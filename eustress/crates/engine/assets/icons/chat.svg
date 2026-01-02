@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Chat - speech bubble -->
+  <path d="M2,2 L14,2 L14,10 L6,10 L3,13 L3,10 L2,10 Z" fill="#3498DB" stroke="#2980B9" stroke-width="0.5" rx="2"/>
+  <circle cx="5" cy="6" r="1" fill="#FFFFFF"/>
+  <circle cx="8" cy="6" r="1" fill="#FFFFFF"/>
+  <circle cx="11" cy="6" r="1" fill="#FFFFFF"/>
+</svg>

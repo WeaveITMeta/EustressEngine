@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- StarterGui - window/UI -->
+  <rect x="2" y="2" width="12" height="12" rx="1" fill="#3498DB" stroke="#2980B9" stroke-width="0.5"/>
+  <rect x="2" y="2" width="12" height="3" fill="#2980B9"/>
+  <circle cx="4" cy="3.5" r="0.8" fill="#E74C3C"/>
+  <circle cx="6" cy="3.5" r="0.8" fill="#F1C40F"/>
+  <circle cx="8" cy="3.5" r="0.8" fill="#2ECC71"/>
+</svg>

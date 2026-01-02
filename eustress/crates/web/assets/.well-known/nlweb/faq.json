@@ -1,0 +1,87 @@
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "name": "Eustress Engine FAQ",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What is Eustress Engine?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. Built from the ground up in 100% Rust, it delivers unprecedented performance, memory safety, and developer experience—all while remaining free forever."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is Eustress free?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, Eustress Engine is free forever. You can create and publish games without paying anything. Premium subscriptions (Player Plus, Creator Pro, Bundle) are available for enhanced features like higher revenue share, more storage, and monthly Bliss currency."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What programming language does Eustress use?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress is built in 100% Rust and uses Soul scripting for gameplay logic. Soul is a text-based scripting language—Eustress does NOT have visual scripting. You can also write native Rust code for maximum performance."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Eustress have visual scripting?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Eustress uses Soul, a text-based scripting language designed for game development. It does not have visual/node-based scripting like Unreal Blueprints or Unity Visual Scripting."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is Bliss?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Bliss is Eustress's platform currency—arcade-style tokens purchased via Steam Wallet and spent on cosmetics, creator assets, and profile customization. Bliss is cosmetics-only with no pay-to-win. Packages range from 100 Bliss ($0.99) to 6,500 Bliss ($49.99)."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What platforms can I deploy to?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress supports Windows, macOS, Linux, iOS, Android, Web (WASM), Meta Quest, SteamVR, and PSVR2. Build once, deploy everywhere."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How much do creators earn?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Free creators earn 25% of marketplace sales. Creator Pro subscribers earn 40% revenue share. All transactions use Bliss currency."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does Eustress compare to Unity or Unreal?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress is built in Rust, offering zero garbage collection pauses, 10x faster startup times, and significantly lower memory usage. It's designed for massive scale (10M+ entities) and includes built-in multiplayer networking. Unlike Unity/Unreal, Eustress is free forever with no runtime fees."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the difference between Eustress Engine and Eustress Player?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress Engine is the game engine and creation suite for building games. Eustress Player is the platform for discovering and playing community-created experiences via Steam."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I get started with Eustress?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Download Eustress Engine from eustress.dev/download or via Steam. It's free to use and includes tutorials at eustress.dev/learn."
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Water material -->
+  <rect x="0" y="0" width="16" height="16" fill="#3498DB"/>
+  <path d="M0,6 Q4,4 8,6 Q12,8 16,6" fill="none" stroke="#5DADE2" stroke-width="1"/>
+  <path d="M0,10 Q4,8 8,10 Q12,12 16,10" fill="none" stroke="#5DADE2" stroke-width="1"/>
+</svg>

@@ -1,0 +1,26 @@
+# Cargo Watch configuration for the EustressEngine Web (WASM) loop on Windows
+# Run it from repo root with:
+#   cargo watch -c
+
+# Force Windows PowerShell as the shell so env vars and quoting behave
+shell = "powershell"
+
+# Watch Rust sources in the WASM demo
+watch = [
+  "eustress_demo/src"
+]
+
+# Ignore generated wasm output and common dirs to avoid infinite loops
+ignore = [
+  "eustress-svelte/public/wasm/*",
+  "**/target/**",
+  ".git/**"
+]
+
+# Build + bindgen in one command so it runs atomically on each change
+# Notes:
+# - RUSTFLAGS sets getrandom wasm backend
+# - CARGO_TARGET_DIR uses a Temp dir to avoid locked/permission issues
+# - wasm-bindgen outputs into eustress-svelte/public/wasm for the dev server to serve
+[[exec]]
+command = "$env:RUSTFLAGS='--cfg=getrandom_backend=\"wasm_js\"'; $env:CARGO_TARGET_DIR=\"$env:TEMP\\cargo-target-eustress\"; cargo build --manifest-path .\\eustress_demo\\Cargo.toml --target wasm32-unknown-unknown --release; wasm-bindgen --target no-modules --out-dir .\\eustress-svelte\\public\\wasm \"$env:CARGO_TARGET_DIR\\wasm32-unknown-unknown\\release\\eustress_demo.wasm\""

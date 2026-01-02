@@ -1,0 +1,3 @@
+@echo off
+echo Running Eustress Engine...
+cargo run --bin eustress-engine

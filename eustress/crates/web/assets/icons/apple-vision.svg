@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <defs>
+    <linearGradient id="visionGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E8E8ED"/>
+      <stop offset="100%" stop-color="#B8B8BE"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#visionGrad)" d="M22 10c0-2.21-1.79-4-4-4H6c-2.21 0-4 1.79-4 4v4c0 2.21 1.79 4 4 4h12c2.21 0 4-1.79 4-4v-4z"/>
+  <circle cx="8" cy="12" r="2.5" fill="#1D1D1F"/>
+  <circle cx="16" cy="12" r="2.5" fill="#1D1D1F"/>
+  <circle cx="8" cy="12" r="1" fill="#3D3D3F"/>
+  <circle cx="16" cy="12" r="1" fill="#3D3D3F"/>
+</svg>

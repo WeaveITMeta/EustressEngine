@@ -1,0 +1,28 @@
+[package]
+name = "eustress-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Shared game runtime for Eustress Engine - character controllers, physics sync, replication"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core Bevy
+bevy = { workspace = true }
+
+# Shared types from common
+eustress-common = { path = "../common" }
+
+# Networking (optional - for replication sync)
+eustress-networking = { path = "../common/eustress-networking", optional = true }
+
+# Physics (optional - for Avian integration)
+avian3d = { workspace = true, optional = true }
+
+# Utilities
+tracing = "0.1"
+
+[features]
+default = ["networking", "physics"]
+networking = ["eustress-networking"]
+physics = ["avian3d"]

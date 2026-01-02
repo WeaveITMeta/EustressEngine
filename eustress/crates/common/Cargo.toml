@@ -1,0 +1,137 @@
+[package]
+name = "eustress-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types and utilities for Eustress Engine"
+
+[dependencies]
+bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "bevy_render", "bevy_asset", "bevy_animation", "bevy_gltf", "animation"] }
+serde = { workspace = true }
+ron = { workspace = true }
+uuid = { workspace = true }
+tracing = "0.1"
+noise = "0.9"
+
+# Asset hosting
+sha2 = "0.10"
+bs58 = "0.5"
+dashmap = "6.1"
+tokio = { version = "1.42", features = ["fs", "sync"], optional = true }
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
+anyhow = "1.0"
+thiserror = "2.0"
+mime_guess = "2.0"
+lru = "0.12"
+parking_lot = "0.12"
+serde_json = "1.0"
+toml = "0.8"
+
+# Compression for asset bundles
+flate2 = "1.0"
+zstd = "0.13"
+lz4_flex = "0.11"
+
+# Serialization
+bincode = "1.3"
+
+# Random
+rand = "0.8"
+
+# Parallel processing
+rayon = "1.10"
+
+# Byte casting for GPU buffers
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# USD Binary Format
+byteorder = "1.5"
+half = { version = "2.4", features = ["bytemuck", "serde"] }
+
+# Hashing for Soul cache
+blake3 = "1.5"
+
+# 3D Model Import (GLTF, FBX, OBJ, DAE, etc.)
+gltf = { version = "1.4", optional = true }
+
+# Image processing for GeoTIFF
+tiff = { version = "0.9", optional = true }
+image = { version = "0.25", optional = true }
+
+# Time for Soul codegen
+chrono = "0.4"
+
+# System info for default author
+whoami = "1.5"
+
+# S3/MinIO support (optional)
+aws-sdk-s3 = { version = "1.65", optional = true }
+aws-config = { version = "1.5", optional = true }
+
+# Physics (optional)
+avian3d = { version = "0.4", optional = true }
+
+# Realism Physics System (optional)
+# Symbolic mathematics for real-time equation solving (1.0+ for rational arithmetic)
+symbolica = { version = "1.0", optional = true }
+# Rune scripting for dynamic physics (0.14+ with native modules)
+rune = { version = "0.14", optional = true }
+rune-modules = { version = "0.14", optional = true }
+# Rune WASM support for browser simulations
+rune-wasm = { version = "0.14", optional = true }
+# Spatial data structures for neighbor queries (4.2+ with rkyv zero-copy)
+kiddo = { version = "4.2", features = ["rkyv"], optional = true }
+# Zero-copy serialization for spatial data
+rkyv = { version = "0.8", optional = true }
+# Notify for hot-reload file watching
+notify = { version = "6.1", optional = true }
+# GPU compute for SPH (uses Bevy's wgpu)
+wgpu = { version = "23.0", optional = true }
+encase = { version = "0.10", optional = true }
+
+# Pure Rust AI Generation (Candle + FLUX.1 Kontext) - December 2025
+# Note: Candle main branch required for latest Flux support
+# These are optional and only enabled with the "generation-candle" feature
+candle-core = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+candle-nn = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+
+# HTTP client for mesh generation server
+ureq = { version = "2.10", optional = true }
+
+# Base64 encoding for mesh data
+base64 = { version = "0.22", optional = true }
+
+[features]
+default = ["physics", "model-import", "geotiff"]
+# Enable physics for terrain collisions (1:1 visual-to-physics mesh)
+physics = ["avian3d"]
+# Enable async asset loading (HTTP, IPFS, etc.)
+async-assets = ["tokio", "reqwest"]
+# Enable S3/MinIO support
+s3 = ["aws-sdk-s3", "aws-config", "async-assets"]
+# Enable 3D model import (GLTF, etc.)
+model-import = ["gltf"]
+# Enable GeoTIFF elevation import
+geotiff = ["tiff", "image"]
+# Enable generation module (mesh server client only, no Candle)
+generation = ["ureq", "base64", "image"]
+# Enable pure Rust texture generation with Candle + FLUX.1 Kontext (requires CUDA)
+generation-candle = ["generation", "candle-core", "candle-nn", "candle-transformers"]
+# Enable placeholder textures for testing generation pipeline
+generation_placeholders = ["generation"]
+# Enable Realism Physics System with symbolic math and scripting
+realism = ["physics"]
+# Enable symbolic mathematics (Symbolica 1.0+) for real-time equation solving
+realism-symbolic = ["realism", "symbolica"]
+# Enable Rune scripting for dynamic physics laws
+realism-scripting = ["realism", "rune", "rune-modules", "notify"]
+# Enable Rune WASM for browser-based physics simulations
+realism-wasm = ["realism-scripting", "rune-wasm"]
+# Enable GPU compute for SPH fluid simulation
+realism-gpu = ["realism", "wgpu", "encase"]
+# Enable advanced spatial queries with zero-copy serialization
+realism-spatial = ["realism", "kiddo", "rkyv"]
+# Enable quantum effects module
+realism-quantum = ["realism-symbolic"]
+# Enable full realism system with all features
+realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]

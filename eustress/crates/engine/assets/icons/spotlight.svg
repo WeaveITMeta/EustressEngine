@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Spot Light - flashlight/cone -->
+  <path d="M4,3 L12,3 L14,13 L2,13 Z" fill="#FFFF64" stroke="#CCCC30" stroke-width="0.5" opacity="0.6"/>
+  <rect x="5" y="1" width="6" height="4" rx="1" fill="#888888" stroke="#666666" stroke-width="0.5"/>
+  <circle cx="8" cy="3" r="1.5" fill="#FFFF64"/>
+</svg>

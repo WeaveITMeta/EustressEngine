@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Grow brush - plant/grass -->
+  <line x1="8" y1="14" x2="8" y2="6" stroke="#27AE60" stroke-width="1.5"/>
+  <path d="M8,6 Q4,4 8,2" fill="none" stroke="#27AE60" stroke-width="1.5"/>
+  <path d="M8,8 Q12,6 8,4" fill="none" stroke="#27AE60" stroke-width="1.5"/>
+  <path d="M8,10 Q5,9 8,7" fill="none" stroke="#27AE60" stroke-width="1.5"/>
+</svg>

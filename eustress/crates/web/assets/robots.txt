@@ -1,0 +1,16 @@
+# Eustress Engine - robots.txt
+# https://eustress.dev/robots.txt
+
+User-agent: *
+Allow: /
+
+# Sitemap location
+Sitemap: https://eustress.dev/sitemap.xml
+
+# Crawl-delay for respectful crawling
+Crawl-delay: 1
+
+# Disallow admin/private areas (if any)
+Disallow: /api/
+Disallow: /admin/
+Disallow: /_trunk/

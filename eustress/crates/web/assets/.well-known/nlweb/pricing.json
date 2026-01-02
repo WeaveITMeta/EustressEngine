@@ -1,0 +1,121 @@
+{
+  "@context": "https://schema.org",
+  "@type": "PriceSpecification",
+  "name": "Eustress Pricing",
+  "description": "Eustress Engine is free forever. Premium subscriptions and Bliss currency available for enhanced features.",
+  "currency": {
+    "name": "Bliss",
+    "description": "Arcade-style tokens for cosmetics, creator support, and marketplace purchases. No pay-to-win—Bliss purchases cosmetics only.",
+    "packages": [
+      {
+        "name": "Starter",
+        "bliss": 100,
+        "bonus": 0,
+        "priceUSD": 0.99,
+        "blissPerDollar": 101
+      },
+      {
+        "name": "Standard",
+        "bliss": 500,
+        "bonus": 0,
+        "priceUSD": 4.99,
+        "blissPerDollar": 100
+      },
+      {
+        "name": "Plus",
+        "bliss": 1000,
+        "bonus": 100,
+        "bonusPercent": 10,
+        "priceUSD": 9.99,
+        "blissPerDollar": 110,
+        "popular": true
+      },
+      {
+        "name": "Premium",
+        "bliss": 2000,
+        "bonus": 400,
+        "bonusPercent": 20,
+        "priceUSD": 19.99,
+        "blissPerDollar": 120
+      },
+      {
+        "name": "Ultimate",
+        "bliss": 5000,
+        "bonus": 1500,
+        "bonusPercent": 30,
+        "priceUSD": 49.99,
+        "blissPerDollar": 130,
+        "bestValue": true
+      }
+    ]
+  },
+  "subscriptions": [
+    {
+      "@type": "Offer",
+      "name": "Player Plus",
+      "description": "For Players - Enhanced gaming experience",
+      "priceMonthly": 4.99,
+      "priceYearly": 49.99,
+      "savingsPercent": 17,
+      "priceCurrency": "USD",
+      "features": [
+        "500 Bliss monthly",
+        "Exclusive profile badge",
+        "Premium profile flair",
+        "Subscriber-only cosmetics",
+        "Priority matchmaking",
+        "Subscriber-only events",
+        "10 GB cloud saves"
+      ]
+    },
+    {
+      "@type": "Offer",
+      "name": "Creator Pro",
+      "description": "For Creators - Enhanced creation tools and revenue",
+      "priceMonthly": 9.99,
+      "priceYearly": 99.99,
+      "savingsPercent": 17,
+      "priceCurrency": "USD",
+      "popular": true,
+      "features": [
+        "40% revenue share (vs 25% free)",
+        "1 TB asset storage",
+        "Priority publishing queue",
+        "Advanced analytics dashboard",
+        "24hr priority support",
+        "500 Bliss monthly",
+        "Early access to features"
+      ]
+    },
+    {
+      "@type": "Offer",
+      "name": "Bundle",
+      "description": "Player Plus + Creator Pro combined at a discount",
+      "priceMonthly": 12.99,
+      "priceYearly": 129.99,
+      "savingsPercent": 17,
+      "priceCurrency": "USD",
+      "features": [
+        "All Player Plus perks",
+        "All Creator Pro perks",
+        "1,000 Bliss monthly (combined)",
+        "10 GB cloud saves",
+        "Unlimited asset storage",
+        "40% revenue share",
+        "Save $1.99/mo vs separate"
+      ]
+    }
+  ],
+  "freeTier": {
+    "name": "Free",
+    "price": 0,
+    "features": [
+      "Play all games",
+      "Create and publish games",
+      "25% creator revenue share",
+      "10 GB asset storage",
+      "1 GB cloud saves",
+      "Community support"
+    ]
+  }
+}

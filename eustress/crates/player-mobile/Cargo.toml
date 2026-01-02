@@ -1,0 +1,48 @@
+# =============================================================================
+# Eustress Player Mobile - Shared Mobile Code
+# =============================================================================
+# This crate contains shared Rust code for Android and iOS builds.
+# It depends on common game logic and adds mobile-specific features.
+# =============================================================================
+
+[package]
+name = "eustress-player-mobile"
+version = "0.1.0"
+edition = "2021"
+authors = ["Eustress Engine Team"]
+description = "Mobile player runtime for Eustress games"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[features]
+default = []
+android = ["android_logger"]
+ios = []
+
+[dependencies]
+# Shared game logic
+# eustress-common = { path = "../common", features = ["mobile"] }
+
+# Bevy with mobile support
+bevy = { version = "0.17", default-features = false, features = [
+    "bevy_asset",
+    "bevy_render",
+    "bevy_winit",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_sprite",
+    "bevy_text",
+    "bevy_ui",
+    "android-game-activity",
+] }
+
+# Logging
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { version = "0.14", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS-specific dependencies as needed

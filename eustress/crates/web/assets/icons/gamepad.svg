@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="gamepadGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6a7280;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4a5260;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Controller body -->
+  <rect x="8" y="18" width="48" height="28" rx="6" fill="url(#gamepadGradient)" stroke="#8090a0" stroke-width="1.5"/>
+  <!-- D-pad vertical -->
+  <rect x="16" y="26" width="6" height="14" rx="1" fill="#1a1d24" stroke="#8090a0" stroke-width="1"/>
+  <!-- D-pad horizontal -->
+  <rect x="12" y="30" width="14" height="6" rx="1" fill="#1a1d24" stroke="#8090a0" stroke-width="1"/>
+  <!-- Button A -->
+  <circle cx="44" cy="36" r="4" fill="#1a1d24" stroke="#8090a0" stroke-width="1"/>
+  <!-- Button B -->
+  <circle cx="52" cy="30" r="4" fill="#1a1d24" stroke="#8090a0" stroke-width="1"/>
+  <!-- Left grip -->
+  <path d="M8 32 Q4 32 4 38 L4 44 Q4 48 8 48 L12 48 L12 46 L8 46" fill="url(#gamepadGradient)" stroke="#8090a0" stroke-width="1.5"/>
+  <!-- Right grip -->
+  <path d="M56 32 Q60 32 60 38 L60 44 Q60 48 56 48 L52 48 L52 46 L56 46" fill="url(#gamepadGradient)" stroke="#8090a0" stroke-width="1.5"/>
+</svg>

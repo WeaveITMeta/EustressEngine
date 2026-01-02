@@ -1,0 +1,81 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/common/bevy-camera-controller",
+    "crates/common/eustress-networking",
+    "crates/runtime",
+    "crates/engine",
+    "crates/client",
+    "crates/server",
+    "crates/web",
+    "crates/backend",
+    "crates/forge",
+    "crates/forge-sdk",
+    "crates/player-mobile",
+    "crates/bliss"
+]
+
+resolver = "2"
+
+[workspace.dependencies]
+# Core Bevy 0.17.3 (November 2025)
+# Note: reflect_auto_register is required for GLTF scene spawning to work
+bevy = { version = "0.17.3", default-features = false, features = ["reflect_auto_register"] }
+
+# UI (compatible with Bevy 0.17 / egui 0.33)
+egui = "0.33"
+bevy_egui = "0.38"
+egui_extras = { version = "0.33", features = ["image"] }
+egui-notify = "0.21"
+egui_dock = "0.18"
+
+# Input (compatible with Bevy 0.17)
+leafwing-input-manager = "0.18"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+ron = "0.8"
+
+# Utilities
+uuid = { version = "1.8", features = ["v4", "serde"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+rfd = "0.14"
+
+# Networking (Lightyear 0.17 + QUIC)
+lightyear = "0.17"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+thiserror = "2.0"
+rcgen = "0.13"
+bincode = "1.3"
+
+# P2P & CRDTs for Persistent Distributed Worlds
+loro = "1.4"  # High-perf CRDT library
+bevy_quinnet = "0.12"  # QUIC client/server for P2P
+quinn = "0.11"  # Underlying QUIC transport
+
+# Physics (Avian 0.4 - Bevy 0.17 compatible)
+avian3d = "0.4"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Hotpatching profile - use with: cargo run --profile hotpatch
+[profile.hotpatch]
+inherits = "dev"
+opt-level = 1
+
+[profile.hotpatch.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

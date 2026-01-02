@@ -1,0 +1,2687 @@
+#![allow(dead_code)]
+
+use bevy_egui::egui;
+use super::{BevySelectionManager, UIActionQueue, UIAction};
+use super::explorer_search::{AdvancedSearchState, ExplorerSearchEngine};
+use super::explorer_search_ui::{show_advanced_search_panel, show_search_results};
+use bevy::prelude::*;
+use std::collections::HashSet;
+use crate::classes::{Instance, ClassName};
+
+// ============================================================================
+// Constants - Row sizing and styling
+// ============================================================================
+
+/// Height of each row in the explorer (consistent sizing)
+const ROW_HEIGHT: f32 = 22.0;
+/// Indentation per hierarchy level
+const INDENT_SIZE: f32 = 16.0;
+/// Icon width
+const ICON_WIDTH: f32 = 18.0;
+
+// ============================================================================
+// Data Model - Services and Hierarchy
+// ============================================================================
+
+/// Virtual service nodes that always exist in the data model
+/// These are the core services that make up the Eustress/Roblox-like hierarchy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+pub enum ServiceType {
+    Workspace,
+    Players,
+    Lighting,
+    SoulService,      // Primary location for Soul scripts
+    ServerStorage,    // Server-only assets (maps, etc.)
+    StarterGui,
+    StarterPack,
+    StarterPlayer,
+    SoundService,
+    Teams,
+    Chat,
+    LocalizationService,
+    TestService,
+}
+
+impl ServiceType {
+    /// Get all services in display order
+    pub fn all() -> &'static [ServiceType] {
+        &[
+            ServiceType::Workspace,
+            ServiceType::Players,
+            ServiceType::Lighting,
+            ServiceType::SoulService,
+            ServiceType::ServerStorage,
+            ServiceType::StarterGui,
+            ServiceType::StarterPack,
+            ServiceType::StarterPlayer,
+            ServiceType::SoundService,
+            ServiceType::Teams,
+            ServiceType::Chat,
+            ServiceType::LocalizationService,
+            ServiceType::TestService,
+        ]
+    }
+    
+    /// Get display name
+    pub fn name(&self) -> &'static str {
+        match self {
+            ServiceType::Workspace => "Workspace",
+            ServiceType::Players => "Players",
+            ServiceType::Lighting => "Lighting",
+            ServiceType::SoulService => "SoulService",
+            ServiceType::ServerStorage => "ServerStorage",
+            ServiceType::StarterGui => "StarterGui",
+            ServiceType::StarterPack => "StarterPack",
+            ServiceType::StarterPlayer => "StarterPlayer",
+            ServiceType::SoundService => "SoundService",
+            ServiceType::Teams => "Teams",
+            ServiceType::Chat => "Chat",
+            ServiceType::LocalizationService => "LocalizationService",
+            ServiceType::TestService => "TestService",
+        }
+    }
+    
+    /// Get class name for service (same as name for services)
+    pub fn class_name(&self) -> &'static str {
+        self.name()
+    }
+    
+    /// Get icon for service (using simple ASCII/Unicode that renders reliably)
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ServiceType::Workspace => "@",      // World/workspace
+            ServiceType::Players => "P",        // Players
+            ServiceType::Lighting => "*",       // Light/sun
+            ServiceType::SoulService => "S",    // Soul scripts
+            ServiceType::ServerStorage => "$",  // Server storage
+            ServiceType::StarterGui => "G",     // GUI
+            ServiceType::StarterPack => "K",    // Pack/kit
+            ServiceType::StarterPlayer => "P",  // Player
+            ServiceType::SoundService => "~",   // Sound wave
+            ServiceType::Teams => "T",          // Teams
+            ServiceType::Chat => "C",           // Chat
+            ServiceType::LocalizationService => "L", // Localization
+            ServiceType::TestService => "?",    // Test
+        }
+    }
+    
+    /// Get color for service icons
+    pub fn color(&self) -> egui::Color32 {
+        match self {
+            ServiceType::Workspace => egui::Color32::from_rgb(100, 200, 255),
+            ServiceType::Players => egui::Color32::from_rgb(100, 255, 150),
+            ServiceType::Lighting => egui::Color32::from_rgb(255, 220, 100),
+            ServiceType::SoulService => egui::Color32::from_rgb(220, 220, 220),  // Light gray
+            ServiceType::ServerStorage => egui::Color32::from_rgb(255, 150, 100),
+            ServiceType::StarterGui => egui::Color32::from_rgb(100, 200, 200),
+            ServiceType::StarterPack => egui::Color32::from_rgb(150, 200, 100),
+            ServiceType::StarterPlayer => egui::Color32::from_rgb(100, 255, 200),
+            ServiceType::SoundService => egui::Color32::from_rgb(150, 255, 100),
+            ServiceType::Teams => egui::Color32::from_rgb(255, 100, 100),
+            ServiceType::Chat => egui::Color32::from_rgb(100, 150, 255),
+            ServiceType::LocalizationService => egui::Color32::from_rgb(150, 200, 255),
+            ServiceType::TestService => egui::Color32::from_rgb(200, 200, 100),
+        }
+    }
+    
+    /// Get text color for service name (consistent light gray)
+    pub fn text_color(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(220, 220, 220)
+    }
+    
+    /// Check if this service should contain a given class
+    /// Note: PointLight, SpotLight, SurfaceLight are children of Parts/Attachments in Workspace,
+    /// not direct children of Lighting service. Lighting service contains global lighting settings.
+    pub fn accepts_class(&self, class: ClassName) -> bool {
+        match self {
+            ServiceType::Workspace => matches!(class, 
+                ClassName::Part | ClassName::MeshPart | ClassName::Model | 
+                ClassName::Folder | ClassName::SpawnLocation | ClassName::Terrain |
+                ClassName::BasePart | ClassName::UnionOperation | ClassName::Camera |
+                // Seat classes (extend BasePart)
+                ClassName::Seat | ClassName::VehicleSeat |
+                // Lights are children of Parts/Attachments, so they appear in Workspace hierarchy
+                ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight |
+                // Effects attached to Parts
+                ClassName::ParticleEmitter | ClassName::Beam | ClassName::Sound |
+                // Constraints attached to Parts
+                ClassName::Attachment | ClassName::WeldConstraint | ClassName::Motor6D |
+                // UI elements that can be in Workspace (BillboardGui, SurfaceGui on Parts)
+                ClassName::BillboardGui | ClassName::SurfaceGui
+            ),
+            ServiceType::Lighting => matches!(class,
+                // Global lighting settings only - not per-part lights
+                ClassName::DirectionalLight | ClassName::Atmosphere | ClassName::Sky |
+                ClassName::Clouds | ClassName::Sun | ClassName::Moon
+            ),
+            ServiceType::SoundService => matches!(class, ClassName::Sound),
+            ServiceType::SoulService => matches!(class, ClassName::SoulScript | ClassName::Folder),
+            ServiceType::StarterGui => matches!(class,
+                // Screen UI elements
+                ClassName::ScreenGui | ClassName::Frame | ClassName::ScrollingFrame |
+                ClassName::TextLabel | ClassName::ImageLabel | ClassName::TextButton |
+                ClassName::ImageButton | ClassName::VideoFrame | ClassName::DocumentFrame |
+                ClassName::WebFrame | ClassName::Folder
+            ),
+            _ => false,
+        }
+    }
+}
+
+/// Component to track which service an entity belongs to
+/// This is used when entities can belong to multiple services (e.g., Folder)
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Reflect)]
+#[reflect(Component)]
+pub struct ServiceOwner(pub ServiceType);
+
+/// Resource to track which nodes are expanded in the explorer
+#[derive(Resource, Default)]
+pub struct ExplorerExpanded {
+    pub expanded_entities: HashSet<Entity>,
+    pub expanded_services: HashSet<ServiceType>,
+    /// Currently selected service (for properties panel)
+    pub selected_service: Option<ServiceType>,
+}
+
+/// Resource to track explorer state (focused item, selection anchor)
+#[derive(Resource)]
+pub struct ExplorerState {
+    pub focused_id: Option<String>,
+    pub anchor_id: Option<String>,
+    pub search_filter: String,
+    pub class_filter: Vec<ClassName>,
+    pub show_class_names: bool,
+    /// Hovered entity for visual feedback
+    pub hovered_id: Option<String>,
+    /// Drag selection state
+    pub drag_selecting: bool,
+    pub drag_start_pos: Option<egui::Pos2>,
+    pub drag_current_pos: Option<egui::Pos2>,
+    /// Entity IDs and their row rects for hit testing during drag selection
+    pub row_rects: Vec<(String, egui::Rect)>,
+    /// Entity row data for context menu hit-testing (entity, class, name, rect)
+    pub entity_row_rects: Vec<(Entity, ClassName, String, egui::Rect)>,
+    /// Ordered list of visible entity IDs for Shift+Click range selection
+    pub visible_entity_order: Vec<String>,
+    /// SoulScript entity to open (set by double-click, consumed by UI system)
+    pub script_to_open: Option<Entity>,
+    /// Entity being renamed (for inline rename mode)
+    pub renaming_entity: Option<Entity>,
+    /// Current rename text buffer
+    pub rename_buffer: String,
+    /// Entity to rename with new name (set when Enter pressed, consumed by UI system)
+    pub entity_to_rename: Option<(Entity, String)>,
+    /// Entity to delete (set by context menu, consumed by UI system)
+    pub entity_to_delete: Option<Entity>,
+    /// Entity to focus camera on (set by context menu, consumed by UI system)
+    pub entity_to_focus: Option<Entity>,
+    /// Class to insert as child (set by context menu Insert submenu)
+    pub insert_class: Option<ClassName>,
+    /// Parent entity for insert operation
+    pub insert_parent: Option<Entity>,
+    /// Context menu state for robust right-click handling
+    pub context_menu_entity: Option<(Entity, ClassName, String)>,
+    /// Context menu position
+    pub context_menu_pos: Option<egui::Pos2>,
+    /// Context menu for service
+    pub context_menu_service: Option<ServiceType>,
+    /// Pending reparent operation: (child_entity, new_parent_entity)
+    pub pending_reparent: Option<(Entity, Entity)>,
+    /// Currently selected/focused service in Explorer (defaults to Workspace)
+    pub selected_service: ServiceType,
+}
+
+impl Default for ExplorerState {
+    fn default() -> Self {
+        Self {
+            focused_id: None,
+            anchor_id: None,
+            search_filter: String::new(),
+            class_filter: Vec::new(),
+            show_class_names: false,  // Cleaner look by default
+            visible_entity_order: Vec::new(),
+            hovered_id: None,
+            drag_selecting: false,
+            drag_start_pos: None,
+            drag_current_pos: None,
+            row_rects: Vec::new(),
+            entity_row_rects: Vec::new(),
+            script_to_open: None,
+            renaming_entity: None,
+            rename_buffer: String::new(),
+            entity_to_rename: None,
+            entity_to_delete: None,
+            entity_to_focus: None,
+            insert_class: None,
+            insert_parent: None,
+            context_menu_entity: None,
+            context_menu_pos: None,
+            context_menu_service: None,
+            pending_reparent: None,
+            selected_service: ServiceType::Workspace,
+        }
+    }
+}
+
+// ============================================================================
+// Performance: Entity Cache for Explorer
+// ============================================================================
+
+/// Cached entity data for efficient explorer rendering
+#[derive(Clone)]
+pub struct CachedEntityData {
+    pub entity: Entity,
+    pub name: String,
+    pub class_name: ClassName,
+    pub has_children: bool,
+}
+
+/// Resource to cache entity hierarchy for performance
+#[derive(Resource)]
+pub struct ExplorerCache {
+    /// Cached entity list (sorted)
+    pub entities: Vec<CachedEntityData>,
+    /// Last update frame
+    pub last_update_frame: u64,
+    /// Update interval in frames (skip updates for performance)
+    pub update_interval: u64,
+    /// Current frame counter
+    pub frame_counter: u64,
+    /// Dirty flag - force update on next frame
+    pub dirty: bool,
+    /// Maximum entities to render per frame (lazy loading)
+    pub max_visible: usize,
+    /// Current scroll offset for lazy loading
+    pub scroll_offset: usize,
+}
+
+impl Default for ExplorerCache {
+    fn default() -> Self {
+        Self {
+            entities: Vec::new(),
+            last_update_frame: 0,
+            update_interval: 10, // Update every 10 frames (~6 times per second at 60fps)
+            frame_counter: 0,
+            dirty: true,
+            max_visible: 100, // Only render 100 entities at a time
+            scroll_offset: 0,
+        }
+    }
+}
+
+impl ExplorerCache {
+    /// Check if cache needs update
+    pub fn needs_update(&self) -> bool {
+        self.dirty || (self.frame_counter - self.last_update_frame) >= self.update_interval
+    }
+    
+    /// Mark cache as dirty (needs refresh)
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+    
+    /// Update cache from world
+    pub fn update_from_world(&mut self, world: &mut World) {
+        self.entities.clear();
+        
+        let mut query = world.query::<(Entity, &Instance, Option<&Children>)>();
+        
+        for (entity, instance, children) in query.iter(world) {
+            self.entities.push(CachedEntityData {
+                entity,
+                name: instance.name.clone(),
+                class_name: instance.class_name,
+                has_children: children.map_or(false, |c| !c.is_empty()),
+            });
+        }
+        
+        // Sort by class name (A-Z), then by instance name (A-Z)
+        self.entities.sort_by(|a, b| {
+            let class_cmp = a.class_name.as_str().cmp(b.class_name.as_str());
+            if class_cmp == std::cmp::Ordering::Equal {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            } else {
+                class_cmp
+            }
+        });
+        
+        self.last_update_frame = self.frame_counter;
+        self.dirty = false;
+    }
+    
+    /// Update cache from entity list (for use when World is borrowed)
+    pub fn update_from_entities(&mut self, entities: &[(Entity, Instance, Option<Vec<Entity>>)]) {
+        self.entities.clear();
+        
+        for (entity, instance, children) in entities {
+            self.entities.push(CachedEntityData {
+                entity: *entity,
+                name: instance.name.clone(),
+                class_name: instance.class_name,
+                has_children: children.as_ref().map_or(false, |c| !c.is_empty()),
+            });
+        }
+        
+        // Sort by class name (A-Z), then by instance name (A-Z)
+        self.entities.sort_by(|a, b| {
+            let class_cmp = a.class_name.as_str().cmp(b.class_name.as_str());
+            if class_cmp == std::cmp::Ordering::Equal {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            } else {
+                class_cmp
+            }
+        });
+        
+        self.last_update_frame = self.frame_counter;
+        self.dirty = false;
+    }
+    
+    /// Increment frame counter
+    pub fn tick(&mut self) {
+        self.frame_counter += 1;
+    }
+    
+    /// Get visible entities (with lazy loading)
+    pub fn get_visible_entities(&self, filter: &str, class_filter: &[ClassName]) -> Vec<&CachedEntityData> {
+        let filter_lower = filter.to_lowercase();
+        
+        self.entities.iter()
+            .filter(|e| {
+                // Apply search filter
+                if !filter.is_empty() && !e.name.to_lowercase().contains(&filter_lower) {
+                    return false;
+                }
+                // Apply class filter
+                if !class_filter.is_empty() && !class_filter.contains(&e.class_name) {
+                    return false;
+                }
+                true
+            })
+            .skip(self.scroll_offset)
+            .take(self.max_visible)
+            .collect()
+    }
+    
+    /// Get total filtered count (for scroll bar)
+    pub fn get_filtered_count(&self, filter: &str, class_filter: &[ClassName]) -> usize {
+        let filter_lower = filter.to_lowercase();
+        
+        self.entities.iter()
+            .filter(|e| {
+                if !filter.is_empty() && !e.name.to_lowercase().contains(&filter_lower) {
+                    return false;
+                }
+                if !class_filter.is_empty() && !class_filter.contains(&e.class_name) {
+                    return false;
+                }
+                true
+            })
+            .count()
+    }
+}
+
+impl ExplorerExpanded {
+    pub fn toggle(&mut self, entity: Entity) {
+        if self.expanded_entities.contains(&entity) {
+            self.expanded_entities.remove(&entity);
+        } else {
+            self.expanded_entities.insert(entity);
+        }
+    }
+    
+    pub fn is_expanded(&self, entity: Entity) -> bool {
+        self.expanded_entities.contains(&entity)
+    }
+    
+    pub fn toggle_service(&mut self, service: ServiceType) {
+        if self.expanded_services.contains(&service) {
+            self.expanded_services.remove(&service);
+        } else {
+            self.expanded_services.insert(service);
+        }
+    }
+    
+    pub fn is_service_expanded(&self, service: ServiceType) -> bool {
+        self.expanded_services.contains(&service)
+    }
+    
+    pub fn select_service(&mut self, service: ServiceType) {
+        self.selected_service = Some(service);
+    }
+    
+    pub fn deselect_service(&mut self) {
+        self.selected_service = None;
+    }
+    
+    pub fn is_service_selected(&self, service: ServiceType) -> bool {
+        self.selected_service == Some(service)
+    }
+}
+
+/// Explorer panel (scene hierarchy tree)
+pub struct ExplorerPanel;
+
+impl ExplorerPanel {
+    /// Show explorer content (for dock system) - Professional hierarchical view
+    pub fn show_content(
+        ui: &mut egui::Ui,
+        world: &mut World,
+        selection_manager: &BevySelectionManager,
+        expanded: &mut ExplorerExpanded,
+        state: &mut ExplorerState,
+        advanced_search: &mut AdvancedSearchState,
+    ) {
+        let shift_held = ui.input(|i| i.modifiers.shift);
+        let ctrl_held = ui.input(|i| i.modifiers.ctrl);
+        
+        // ════════════════════════════════════════════════════════════════════
+        // Header - Advanced Search Panel
+        // ════════════════════════════════════════════════════════════════════
+        
+        // Advanced search panel (replaces simple search bar)
+        show_advanced_search_panel(ui, advanced_search, world);
+        
+        // Show search results if we have an active query
+        if !advanced_search.results.is_empty() {
+            if let Some(selected_entity) = show_search_results(ui, advanced_search) {
+                // Select the entity in the selection manager (uses string ID)
+                let sm = selection_manager.0.read();
+                sm.select(format!("{:?}", selected_entity));
+            }
+            
+            ui.separator();
+        }
+        
+        // Sync simple search filter with advanced search for backwards compatibility
+        if !advanced_search.query.raw_query.is_empty() {
+            state.search_filter = advanced_search.query.raw_query.clone();
+        }
+        
+        ui.add_space(2.0);
+        
+        // Clear visible entity order and row rects for selection tracking
+        state.visible_entity_order.clear();
+        state.row_rects.clear();
+        state.entity_row_rects.clear();
+        
+        // ════════════════════════════════════════════════════════════════════
+        // Data Model Tree
+        // ════════════════════════════════════════════════════════════════════
+        
+        // Collect entities grouped by service
+        let mut workspace_entities: Vec<(Entity, Instance, bool)> = Vec::new();
+        let mut lighting_entities: Vec<(Entity, Instance, bool)> = Vec::new();
+        let mut soul_entities: Vec<(Entity, Instance, bool)> = Vec::new();
+        let mut other_entities: Vec<(Entity, Instance, bool)> = Vec::new();
+        
+        {
+            let mut query = world.query::<(Entity, &Instance, Option<&Children>, Option<&ChildOf>)>();
+            
+            for (entity, instance, children, parent) in query.iter(world) {
+                // Skip if has parent (will be shown under parent)
+                if parent.is_some() {
+                    continue;
+                }
+                
+                // Apply search filter
+                if !state.search_filter.is_empty() {
+                    let search_lower = state.search_filter.to_lowercase();
+                    if !instance.name.to_lowercase().contains(&search_lower) {
+                        continue;
+                    }
+                }
+                
+                let has_children = children.map_or(false, |c| !c.is_empty());
+                let entry = (entity, instance.clone(), has_children);
+                
+                // Route to appropriate service - check SoulService FIRST for SoulScript
+                if instance.class_name == ClassName::SoulScript {
+                    soul_entities.push(entry);
+                } else if ServiceType::Workspace.accepts_class(instance.class_name) {
+                    workspace_entities.push(entry);
+                } else if ServiceType::Lighting.accepts_class(instance.class_name) {
+                    lighting_entities.push(entry);
+                } else if ServiceType::SoulService.accepts_class(instance.class_name) {
+                    soul_entities.push(entry);
+                } else {
+                    other_entities.push(entry);
+                }
+            }
+        }
+        
+        // Sort by class name (A-Z), then by instance name (A-Z), then by Entity ID for stability
+        // The Entity ID tie-breaker ensures consistent ordering even when names are identical
+        let sort_by_class_then_name = |a: &(Entity, Instance, bool), b: &(Entity, Instance, bool)| {
+            let class_cmp = a.1.class_name.as_str().cmp(b.1.class_name.as_str());
+            if class_cmp != std::cmp::Ordering::Equal {
+                return class_cmp;
+            }
+            let name_cmp = a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase());
+            if name_cmp != std::cmp::Ordering::Equal {
+                return name_cmp;
+            }
+            // Stable tie-breaker: sort by Entity ID to prevent reshuffling
+            a.0.to_bits().cmp(&b.0.to_bits())
+        };
+        workspace_entities.sort_by(sort_by_class_then_name);
+        lighting_entities.sort_by(sort_by_class_then_name);
+        soul_entities.sort_by(sort_by_class_then_name);
+        other_entities.sort_by(sort_by_class_then_name);
+        
+        let selected = selection_manager.0.read().get_selected();
+        
+        // Main scroll area
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 1.0);
+                
+                // ════════════════════════════════════════════════════════════
+                // Experience (Root)
+                // ════════════════════════════════════════════════════════════
+                
+                Self::render_root_header(ui, "🎮", "Experience", egui::Color32::WHITE);
+                
+                // ════════════════════════════════════════════════════════════
+                // Services
+                // ════════════════════════════════════════════════════════════
+                
+                // Workspace - Contains 3D objects
+                Self::render_service_node(
+                    ui, 
+                    ServiceType::Workspace, 
+                    &workspace_entities,
+                    expanded,
+                    &selected,
+                    selection_manager,
+                    state,
+                    shift_held,
+                    ctrl_held,
+                    world,
+                );
+                
+                // Players
+                Self::render_service_node_empty(ui, ServiceType::Players, expanded, state);
+                
+                // Lighting - Contains lights and atmosphere
+                Self::render_service_node(
+                    ui,
+                    ServiceType::Lighting,
+                    &lighting_entities,
+                    expanded,
+                    &selected,
+                    selection_manager,
+                    state,
+                    shift_held,
+                    ctrl_held,
+                    world,
+                );
+                
+                // SoulService - Contains Soul scripts
+                Self::render_service_node(
+                    ui,
+                    ServiceType::SoulService,
+                    &soul_entities,
+                    expanded,
+                    &selected,
+                    selection_manager,
+                    state,
+                    shift_held,
+                    ctrl_held,
+                    world,
+                );
+                
+                // ServerStorage
+                Self::render_service_node_empty(ui, ServiceType::ServerStorage, expanded, state);
+                
+                // StarterGui
+                Self::render_service_node_empty(ui, ServiceType::StarterGui, expanded, state);
+                
+                // StarterPack
+                Self::render_service_node_empty(ui, ServiceType::StarterPack, expanded, state);
+                
+                // StarterPlayer
+                Self::render_service_node_empty(ui, ServiceType::StarterPlayer, expanded, state);
+                
+                // SoundService
+                Self::render_service_node_empty(ui, ServiceType::SoundService, expanded, state);
+                
+                // Teams
+                Self::render_service_node_empty(ui, ServiceType::Teams, expanded, state);
+                
+                // Chat
+                Self::render_service_node_empty(ui, ServiceType::Chat, expanded, state);
+                
+                // Show any unclassified entities
+                if !other_entities.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("📋 Other").small().color(egui::Color32::GRAY));
+                    for (entity, instance, has_children) in &other_entities {
+                        Self::render_entity_row(
+                            ui,
+                            *entity,
+                            instance,
+                            *has_children,
+                            1,
+                            &selected,
+                            selection_manager,
+                            state,
+                            shift_held,
+                            ctrl_held,
+                            expanded,
+                            world,
+                        );
+                    }
+                }
+                
+                // ════════════════════════════════════════════════════════════
+                // Empty space click handler - deselect when clicking empty area
+                // ════════════════════════════════════════════════════════════
+                
+                // Add significant empty space that's always clickable for deselection
+                // Use a large fixed height to ensure there's always a clickable area
+                let empty_space_height = 300.0; // Large clickable area for deselection
+                
+                // Use interact_bg to make the entire area interactive
+                let (empty_rect, empty_response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), empty_space_height),
+                    egui::Sense::click()
+                );
+                
+                // Always draw a subtle background to show the clickable area exists
+                if ui.is_rect_visible(empty_rect) {
+                    // Very subtle background to indicate clickable area
+                    let bg_color = if empty_response.hovered() {
+                        egui::Color32::from_rgba_unmultiplied(100, 100, 255, 15) // Subtle blue on hover
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 3) // Nearly invisible
+                    };
+                    ui.painter().rect_filled(empty_rect, 0.0, bg_color);
+                }
+                
+                // Deselect all when clicking on empty space (but not if drag selecting)
+                if empty_response.clicked() && !state.drag_selecting {
+                    selection_manager.0.write().clear();
+                    expanded.selected_service = None;
+                    info!("Explorer: Cleared selection via empty space click");
+                }
+                
+                // ════════════════════════════════════════════════════════════════
+                // Drag Selection in Explorer
+                // ════════════════════════════════════════════════════════════════
+                
+                // Handle drag selection start
+                if empty_response.drag_started() {
+                    state.drag_selecting = true;
+                    state.drag_start_pos = ui.ctx().pointer_interact_pos();
+                    state.drag_current_pos = state.drag_start_pos;
+                    if !ctrl_held {
+                        selection_manager.0.write().clear();
+                    }
+                }
+                
+                // Update drag selection
+                if state.drag_selecting {
+                    if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                        state.drag_current_pos = Some(pos);
+                    }
+                    
+                    // Draw selection rectangle
+                    if let (Some(start), Some(current)) = (state.drag_start_pos, state.drag_current_pos) {
+                        let rect = egui::Rect::from_two_pos(start, current);
+                        ui.painter().rect_filled(
+                            rect,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(100, 150, 255, 30)
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            0.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 150, 255)),
+                            egui::StrokeKind::Outside,
+                        );
+                        
+                        // Select entities whose rows intersect the drag rectangle
+                        let sm = selection_manager.0.write();
+                        if !ctrl_held {
+                            sm.clear();
+                        }
+                        for (entity_id, row_rect) in &state.row_rects {
+                            if rect.intersects(*row_rect) {
+                                sm.select(entity_id.clone());
+                            }
+                        }
+                    }
+                }
+                
+                // End drag selection
+                if !ui.ctx().input(|i| i.pointer.primary_down()) && state.drag_selecting {
+                    state.drag_selecting = false;
+                    state.drag_start_pos = None;
+                    state.drag_current_pos = None;
+                }
+            });
+        
+        // ════════════════════════════════════════════════════════════════════════
+        // Render context menu (separate from row rendering for robustness)
+        // ════════════════════════════════════════════════════════════════════════
+        
+        Self::render_context_menu(ui, state);
+    }
+    
+    /// Render the context menu as a separate popup (more robust than inline context_menu)
+    fn render_context_menu(ui: &mut egui::Ui, state: &mut ExplorerState) {
+        // Check if we have a context menu to show
+        let menu_data = if let Some((entity, class, name)) = state.context_menu_entity.clone() {
+            if let Some(pos) = state.context_menu_pos {
+                Some((entity, class, name, pos))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        if let Some((entity, class, name, pos)) = menu_data {
+            let popup_id = egui::Id::new("explorer_context_menu");
+            
+            // Show popup at the stored position
+            let area_response = egui::Area::new(popup_id)
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::menu(&ui.ctx().style())
+                        .inner_margin(egui::Margin::symmetric(4, 6))
+                        .show(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 2.0);
+                            ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
+                            
+                            // Header
+                            ui.label(egui::RichText::new(&name).strong());
+                            ui.separator();
+                            
+                            // Rename
+                            if ui.add(Self::menu_button("Rename", "F2")).clicked() {
+                                state.renaming_entity = Some(entity);
+                                state.rename_buffer = name.clone();
+                                state.context_menu_entity = None;
+                            }
+                            
+                            ui.separator();
+                            
+                            // Copy/Cut/Paste/Duplicate
+                            if ui.add(Self::menu_button("Cut", "Ctrl+X")).clicked() {
+                                state.context_menu_entity = None;
+                            }
+                            if ui.add(Self::menu_button("Copy", "Ctrl+C")).clicked() {
+                                state.context_menu_entity = None;
+                            }
+                            if ui.add(Self::menu_button("Paste Into", "Ctrl+Shift+V")).clicked() {
+                                state.context_menu_entity = None;
+                            }
+                            if ui.add(Self::menu_button("Duplicate", "Ctrl+D")).clicked() {
+                                state.context_menu_entity = None;
+                            }
+                            
+                            ui.separator();
+                            
+                            // Insert submenu
+                            ui.menu_button("Insert...", |ui| {
+                                ui.set_min_width(180.0);
+                                ui.style_mut().spacing.button_padding = egui::vec2(8.0, 4.0);
+                                Self::render_insert_menu_for_class(ui, class, entity, state);
+                            });
+                            
+                            ui.separator();
+                            
+                            // Delete
+                            if ui.add(Self::menu_button("Delete", "Del")).clicked() {
+                                state.entity_to_delete = Some(entity);
+                                state.context_menu_entity = None;
+                            }
+                            
+                            ui.separator();
+                            
+                            // Focus
+                            if ui.add(Self::menu_button("Zoom to", "F")).clicked() {
+                                state.entity_to_focus = Some(entity);
+                                state.context_menu_entity = None;
+                            }
+                        });
+                });
+            
+            // Close on Escape
+            let ctx = ui.ctx();
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                state.context_menu_entity = None;
+            }
+            
+            let menu_rect = area_response.response.rect;
+            
+            // Close on LEFT click outside the menu area
+            if ctx.input(|i| i.pointer.primary_clicked()) {
+                if let Some(pointer_pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                    if !menu_rect.contains(pointer_pos) {
+                        state.context_menu_entity = None;
+                    }
+                }
+            }
+            
+            // On RIGHT click outside the menu area, check if clicking on another entity
+            // and immediately switch to that entity's context menu
+            if ctx.input(|i| i.pointer.secondary_clicked()) {
+                if let Some(pointer_pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                    if !menu_rect.contains(pointer_pos) {
+                        // Check if the click is on another entity row
+                        let mut found_entity = None;
+                        for (ent, class, name, row_rect) in &state.entity_row_rects {
+                            if row_rect.contains(pointer_pos) {
+                                found_entity = Some((*ent, *class, name.clone(), pointer_pos));
+                                break;
+                            }
+                        }
+                        
+                        if let Some((ent, class, name, pos)) = found_entity {
+                            // Switch to the new entity's context menu
+                            state.context_menu_entity = Some((ent, class, name));
+                            state.context_menu_pos = Some(pos);
+                            info!("Explorer: Switched context menu to entity {:?}", ent);
+                        } else {
+                            // Clicked outside any entity row, close the menu
+                            state.context_menu_entity = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Render the root "Experience" header
+    fn render_root_header(ui: &mut egui::Ui, icon: &str, name: &str, color: egui::Color32) {
+        let (rect, _response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::hover()
+        );
+        
+        if ui.is_rect_visible(rect) {
+            // Background
+            ui.painter().rect_filled(
+                rect,
+                0.0,
+                egui::Color32::from_rgb(45, 45, 50)
+            );
+            
+            // Icon and text
+            let text_pos = rect.min + egui::vec2(4.0, 3.0);
+            ui.painter().text(
+                text_pos,
+                egui::Align2::LEFT_TOP,
+                format!("{} {}", icon, name),
+                egui::FontId::proportional(14.0),
+                color,
+            );
+        }
+    }
+    
+    /// Render a service node with children
+    fn render_service_node(
+        ui: &mut egui::Ui,
+        service: ServiceType,
+        entities: &[(Entity, Instance, bool)],
+        expanded: &mut ExplorerExpanded,
+        selected: &[String],
+        selection_manager: &BevySelectionManager,
+        state: &mut ExplorerState,
+        shift_held: bool,
+        ctrl_held: bool,
+        world: &World,
+    ) {
+        let is_expanded = expanded.is_service_expanded(service);
+        let has_children = !entities.is_empty();
+        let child_count = entities.len();
+        
+        // Service row
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click()
+        );
+        
+        let is_hovered = response.hovered();
+        
+        if ui.is_rect_visible(rect) {
+            // Background on hover
+            if is_hovered {
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(60, 60, 65));
+            }
+            
+            let mut x = rect.min.x + INDENT_SIZE;
+            
+            // Expand arrow (draw triangle shape for consistent rendering)
+            if has_children {
+                // Interactive arrow area for single-click toggle
+                let arrow_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.min.y),
+                    egui::vec2(14.0, ROW_HEIGHT)
+                );
+                
+                // Handle arrow click (separate from row click)
+                if ui.interact(arrow_rect, response.id.with("arrow"), egui::Sense::click()).clicked() {
+                    expanded.toggle_service(service);
+                }
+
+                let arrow_center = egui::pos2(x + 5.0, rect.min.y + ROW_HEIGHT / 2.0);
+                let arrow_size = 4.0;
+                let arrow_color = egui::Color32::from_rgb(180, 180, 180);
+                
+                if is_expanded {
+                    // Down-pointing triangle (expanded)
+                    let points = vec![
+                        egui::pos2(arrow_center.x - arrow_size, arrow_center.y - arrow_size * 0.5),
+                        egui::pos2(arrow_center.x + arrow_size, arrow_center.y - arrow_size * 0.5),
+                        egui::pos2(arrow_center.x, arrow_center.y + arrow_size * 0.5),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(points, arrow_color, egui::Stroke::NONE));
+                } else {
+                    // Right-pointing triangle (collapsed)
+                    let points = vec![
+                        egui::pos2(arrow_center.x - arrow_size * 0.5, arrow_center.y - arrow_size),
+                        egui::pos2(arrow_center.x + arrow_size * 0.5, arrow_center.y),
+                        egui::pos2(arrow_center.x - arrow_size * 0.5, arrow_center.y + arrow_size),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(points, arrow_color, egui::Stroke::NONE));
+                }
+            }
+            x += 14.0;
+            
+            // Icon
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 2.0),
+                egui::Align2::LEFT_TOP,
+                service.icon(),
+                egui::FontId::proportional(14.0),
+                service.color(),
+            );
+            x += ICON_WIDTH;
+            
+            // Name
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 3.0),
+                egui::Align2::LEFT_TOP,
+                service.name(),
+                egui::FontId::proportional(13.0),
+                service.color(),
+            );
+            
+            // Child count badge
+            if child_count > 0 {
+                let count_text = format!("({})", child_count);
+                ui.painter().text(
+                    egui::pos2(rect.max.x - 30.0, rect.min.y + 4.0),
+                    egui::Align2::RIGHT_TOP,
+                    &count_text,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(120, 120, 120),
+                );
+            }
+        }
+        
+        // Handle click - select service for properties panel and insertion target
+        if response.clicked() {
+            // Select this service for properties panel
+            expanded.selected_service = Some(service);
+            // Also set as the selected service for insert operations (Folder, etc.)
+            state.selected_service = service;
+            // Double click still toggles
+            if response.double_clicked() {
+                expanded.toggle_service(service);
+            }
+        }
+        
+        // Context menu for inserting valid instances
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            ui.label(egui::RichText::new(format!("Insert into {}", service.name())).strong());
+            ui.separator();
+            
+            match service {
+                ServiceType::Workspace => {
+                    if ui.button("▣ Part").clicked() { ui.close(); }
+                    if ui.button("◆ MeshPart").clicked() { ui.close(); }
+                    if ui.button("📦 Model").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                    if ui.button("🎯 SpawnLocation").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📷 Camera").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::Lighting => {
+                    // Global lighting only - PointLight/SpotLight/SurfaceLight go on Parts
+                    if ui.button("☀️ DirectionalLight (Sun)").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("☁️ Sky").clicked() { ui.close(); }
+                    if ui.button("🌫️ Atmosphere").clicked() { ui.close(); }
+                    if ui.button("☁️ Clouds").clicked() { ui.close(); }
+                    ui.separator();
+                    ui.label(egui::RichText::new("💡 Lights go on Parts").small().color(egui::Color32::GRAY));
+                }
+                ServiceType::SoundService => {
+                    if ui.button("🔊 Sound").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::SoulService => {
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                }
+                ServiceType::ServerStorage => {
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                    if ui.button("📦 Model").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterGui => {
+                    if ui.button("🖼️ ScreenGui").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterPack => {
+                    if ui.button("🔧 Tool").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterPlayer => {
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                }
+                ServiceType::Teams => {
+                    if ui.button("🏁 Team").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::Players | ServiceType::Chat => {
+                    ui.label(egui::RichText::new("(Runtime only)").small().color(egui::Color32::GRAY));
+                }
+                ServiceType::LocalizationService => {
+                    if ui.button("🌐 LocalizationTable").clicked() { ui.close(); }
+                }
+                ServiceType::TestService => {
+                    ui.label(egui::RichText::new("(Testing only)").small().color(egui::Color32::GRAY));
+                }
+            }
+        });
+        
+        // Render children if expanded
+        if is_expanded {
+            for (entity, instance, has_children) in entities {
+                Self::render_entity_row(
+                    ui,
+                    *entity,
+                    instance,
+                    *has_children,
+                    2, // Depth 2 (under service)
+                    selected,
+                    selection_manager,
+                    state,
+                    shift_held,
+                    ctrl_held,
+                    expanded,
+                    world,
+                );
+            }
+        }
+    }
+    
+    /// Render an empty service node (no children)
+    fn render_service_node_empty(ui: &mut egui::Ui, service: ServiceType, expanded: &mut ExplorerExpanded, state: &mut ExplorerState) {
+        let is_expanded = expanded.is_service_expanded(service);
+        
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click()
+        );
+        
+        let is_hovered = response.hovered();
+        
+        if ui.is_rect_visible(rect) {
+            if is_hovered {
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(60, 60, 65));
+            }
+            
+            let mut x = rect.min.x + INDENT_SIZE;
+            
+            // No arrow for empty services, just spacing
+            x += 14.0;
+            
+            // Icon (dimmed for empty)
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 2.0),
+                egui::Align2::LEFT_TOP,
+                service.icon(),
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_rgb(100, 100, 100),
+            );
+            x += ICON_WIDTH;
+            
+            // Name (dimmed)
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 3.0),
+                egui::Align2::LEFT_TOP,
+                service.name(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(100, 100, 100),
+            );
+        }
+        
+        // Handle click - select service for properties panel and insertion target
+        if response.clicked() {
+            expanded.selected_service = Some(service);
+            // Also set as the selected service for insert operations (Folder, etc.)
+            state.selected_service = service;
+            expanded.toggle_service(service);
+        }
+        
+        // Context menu for inserting valid instances (same as non-empty services)
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            ui.label(egui::RichText::new(format!("Insert into {}", service.name())).strong());
+            ui.separator();
+            
+            match service {
+                ServiceType::Workspace => {
+                    if ui.button("▣ Part").clicked() { ui.close(); }
+                    if ui.button("◆ MeshPart").clicked() { ui.close(); }
+                    if ui.button("📦 Model").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                    if ui.button("🎯 SpawnLocation").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📷 Camera").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::Lighting => {
+                    // Global lighting only - PointLight/SpotLight/SurfaceLight go on Parts
+                    if ui.button("☀️ DirectionalLight (Sun)").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("☁️ Sky").clicked() { ui.close(); }
+                    if ui.button("🌫️ Atmosphere").clicked() { ui.close(); }
+                    if ui.button("☁️ Clouds").clicked() { ui.close(); }
+                    ui.separator();
+                    ui.label(egui::RichText::new("💡 Lights go on Parts").small().color(egui::Color32::GRAY));
+                }
+                ServiceType::SoundService => {
+                    if ui.button("🔊 Sound").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::SoulService => {
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                }
+                ServiceType::ServerStorage => {
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                    if ui.button("📦 Model").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterGui => {
+                    if ui.button("🖼️ ScreenGui").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterPack => {
+                    if ui.button("🔧 Tool").clicked() { ui.close(); }
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::StarterPlayer => {
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                    if ui.button("📁 Folder").clicked() { ui.close(); }
+                }
+                ServiceType::Teams => {
+                    if ui.button("🏁 Team").clicked() { ui.close(); }
+                    ui.separator();
+                    if ui.button("📝 SoulScript").clicked() { ui.close(); }
+                }
+                ServiceType::Players | ServiceType::Chat => {
+                    ui.label(egui::RichText::new("(Runtime only)").small().color(egui::Color32::GRAY));
+                }
+                ServiceType::LocalizationService => {
+                    if ui.button("🌐 LocalizationTable").clicked() { ui.close(); }
+                }
+                ServiceType::TestService => {
+                    ui.label(egui::RichText::new("(Testing only)").small().color(egui::Color32::GRAY));
+                }
+            }
+        });
+    }
+    
+    /// Render a single entity row
+    fn render_entity_row(
+        ui: &mut egui::Ui,
+        entity: Entity,
+        instance: &Instance,
+        has_children: bool,
+        depth: usize,
+        selected: &[String],
+        selection_manager: &BevySelectionManager,
+        state: &mut ExplorerState,
+        shift_held: bool,
+        ctrl_held: bool,
+        expanded: &mut ExplorerExpanded,
+        world: &World,
+    ) {
+        let entity_id = format!("{}v{}", entity.index(), entity.generation());
+        let is_selected = selected.contains(&entity_id);
+        let is_expanded = expanded.is_expanded(entity);
+        
+        // Track visible entity order for Shift+Click range selection
+        state.visible_entity_order.push(entity_id.clone());
+        
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click_and_drag()
+        );
+        
+        // Store row rect for drag selection hit testing
+        state.row_rects.push((entity_id.clone(), rect));
+        // Store entity data for context menu hit-testing
+        state.entity_row_rects.push((entity, instance.class_name, instance.name.clone(), rect));
+        
+        // Drag payload for reparenting - set the dragged entity
+        if response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            response.dnd_set_drag_payload(entity);
+        }
+        
+        // Check if this row is a drop target for reparenting
+        let mut is_drop_target = false;
+        if let Some(dragged_entity) = response.dnd_hover_payload::<Entity>() {
+            // Don't allow dropping onto self
+            if *dragged_entity != entity {
+                is_drop_target = true;
+            }
+        }
+        
+        // Handle drop - reparent the dragged entity to this entity
+        if let Some(dragged_entity) = response.dnd_release_payload::<Entity>() {
+            // Don't allow dropping onto self
+            if *dragged_entity != entity {
+                info!("🔗 Explorer: Reparenting {:?} to {:?}", dragged_entity, entity);
+                state.pending_reparent = Some((*dragged_entity, entity));
+            }
+        }
+        
+        let is_hovered = response.hovered();
+        
+        // Check if this entity is being renamed
+        let is_renaming = state.renaming_entity == Some(entity);
+        
+        if ui.is_rect_visible(rect) {
+            // Background - highlight drop targets
+            let bg_color = if is_drop_target {
+                egui::Color32::from_rgb(80, 120, 80) // Green tint for drop target
+            } else if is_selected {
+                egui::Color32::from_rgb(50, 100, 150)
+            } else if is_hovered {
+                egui::Color32::from_rgb(55, 55, 60)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            
+            if bg_color != egui::Color32::TRANSPARENT {
+                ui.painter().rect_filled(rect, 0.0, bg_color);
+            }
+            
+            let mut x = rect.min.x + (depth as f32 * INDENT_SIZE);
+            
+            // Expand arrow (draw triangle shape for consistent rendering)
+            if has_children {
+                // Interactive arrow area for single-click toggle
+                let arrow_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.min.y),
+                    egui::vec2(14.0, ROW_HEIGHT)
+                );
+                
+                // Handle arrow click (separate from row click)
+                if ui.interact(arrow_rect, response.id.with("arrow"), egui::Sense::click()).clicked() {
+                    expanded.toggle(entity);
+                }
+
+                let arrow_center = egui::pos2(x + 5.0, rect.min.y + ROW_HEIGHT / 2.0);
+                let arrow_size = 4.0;
+                let arrow_color = egui::Color32::from_rgb(180, 180, 180);
+                
+                if is_expanded {
+                    // Down-pointing triangle (expanded)
+                    let points = vec![
+                        egui::pos2(arrow_center.x - arrow_size, arrow_center.y - arrow_size * 0.5),
+                        egui::pos2(arrow_center.x + arrow_size, arrow_center.y - arrow_size * 0.5),
+                        egui::pos2(arrow_center.x, arrow_center.y + arrow_size * 0.5),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(points, arrow_color, egui::Stroke::NONE));
+                } else {
+                    // Right-pointing triangle (collapsed)
+                    let points = vec![
+                        egui::pos2(arrow_center.x - arrow_size * 0.5, arrow_center.y - arrow_size),
+                        egui::pos2(arrow_center.x + arrow_size * 0.5, arrow_center.y),
+                        egui::pos2(arrow_center.x - arrow_size * 0.5, arrow_center.y + arrow_size),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(points, arrow_color, egui::Stroke::NONE));
+                }
+            }
+            x += 14.0;
+            
+            // Class icon (vector)
+            super::icons::draw_class_icon(ui.painter(), egui::pos2(x, rect.min.y + 2.0), instance.class_name, 14.0);
+            x += ICON_WIDTH;
+            
+            // Instance name (or rename text edit if renaming)
+            if is_renaming {
+                // Show text edit for renaming - use put_at to position it
+                let text_rect = egui::Rect::from_min_size(
+                    egui::pos2(x, rect.min.y + 1.0),
+                    egui::vec2(rect.max.x - x - 4.0, ROW_HEIGHT - 2.0)
+                );
+                let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+                let text_edit = egui::TextEdit::singleline(&mut state.rename_buffer)
+                    .desired_width(text_rect.width())
+                    .font(egui::FontId::proportional(13.0));
+                let response = child_ui.add(text_edit);
+                
+                // Request focus on first frame
+                if response.gained_focus() || !response.has_focus() {
+                    response.request_focus();
+                }
+                
+                // Handle Enter to confirm, Escape to cancel
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    state.entity_to_rename = Some((entity, state.rename_buffer.clone()));
+                    state.renaming_entity = None;
+                    state.rename_buffer.clear();
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    state.renaming_entity = None;
+                    state.rename_buffer.clear();
+                }
+            } else {
+                let name_color = if is_selected {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(220, 220, 220)
+                };
+                
+                let display_name = if state.show_class_names {
+                    format!("{} ({})", instance.name, instance.class_name.as_str())
+                } else {
+                    instance.name.clone()
+                };
+                
+                ui.painter().text(
+                    egui::pos2(x, rect.min.y + 3.0),
+                    egui::Align2::LEFT_TOP,
+                    &display_name,
+                    egui::FontId::proportional(13.0),
+                    name_color,
+                );
+            }
+        }
+        
+        // Handle interactions (skip if renaming)
+        if !is_renaming {
+            // Single click = SELECT ONLY (no expand/collapse)
+            if response.clicked() {
+                info!("Explorer: Clicked on entity {:?} ({})", entity, instance.name);
+                Self::handle_entity_click(entity, selection_manager, shift_held, ctrl_held, state);
+                // Clear service selection when clicking on an entity
+                expanded.selected_service = None;
+            }
+            
+            // Right-click = Store context menu target (more robust than response.context_menu)
+            if response.secondary_clicked() {
+                if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+                    state.context_menu_entity = Some((entity, instance.class_name, instance.name.clone()));
+                    state.context_menu_pos = Some(pos);
+                    state.context_menu_service = None; // Clear service menu
+                    info!("Explorer: Right-clicked on entity {:?} ({})", entity, instance.name);
+                }
+            }
+            
+            // Double-click handling
+            if response.double_clicked() {
+                if instance.class_name == ClassName::SoulScript {
+                    // Open SoulScript in editor AND expand if has children
+                    info!("Explorer: Double-clicked to open SoulScript {:?} ({})", entity, instance.name);
+                    state.script_to_open = Some(entity);
+                    if has_children {
+                        expanded.toggle(entity);
+                    }
+                } else if has_children {
+                    // Toggle expand/collapse for items with children
+                    info!("Explorer: Double-clicked to toggle expand on {:?}", entity);
+                    expanded.toggle(entity);
+                } else {
+                    // Double-click on leaf item starts rename
+                    info!("Explorer: Double-clicked to rename {:?} ({})", entity, instance.name);
+                    state.renaming_entity = Some(entity);
+                    state.rename_buffer = instance.name.clone();
+                }
+            }
+            
+            // F2 or Enter on selected item starts rename (when not already renaming)
+            if is_selected && state.renaming_entity.is_none() {
+                if ui.input(|i| i.key_pressed(egui::Key::F2) || i.key_pressed(egui::Key::Enter)) {
+                    info!("Explorer: F2/Enter pressed - starting rename for {:?}", entity);
+                    state.renaming_entity = Some(entity);
+                    state.rename_buffer = instance.name.clone();
+                }
+            }
+        }
+        
+        // Render children if expanded
+        if is_expanded && has_children {
+            // Query for children of this entity
+            if let Some(children) = world.get::<Children>(entity) {
+                let child_entities: Vec<Entity> = children.iter().collect();
+                for child_entity in child_entities {
+                    if let Some(child_instance) = world.get::<Instance>(child_entity) {
+                        let child_has_children = world.get::<Children>(child_entity)
+                            .map_or(false, |c| !c.is_empty());
+                        Self::render_entity_row(
+                            ui,
+                            child_entity,
+                            child_instance,
+                            child_has_children,
+                            depth + 1,
+                            selected,
+                            selection_manager,
+                            state,
+                            shift_held,
+                            ctrl_held,
+                            expanded,
+                            world,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Create a styled menu button with right-aligned shortcut
+    fn menu_button(label: &str, shortcut: &str) -> egui::Button<'static> {
+        let text = if shortcut.is_empty() {
+            egui::RichText::new(label.to_string()).size(13.0)
+        } else {
+            // Use a fixed-width format for alignment
+            let full_text = format!("{:<20}{:>12}", label, shortcut);
+            egui::RichText::new(full_text).size(13.0).family(egui::FontFamily::Monospace)
+        };
+        egui::Button::new(text)
+            .min_size(egui::vec2(200.0, 22.0))
+            .frame(false)
+    }
+    
+    /// Render Insert submenu items based on parent class
+    fn render_insert_menu_for_class(ui: &mut egui::Ui, class: ClassName, parent: Entity, state: &mut ExplorerState) {
+        // Helper macro to set both insert_class and insert_parent
+        macro_rules! insert_item {
+            ($class:expr) => {{
+                state.insert_class = Some($class);
+                state.insert_parent = Some(parent);
+                ui.close();
+            }};
+        }
+        
+        match class {
+            // Parts can have attachments, constraints, effects, decals
+            ClassName::Part | ClassName::MeshPart | ClassName::SpawnLocation => {
+                ui.label(egui::RichText::new("Constraints").small().color(egui::Color32::GRAY));
+                if ui.button("Attachment").clicked() { insert_item!(ClassName::Attachment); }
+                if ui.button("WeldConstraint").clicked() { insert_item!(ClassName::WeldConstraint); }
+                if ui.button("Motor6D").clicked() { insert_item!(ClassName::Motor6D); }
+                ui.separator();
+                ui.label(egui::RichText::new("Appearance").small().color(egui::Color32::GRAY));
+                if ui.button("Decal").clicked() { insert_item!(ClassName::Decal); }
+                if ui.button("SpecialMesh").clicked() { insert_item!(ClassName::SpecialMesh); }
+                ui.separator();
+                ui.label(egui::RichText::new("Effects").small().color(egui::Color32::GRAY));
+                if ui.button("ParticleEmitter").clicked() { insert_item!(ClassName::ParticleEmitter); }
+                if ui.button("PointLight").clicked() { insert_item!(ClassName::PointLight); }
+                if ui.button("SpotLight").clicked() { insert_item!(ClassName::SpotLight); }
+                if ui.button("SurfaceLight").clicked() { insert_item!(ClassName::SurfaceLight); }
+                ui.separator();
+                ui.label(egui::RichText::new("Other").small().color(egui::Color32::GRAY));
+                if ui.button("Sound").clicked() { insert_item!(ClassName::Sound); }
+                if ui.button("BillboardGui").clicked() { insert_item!(ClassName::BillboardGui); }
+                if ui.button("SoulScript").clicked() { insert_item!(ClassName::SoulScript); }
+            }
+            // Models can have parts, other models, scripts
+            ClassName::Model => {
+                ui.label(egui::RichText::new("Objects").small().color(egui::Color32::GRAY));
+                ui.menu_button("Part", |ui| {
+                    if ui.button("Block").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Sphere").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Cylinder").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Wedge").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                });
+                if ui.button("MeshPart").clicked() { insert_item!(ClassName::MeshPart); }
+                if ui.button("Model").clicked() { insert_item!(ClassName::Model); }
+                if ui.button("Folder").clicked() { insert_item!(ClassName::Folder); }
+                ui.separator();
+                ui.label(egui::RichText::new("Character").small().color(egui::Color32::GRAY));
+                if ui.button("Humanoid").clicked() { insert_item!(ClassName::Humanoid); }
+                if ui.button("Animator").clicked() { insert_item!(ClassName::Animator); }
+                ui.separator();
+                ui.label(egui::RichText::new("Scripts").small().color(egui::Color32::GRAY));
+                if ui.button("SoulScript").clicked() { insert_item!(ClassName::SoulScript); }
+            }
+            // Folders can have anything
+            ClassName::Folder => {
+                ui.label(egui::RichText::new("Objects").small().color(egui::Color32::GRAY));
+                ui.menu_button("Part", |ui| {
+                    if ui.button("Block").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Sphere").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Cylinder").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                    if ui.button("Wedge").clicked() { state.insert_class = Some(ClassName::Part); state.insert_parent = Some(parent); ui.close(); }
+                });
+                if ui.button("Model").clicked() { insert_item!(ClassName::Model); }
+                if ui.button("Folder").clicked() { insert_item!(ClassName::Folder); }
+                ui.separator();
+                ui.label(egui::RichText::new("Scripts").small().color(egui::Color32::GRAY));
+                if ui.button("SoulScript").clicked() { insert_item!(ClassName::SoulScript); }
+            }
+            // SoulScript - limited children
+            ClassName::SoulScript => {
+                if ui.button("Folder").clicked() { insert_item!(ClassName::Folder); }
+            }
+            // Humanoid can have Animator
+            ClassName::Humanoid => {
+                if ui.button("Animator").clicked() { insert_item!(ClassName::Animator); }
+            }
+            // BillboardGui/ScreenGui can have GUI children
+            ClassName::BillboardGui | ClassName::ScreenGui => {
+                ui.label(egui::RichText::new("Containers").small().color(egui::Color32::GRAY));
+                if ui.button("Frame").clicked() { insert_item!(ClassName::Frame); }
+                if ui.button("ScrollingFrame").clicked() { insert_item!(ClassName::ScrollingFrame); }
+                ui.separator();
+                ui.label(egui::RichText::new("Media").small().color(egui::Color32::GRAY));
+                if ui.button("VideoFrame").clicked() { insert_item!(ClassName::VideoFrame); }
+                if ui.button("DocumentFrame").clicked() { insert_item!(ClassName::DocumentFrame); }
+                if ui.button("ImageLabel").clicked() { insert_item!(ClassName::ImageLabel); }
+                ui.separator();
+                ui.label(egui::RichText::new("Interactive").small().color(egui::Color32::GRAY));
+                if ui.button("TextLabel").clicked() { insert_item!(ClassName::TextLabel); }
+                if ui.button("TextButton").clicked() { insert_item!(ClassName::TextButton); }
+                if ui.button("ImageButton").clicked() { insert_item!(ClassName::ImageButton); }
+            }
+            // Frame/ScrollingFrame can have GUI children
+            ClassName::Frame | ClassName::ScrollingFrame => {
+                if ui.button("Frame").clicked() { insert_item!(ClassName::Frame); }
+                if ui.button("ScrollingFrame").clicked() { insert_item!(ClassName::ScrollingFrame); }
+                if ui.button("VideoFrame").clicked() { insert_item!(ClassName::VideoFrame); }
+                if ui.button("DocumentFrame").clicked() { insert_item!(ClassName::DocumentFrame); }
+                if ui.button("ImageLabel").clicked() { insert_item!(ClassName::ImageLabel); }
+                if ui.button("TextLabel").clicked() { insert_item!(ClassName::TextLabel); }
+                if ui.button("TextButton").clicked() { insert_item!(ClassName::TextButton); }
+                if ui.button("ImageButton").clicked() { insert_item!(ClassName::ImageButton); }
+            }
+            // Default - Folder only
+            _ => {
+                if ui.button("Folder").clicked() { insert_item!(ClassName::Folder); }
+                if ui.button("SoulScript").clicked() { insert_item!(ClassName::SoulScript); }
+            }
+        }
+    }
+    
+    /// Render entity hierarchy (ECS-based)
+    fn render_entity_hierarchy(
+        ui: &mut egui::Ui,
+        _world: &World,
+        entities: &[(Entity, Instance, Option<Vec<Entity>>)],
+        parent: Option<Entity>,
+        depth: usize,
+        selected: &[String],
+        selection_manager: &BevySelectionManager,
+        shift_held: bool,
+        ctrl_held: bool,
+        expanded: &mut ExplorerExpanded,
+        state: &ExplorerState,
+        action_queue: &mut UIActionQueue,
+    ) {
+        // Find entities that match the parent (or root if parent is None)
+        for (entity, instance, children) in entities {
+            // TODO: Implement parent checking when we have parent relationships
+            // For now, show all entities at root level
+            if parent.is_some() {
+                continue; // Skip non-root for now
+            }
+            
+            // Apply search filter
+            if !state.search_filter.is_empty() {
+                let search_lower = state.search_filter.to_lowercase();
+                if !instance.name.to_lowercase().contains(&search_lower) {
+                    continue;
+                }
+            }
+            
+            // Apply class filter
+            if !state.class_filter.is_empty() {
+                if !state.class_filter.contains(&instance.class_name) {
+                    continue;
+                }
+            }
+            
+            let entity_id_str = format!("{:?}", entity);
+            let is_selected = selected.contains(&entity_id_str);
+            let has_children = children.as_ref().map_or(false, |c| !c.is_empty());
+            let is_expanded = expanded.is_expanded(*entity);
+            
+            // Render the entity row
+            ui.horizontal(|ui| {
+                // Indentation
+                ui.add_space(depth as f32 * 16.0);
+                
+                // Expand/collapse arrow for entities with children
+                if has_children {
+                    let arrow = if is_expanded { "▼" } else { "▶" };
+                    if ui.small_button(arrow).clicked() {
+                        expanded.toggle(*entity);
+                    }
+                } else {
+                    ui.add_space(16.0); // Space for alignment
+                }
+                
+                // Icon
+                // Class icon (vector)
+                let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                super::icons::draw_class_icon(ui.painter(), icon_rect.min, instance.class_name, 14.0);
+                
+                // Name
+                let label_text = if state.show_class_names {
+                    format!("{} ({})", instance.name, instance.class_name.as_str())
+                } else {
+                    instance.name.clone()
+                };
+                
+                let response = ui.selectable_label(is_selected, label_text);
+                
+                // Handle double-click to open Soul Scripts
+                if response.double_clicked() && instance.class_name == ClassName::SoulScript {
+                    // Queue action to open script in editor
+                    action_queue.push(UIAction::OpenScript(*entity));
+                    info!("Explorer: Double-clicked Soul Script '{}' - opening in editor", instance.name);
+                }
+                
+                // Handle selection (single click) - note: this path doesn't have mutable state access
+                // Range selection won't work here, but basic selection will
+                if response.clicked() {
+                    let entity_id_str = format!("{}v{}", entity.index(), entity.generation());
+                    let sm = selection_manager.0.write();
+                    if ctrl_held {
+                        sm.toggle_selection(entity_id_str);
+                    } else {
+                        sm.clear();
+                        sm.select(entity_id_str);
+                    }
+                }
+                
+                // TODO: Drag-drop reparenting (needs event system)
+                // let drag_source = response.dnd_set_drag_payload(*entity);
+                
+                // TODO: Context menu (needs mutable World access via event system)
+                // response.context_menu(|ui| {
+                //     show_entity_context_menu(ui, *entity, instance.class_name, selection_manager, world);
+                // });
+            });
+            
+            // Render children if expanded
+            if has_children && is_expanded {
+                if let Some(child_entities) = children {
+                    for _child_entity in child_entities {
+                        // TODO: Recursively render children
+                        // Self::render_entity_hierarchy(ui, world, entities, Some(*entity), depth + 1, ...);
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Handle entity click for selection
+    fn handle_entity_click(
+        entity: Entity,
+        selection_manager: &BevySelectionManager,
+        shift_held: bool,
+        ctrl_held: bool,
+        state: &mut ExplorerState,
+    ) {
+        // Use consistent entity ID format: "indexvgeneration" (e.g., "123v4")
+        let entity_id_str = format!("{}v{}", entity.index(), entity.generation());
+        info!("Explorer: handle_entity_click - selecting '{}'", entity_id_str);
+        
+        let sm = selection_manager.0.write();
+        
+        if ctrl_held {
+            // Toggle selection (keep anchor)
+            info!("Explorer: Ctrl+click - toggling selection");
+            sm.toggle_selection(entity_id_str.clone());
+            // Update anchor to this entity
+            state.anchor_id = Some(entity_id_str);
+        } else if shift_held {
+            // Range selection from anchor to clicked entity
+            if let Some(ref anchor_id) = state.anchor_id {
+                info!("Explorer: Shift+click - range selection from '{}' to '{}'", anchor_id, entity_id_str);
+                
+                // Find indices of anchor and clicked entity in visible order
+                let anchor_idx = state.visible_entity_order.iter().position(|id| id == anchor_id);
+                let clicked_idx = state.visible_entity_order.iter().position(|id| id == &entity_id_str);
+                
+                if let (Some(start), Some(end)) = (anchor_idx, clicked_idx) {
+                    // Select all entities in range
+                    let (range_start, range_end) = if start <= end { (start, end) } else { (end, start) };
+                    
+                    // Clear current selection and select range
+                    sm.clear();
+                    for idx in range_start..=range_end {
+                        if let Some(id) = state.visible_entity_order.get(idx) {
+                            sm.select(id.clone());
+                        }
+                    }
+                    info!("Explorer: Selected {} entities in range", range_end - range_start + 1);
+                } else {
+                    // Fallback: just add to selection
+                    sm.select(entity_id_str);
+                }
+            } else {
+                // No anchor, just select this entity and set as anchor
+                sm.clear();
+                sm.select(entity_id_str.clone());
+                state.anchor_id = Some(entity_id_str);
+            }
+        } else {
+            // Replace selection and set new anchor
+            info!("Explorer: Normal click - replacing selection");
+            sm.clear();
+            sm.select(entity_id_str.clone());
+            state.anchor_id = Some(entity_id_str);
+        }
+    }
+    
+    /// Simplified explorer content that works with immutable state references
+    /// Used by dock_system_exclusive to avoid borrow conflicts
+    pub fn show_content_simple(
+        ui: &mut egui::Ui,
+        world: &mut World,
+        selection_manager: &BevySelectionManager,
+        _expanded_entities: &HashSet<Entity>,
+        filter: &str,
+    ) {
+        // Scene tree - Professional VS Code style
+        ui.label(egui::RichText::new("EXPLORER").small().color(egui::Color32::GRAY));
+        ui.add_space(4.0);
+        
+        // Query all entities with Instance component
+        let mut entities_vec = Vec::new();
+        let mut query = world.query::<(Entity, &Instance, Option<&Children>)>();
+        
+        for (entity, instance, children) in query.iter(world) {
+            // Apply filter
+            if !filter.is_empty() {
+                let filter_lower = filter.to_lowercase();
+                if !instance.name.to_lowercase().contains(&filter_lower) {
+                    continue;
+                }
+            }
+            entities_vec.push((entity, instance.clone(), children.map(|c| c.to_vec())));
+        }
+        
+        // Sort by class name (A-Z), then by instance name (A-Z)
+        entities_vec.sort_by(|a, b| {
+            let class_cmp = a.1.class_name.as_str().cmp(b.1.class_name.as_str());
+            if class_cmp == std::cmp::Ordering::Equal {
+                a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase())
+            } else {
+                class_cmp
+            }
+        });
+        
+        let selected = selection_manager.0.read().get_selected();
+        
+        // Render entities under appropriate services
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Render all services with their children
+                for service in ServiceType::all() {
+                    Self::render_service_simple(
+                        ui, 
+                        *service, 
+                        &entities_vec, 
+                        &selected, 
+                        selection_manager,
+                        world,
+                    );
+                }
+            });
+    }
+    
+    /// Render a service in simple mode with hover plus button
+    fn render_service_simple(
+        ui: &mut egui::Ui,
+        service: ServiceType,
+        entities: &[(Entity, Instance, Option<Vec<Entity>>)],
+        selected: &[String],
+        selection_manager: &BevySelectionManager,
+        world: &mut World,
+    ) {
+        // Filter entities for this service
+        let service_entities: Vec<_> = entities.iter()
+            .filter(|(_, inst, _)| service.accepts_class(inst.class_name))
+            .collect();
+        
+        let child_count = service_entities.len();
+        
+        // Service row with hover detection
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click()
+        );
+        
+        let is_hovered = response.hovered();
+        
+        if ui.is_rect_visible(rect) {
+            // Hover background
+            if is_hovered {
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(50, 50, 55));
+            }
+            
+            let mut x = rect.min.x + 4.0;
+            
+            // Icon - always full color (services are always visible)
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 2.0),
+                egui::Align2::LEFT_TOP,
+                service.icon(),
+                egui::FontId::proportional(14.0),
+                service.color(),
+            );
+            x += ICON_WIDTH;
+            
+            // Name
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 3.0),
+                egui::Align2::LEFT_TOP,
+                service.name(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(200, 200, 200),
+            );
+            
+            // Child count (if any)
+            if child_count > 0 {
+                let count_text = format!("{}", child_count);
+                ui.painter().text(
+                    egui::pos2(rect.max.x - 40.0, rect.min.y + 4.0),
+                    egui::Align2::RIGHT_TOP,
+                    &count_text,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(100, 100, 100),
+                );
+            }
+            
+            // Plus button on hover (right side)
+            if is_hovered {
+                let plus_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.max.x - 22.0, rect.min.y + 2.0),
+                    egui::vec2(18.0, 18.0)
+                );
+                
+                // Plus button background
+                ui.painter().rect_filled(
+                    plus_rect,
+                    3.0,
+                    egui::Color32::from_rgb(70, 70, 75)
+                );
+                
+                // Plus icon
+                ui.painter().text(
+                    plus_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "+",
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(150, 200, 255),
+                );
+            }
+        }
+        
+        // Handle plus button click
+        if is_hovered {
+            let plus_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - 22.0, rect.min.y + 2.0),
+                egui::vec2(18.0, 18.0)
+            );
+            
+            if let Some(pos) = response.interact_pointer_pos() {
+                if plus_rect.contains(pos) && response.clicked() {
+                    // Show insert popup for this service
+                    Self::spawn_default_for_service(service, world);
+                }
+            }
+        }
+        
+        // Context menu for service
+        response.context_menu(|ui| {
+            Self::show_insert_menu(ui, service, world);
+        });
+        
+        // Render children (entities under this service)
+        for (entity, instance, _children) in &service_entities {
+            Self::render_entity_simple(
+                ui,
+                *entity,
+                instance,
+                1, // depth
+                selected,
+                selection_manager,
+                world,
+            );
+        }
+    }
+    
+    /// Render a single entity row with hover plus button
+    fn render_entity_simple(
+        ui: &mut egui::Ui,
+        entity: Entity,
+        instance: &Instance,
+        depth: usize,
+        selected: &[String],
+        selection_manager: &BevySelectionManager,
+        world: &mut World,
+    ) {
+        let entity_id = format!("{}v{}", entity.index(), entity.generation());
+        let is_selected = selected.contains(&entity_id);
+        
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click()
+        );
+        
+        let is_hovered = response.hovered();
+        
+        if ui.is_rect_visible(rect) {
+            // Background
+            let bg_color = if is_selected {
+                egui::Color32::from_rgb(40, 80, 120)
+            } else if is_hovered {
+                egui::Color32::from_rgb(50, 50, 55)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            
+            if bg_color != egui::Color32::TRANSPARENT {
+                ui.painter().rect_filled(rect, 0.0, bg_color);
+            }
+            
+            let mut x = rect.min.x + (depth as f32 * INDENT_SIZE) + 4.0;
+            
+            // Class icon (vector)
+            super::icons::draw_class_icon(ui.painter(), egui::pos2(x, rect.min.y + 2.0), instance.class_name, 14.0);
+            x += ICON_WIDTH;
+            
+            // Instance name
+            let name_color = if is_selected {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(200, 200, 200)
+            };
+            
+            ui.painter().text(
+                egui::pos2(x, rect.min.y + 3.0),
+                egui::Align2::LEFT_TOP,
+                &instance.name,
+                egui::FontId::proportional(13.0),
+                name_color,
+            );
+            
+            // Plus button on hover
+            if is_hovered {
+                let plus_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.max.x - 22.0, rect.min.y + 2.0),
+                    egui::vec2(18.0, 18.0)
+                );
+                
+                ui.painter().rect_filled(
+                    plus_rect,
+                    3.0,
+                    egui::Color32::from_rgb(70, 70, 75)
+                );
+                
+                ui.painter().text(
+                    plus_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "+",
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(150, 200, 255),
+                );
+            }
+        }
+        
+        // Handle click
+        if response.clicked() {
+            // Check if plus button was clicked
+            let plus_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.max.x - 22.0, rect.min.y + 2.0),
+                egui::vec2(18.0, 18.0)
+            );
+            
+            if let Some(pos) = response.interact_pointer_pos() {
+                if is_hovered && plus_rect.contains(pos) {
+                    // Show insert popup for this entity type
+                    Self::spawn_child_for_entity(instance.class_name, world);
+                } else {
+                    // Normal selection
+                    let sm = selection_manager.0.write();
+                    sm.clear();
+                    sm.select(entity_id);
+                }
+            } else {
+                let sm = selection_manager.0.write();
+                sm.clear();
+                sm.select(entity_id);
+            }
+        }
+        
+        // Context menu
+        response.context_menu(|ui| {
+            ui.set_min_width(150.0);
+            
+            ui.menu_button("➕ Insert", |ui| {
+                Self::show_insert_menu_for_class(ui, instance.class_name, world);
+            });
+            
+            ui.separator();
+            
+            if ui.button("📋 Copy").clicked() {
+                ui.close();
+            }
+            if ui.button("⧉ Duplicate").clicked() {
+                ui.close();
+            }
+            
+            ui.separator();
+            
+            if ui.button("✂ Cut").clicked() {
+                ui.close();
+            }
+            if ui.button("📋 Paste").clicked() {
+                ui.close();
+            }
+            
+            ui.separator();
+            
+            if ui.button("🗑 Delete").clicked() {
+                ui.close();
+            }
+            
+            ui.separator();
+            
+            if ui.button("🎯 Focus in Viewport").clicked() {
+                ui.close();
+            }
+        });
+    }
+    
+    /// Show insert menu for a service
+    fn show_insert_menu(ui: &mut egui::Ui, service: ServiceType, world: &mut World) {
+        use super::context_menu::InsertObjectEvent;
+        
+        ui.set_min_width(180.0);
+        ui.label(egui::RichText::new(format!("Insert into {}", service.name())).strong());
+        ui.separator();
+        
+        match service {
+            ServiceType::Workspace => {
+                if ui.button("▣ Part").clicked() {
+                    world.write_message(super::SpawnPartEvent {
+                        part_type: crate::classes::PartType::Block,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("◆ MeshPart").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::MeshPart,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("📦 Model").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Model,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("🎯 SpawnLocation").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SpawnLocation,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("📷 Camera").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Camera,
+                        parent: None,
+                        position: Vec3::new(0.0, 5.0, 10.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::Lighting => {
+                // Global lighting only - PointLight/SpotLight/SurfaceLight go on Parts
+                if ui.button("☀️ DirectionalLight").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::DirectionalLight,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("☁️ Sky").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Sky,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("🌫️ Atmosphere").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Atmosphere,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("☁️ Clouds").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Clouds,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("💡 Lights go on Parts").small().color(egui::Color32::GRAY));
+            }
+            ServiceType::SoundService => {
+                if ui.button("🔊 Sound").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Sound,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::SoulService => {
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::ServerStorage => {
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("📦 Model").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Model,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::StarterGui => {
+                if ui.button("🖼️ ScreenGui").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::ScreenGui,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::StarterPack => {
+                if ui.button("🔧 Tool").clicked() {
+                    // Tool class not yet implemented
+                    ui.close();
+                }
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::StarterPlayer => {
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::Teams => {
+                if ui.button("🏁 Team").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Team,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("📝 SoulScript").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ServiceType::LocalizationService => {
+                if ui.button("🌐 LocalizationTable").clicked() {
+                    // LocalizationTable class not yet implemented
+                    ui.close();
+                }
+            }
+            ServiceType::TestService => {
+                ui.label(egui::RichText::new("(Testing only)").small().color(egui::Color32::GRAY));
+            }
+            ServiceType::Players | ServiceType::Chat => {
+                ui.label(egui::RichText::new("(Runtime only)").small().color(egui::Color32::GRAY));
+            }
+        }
+    }
+    
+    /// Show insert menu for a class type
+    fn show_insert_menu_for_class(ui: &mut egui::Ui, class: ClassName, world: &mut World) {
+        use super::context_menu::InsertObjectEvent;
+        
+        match class {
+            ClassName::Model | ClassName::Folder => {
+                if ui.button("▣ Part").clicked() {
+                    world.write_message(super::SpawnPartEvent {
+                        part_type: crate::classes::PartType::Block,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("◆ MeshPart").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::MeshPart,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("📦 Model").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Model,
+                        parent: None,
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                    });
+                    ui.close();
+                }
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            ClassName::Part | ClassName::MeshPart | ClassName::BasePart => {
+                if ui.button("📝 Soul Script").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SoulScript,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("🔊 Sound").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Sound,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("💡 PointLight").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::PointLight,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+                if ui.button("🔦 SpotLight").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::SpotLight,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+            _ => {
+                if ui.button("📁 Folder").clicked() {
+                    world.write_message(InsertObjectEvent {
+                        class_name: ClassName::Folder,
+                        parent: None,
+                        position: Vec3::ZERO,
+                    });
+                    ui.close();
+                }
+            }
+        }
+    }
+    
+    /// Spawn default instance for a service (when + is clicked)
+    fn spawn_default_for_service(service: ServiceType, world: &mut World) {
+        match service {
+            ServiceType::Workspace => {
+                world.write_message(super::SpawnPartEvent {
+                    part_type: crate::classes::PartType::Block,
+                    position: Vec3::new(0.0, 1.0, 0.0),
+                });
+            }
+            _ => {
+                // TODO: Implement spawning for other services
+            }
+        }
+    }
+    
+    /// Spawn child for an entity (when + is clicked on entity)
+    fn spawn_child_for_entity(class: ClassName, world: &mut World) {
+        match class {
+            ClassName::Model | ClassName::Folder => {
+                world.write_message(super::SpawnPartEvent {
+                    part_type: crate::classes::PartType::Block,
+                    position: Vec3::new(0.0, 1.0, 0.0),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Event to toggle explorer node expansion
+#[derive(bevy::prelude::Message, Clone)]
+pub struct ExplorerToggleEvent(pub Entity);
+
+/// System to handle explorer toggle events
+pub fn handle_explorer_toggle(
+    mut events: bevy::ecs::message::MessageReader<ExplorerToggleEvent>,
+    mut expanded: ResMut<ExplorerExpanded>,
+) {
+    for event in events.read() {
+        expanded.toggle(event.0);
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Helper to parse Entity from debug string
+fn parse_entity_from_string_simple(s: &str) -> Option<Entity> {
+    let s = s.trim();
+    let s = if s.starts_with("Entity(") && s.ends_with(')') { 
+        &s[7..s.len()-1] 
+    } else { 
+        s 
+    };
+    
+    if let Some(v_pos) = s.find('v') {
+        let (idx, gen) = (&s[..v_pos], &s[v_pos+1..]);
+        if let (Ok(i), Ok(g)) = (idx.parse::<u32>(), gen.parse::<u32>()) {
+            return Some(Entity::from_bits((g as u64) << 32 | i as u64));
+        }
+    }
+    None
+}
+
+/// Handle keyboard navigation in Explorer
+fn handle_keyboard_navigation(
+        ui: &mut egui::Ui,
+        visible_entities: &[String],
+        state: &mut ExplorerState,
+        selection_manager: &BevySelectionManager,
+        expanded: &mut ExplorerExpanded,
+        world: &World,
+        shift_held: bool,
+    ) {
+        // Don't process if text input has focus
+        if ui.ctx().wants_keyboard_input() {
+            return;
+        }
+
+        ui.input(|i| {
+            let sm = selection_manager.0.read();
+            let selected = sm.get_selected();
+
+            // Get current focused entity or use first selected
+            let current_focus = state.focused_id.clone()
+                .or_else(|| selected.first().cloned());
+            
+            drop(sm); // Drop the read lock early
+
+            if let Some(current_id) = &current_focus {
+                let current_idx = visible_entities.iter().position(|id| id == current_id);
+
+                if let Some(idx) = current_idx {
+                    // Arrow Down: Move to next entity
+                    if i.key_pressed(egui::Key::ArrowDown) {
+                        if let Some(next_id) = visible_entities.get(idx + 1) {
+                            if shift_held {
+                                selection_manager.0.write().add_to_selection(next_id.clone());
+                            } else {
+                                let sm = selection_manager.0.write();
+                                sm.clear();
+                                sm.select(next_id.clone());
+                            }
+                            state.focused_id = Some(next_id.clone());
+                        }
+                    }
+
+                    // Arrow Up: Move to previous entity
+                    if i.key_pressed(egui::Key::ArrowUp) && idx > 0 {
+                        if let Some(prev_id) = visible_entities.get(idx - 1) {
+                            if shift_held {
+                                selection_manager.0.write().add_to_selection(prev_id.clone());
+                            } else {
+                                let sm = selection_manager.0.write();
+                                sm.clear();
+                                sm.select(prev_id.clone());
+                            }
+                            state.focused_id = Some(prev_id.clone());
+                        }
+                    }
+
+                    // Arrow Right: Expand entity if it has children
+                    if i.key_pressed(egui::Key::ArrowRight) {
+                        if let Some(entity) = parse_entity_from_string_simple(current_id) {
+                            if let Ok(entity_ref) = world.get_entity(entity) {
+                                if entity_ref.contains::<Children>() {
+                                    expanded.expanded_entities.insert(entity);
+                                }
+                            }
+                        }
+                    }
+
+                    // Arrow Left: Collapse entity
+                    if i.key_pressed(egui::Key::ArrowLeft) {
+                        if let Some(entity) = parse_entity_from_string_simple(current_id) {
+                            expanded.expanded_entities.remove(&entity);
+                        }
+                    }
+
+                    // Enter: Toggle expansion
+                    if i.key_pressed(egui::Key::Enter) {
+                        if let Some(entity) = parse_entity_from_string_simple(current_id) {
+                            expanded.toggle(entity);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+/// Show context menu for an entity
+fn show_entity_context_menu(
+        ui: &mut egui::Ui,
+        entity: Entity,
+        class_name: ClassName,
+        selection_manager: &BevySelectionManager,
+        world: &mut World,
+    ) {
+        // Duplicate
+        if ui.button("?? Duplicate").clicked() {
+            if let Ok(entity_ref) = world.get_entity(entity) {
+                let instance = entity_ref.get::<Instance>().cloned();
+                let basepart = entity_ref.get::<crate::classes::BasePart>().map(|bp| {
+                    let mut bp = bp.clone();
+                    bp.cframe.translation.y += 2.0;
+                    bp
+                });
+                let part = entity_ref.get::<crate::classes::Part>().cloned();
+                let name = entity_ref.get::<Name>().map(|n| n.as_str().to_string());
+
+                if let Some(inst) = instance {
+                    let mut new_entity = world.spawn(inst);
+                    if let Some(bp) = basepart { new_entity.insert(bp); }
+                    if let Some(p) = part { new_entity.insert(p); }
+                    if let Some(n) = name { new_entity.insert(Name::new(n)); }
+                    
+                    let new_id = new_entity.id();
+                    selection_manager.0.write().select(format!("{:?}", new_id));
+                }
+            }
+            ui.close();
+        }
+
+        // Delete
+        if ui.button("🗑 Delete").clicked() {
+            world.despawn(entity);
+            selection_manager.0.write().clear();
+            ui.close();
+        }
+
+        // Unparent
+        if ui.button("🔗 Unparent").clicked() {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                if entity_mut.contains::<ChildOf>() {
+                    entity_mut.remove::<ChildOf>();
+                    ui.ctx().debug_text("Removed parent");
+                }
+            }
+            ui.close();
+        }
+
+        ui.separator();
+
+        // Copy
+        if ui.button("?? Copy").clicked() {
+            // TODO: Copy to clipboard
+            ui.close();
+        }
+
+        ui.separator();
+
+        // Rename
+        if ui.button("?? Rename...").clicked() {
+            // TODO: Show rename dialog
+            ui.close();
+        }
+
+        ui.separator();
+
+        // Info
+        ui.label(format!("Class: {}", class_name.as_str()));
+        ui.label(format!("Entity: {:?}", entity));
+    }

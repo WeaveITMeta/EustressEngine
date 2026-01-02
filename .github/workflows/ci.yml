@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  rust-wasm-demo:
+    name: Rust WASM Demo
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eustress_demo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: build wasm (release)
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.104
+
+      - name: Generate bindings (no-modules)
+        run: |
+          wasm-bindgen --target no-modules --out-dir ../eustress-svelte/public/wasm ./target/wasm32-unknown-unknown/release/eustress_demo.wasm
+
+  security:
+    name: Security (cargo-deny & cargo-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eustress_demo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tools-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: cargo-deny (advisories, bans, sources)
+        run: |
+          cargo deny check advisories bans sources
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: cargo-audit
+        run: cargo audit
+
+  web-build:
+    name: Web Build (pnpm)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: eustress-svelte
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install web deps
+        working-directory: eustress-svelte
+        run: pnpm install --frozen-lockfile
+
+      - name: Build wasm (release)
+        working-directory: eustress_demo
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Install wasm-bindgen-cli
+        working-directory: eustress_demo
+        run: cargo install wasm-bindgen-cli --version 0.2.104
+
+      - name: Generate bindings (no-modules)
+        working-directory: eustress_demo
+        run: |
+          wasm-bindgen --target no-modules --out-dir ../eustress-svelte/public/wasm ./target/wasm32-unknown-unknown/release/eustress_demo.wasm
+
+      - name: Install Playwright browsers
+        working-directory: eustress-svelte
+        run: pnpm exec playwright install --with-deps
+
+      - name: Run Playwright tests
+        working-directory: eustress-svelte
+        run: pnpm run test:e2e
+
+  shader-validate:
+    name: WGSL Validation (naga)
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('**/*.wgsl') != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.88.0
+
+      - name: Install naga-cli
+        run: cargo install naga-cli || true
+
+      - name: Validate WGSL
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          files=(**/*.wgsl)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No WGSL files found. Skipping."
+            exit 0
+          fi
+          which naga || { echo "naga CLI not found"; exit 1; }
+          for f in "${files[@]}"; do
+            echo "Validating: $f"
+            naga parse "$f"
+          done

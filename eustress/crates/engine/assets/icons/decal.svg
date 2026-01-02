@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Decal - picture frame -->
+  <rect x="2" y="2" width="12" height="12" rx="1" fill="#FF96C8" stroke="#CC60A0" stroke-width="0.5"/>
+  <rect x="4" y="4" width="8" height="8" fill="#2A2A35"/>
+  <polygon points="5,11 7,8 9,10 11,7 12,11" fill="#FF96C8"/>
+  <circle cx="6" cy="6" r="1" fill="#FFFF64"/>
+</svg>

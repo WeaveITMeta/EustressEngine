@@ -1,0 +1,99 @@
+﻿{
+    "version":  "0.1.0",
+    "release_date":  "2025-12-11",
+    "engine":  {
+                   "version":  "0.1.0",
+                   "downloads":  {
+                                     "windows":  {
+                                                     "url":  "https://downloads.eustress.dev/engine/windows/EustressEngine-Setup.exe",
+                                                     "filename":  "EustressEngine-Setup.exe",
+                                                     "size":  29814663,
+                                                     "sha256":  "b518fbe06b42d1cdcf2932e0d072fa0871489c22cd9ee1df84ff964d29071877"
+                                                 },
+                                     "mac":  {
+                                                 "url":  "https://downloads.eustress.dev/engine/mac/EustressEngine.dmg",
+                                                 "filename":  "EustressEngine.dmg",
+                                                 "size":  0,
+                                                 "sha256":  ""
+                                             },
+                                     "mac_arm64":  {
+                                                       "url":  "https://downloads.eustress.dev/engine/mac/EustressEngine-arm64.dmg",
+                                                       "filename":  "EustressEngine-arm64.dmg",
+                                                       "size":  0,
+                                                       "sha256":  ""
+                                                   },
+                                     "linux_appimage":  {
+                                                            "url":  "https://downloads.eustress.dev/engine/linux/EustressEngine.AppImage",
+                                                            "filename":  "EustressEngine.AppImage",
+                                                            "size":  0,
+                                                            "sha256":  ""
+                                                        },
+                                     "linux_deb":  {
+                                                       "url":  "https://downloads.eustress.dev/engine/linux/eustress-engine.deb",
+                                                       "filename":  "eustress-engine.deb",
+                                                       "size":  0,
+                                                       "sha256":  ""
+                                                   },
+                                     "linux_rpm":  {
+                                                       "url":  "https://downloads.eustress.dev/engine/linux/eustress-engine.rpm",
+                                                       "filename":  "eustress-engine.rpm",
+                                                       "size":  0,
+                                                       "sha256":  ""
+                                                   },
+                                     "redox":  {
+                                                   "url":  "https://downloads.eustress.dev/engine/redox/eustress-engine.tar.gz",
+                                                   "filename":  "eustress-engine.tar.gz",
+                                                   "size":  0,
+                                                   "sha256":  ""
+                                               }
+                                 }
+               },
+    "player":  {
+                   "version":  "0.1.0",
+                   "downloads":  {
+                                     "windows":  {
+                                                     "url":  "https://downloads.eustress.dev/player/windows/EustressPlayer-Setup.exe",
+                                                     "filename":  "EustressPlayer-Setup.exe",
+                                                     "size":  0,
+                                                     "sha256":  ""
+                                                 },
+                                     "mac":  {
+                                                 "url":  "https://downloads.eustress.dev/player/mac/EustressPlayer.dmg",
+                                                 "filename":  "EustressPlayer.dmg",
+                                                 "size":  0,
+                                                 "sha256":  ""
+                                             },
+                                     "linux":  {
+                                                   "url":  "https://downloads.eustress.dev/player/linux/EustressPlayer.AppImage",
+                                                   "filename":  "EustressPlayer.AppImage",
+                                                   "size":  0,
+                                                   "sha256":  ""
+                                               },
+                                     "redox":  {
+                                                   "url":  "https://downloads.eustress.dev/player/redox/eustress-player.tar.gz",
+                                                   "filename":  "eustress-player.tar.gz",
+                                                   "size":  0,
+                                                   "sha256":  ""
+                                               },
+                                     "android":  {
+                                                     "url":  "https://downloads.eustress.dev/player/android/EustressPlayer.apk",
+                                                     "filename":  "EustressPlayer.apk",
+                                                     "size":  0,
+                                                     "sha256":  "",
+                                                     "play_store":  "https://play.google.com/store/apps/details?id=dev.eustress.player"
+                                                 },
+                                     "ios":  {
+                                                 "app_store":  "https://apps.apple.com/app/eustress-player/id123456789"
+                                             }
+                                 }
+               },
+    "changelog":  "https://eustress.dev/changelog",
+    "minimum_os":  {
+                       "windows":  "10",
+                       "mac":  "11.0",
+                       "linux":  "Ubuntu 20.04 / Fedora 34",
+                       "redox":  "0.8.0",
+                       "android":  "10",
+                       "ios":  "15.0"
+                   }
+}

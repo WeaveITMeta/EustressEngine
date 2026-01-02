@@ -1,0 +1,56 @@
+[package]
+name = "eustress-networking"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance networking for Eustress Engine - Lightyear + QUIC"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core Bevy 0.17
+bevy = { workspace = true, features = ["serialize"] }
+
+# Networking: Lightyear 0.17 (Bevy 0.17 compatible)
+lightyear = { workspace = true }
+
+# Physics: Avian 0.4 (Bevy 0.17 compatible)
+avian3d = { workspace = true, optional = true }
+
+# P2P & CRDTs for Persistent Distributed Worlds
+loro = { workspace = true, optional = true }
+bevy_quinnet = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Async runtime for QUIC
+tokio = { workspace = true }
+
+# TLS certificates
+rcgen = { workspace = true }
+
+# Utilities
+tracing = "0.1"
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+
+# Local crate for types
+eustress-common = { path = ".." }
+
+[features]
+default = ["server", "client", "physics"]
+server = []
+client = []
+physics = ["avian3d"]
+p2p = ["loro", "bevy_quinnet", "quinn"]  # Persistent Distributed Worlds
+
+[dev-dependencies]
+bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos"] }
+
+[[bench]]
+name = "stress_test"
+harness = false

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Beam - curved line -->
+  <path d="M2,12 Q8,2 14,12" fill="none" stroke="#FF64FF" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="2" cy="12" r="2" fill="#FF64FF"/>
+  <circle cx="14" cy="12" r="2" fill="#FF64FF"/>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Grass material -->
+  <rect x="0" y="0" width="16" height="16" fill="#4CAF50"/>
+  <path d="M2,16 L3,10 L4,16" fill="#388E3C"/>
+  <path d="M5,16 L6,8 L7,16" fill="#388E3C"/>
+  <path d="M8,16 L9,9 L10,16" fill="#388E3C"/>
+  <path d="M11,16 L12,11 L13,16" fill="#388E3C"/>
+</svg>

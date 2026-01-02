@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Model/Package icon - grouped colored squares (RGB) -->
+  <rect x="2" y="7" width="5" height="5" rx="0.8" fill="#4A90D9" stroke="#2E5A8A" stroke-width="0.5"/>
+  <rect x="9" y="7" width="5" height="5" rx="0.8" fill="#E05050" stroke="#A03030" stroke-width="0.5"/>
+  <rect x="5.5" y="4" width="5" height="5" rx="0.8" fill="#50C878" stroke="#308050" stroke-width="0.5"/>
+</svg>

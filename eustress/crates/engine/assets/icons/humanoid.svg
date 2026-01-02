@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Humanoid - stick figure person -->
+  <circle cx="8" cy="3" r="2" fill="#64FF96" stroke="#30CC60" stroke-width="0.5"/>
+  <line x1="8" y1="5" x2="8" y2="10" stroke="#64FF96" stroke-width="1.5"/>
+  <line x1="4" y1="7" x2="12" y2="7" stroke="#64FF96" stroke-width="1.5"/>
+  <line x1="8" y1="10" x2="5" y2="15" stroke="#64FF96" stroke-width="1.5"/>
+  <line x1="8" y1="10" x2="11" y2="15" stroke="#64FF96" stroke-width="1.5"/>
+</svg>

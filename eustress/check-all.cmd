@@ -1,0 +1,3 @@
+@echo off
+echo Checking workspace...
+cargo check --workspace

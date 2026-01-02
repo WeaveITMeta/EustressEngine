@@ -1,0 +1,41 @@
+# =============================================================================
+# Eustress Experiences Worker Configuration
+# =============================================================================
+# Deploy: cd infrastructure/cloudflare/experiences && wrangler deploy
+# =============================================================================
+
+name = "eustress-experiences"
+main = "experiences-worker.js"
+compatibility_date = "2024-01-01"
+
+# Custom domain
+routes = [{ pattern = "experiences.eustress.dev/*", zone_name = "eustress.dev" }]
+
+# R2 bucket binding for experiences
+[[r2_buckets]]
+binding = "EXPERIENCES"
+bucket_name = "eustress-experiences"
+
+# KV namespace for caching (optional, create in dashboard first)
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "your-kv-namespace-id"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+# Backend API URL for validation
+BACKEND_API_URL = "https://api.eustress.dev"
+
+# Secrets (set via wrangler secret put)
+# JWT_SECRET - For validating auth tokens
+# Run: wrangler secret put JWT_SECRET
+
+# Development overrides
+[env.dev]
+name = "eustress-experiences-dev"
+routes = [{ pattern = "experiences-dev.eustress.dev/*", zone_name = "eustress.dev" }]
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+BACKEND_API_URL = "http://localhost:7000"

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Script - scroll/document -->
+  <rect x="3" y="1" width="10" height="14" rx="1" fill="#FF9632" stroke="#CC6020" stroke-width="0.5"/>
+  <line x1="5" y1="4" x2="11" y2="4" stroke="#CC6020" stroke-width="0.8"/>
+  <line x1="5" y1="6.5" x2="11" y2="6.5" stroke="#CC6020" stroke-width="0.8"/>
+  <line x1="5" y1="9" x2="11" y2="9" stroke="#CC6020" stroke-width="0.8"/>
+  <line x1="5" y1="11.5" x2="9" y2="11.5" stroke="#CC6020" stroke-width="0.8"/>
+</svg>

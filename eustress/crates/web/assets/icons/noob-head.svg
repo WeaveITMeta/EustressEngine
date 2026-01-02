@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Head (yellow) -->
+  <circle cx="32" cy="32" r="28" fill="#f5c542"/>
+  <circle cx="32" cy="32" r="28" fill="none" stroke="#d4a82e" stroke-width="2"/>
+  
+  <!-- Left Eye -->
+  <circle cx="22" cy="26" r="4" fill="#1a1a2e"/>
+  
+  <!-- Right Eye -->
+  <circle cx="42" cy="26" r="4" fill="#1a1a2e"/>
+  
+  <!-- Smile (curved line made of circles) -->
+  <path d="M 18 38 Q 32 50 46 38" fill="none" stroke="#1a1a2e" stroke-width="3" stroke-linecap="round"/>
+</svg>

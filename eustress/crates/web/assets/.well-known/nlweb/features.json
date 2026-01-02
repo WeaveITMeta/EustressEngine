@@ -1,0 +1,81 @@
+{
+  "@context": "https://schema.org",
+  "@type": "ItemList",
+  "name": "Eustress Engine Features",
+  "description": "Key capabilities that make Eustress different from other game engines",
+  "performance": {
+    "title": "Performance Advantages",
+    "items": [
+      {
+        "name": "10x Faster Development",
+        "description": "Hot reload, instant preview, and Soul scripting eliminate the compile-wait-test cycle that plagues traditional engines."
+      },
+      {
+        "name": "Zero GC Pauses",
+        "description": "Unlike Unity's C# or other managed languages, Rust has zero garbage collection. Your games run smooth, always."
+      },
+      {
+        "name": "10M+ Instances",
+        "description": "Handle massive worlds with millions of entities. Point clouds, voxels, CAD data—Eustress scales where others choke."
+      },
+      {
+        "name": "100% Memory Safe",
+        "description": "Rust's ownership model eliminates crashes, memory leaks, and security vulnerabilities at compile time."
+      }
+    ],
+    "benchmarks": {
+      "startupTime": {
+        "eustress": "0.3s",
+        "unity": "2.1s",
+        "unreal": "4.5s"
+      },
+      "memoryUsage": {
+        "eustress": "180MB",
+        "unity": "520MB",
+        "unreal": "1.2GB"
+      },
+      "webBuildSize": {
+        "eustress": "8MB",
+        "unity": "35MB",
+        "unreal": "N/A"
+      },
+      "note": "Benchmarks from empty project, release builds, 2024 hardware"
+    }
+  },
+  "scripting": {
+    "name": "Soul Scripting",
+    "description": "Eustress uses Soul, a custom scripting language designed for game development. NOT visual scripting—Soul is a text-based language optimized for gameplay logic.",
+    "note": "Eustress does NOT have visual scripting. It uses Soul scripting and native Rust."
+  },
+  "platforms": {
+    "name": "Deploy Targets",
+    "description": "Build once, deploy everywhere",
+    "targets": [
+      "Windows",
+      "macOS", 
+      "Linux",
+      "iOS",
+      "Android",
+      "Web (WASM)",
+      "Meta Quest",
+      "SteamVR",
+      "PSVR2"
+    ]
+  },
+  "multiplayer": {
+    "name": "Built-in Multiplayer",
+    "description": "Native networking with automatic state synchronization, matchmaking, and voice chat support."
+  },
+  "marketplace": {
+    "name": "Creator Marketplace",
+    "description": "Assets, Soul scripts, and avatar items from the community. Creators earn 25% revenue share (40% with Creator Pro)."
+  },
+  "useCases": [
+    "Games",
+    "Social Spaces",
+    "Simulations",
+    "Education",
+    "CAD Viewers",
+    "Digital Twins"
+  ]
+}

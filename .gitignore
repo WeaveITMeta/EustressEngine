@@ -1,0 +1,99 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Cargo lock for libraries (keep for binaries)
+# Cargo.lock
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# VS Code Counter
+.VSCodeCounter/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+*.egg
+venv/
+.venv/
+env/
+.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.exp
+*.lib
+*.o
+*.a
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Tauri
+src-tauri/target/
+
+# WASM
+*.wasm
+pkg/
+
+# Generated files
+*.generated.*
+
+# Secrets and credentials
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Incremental compilation
+incremental/
+**/incremental/
+
+# Debug artifacts
+**/debug/
+**/deps/*.d
+**/deps/*.rlib
+**/deps/*.rmeta

@@ -1,0 +1,26 @@
+# =============================================================================
+# Eustress Downloads Worker Configuration
+# =============================================================================
+# Deploy: cd infrastructure/cloudflare && wrangler deploy
+# =============================================================================
+
+name = "eustress-downloads"
+main = "download-worker.js"
+compatibility_date = "2024-01-01"
+
+# Custom domain
+routes = [{ pattern = "downloads.eustress.dev/*", zone_name = "eustress.dev" }]
+
+# R2 bucket binding
+[[r2_buckets]]
+binding = "DOWNLOADS"
+bucket_name = "eustress-downloads"
+
+# Analytics Engine binding (create in dashboard first)
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "eustress_downloads"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"

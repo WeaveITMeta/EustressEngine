@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Point Light - lightbulb -->
+  <circle cx="8" cy="6" r="4" fill="#FFFF64" stroke="#CCCC30" stroke-width="0.5"/>
+  <rect x="6" y="10" width="4" height="2" fill="#DDDDAA"/>
+  <rect x="6.5" y="12" width="3" height="1" fill="#CCCC88"/>
+  <!-- Rays -->
+  <line x1="8" y1="1" x2="8" y2="0" stroke="#FFFF64" stroke-width="1"/>
+  <line x1="12" y1="3" x2="13" y2="2" stroke="#FFFF64" stroke-width="1"/>
+  <line x1="4" y1="3" x2="3" y2="2" stroke="#FFFF64" stroke-width="1"/>
+</svg>

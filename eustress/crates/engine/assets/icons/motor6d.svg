@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Motor6D - gear -->
+  <circle cx="8" cy="8" r="5" fill="#9696B4" stroke="#6060A0" stroke-width="0.5"/>
+  <circle cx="8" cy="8" r="2" fill="#6060A0"/>
+  <!-- Teeth -->
+  <rect x="7" y="1" width="2" height="3" fill="#9696B4"/>
+  <rect x="7" y="12" width="2" height="3" fill="#9696B4"/>
+  <rect x="1" y="7" width="3" height="2" fill="#9696B4"/>
+  <rect x="12" y="7" width="3" height="2" fill="#9696B4"/>
+</svg>

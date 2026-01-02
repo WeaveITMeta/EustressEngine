@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Terrain - mountain -->
+  <polygon points="1,14 5,5 8,9 11,4 15,14" fill="#64C896" stroke="#30A060" stroke-width="0.5"/>
+  <polygon points="5,5 7,8 3,8" fill="#FFFFFF" opacity="0.6"/>
+  <polygon points="11,4 13,7 9,7" fill="#FFFFFF" opacity="0.6"/>
+</svg>

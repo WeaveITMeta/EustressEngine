@@ -1,0 +1,3 @@
+# Apply wasm cfg globally when building any crate for wasm32-unknown-unknown
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=wasm_js"]

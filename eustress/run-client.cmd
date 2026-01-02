@@ -1,0 +1,3 @@
+@echo off
+echo Running Eustress Client...
+cargo run --bin eustress-client

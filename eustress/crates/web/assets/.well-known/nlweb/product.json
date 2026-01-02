@@ -1,0 +1,65 @@
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Eustress Engine",
+  "alternateName": ["Eustress", "Eustress Engine", "Eustress Player"],
+  "description": "Eustress is a complete ecosystem for creating, sharing, and playing interactive 3D experiences. Built from the ground up in 100% Rust, we deliver unprecedented performance, memory safety, and developer experience—all while remaining free forever.",
+  "applicationCategory": "GameApplication",
+  "operatingSystem": ["Windows", "macOS", "Linux", "iOS", "Android", "Web", "Meta Quest", "SteamVR", "PSVR2"],
+  "softwareVersion": "0.16.1",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD",
+    "description": "Free forever. Premium subscriptions available for enhanced features."
+  },
+  "products": [
+    {
+      "@type": "SoftwareApplication",
+      "name": "Eustress Engine",
+      "description": "Professional-grade game engine and creation suite. Build stunning 3D worlds, script gameplay logic with Soul, design UI, and publish to multiple platforms—all from one tool.",
+      "applicationCategory": "DeveloperApplication",
+      "features": [
+        "Visual editor with hot reload",
+        "Soul scripting language",
+        "Built-in multiplayer networking",
+        "One-click publishing to Steam",
+        "Point cloud and CAD support",
+        "10M+ entity instances"
+      ]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "Eustress Player",
+      "description": "Discover and play thousands of community-created experiences. Jump into games instantly through Steam, connect with friends, and explore endless creativity.",
+      "applicationCategory": "GameApplication",
+      "features": [
+        "Instant play via Steam",
+        "Cross-platform multiplayer",
+        "Social features and friends",
+        "Curated game discovery"
+      ]
+    }
+  ],
+  "programmingLanguage": "Rust",
+  "runtimePlatform": "Bevy Engine",
+  "keywords": [
+    "game engine",
+    "rust game engine",
+    "game development",
+    "3D engine",
+    "multiplayer",
+    "Soul scripting",
+    "bevy",
+    "wasm",
+    "steam",
+    "voxel",
+    "point cloud",
+    "CAD"
+  ],
+  "sameAs": [
+    "https://discord.gg/eustress",
+    "https://x.com/eustressengine",
+    "https://store.steampowered.com/app/eustress"
+  ]
+}

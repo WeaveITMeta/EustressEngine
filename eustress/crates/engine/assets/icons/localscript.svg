@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- LocalScript - document with L -->
+  <rect x="3" y="1" width="10" height="14" rx="1" fill="#FF9632" stroke="#CC6020" stroke-width="0.5"/>
+  <text x="8" y="11" font-family="Arial" font-size="8" font-weight="bold" fill="#CC6020" text-anchor="middle">L</text>
+</svg>

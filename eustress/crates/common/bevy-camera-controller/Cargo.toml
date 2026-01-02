@@ -1,0 +1,9 @@
+[package]
+name = "bevy-camera-controller"
+version = "0.1.0"
+edition = "2021"
+description = "Freecam-style camera controller for Bevy"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bevy = { workspace = true, features = ["bevy_window"] }

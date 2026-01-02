@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Sky - cloud -->
+  <ellipse cx="6" cy="10" rx="4" ry="3" fill="#64C896"/>
+  <ellipse cx="10" cy="9" rx="4" ry="3.5" fill="#64C896"/>
+  <ellipse cx="8" cy="7" rx="3" ry="2.5" fill="#64C896"/>
+  <circle cx="12" cy="4" r="2" fill="#FFFF64"/>
+</svg>

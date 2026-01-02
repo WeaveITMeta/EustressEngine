@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Snow material -->
+  <rect x="0" y="0" width="16" height="16" fill="#ECF0F1"/>
+  <circle cx="4" cy="4" r="1" fill="#BDC3C7"/>
+  <circle cx="10" cy="6" r="0.8" fill="#BDC3C7"/>
+  <circle cx="6" cy="10" r="1.2" fill="#BDC3C7"/>
+  <circle cx="12" cy="12" r="0.9" fill="#BDC3C7"/>
+</svg>

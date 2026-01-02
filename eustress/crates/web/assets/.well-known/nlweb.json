@@ -1,0 +1,52 @@
+{
+  "$schema": "https://nlweb.ai/schemas/nlweb-manifest.json",
+  "version": "1.0",
+  "name": "Eustress Engine",
+  "description": "Next-generation game engine built 100% in Rust. Create, share, and play interactive 3D experiences with unprecedented performance.",
+  "url": "https://eustress.dev",
+  "logo": "https://eustress.dev/assets/logo.svg",
+  "endpoints": {
+    "product": "/.well-known/nlweb/product.json",
+    "pricing": "/.well-known/nlweb/pricing.json",
+    "features": "/.well-known/nlweb/features.json",
+    "faq": "/.well-known/nlweb/faq.json",
+    "ai-training": "/.well-known/nlweb/ai-training.json",
+    "api": "/.well-known/nlweb/api.json"
+  },
+  "services": {
+    "ai-training": {
+      "name": "Eustress Export Protocol (EEP)",
+      "description": "Train AI models with consented 3D spatial data. Export entities, scenes, and hierarchies in TOON format for 50% token reduction.",
+      "url": "https://eustress.dev/ai",
+      "documentation": "https://eustress.dev/docs/networking#eep-sdk"
+    },
+    "mcp-server": {
+      "name": "Model Control Protocol Server",
+      "description": "AI-controllable 3D world server. Execute Rune scripts, manage entities, and stream real-time spatial data via HTTP, WebTransport, or WebSocket.",
+      "url": "https://forge.eustress.io",
+      "documentation": "https://eustress.dev/docs/networking#mcp"
+    },
+    "sdk": {
+      "name": "EEP SDK",
+      "description": "Official SDKs for Rust, Python, and Node.js to integrate with Eustress Export Protocol for 3D AI training pipelines.",
+      "url": "https://sdk.eustress.io",
+      "languages": ["rust", "python", "nodejs"]
+    }
+  },
+  "ai_capabilities": {
+    "spatial_data_export": true,
+    "real_time_streaming": true,
+    "token_optimized_format": "TOON",
+    "consent_based": true,
+    "multi_account_aggregation": true
+  },
+  "contact": {
+    "support": "support@eustress.dev",
+    "business": "business@eustress.dev"
+  },
+  "social": {
+    "discord": "https://discord.gg/eustress",
+    "twitter": "https://x.com/eustressengine",
+    "steam": "https://store.steampowered.com/app/eustress"
+  }
+}

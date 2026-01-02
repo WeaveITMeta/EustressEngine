@@ -1,0 +1,10 @@
+[build]
+# Disable incremental compilation to avoid Windows file locking issues
+incremental = false
+
+# Use all cores but with better coordination
+jobs = 8
+
+[target.x86_64-pc-windows-msvc]
+# Optimize linker for Windows
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

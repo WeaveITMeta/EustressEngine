@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Flatten brush - horizontal line -->
+  <line x1="2" y1="8" x2="14" y2="8" stroke="#F39C12" stroke-width="3" stroke-linecap="round"/>
+  <line x1="4" y1="5" x2="4" y2="11" stroke="#F39C12" stroke-width="1"/>
+  <line x1="12" y1="5" x2="12" y2="11" stroke="#F39C12" stroke-width="1"/>
+</svg>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Brick material -->
+  <rect x="0" y="0" width="16" height="16" fill="#C0392B"/>
+  <rect x="0" y="0" width="7" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="8" y="0" width="8" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="0" y="5" width="4" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="5" y="5" width="7" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="13" y="5" width="3" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="0" y="10" width="7" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+  <rect x="8" y="10" width="8" height="4" fill="#E74C3C" stroke="#922B21" stroke-width="0.5"/>
+</svg>

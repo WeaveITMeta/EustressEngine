@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- 3D Cube/Block icon -->
+  <polygon points="8,1 14,4 14,11 8,14 2,11 2,4" fill="#6496FF" stroke="#4070CC" stroke-width="0.5"/>
+  <polygon points="8,1 14,4 8,7 2,4" fill="#8AB4FF"/>
+  <polygon points="8,7 14,4 14,11 8,14" fill="#5080DD"/>
+  <polygon points="8,7 2,4 2,11 8,14" fill="#6496FF"/>
+</svg>

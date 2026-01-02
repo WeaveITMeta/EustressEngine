@@ -1,0 +1,102 @@
+# =============================================================================
+# Eustress Web - Leptos Frontend
+# =============================================================================
+# Table of Contents:
+# 1. Package Metadata
+# 2. Dependencies (Leptos, WASM, HTTP)
+# 3. Features
+# 4. Build Configuration
+# =============================================================================
+
+[package]
+name = "eustress-web"
+version = "0.1.0"
+edition = "2021"
+description = "Eustress Web Frontend - Built with Leptos + Trunk"
+authors = ["WeaveSolutions <admin@weave.solutions>"]
+license = "MIT OR Apache-2.0"
+
+# =============================================================================
+# 1. Dependencies
+# =============================================================================
+
+[dependencies]
+# Leptos - Reactive Rust Framework (CSR mode)
+leptos = { version = "0.7", features = ["csr"] }
+leptos_router = "0.7"
+leptos_meta = "0.7"
+
+# WASM utilities
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "Storage",
+    "Location",
+    "History",
+    "Navigator",
+    "Performance",
+    "Notification",
+    "NotificationOptions",
+    "NotificationPermission",
+] }
+
+# HTTP Client (WASM-compatible)
+gloo-net = "0.6"
+gloo-storage = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+
+# Async
+futures = "0.3"
+
+# Logging
+log = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
+
+# Bliss Wallet (crypto currency) - WASM-compatible only
+bliss-core = { path = "E:/OpenSource/Crypto/Bliss/crates/bliss-core" }
+bliss-crypto = { path = "E:/OpenSource/Crypto/Bliss/crates/bliss-crypto" }
+hex = "0.4"
+getrandom = { version = "0.2", features = ["js"] }
+
+# Utilities
+thiserror = "2.0"
+uuid = { version = "1.8", features = ["v4", "serde", "js"] }
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+urlencoding = "2.1"
+
+# =============================================================================
+# 2. Features
+# =============================================================================
+
+[features]
+default = []
+# For SSR/hydration mode (future use with cargo-leptos)
+hydrate = ["leptos/hydrate"]
+ssr = ["leptos/ssr", "leptos_meta/ssr"]
+
+# =============================================================================
+# 3. Build Configuration
+# =============================================================================
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Note: Profile settings moved to workspace Cargo.toml
+
+[package.metadata.leptos]
+output-name = "eustress-web"
+site-root = "target/site"
+site-pkg-dir = "pkg"

@@ -1,0 +1,43 @@
+# =============================================================================
+# Trunk Configuration - Eustress Web
+# =============================================================================
+# Build: trunk build --release
+# Serve: trunk serve --open
+# =============================================================================
+
+[build]
+# Target index.html
+target = "index.html"
+# Output directory
+dist = "dist"
+# Release build optimizations
+release = false
+
+# Environment variables from .env file
+# ENVIRONMENT=development → localhost:7000
+# ENVIRONMENT=production → api.eustress.dev
+[build.env]
+file = ".env"
+
+[watch]
+# Files to watch for changes
+watch = ["src", "style", "index.html", "Cargo.toml"]
+# Ignore patterns
+ignore = ["target", "dist"]
+
+[serve]
+# Development server addresses
+addresses = ["127.0.0.1"]
+# Development server port
+port = 3000
+# Open browser on start
+open = false
+# Proxy API requests to backend
+# [[serve.proxy]]
+# rewrite = "/api/"
+# backend = "http://127.0.0.1:7000/api/"
+
+# Disable wasm-opt to avoid bulk memory issues
+# The WASM will still be optimized by rustc with release profile
+# [tools]
+# wasm_opt = "version_118"

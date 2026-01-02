@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Sand material -->
+  <rect x="0" y="0" width="16" height="16" fill="#F4D03F"/>
+  <circle cx="3" cy="4" r="0.5" fill="#D4AC0D"/>
+  <circle cx="8" cy="3" r="0.4" fill="#D4AC0D"/>
+  <circle cx="12" cy="5" r="0.5" fill="#D4AC0D"/>
+  <circle cx="5" cy="8" r="0.4" fill="#D4AC0D"/>
+  <circle cx="10" cy="9" r="0.5" fill="#D4AC0D"/>
+  <circle cx="4" cy="12" r="0.4" fill="#D4AC0D"/>
+  <circle cx="9" cy="13" r="0.5" fill="#D4AC0D"/>
+  <circle cx="13" cy="11" r="0.4" fill="#D4AC0D"/>
+</svg>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Directional Light - sun -->
+  <circle cx="8" cy="8" r="4" fill="#FFFF64" stroke="#CCCC30" stroke-width="0.5"/>
+  <!-- Rays -->
+  <line x1="8" y1="2" x2="8" y2="0" stroke="#FFFF64" stroke-width="1.5"/>
+  <line x1="8" y1="14" x2="8" y2="16" stroke="#FFFF64" stroke-width="1.5"/>
+  <line x1="2" y1="8" x2="0" y2="8" stroke="#FFFF64" stroke-width="1.5"/>
+  <line x1="14" y1="8" x2="16" y2="8" stroke="#FFFF64" stroke-width="1.5"/>
+  <line x1="3.5" y1="3.5" x2="2" y2="2" stroke="#FFFF64" stroke-width="1"/>
+  <line x1="12.5" y1="3.5" x2="14" y2="2" stroke="#FFFF64" stroke-width="1"/>
+  <line x1="3.5" y1="12.5" x2="2" y2="14" stroke="#FFFF64" stroke-width="1"/>
+  <line x1="12.5" y1="12.5" x2="14" y2="14" stroke="#FFFF64" stroke-width="1"/>
+</svg>

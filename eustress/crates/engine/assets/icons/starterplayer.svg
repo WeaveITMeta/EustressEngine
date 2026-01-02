@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- StarterPlayer - person with star -->
+  <circle cx="8" cy="4" r="2.5" fill="#1ABC9C"/>
+  <ellipse cx="8" cy="12" rx="4" ry="4" fill="#1ABC9C"/>
+  <polygon points="12,2 13,4 15,4 13.5,5.5 14,7.5 12,6 10,7.5 10.5,5.5 9,4 11,4" fill="#F1C40F"/>
+</svg>

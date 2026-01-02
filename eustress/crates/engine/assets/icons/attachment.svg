@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Attachment - pin/marker -->
+  <circle cx="8" cy="5" r="4" fill="#9696B4" stroke="#6060A0" stroke-width="0.5"/>
+  <polygon points="8,9 6,14 8,12 10,14" fill="#9696B4" stroke="#6060A0" stroke-width="0.5"/>
+  <circle cx="8" cy="5" r="1.5" fill="#6060A0"/>
+</svg>

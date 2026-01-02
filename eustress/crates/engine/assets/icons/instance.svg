@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Instance - generic document -->
+  <path d="M3,1 L10,1 L13,4 L13,15 L3,15 Z" fill="#888888" stroke="#666666" stroke-width="0.5"/>
+  <path d="M10,1 L10,4 L13,4" fill="#AAAAAA" stroke="#666666" stroke-width="0.5"/>
+</svg>

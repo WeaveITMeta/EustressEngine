@@ -1,0 +1,186 @@
+// Eustress Scene File - Sample Game
+// Format: eustress_v3
+// Double-click to open in Eustress Engine
+
+(
+    format: "eustress_v3",
+    
+    metadata: (
+        name: "Sample Game",
+        author: "Eustress Developer",
+        description: "A sample scene demonstrating the .eustress file format",
+        created: "2024-01-01T00:00:00Z",
+        modified: "2024-01-01T00:00:00Z",
+        engine_version: "0.1.0",
+        tags: ["sample", "tutorial", "starter"],
+    ),
+    
+    global_theme: "colorful playground with bright colors",
+    
+    atmosphere: (
+        time_of_day: "12:00:00",
+        weather: "clear",
+        sun_color: (1.0, 0.95, 0.9, 1.0),
+        sun_intensity: 15000.0,
+        ambient_color: (0.4, 0.4, 0.5, 1.0),
+        fog_density: 0.0,
+        fog_color: (0.8, 0.85, 0.9, 1.0),
+    ),
+    
+    workspace_settings: (
+        gravity: 35.0,
+        max_entity_speed: 100.0,
+        max_fall_speed: 200.0,
+        air_density: 0.0,
+        streaming_enabled: false,
+        streaming_target_radius: 1024.0,
+        streaming_min_radius: 256.0,
+    ),
+    
+    player_settings: (
+        walk_speed: 16.0,
+        run_speed: 32.0,
+        jump_power: 50.0,
+        max_health: 100.0,
+        auto_jump_enabled: true,
+        character_height: 5.0,
+        character_width: 2.0,
+        respawn_time: 5.0,
+        allow_reset: true,
+    ),
+    
+    spawn_locations: [
+        (
+            position: (0.0, 5.0, 0.0),
+            rotation: (0.0, 0.0, 0.0),
+            team: "",
+            enabled: true,
+            spawn_protection_duration: 3.0,
+            allow_team_change: false,
+        ),
+    ],
+    
+    entities: [
+        // Baseplate
+        (
+            id: 1,
+            name: "Baseplate",
+            parent: None,
+            children: [],
+            class: Part((
+                size: (512.0, 1.0, 512.0),
+                color: (0.388, 0.372, 0.384, 1.0),
+                material: "Plastic",
+                shape: "Block",
+                transparency: 0.0,
+                reflectance: 0.0,
+                anchored: true,
+                can_collide: true,
+                cast_shadow: true,
+            )),
+            transform: (
+                position: (0.0, -0.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            network_ownership: ServerOnly,
+            prompt: "large gray baseplate floor",
+            detail_level: Low,
+            category: Structure,
+            quest_flags: {},
+            archivable: true,
+        ),
+        
+        // Red Part
+        (
+            id: 2,
+            name: "RedPart",
+            parent: None,
+            children: [],
+            class: Part((
+                size: (4.0, 4.0, 4.0),
+                color: (0.9, 0.2, 0.2, 1.0),
+                material: "Plastic",
+                shape: "Block",
+                transparency: 0.0,
+                reflectance: 0.0,
+                anchored: true,
+                can_collide: true,
+                cast_shadow: true,
+            )),
+            transform: (
+                position: (-10.0, 2.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            network_ownership: ServerOnly,
+            prompt: "red cube",
+            detail_level: Low,
+            category: Prop,
+            quest_flags: {},
+            archivable: true,
+        ),
+        
+        // Blue Ball
+        (
+            id: 3,
+            name: "BlueBall",
+            parent: None,
+            children: [],
+            class: Part((
+                size: (4.0, 4.0, 4.0),
+                color: (0.2, 0.4, 0.9, 1.0),
+                material: "Plastic",
+                shape: "Ball",
+                transparency: 0.0,
+                reflectance: 0.2,
+                anchored: true,
+                can_collide: true,
+                cast_shadow: true,
+            )),
+            transform: (
+                position: (0.0, 2.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            network_ownership: ServerOnly,
+            prompt: "blue sphere",
+            detail_level: Low,
+            category: Prop,
+            quest_flags: {},
+            archivable: true,
+        ),
+        
+        // Green Cylinder
+        (
+            id: 4,
+            name: "GreenCylinder",
+            parent: None,
+            children: [],
+            class: Part((
+                size: (4.0, 6.0, 4.0),
+                color: (0.2, 0.8, 0.3, 1.0),
+                material: "Plastic",
+                shape: "Cylinder",
+                transparency: 0.0,
+                reflectance: 0.0,
+                anchored: true,
+                can_collide: true,
+                cast_shadow: true,
+            )),
+            transform: (
+                position: (10.0, 3.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            network_ownership: ServerOnly,
+            prompt: "green cylinder pillar",
+            detail_level: Low,
+            category: Prop,
+            quest_flags: {},
+            archivable: true,
+        ),
+    ],
+    
+    connections: [],
+)

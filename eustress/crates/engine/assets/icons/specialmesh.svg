@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- SpecialMesh - wireframe triangle -->
+  <polygon points="8,2 14,14 2,14" fill="none" stroke="#C896FF" stroke-width="1.5"/>
+  <line x1="8" y1="2" x2="8" y2="14" stroke="#C896FF" stroke-width="0.5"/>
+  <line x1="5" y1="8" x2="11" y2="8" stroke="#C896FF" stroke-width="0.5"/>
+</svg>

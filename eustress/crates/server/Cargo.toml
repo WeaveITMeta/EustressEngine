@@ -1,0 +1,53 @@
+[package]
+name = "eustress-server"
+version = "0.1.0"
+edition = "2021"
+description = "Headless dedicated server for Eustress Engine multiplayer games"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "eustress-server"
+path = "src/main.rs"
+
+[dependencies]
+# Core Bevy (headless - no rendering)
+bevy = { workspace = true, default-features = false, features = [
+    "bevy_asset",
+    "bevy_scene",
+    "bevy_state",
+    "serialize",
+    "multi_threaded",
+] }
+
+# Shared types
+eustress-common = { path = "../common" }
+
+# Runtime (character, physics, ownership)
+eustress-runtime = { path = "../runtime", default-features = false, features = ["networking"] }
+
+# Networking (server mode)
+eustress-networking = { path = "../common/eustress-networking", features = ["server", "physics"] }
+
+# Physics (headless)
+avian3d = { workspace = true }
+
+# CLI and config
+clap = { version = "4.4", features = ["derive"] }
+toml = "0.8"
+serde = { workspace = true }
+uuid = { workspace = true }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Metrics
+prometheus = { version = "0.13", optional = true }
+
+[features]
+default = []
+metrics = ["prometheus"]
