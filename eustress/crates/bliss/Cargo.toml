@@ -1,0 +1,58 @@
+[package]
+name = "eustress-bliss"
+version = "0.1.0"
+edition = "2021"
+description = "Bliss (BLS) - Proof-of-Contribution cryptocurrency for the Eustress ecosystem"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Cryptography
+sha2 = "0.10"
+blake3 = "1.5"
+ed25519-dalek = "2.0"
+rand = "0.8"
+
+# Blockchain
+ethers = { version = "2.0", optional = true }
+web3 = { version = "0.19", optional = true }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+
+# Database for contribution tracking
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+
+[features]
+default = ["ethereum"]
+# Ethereum integration
+ethereum = ["ethers", "web3"]
+# Database support for contribution tracking
+database = ["sqlx"]
+# Mock blockchain for testing
+mock = []

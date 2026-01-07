@@ -1,0 +1,51 @@
+[package]
+name = "eustress-forge"
+version = "0.1.0"
+edition = "2021"
+description = "Eustress Forge - Rust-native multiplayer orchestration platform built on HashiCorp Nomad"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Networking
+reqwest = { version = "0.12", features = ["json"] }
+
+# Nomad API client
+nomad-client = { version = "0.1", optional = true }
+
+# Consul for service discovery
+consul-client = { version = "0.1", optional = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# UUID for instance IDs
+uuid = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# Metrics
+prometheus = { version = "0.13", optional = true }
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+
+[features]
+default = ["nomad", "consul"]
+nomad = []
+consul = []
+metrics = ["prometheus"]

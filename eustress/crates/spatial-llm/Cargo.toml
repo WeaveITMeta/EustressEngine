@@ -1,0 +1,60 @@
+[package]
+name = "eustress-spatial-llm"
+version = "0.1.0"
+edition = "2021"
+description = "Spatial LLM integration for Eustress Engine - AI-powered spatial reasoning and generation"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core Bevy
+bevy = { workspace = true }
+
+# Shared types
+eustress-common = { path = "../common" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# HTTP client for LLM APIs
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Spatial data structures
+kiddo = "4.2"  # Fast spatial queries
+rkyv = "0.8"   # Zero-copy serialization
+
+# AI/ML
+candle-core = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+candle-nn = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
+
+# Vector operations
+nalgebra = "0.32"
+glam = "0.25"
+
+[features]
+default = ["remote"]
+# Use remote LLM APIs (OpenAI, Claude, etc.)
+remote = []
+# Use local Candle models
+local = ["candle-core", "candle-nn", "candle-transformers"]
+# Enable spatial indexing
+spatial = ["kiddo", "rkyv"]
