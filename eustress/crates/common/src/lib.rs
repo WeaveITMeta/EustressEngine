@@ -47,8 +47,18 @@ pub use attributes::{
     CFrameValue, ObjectValue, NumberSequenceKeypoint, ColorSequenceKeypoint,
 };
 pub use parameters::{
+    // Legacy types
     Parameters, ParametersPlugin, DataSourceType, AuthType, AnonymizationMode,
     UpdateMode, DataMapping, FieldMapping, ValidationRule, ValidationRules,
+    // 3-Tier Parameter Architecture
+    GlobalParameters, DomainRegistry, DomainSchema, DomainKeyDef,
+    InstanceParameters, ParameterValue, ParameterValueType,
+    // MCP Server Configuration
+    McpServerConfig, McpCapabilities, ExportTargetConfig, ExportTargetType, AuthConfig,
+    // Parameter Router
+    ParameterRouter, RouterStats, ExportRecord, ExportTransform, CreatorInfo, CreatorType,
+    // Events
+    ParameterChangedEvent, ExportRequestEvent,
 };
 
 // Re-export default scene functions

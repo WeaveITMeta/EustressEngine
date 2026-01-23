@@ -46,7 +46,7 @@ config = "0.14"
 toml = "0.8"
 
 # Database for contribution tracking
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"], optional = true }
 
 [features]
 default = ["ethereum"]

@@ -3,7 +3,7 @@
 //! Low-level vertex manipulation for deformation.
 
 use bevy::prelude::*;
-use bevy::render::mesh::{Mesh, VertexAttributeValues, Indices};
+use bevy::mesh::{Mesh, VertexAttributeValues, Indices};
 
 // ============================================================================
 // Vertex Data

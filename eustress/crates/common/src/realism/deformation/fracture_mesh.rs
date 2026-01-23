@@ -3,7 +3,7 @@
 //! Procedural mesh splitting for fracture simulation.
 
 use bevy::prelude::*;
-use bevy::render::mesh::{Mesh, VertexAttributeValues, Indices, PrimitiveTopology};
+use bevy::mesh::{Mesh, VertexAttributeValues, Indices, PrimitiveTopology};
 
 use super::vertex::VertexData;
 
@@ -152,11 +152,12 @@ pub fn split_mesh_by_plane(
         None
     };
     
+    let success = positive.is_some() && negative.is_some();
     MeshSplitResult {
         positive,
         negative,
         cut_vertices,
-        success: positive.is_some() && negative.is_some(),
+        success,
     }
 }
 

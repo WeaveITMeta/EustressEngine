@@ -37,9 +37,9 @@ uuid = { workspace = true }
 # Time
 chrono = { workspace = true }
 
-# Spatial data structures
-kiddo = "4.2"  # Fast spatial queries
-rkyv = "0.8"   # Zero-copy serialization
+# Spatial data structures (optional)
+kiddo = { version = "4.2", optional = true }  # Fast spatial queries
+rkyv = { version = "0.8", optional = true }   # Zero-copy serialization
 
 # AI/ML
 candle-core = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }

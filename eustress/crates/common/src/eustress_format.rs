@@ -360,6 +360,7 @@ pub fn new_default_scene(name: &str) -> Scene {
                 generated_lods: vec![],
                 generation_status: GenerationStatus::NotRequested,
                 archivable: true,
+                ai: false,
             },
         ],
         connections: vec![],

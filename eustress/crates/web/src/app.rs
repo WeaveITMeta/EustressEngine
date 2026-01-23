@@ -27,6 +27,7 @@ use crate::pages::{
     dashboard::DashboardPage,
     dmca::DmcaPage,
     docs_networking::DocsNetworkingPage,
+    docs_physics::DocsPhysicsPage,
     docs_scripting::DocsScriptingPage,
     download::DownloadPage,
     download_player::DownloadPlayerPage,
@@ -114,6 +115,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/marketplace/:id") view=MarketplaceItemPage />
                 <Route path=path!("/learn") view=LearnPage />
                 <Route path=path!("/docs/scripting") view=DocsScriptingPage />
+                <Route path=path!("/docs/physics") view=DocsPhysicsPage />
                 <Route path=path!("/docs/networking") view=DocsNetworkingPage />
                 <Route path=path!("/bliss") view=BlissPage />
                 <Route path=path!("/download") view=DownloadPage />

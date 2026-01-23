@@ -59,6 +59,7 @@ impl Default for OverlaySettings {
             show_damage: true,
             max_distance: 50.0,
             text_scale: 1.0,
+            show_units: true,
             decimal_places: 1,
         }
     }

@@ -3,7 +3,7 @@
 //! ECS systems for updating mesh deformation.
 
 use bevy::prelude::*;
-use bevy::render::mesh::{Mesh, VertexAttributeValues};
+use bevy::mesh::{Mesh, VertexAttributeValues};
 
 use super::components::*;
 use crate::classes::BasePart;
@@ -18,15 +18,16 @@ use crate::realism::particles::components::ThermodynamicState;
 /// Initialize deformable mesh components for entities with deformation enabled
 pub fn init_deformable_meshes(
     mut commands: Commands,
-    query: Query<(Entity, &BasePart, &Handle<Mesh>), (Changed<BasePart>, Without<DeformableMesh>)>,
+    query: Query<(Entity, &BasePart, &Mesh3d), (Changed<BasePart>, Without<DeformableMesh>)>,
     meshes: Res<Assets<Mesh>>,
 ) {
-    for (entity, base_part, mesh_handle) in query.iter() {
+    for (entity, base_part, mesh3d) in query.iter() {
         if !base_part.deformation {
             continue;
         }
         
         // Get vertex count from mesh
+        let mesh_handle = &mesh3d.0;
         let vertex_count = if let Some(mesh) = meshes.get(mesh_handle) {
             mesh.count_vertices()
         } else {
@@ -272,18 +273,18 @@ pub fn update_mesh_vertices(
             continue;
         }
         
-        let Some(mesh) = meshes.get_mut(&deform_mesh.deformed_mesh) else {
-            continue;
-        };
-        
-        // Get original positions
-        let Some(original_mesh) = meshes.get(&deform_mesh.original_mesh) else {
-            continue;
-        };
-        
-        let Some(VertexAttributeValues::Float32x3(original_positions)) = 
-            original_mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
-            continue;
+        // First, get original positions from the original mesh
+        let original_positions: Vec<[f32; 3]> = {
+            let Some(original_mesh) = meshes.get(&deform_mesh.original_mesh) else {
+                continue;
+            };
+            
+            let Some(VertexAttributeValues::Float32x3(positions)) = 
+                original_mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+                continue;
+            };
+            
+            positions.clone()
         };
         
         // Calculate new positions
@@ -297,6 +298,11 @@ pub fn update_mesh_vertices(
                 pos[2] + displacement.z,
             ]);
         }
+        
+        // Now get mutable reference to deformed mesh and update it
+        let Some(mesh) = meshes.get_mut(&deform_mesh.deformed_mesh) else {
+            continue;
+        };
         
         // Update mesh
         mesh.insert_attribute(

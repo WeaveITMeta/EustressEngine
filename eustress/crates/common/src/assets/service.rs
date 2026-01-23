@@ -368,6 +368,96 @@ impl AssetService {
         
         Ok(count)
     }
+    
+    /// Resolve an asset with P2P fallback
+    /// 
+    /// Tries standard sources first, then falls back to P2P if available.
+    /// Returns the result and whether P2P was used.
+    pub fn resolve_with_p2p(
+        &self,
+        id: &ContentHash,
+        peer_manager: &super::p2p::PeerManager,
+        transfer_manager: &mut super::p2p::ChunkTransferManager,
+        p2p_config: &super::p2p::P2PConfig,
+    ) -> Result<(Vec<u8>, bool), ResolveError> {
+        // Try standard resolution first
+        match self.load(id) {
+            Ok(data) => return Ok((data, false)),
+            Err(ResolveError::AllSourcesFailed) => {
+                // Fall through to P2P
+            }
+            Err(e) => return Err(e),
+        }
+        
+        // Try P2P fallback
+        let content_hash = id.to_base58();
+        match super::p2p::fetch_asset_p2p(&content_hash, peer_manager, transfer_manager, p2p_config) {
+            super::p2p::P2PFetchResult::Success(data) => {
+                // Verify hash
+                if id.verify(&data) {
+                    // Cache the result
+                    self.resolver.precache(id.clone(), data.clone());
+                    Ok((data, true))
+                } else {
+                    Err(ResolveError::HashMismatch {
+                        expected: id.to_base58(),
+                        actual: ContentHash::from_content(&data).to_base58(),
+                    })
+                }
+            }
+            super::p2p::P2PFetchResult::InProgress { progress, speed: _ } => {
+                Err(ResolveError::Network(format!(
+                    "P2P download in progress: {:.1}%",
+                    progress * 100.0
+                )))
+            }
+            super::p2p::P2PFetchResult::NoPeers => {
+                Err(ResolveError::Network("No P2P peers available".to_string()))
+            }
+            super::p2p::P2PFetchResult::Failed(e) => {
+                Err(ResolveError::Network(format!("P2P failed: {}", e)))
+            }
+        }
+    }
+    
+    /// Check P2P download status for an asset
+    pub fn p2p_download_status(
+        &self,
+        id: &ContentHash,
+        transfer_manager: &super::p2p::ChunkTransferManager,
+    ) -> Option<(f32, f32)> {
+        let content_hash = id.to_base58();
+        transfer_manager.get_download(&content_hash)
+            .map(|d| (d.progress(), d.speed()))
+    }
+    
+    /// Start seeding an asset via P2P
+    pub fn start_seeding(
+        &self,
+        id: &ContentHash,
+        peer_manager: &mut super::p2p::PeerManager,
+        chunk_size: usize,
+    ) -> Result<(), ResolveError> {
+        // Load the asset data
+        let data = self.load(id)?;
+        
+        // Calculate chunk count
+        let chunk_count = ((data.len() + chunk_size - 1) / chunk_size) as u32;
+        
+        // Register as seeder
+        peer_manager.start_seeding(&id.to_base58(), chunk_count);
+        
+        Ok(())
+    }
+    
+    /// Stop seeding an asset
+    pub fn stop_seeding(
+        &self,
+        id: &ContentHash,
+        peer_manager: &mut super::p2p::PeerManager,
+    ) {
+        peer_manager.stop_seeding(&id.to_base58());
+    }
 }
 
 /// Component for entities with progressive asset loading

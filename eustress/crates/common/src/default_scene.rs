@@ -83,6 +83,7 @@ pub fn default_scene() -> Scene {
                 generated_lods: Vec::new(),
                 generation_status: crate::scene::GenerationStatus::NotRequested,
                 archivable: true,
+                ai: false,
             },
             // Welcome Cube - ID 2
             // Size: 1.96133m (Space Grade Ready: 9.80665 / 5)
@@ -117,6 +118,7 @@ pub fn default_scene() -> Scene {
                 generated_lods: Vec::new(),
                 generation_status: crate::scene::GenerationStatus::NotRequested,
                 archivable: true,
+                ai: false,
             },
         ],
         connections: Vec::new(),
@@ -149,6 +151,7 @@ pub fn spawn_baseplate(
         class_name: ClassName::Part,
         archivable: true,
         id: 1,
+        ai: false,
     };
     
     // Create BasePart component for part properties
@@ -210,6 +213,7 @@ pub fn spawn_welcome_cube(
         class_name: ClassName::Part,
         archivable: true,
         id: 2,
+        ai: false,
     };
     
     // Create BasePart component for part properties
@@ -309,6 +313,7 @@ fn spawn_scene_entity(
                 class_name: ClassName::Part,
                 archivable: entity.archivable,
                 id: entity.id,
+                ai: entity.ai,
             };
             
             // Create BasePart component for part properties

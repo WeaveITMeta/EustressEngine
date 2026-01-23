@@ -1,28 +1,19 @@
 //! Error types for Eustress Forge.
+//!
+//! Extends `forge_orchestration::ForgeError` with game-server-specific errors.
 
 use thiserror::Error;
 
-/// Errors that can occur in the Forge orchestration system.
+/// Errors that can occur in the Eustress Forge game server orchestration.
 #[derive(Error, Debug)]
-pub enum ForgeError {
-    /// Failed to connect to Nomad cluster
-    #[error("Failed to connect to Nomad: {0}")]
-    NomadConnection(String),
+pub enum EustressForgeError {
+    /// Underlying forge-orchestration error
+    #[error("Orchestration error: {0}")]
+    Orchestration(#[from] forge_orchestration::ForgeError),
     
-    /// Failed to connect to Consul
-    #[error("Failed to connect to Consul: {0}")]
-    ConsulConnection(String),
-    
-    /// Job submission failed
-    #[error("Failed to submit job '{job_id}': {reason}")]
-    JobSubmission {
-        job_id: String,
-        reason: String,
-    },
-    
-    /// Job not found
-    #[error("Job not found: {0}")]
-    JobNotFound(String),
+    /// Experience not found
+    #[error("Experience not found: {0}")]
+    ExperienceNotFound(String),
     
     /// Server allocation failed
     #[error("Failed to allocate server: {0}")]
@@ -59,18 +50,13 @@ pub enum ForgeError {
         reason: String,
     },
     
-    /// Internal error
-    #[error("Internal error: {0}")]
-    Internal(#[from] anyhow::Error),
-    
-    /// HTTP request error
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
 
-/// Result type for Forge operations.
-pub type ForgeResult<T> = Result<T, ForgeError>;
+/// Result type for Eustress Forge operations.
+pub type Result<T> = std::result::Result<T, EustressForgeError>;
+
+// Re-export base forge error for convenience
+pub use forge_orchestration::ForgeError as BaseForgeError;

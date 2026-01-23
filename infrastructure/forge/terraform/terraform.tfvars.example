@@ -1,0 +1,77 @@
+# Eustress Forge - Example Terraform Variables
+# Copy this file to terraform.tfvars and customize for your deployment
+
+# ============================================================================
+# General
+# ============================================================================
+
+project_name = "eustress-forge"
+environment  = "development"  # development, staging, production
+aws_region   = "us-east-1"
+datacenter   = "dc1"
+
+# ============================================================================
+# Networking
+# ============================================================================
+
+vpc_cidr             = "10.0.0.0/16"
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+enable_flow_logs     = true
+
+# ============================================================================
+# Nomad Server (Control Plane)
+# ============================================================================
+
+nomad_server_count         = 3
+nomad_server_instance_type = "m6i.large"
+
+# REQUIRED: Build with Packer or use HashiCorp's AMI
+nomad_ami_id = "ami-xxxxxxxxxxxxxxxxx"
+
+# REQUIRED: Your SSH key pair name
+ssh_key_name = "your-key-pair"
+
+# Leave empty for auto-discovery via AWS tags
+consul_server_addresses = []
+
+# ============================================================================
+# Nomad Client (Game Servers)
+# ============================================================================
+
+nomad_client_min_count     = 3
+nomad_client_max_count     = 100  # Increase for production
+nomad_client_instance_type = "c7i.2xlarge"
+
+# Spot configuration for 60-80% cost savings
+spot_max_price          = "0.50"
+on_demand_base_capacity = 2
+
+# Mixed instance types for spot availability
+spot_instance_types = [
+  { instance_type = "c7i.2xlarge" },
+  { instance_type = "c6i.2xlarge" },
+  { instance_type = "c6a.2xlarge" },
+  { instance_type = "c5.2xlarge" },
+  { instance_type = "m6i.2xlarge" },
+]
+
+# ============================================================================
+# Auto Scaling
+# ============================================================================
+
+scale_up_adjustment   = 5
+scale_down_adjustment = -2
+
+# ============================================================================
+# Production Recommendations
+# ============================================================================
+
+# For production deployments:
+# 1. Set environment = "production"
+# 2. Increase nomad_client_max_count to 1000+
+# 3. Enable multi-region with Consul federation
+# 4. Use dedicated hosts for control plane (Reserved Instances)
+# 5. Enable VPC flow logs and CloudTrail
+# 6. Configure proper TLS certificates
+# 7. Set up monitoring with Prometheus/Grafana

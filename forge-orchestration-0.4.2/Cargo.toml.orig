@@ -1,0 +1,69 @@
+[package]
+name = "forge-orchestration"
+description = "Rust-native orchestration platform for distributed workloads with MoE routing, autoscaling, and Nomad integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../README.md"
+documentation = "https://docs.rs/forge-orchestration"
+
+[dependencies]
+tokio.workspace = true
+rayon.workspace = true
+
+# Optional: QUIC networking (requires C compiler on Windows for aws-lc-sys)
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { version = "0.13", optional = true }
+
+# HTTP/gRPC (always available)
+axum.workspace = true
+tonic.workspace = true
+prost.workspace = true
+
+# Metrics (always included - lightweight)
+prometheus.workspace = true
+
+# Core dependencies (always needed)
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+bytes.workspace = true
+reqwest.workspace = true
+hostname = "0.4"
+lazy_static = "1.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+mockall = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "scheduler_benchmark"
+harness = false
+
+[features]
+default = []
+full = ["nomad", "quic"]
+nomad = []
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen"]
+
+# TLS crypto backend selection (for quic feature)
+# By default uses aws-lc-rs (fast, but requires C compiler)
+# Use ring for pure Rust (slower, but no C compiler needed)
+tls-aws-lc = ["rustls?/aws-lc-rs"]
+tls-ring = ["rustls?/ring"]

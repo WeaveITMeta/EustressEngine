@@ -66,19 +66,13 @@ pub mod indexing;
 pub mod prompt;
 pub mod query;
 
-#[cfg(feature = "local")]
-pub mod local;
-
-#[cfg(feature = "remote")]
-pub mod remote;
-
-pub use client::SpatialLlm;
-pub use context::{SpatialContext, SceneGraph};
-pub use error::SpatialLlmError;
-pub use generation::{EnvironmentGenerator, BehaviorGenerator};
-pub use indexing::SpatialIndex;
-pub use prompt::{PromptEngine, EnvironmentPrompt};
-pub use query::{QueryProcessor, SpatialQuery};
+pub use client::{SpatialLlm, SpatialLlmConfig};
+pub use context::{SpatialContext, SceneGraph, SpatialEntity};
+pub use error::{SpatialLlmError, Result};
+pub use generation::{EnvironmentGenerator, BehaviorGenerator, GeneratedContent};
+pub use indexing::{SpatialIndex, IndexedEntity};
+pub use prompt::{PromptEngine, EnvironmentPrompt, EnvironmentStyle};
+pub use query::{QueryProcessor, SpatialQuery, QueryResult};
 
 // ============================================================================
 // Prelude

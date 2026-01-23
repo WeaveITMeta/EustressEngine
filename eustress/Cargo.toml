@@ -11,8 +11,11 @@ members = [
     "crates/backend",
     "crates/forge",
     "crates/forge-sdk",
+    "crates/mcp",
     "crates/player-mobile",
-    "crates/bliss"
+    "crates/bliss",
+    "crates/embedvec",
+    "crates/spatial-llm"
 ]
 
 resolver = "2"

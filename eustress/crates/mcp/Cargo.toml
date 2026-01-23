@@ -1,0 +1,63 @@
+[package]
+name = "eustress-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Eustress MCP (Model Control Protocol) Server - AI-controllable 3D world server"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+# Core Eustress
+eustress-common = { path = "../common" }
+eustress-forge = { path = "../forge" }
+eustress-embedvec = { path = "../embedvec", optional = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Web server
+axum = { version = "0.8", features = ["json", "ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UUID
+uuid = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Authentication
+jsonwebtoken = "9.0"
+base64 = "0.22"
+
+# Async channels
+async-channel = "2.0"
+
+# WebSocket
+tokio-tungstenite = "0.26"
+
+# Async trait
+async-trait = "0.1"
+
+[features]
+default = []
+full = ["rune", "embedvec"]
+rune = []
+embedvec = ["eustress-embedvec"]
+
+[dev-dependencies]
+tokio-test = "0.4"

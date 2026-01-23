@@ -658,6 +658,7 @@ impl Default for Entity {
             generated_lods: Vec::new(),
             generation_status: GenerationStatus::default(),
             archivable: true,
+            ai: false,
         }
     }
 }

@@ -4,6 +4,56 @@
 > 
 > See [ASSET_DEVELOPER_GUIDE.md](./ASSET_DEVELOPER_GUIDE.md) for usage.
 
+---
+
+## Implementation Status (January 2026)
+
+All core features from the asset hosting proposal are **fully implemented**:
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| **World Snapshot** | ✅ Complete | `engine/src/play_mode.rs` | `WorldSnapshot`, `SnapshotStack`, `EntitySnapshot` with disk spill, 10 save points |
+| **OrderedDataStore** | ✅ Complete | `common/src/services/datastore.rs` | BTreeMap-based, `get_range()`, `get_rank()`, ascending/descending |
+| **Ownership Auto-Release** | ✅ Complete | `common/eustress-networking/src/ownership.rs` | `ActivityTracker`, `auto_release_inactive()`, `GradualHandoff` (1-2s blend) |
+| **Party Teleport** | ✅ Complete | `common/src/services/teleport.rs` | `PartyTeleport`, `ServerReservation`, confirmation/veto, countdown |
+| **P2P Assets** | ✅ Complete | `common/src/assets/p2p.rs` | `PeerManager`, `ChunkTransferManager`, WebRTC signaling |
+| **Asset CAS** | ✅ Complete | `common/src/assets/` | `ContentHash`, `AssetResolver`, `AssetService`, multi-source |
+
+### Key Implementation Details
+
+#### 1. World Snapshot (`play_mode.rs`)
+- **SnapshotConfig**: Configurable capture (transforms, Instance, BasePart, Humanoid)
+- **SnapshotStack**: Up to 10 save points with auto-spill to disk at 10MB
+- **Entity tracking**: Spawned/deleted entities tracked for accurate restore
+- **Compression**: Optional snap compression for disk storage
+
+#### 2. OrderedDataStore (`datastore.rs`)
+- **BTreeMap-based**: Efficient O(log n) operations
+- **Range queries**: `get_range(start, count, SortOrder)` for leaderboards
+- **Rank lookup**: `get_rank(key, order)` returns 0-indexed position
+- **Persistence**: JSON serialization to backend with dirty tracking
+
+#### 3. Ownership Auto-Release (`ownership.rs`)
+- **ActivityType**: Input, Movement, Interaction tracking
+- **Per-entity timers**: `record_activity()`, `is_idle()`, `get_idle_entities()`
+- **Gradual handoff**: 1-2s physics authority blend via `GradualHandoff`
+- **Config**: `auto_release_secs`, `gradual_handoff_ms` in `OwnershipConfig`
+
+#### 4. Party Teleport (`teleport.rs`)
+- **ServerReservation**: TTL-based slot reservation before teleport
+- **Confirmation flow**: `confirm_party_member()`, `veto_party_teleport()`
+- **Quorum**: `min_confirm_ratio`, `require_all_confirm` options
+- **Status tracking**: `WaitingForConfirmation` → `ReservingServer` → `Countdown` → `Teleporting`
+
+#### 5. P2P Assets (`p2p.rs` + `service.rs`)
+- **PeerManager**: Discovery, health scoring, blacklisting
+- **ChunkTransferManager**: Parallel chunk downloads, timeout handling
+- **SignalingClient**: WebRTC offer/answer/ICE via signaling server
+- **Integration**: `AssetService::resolve_with_p2p()` for CDN→P2P fallback
+- **Seeding**: `AssetService::start_seeding()`, `stop_seeding()` for peer distribution
+
+---
+
 ## How to Beat Roblox's Asset System
 
 Roblox's asset system has limitations:

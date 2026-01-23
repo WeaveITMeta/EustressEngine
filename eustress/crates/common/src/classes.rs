@@ -6709,7 +6709,7 @@ impl RegionChunk {
             crate::orbital::Region::from_geodetic(
                 self.center_geodetic[0],
                 self.center_geodetic[1],
-                self.bounds_extents.x * 2.0,
+                (self.bounds_extents.x * 2.0) as f64,
             )
         }
     }

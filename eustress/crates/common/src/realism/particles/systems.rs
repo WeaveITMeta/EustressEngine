@@ -265,7 +265,7 @@ pub fn update_particle_lifetimes(
         if let Some(ref mut lifetime) = particle.lifetime {
             *lifetime -= dt;
             if *lifetime <= 0.0 {
-                commands.entity(entity).despawn_recursive();
+                commands.entity(entity).despawn();
             }
         }
     }

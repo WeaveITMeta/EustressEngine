@@ -327,6 +327,7 @@ pub fn spawn_humanoid_character(
             name: "Player".to_string(),
             class_name: ClassName::Model,
             archivable: false,
+            ai: false,
             id: 0,
         },
     ));

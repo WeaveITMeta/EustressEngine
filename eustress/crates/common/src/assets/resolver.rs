@@ -306,12 +306,19 @@ impl AssetResolver {
             }
             
             AssetSource::P2P { info_hash, trackers: _ } => {
-                // P2P is handled separately via the P2P subsystem
-                // This is a fallback that indicates P2P should be tried
-                // The actual P2P resolution happens in the service layer
+                // P2P resolution requires PeerManager and ChunkTransferManager resources
+                // which are not available in the sync resolver. Use AssetService.resolve_with_p2p()
+                // for P2P-enabled resolution, or ensure P2PAssetPlugin is added to your app.
+                //
+                // The P2P subsystem provides:
+                // - PeerManager: Peer discovery, health scoring, blacklisting
+                // - ChunkTransferManager: Parallel chunk downloads with timeout handling
+                // - SignalingClient: WebRTC coordination via signaling server
+                //
+                // See: AssetService::resolve_with_p2p(), AssetService::start_seeding()
                 let hash_hex: String = info_hash.iter().map(|b| format!("{:02x}", b)).collect();
                 Err(ResolveError::Network(format!(
-                    "P2P fallback for {}: use AssetService.resolve_with_p2p()",
+                    "P2P source for {} requires AssetService.resolve_with_p2p() with PeerManager",
                     hash_hex
                 )))
             }

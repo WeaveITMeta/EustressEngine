@@ -2,11 +2,16 @@
 name = "eustress-forge"
 version = "0.1.0"
 edition = "2021"
-description = "Eustress Forge - Rust-native multiplayer orchestration platform built on HashiCorp Nomad"
+rust-version = "1.75"
+description = "Eustress Forge - Game server orchestration built on forge-orchestration"
 authors = ["EustressEngine Contributors"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# Core orchestration platform
+# Using tls-ring for pure Rust crypto (no cmake/MSVC required on Windows)
+forge-orchestration = { version = "0.4.2", default-features = false, features = ["nomad", "quic", "tls-ring"] }
+
 # Core async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -15,18 +20,8 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Networking
-reqwest = { version = "0.12", features = ["json"] }
-
-# Nomad API client
-nomad-client = { version = "0.1", optional = true }
-
-# Consul for service discovery
-consul-client = { version = "0.1", optional = true }
-
 # Error handling
 thiserror = { workspace = true }
-anyhow = "1.0"
 
 # Logging
 tracing = "0.1"
@@ -37,15 +32,20 @@ uuid = { workspace = true }
 # Time handling
 chrono = { workspace = true }
 
-# Metrics
-prometheus = { version = "0.13", optional = true }
+# Async trait for custom routers
+async-trait = "0.1"
 
-# Configuration
-config = "0.14"
-toml = "0.8"
+# Concurrent data structures
+parking_lot = "0.12"
+
+# Hostname detection
+hostname = "0.4"
 
 [features]
-default = ["nomad", "consul"]
-nomad = []
-consul = []
-metrics = ["prometheus"]
+default = ["full"]
+full = ["metrics", "quic"]
+metrics = []
+quic = []
+
+[dev-dependencies]
+tokio-test = "0.4"

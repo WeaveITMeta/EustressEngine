@@ -1,0 +1,44 @@
+[package]
+name = "eustress-embedvec"
+version = "0.1.0"
+edition = "2021"
+description = "Vector database integration for Eustress Engine with HNSW indexing, property embeddings, and semantic search"
+license = "MIT"
+
+[dependencies]
+# Core Bevy
+bevy = { workspace = true, features = ["serialize"] }
+
+# Vector database with HNSW indexing
+embedvec = { version = "0.5.1", default-features = false, features = ["async"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+# Async runtime (optional, for persistence)
+tokio = { workspace = true, optional = true }
+
+# Sled embedded database (optional, for persistence)
+sled = { version = "0.34", optional = true }
+
+[features]
+default = ["persistence"]
+# Enable sled-based persistence
+persistence = ["sled", "tokio"]
+# Enable RocksDB persistence (better for large indices)
+persistence-rocksdb = ["tokio"]
+# Enable SIMD acceleration
+simd = ["embedvec/simd"]
+# Full feature set
+full = ["persistence", "simd"]
+
+[dev-dependencies]
+rand = "0.8"
+tempfile = "3.10"

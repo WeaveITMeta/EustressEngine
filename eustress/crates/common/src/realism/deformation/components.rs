@@ -181,7 +181,7 @@ impl DeformationState {
 // ============================================================================
 
 /// Event triggered when mesh should fracture
-#[derive(Event, Clone, Debug)]
+#[derive(Message, Clone, Debug)]
 pub struct FractureMeshEvent {
     /// Entity to fracture
     pub entity: Entity,
@@ -196,7 +196,7 @@ pub struct FractureMeshEvent {
 }
 
 /// Event triggered on impact deformation
-#[derive(Event, Clone, Debug)]
+#[derive(Message, Clone, Debug)]
 pub struct ImpactDeformEvent {
     /// Entity that was impacted
     pub entity: Entity,
