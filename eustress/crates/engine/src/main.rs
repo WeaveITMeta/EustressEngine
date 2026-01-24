@@ -56,6 +56,7 @@ mod io_manager;         // Async data fetching for Parameters
 mod plugins;
 mod shaders;
 mod generative_pipeline;
+mod viga;  // VIGA: Vision-as-Inverse-Graphics Agent
 
 use ui::StudioUiPlugin;
 use rendering::PartRenderingPlugin;
@@ -220,6 +221,8 @@ fn main() {
         .add_plugins(EngineSoulPlugin)
         // Generative AI pipeline (Soul/Abstract modes, text-to-mesh)
         .add_plugins(generative_pipeline::GenerativePipelinePlugin)
+        // VIGA: Vision-as-Inverse-Graphics Agent (image-to-scene)
+        .add_plugins(viga::VigaPlugin)
         // MoonDisk rendering - DISABLED: Bevy's atmosphere shader already renders the moon
         // .add_plugins(shaders::MoonDiskPlugin)
         // IoManager for async data fetching (Parameters system)

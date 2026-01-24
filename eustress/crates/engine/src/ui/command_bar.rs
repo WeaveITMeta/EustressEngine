@@ -124,6 +124,16 @@ pub struct CommandBarState {
     pub include_screenshot: bool,
     /// Whether to include reference image in next prompt
     pub include_reference: bool,
+    
+    // === VIGA Fields ===
+    /// VIGA reference image for inverse graphics (base64 PNG data URL)
+    pub viga_reference_image: Option<String>,
+    /// Whether VIGA mode is active (image-to-scene generation)
+    pub viga_mode: bool,
+    /// VIGA processing status message
+    pub viga_status: Option<String>,
+    /// Whether drag-and-drop is being hovered
+    pub drag_hover: bool,
 }
 
 impl Default for CommandBarState {
@@ -147,6 +157,11 @@ impl Default for CommandBarState {
             build_phase: BuildPhase::default(),
             include_screenshot: false,
             include_reference: false,
+            // VIGA defaults
+            viga_reference_image: None,
+            viga_mode: false,
+            viga_status: None,
+            drag_hover: false,
         }
     }
 }
@@ -348,6 +363,35 @@ impl CommandBarPanel {
                         if ui.button("🏛️ Build").on_hover_text("Send to Claude AI with scene context").clicked() {
                             Self::execute_korah_build(state, world);
                         }
+                        
+                        // === Generate Button (Image-to-Scene) ===
+                        let generate_label = if state.viga_reference_image.is_some() { "✨ Generate ✓" } else { "✨ Generate" };
+                        let generate_color = if state.viga_mode {
+                            egui::Color32::from_rgb(138, 43, 226) // Purple when active
+                        } else {
+                            egui::Color32::from_rgb(100, 100, 100)
+                        };
+                        if ui.add(egui::Button::new(egui::RichText::new(generate_label).color(generate_color)))
+                            .on_hover_text("Generate 3D scene from image\nDrag & drop an image or click to upload\nAI will recreate the scene in 3D")
+                            .clicked()
+                        {
+                            if state.viga_reference_image.is_some() {
+                                // Start generation
+                                Self::start_viga_generation(state, world);
+                            } else {
+                                // Open file picker for image
+                                Self::open_viga_file_picker(state);
+                            }
+                        }
+                        
+                        // Clear reference image button (if image attached)
+                        if state.viga_reference_image.is_some() {
+                            if ui.small_button("×").on_hover_text("Clear reference image").clicked() {
+                                state.viga_reference_image = None;
+                                state.viga_mode = false;
+                                state.status = "Reference image cleared".to_string();
+                            }
+                        }
                     });
                     
                     // Autocomplete suggestions (if typing)
@@ -447,6 +491,7 @@ impl CommandBarPanel {
                     class_name: ClassName::Part,
                     archivable: true,
                     id: 0, // Will be assigned by ECS
+                    ai: false, // Not opted into AI training by default
                 };
                 
                 let base_part = BasePart {
@@ -1041,6 +1086,161 @@ impl CommandBarPanel {
                 break;
             }
         }
+    }
+    
+    /// Open file picker for Generate reference image
+    fn open_viga_file_picker(state: &mut CommandBarState) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::path::PathBuf;
+            
+            // Use rfd (Rust File Dialog) for native file picker
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif"])
+                .set_title("Select Reference Image for Generation")
+                .pick_file()
+            {
+                match Self::load_image_as_data_url(&path) {
+                    Ok(data_url) => {
+                        state.viga_reference_image = Some(data_url);
+                        state.viga_mode = true;
+                        state.status = format!("✨ Generate: Loaded reference image from {:?}", path.file_name().unwrap_or_default());
+                        info!("✨ Generate: Loaded reference image from {:?}", path);
+                    }
+                    Err(e) => {
+                        state.status = format!("Failed to load image: {}", e);
+                        error!("✨ Generate: Failed to load image: {}", e);
+                    }
+                }
+            }
+        }
+        
+        #[cfg(target_arch = "wasm32")]
+        {
+            state.status = "Drag & drop an image onto the command bar to generate".to_string();
+        }
+    }
+    
+    /// Load image file and convert to base64 data URL
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_image_as_data_url(path: &std::path::Path) -> Result<String, String> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        
+        // Determine MIME type from extension
+        let mime_type = match path.extension().and_then(|e| e.to_str()) {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            _ => "image/png", // Default
+        };
+        
+        let base64_data = BASE64.encode(&bytes);
+        Ok(format!("data:{};base64,{}", mime_type, base64_data))
+    }
+    
+    /// Start scene generation from reference image
+    fn start_viga_generation(state: &mut CommandBarState, world: &mut World) {
+        let Some(ref image) = state.viga_reference_image else {
+            state.status = "No reference image attached. Drag & drop or click Generate to upload.".to_string();
+            return;
+        };
+        
+        // Get optional description from input
+        let description = if state.input.trim().is_empty() {
+            None
+        } else {
+            Some(state.input.trim().to_string())
+        };
+        
+        info!("✨ Generate: Starting scene generation");
+        info!("  Reference image: {} chars", image.len());
+        if let Some(ref desc) = description {
+            info!("  Description: {}", desc);
+        }
+        
+        // Send generation request event
+        world.write_message(crate::viga::pipeline::VigaRequestEvent {
+            reference_image: image.clone(),
+            description,
+        });
+        
+        state.viga_mode = true;
+        state.status = "✨ Generate: Creating 3D scene from image...".to_string();
+        state.input.clear();
+        
+        state.last_result = Some(CommandResult::Success(
+            "Generation started. Watch the Output panel for progress.".to_string()
+        ));
+    }
+    
+    /// Handle dropped files (for drag-and-drop support)
+    pub fn handle_dropped_files(state: &mut CommandBarState, ctx: &egui::Context) {
+        // Check for dropped files
+        ctx.input(|i| {
+            if !i.raw.dropped_files.is_empty() {
+                for file in &i.raw.dropped_files {
+                    // Check if it's an image
+                    let is_image = file.name.ends_with(".png")
+                        || file.name.ends_with(".jpg")
+                        || file.name.ends_with(".jpeg")
+                        || file.name.ends_with(".webp")
+                        || file.name.ends_with(".gif");
+                    
+                    if is_image {
+                        // Try to get bytes
+                        if let Some(bytes) = &file.bytes {
+                            use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                            
+                            // Determine MIME type
+                            let mime_type = if file.name.ends_with(".png") {
+                                "image/png"
+                            } else if file.name.ends_with(".jpg") || file.name.ends_with(".jpeg") {
+                                "image/jpeg"
+                            } else if file.name.ends_with(".webp") {
+                                "image/webp"
+                            } else {
+                                "image/png"
+                            };
+                            
+                            let base64_data = BASE64.encode(bytes.as_ref());
+                            let data_url = format!("data:{};base64,{}", mime_type, base64_data);
+                            
+                            state.viga_reference_image = Some(data_url);
+                            state.viga_mode = true;
+                            state.status = format!("✨ Generate: Loaded reference image: {}", file.name);
+                            info!("✨ Generate: Loaded dropped image: {}", file.name);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(ref path) = file.path {
+                            match Self::load_image_as_data_url(path) {
+                                Ok(data_url) => {
+                                    state.viga_reference_image = Some(data_url);
+                                    state.viga_mode = true;
+                                    state.status = format!("✨ Generate: Loaded reference image: {}", file.name);
+                                    info!("✨ Generate: Loaded dropped image: {}", file.name);
+                                }
+                                Err(e) => {
+                                    state.status = format!("Failed to load image: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Update drag hover state
+            state.drag_hover = i.raw.hovered_files.iter().any(|f| {
+                f.name.ends_with(".png")
+                    || f.name.ends_with(".jpg")
+                    || f.name.ends_with(".jpeg")
+                    || f.name.ends_with(".webp")
+                    || f.name.ends_with(".gif")
+            });
+        });
     }
 }
 

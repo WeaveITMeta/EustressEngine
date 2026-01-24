@@ -65,6 +65,7 @@ blake3 = "1"
 bitflags = "2"
 zstd = "0.13"
 ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
 urlencoding = "2"
 open = "5"
 rune = "0.14"
