@@ -23,6 +23,7 @@ pub mod prelude {
 }
 
 use bevy::prelude::*;
+use tracing::info;
 
 /// Fluid dynamics plugin
 pub struct FluidsPlugin;

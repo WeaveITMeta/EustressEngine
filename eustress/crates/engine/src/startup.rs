@@ -769,6 +769,7 @@ fn spawn_scene(
                     name: entity.name.clone(),
                     class_name: ClassName::Part,
                     archivable: true,
+                    ..Default::default()
                 };
                 
                 // Parse material from string
@@ -842,6 +843,7 @@ fn spawn_scene(
                     name: entity.name.clone(),
                     class_name: ClassName::MeshPart,
                     archivable: true,
+                    ..Default::default()
                 };
                 
                 let base_part = BasePart {
@@ -874,6 +876,7 @@ fn spawn_scene(
                     name: entity.name.clone(),
                     class_name: ClassName::Folder,
                     archivable: true,
+                    ..Default::default()
                 };
                 commands.spawn((instance, Name::new(entity.name.clone())));
             }
@@ -883,6 +886,7 @@ fn spawn_scene(
                     name: entity.name.clone(),
                     class_name: ClassName::Model,
                     archivable: true,
+                    ..Default::default()
                 };
                 commands.spawn((instance, Name::new(entity.name.clone())));
             }

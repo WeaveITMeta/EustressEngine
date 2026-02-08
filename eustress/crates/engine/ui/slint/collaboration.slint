@@ -1,0 +1,276 @@
+// ============================================================================
+// Eustress Engine Studio - Collaboration Panel
+// Real-time collaboration with other users
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, ScrollView, Button } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// Collaborator data
+export struct Collaborator {
+    id: string,
+    name: string,
+    avatar-color: color,
+    status: string, // "online", "away", "editing"
+    current-selection: string,
+}
+
+export component Collaboration inherits Rectangle {
+    // Properties
+    in property <[Collaborator]> collaborators: [];
+    in property <bool> connected: false;
+    in property <string> session-id: "";
+    in property <string> invite-link: "";
+    
+    // Callbacks
+    callback on-connect();
+    callback on-disconnect();
+    callback on-invite();
+    callback on-copy-link();
+    callback on-follow-user(string);
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Header
+        PanelHeader {
+            title: "Collaboration";
+        }
+        
+        if !root.connected: Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 16px;
+                spacing: 12px;
+                alignment: center;
+                
+                Text {
+                    text: "👥";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Not connected";
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Start a collaboration session to work with others in real-time";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                
+                Rectangle {
+                    height: 36px;
+                    width: 140px;
+                    background: Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-connect(); }
+                    }
+                    
+                    Text {
+                        text: "Start Session";
+                        color: white;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        if root.connected: VerticalBox {
+            padding: 8px;
+            spacing: 8px;
+            
+            // Session info
+            Rectangle {
+                height: 60px;
+                background: Theme.background-tertiary;
+                border-radius: 4px;
+                
+                VerticalBox {
+                    padding: 8px;
+                    spacing: 4px;
+                    
+                    HorizontalBox {
+                        Text {
+                            text: "Session Active";
+                            color: Theme.accent-green;
+                            font-weight: 500;
+                        }
+                        
+                        Rectangle { horizontal-stretch: 1; }
+                        
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            background: Theme.accent-green;
+                            border-radius: 4px;
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        spacing: 8px;
+                        
+                        Text {
+                            text: root.collaborators.length + " connected";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                        }
+                    }
+                }
+            }
+            
+            // Invite section
+            HorizontalBox {
+                spacing: 4px;
+                
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.input-border;
+                    
+                    HorizontalBox {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        
+                        Text {
+                            text: root.invite-link;
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+                
+                Rectangle {
+                    width: 60px;
+                    height: 28px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-copy-link(); }
+                    }
+                    
+                    Text {
+                        text: "Copy";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            // Collaborators list
+            PanelHeader {
+                title: "Collaborators";
+            }
+            
+            ScrollView {
+                vertical-stretch: 1;
+                
+                VerticalBox {
+                    spacing: 2px;
+                    
+                    for collab in root.collaborators: Rectangle {
+                        height: 36px;
+                        background: collab-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                        border-radius: 4px;
+                        
+                        collab-touch := TouchArea {
+                            double-clicked => { root.on-follow-user(collab.id); }
+                        }
+                        
+                        HorizontalBox {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            
+                            // Avatar
+                            Rectangle {
+                                width: 24px;
+                                height: 24px;
+                                background: collab.avatar-color;
+                                border-radius: 12px;
+                                
+                                Text {
+                                    text: collab.name;
+                                    color: white;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            
+                            // Name and status
+                            VerticalBox {
+                                horizontal-stretch: 1;
+                                spacing: 0px;
+                                
+                                Text {
+                                    text: collab.name;
+                                    color: Theme.text-primary;
+                                    font-size: 12px;
+                                }
+                                
+                                Text {
+                                    text: collab.status == "editing" ? "Editing: " + collab.current-selection : collab.status;
+                                    color: Theme.text-secondary;
+                                    font-size: 10px;
+                                }
+                            }
+                            
+                            // Status indicator
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                background: collab.status == "online" ? Theme.accent-green :
+                                           collab.status == "editing" ? Theme.accent-blue :
+                                           Theme.text-secondary;
+                                border-radius: 4px;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Disconnect button
+            Rectangle {
+                height: 32px;
+                background: Theme.button-background;
+                border-radius: 4px;
+                
+                TouchArea {
+                    clicked => { root.on-disconnect(); }
+                }
+                
+                Text {
+                    text: "Leave Session";
+                    color: Theme.text-primary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

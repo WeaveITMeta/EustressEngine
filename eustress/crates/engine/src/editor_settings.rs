@@ -24,6 +24,7 @@ use bevy::gizmos::config::{GizmoConfigStore, DefaultGizmoConfigGroup};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use bevy::log::{info, warn};
 
 /// Global editor settings resource
 /// 

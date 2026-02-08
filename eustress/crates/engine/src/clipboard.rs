@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use bevy::prelude::Message;
-use bevy_egui::egui;
 use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::collections::HashMap;
@@ -516,11 +515,12 @@ pub fn handle_copy_event(
     mut events: MessageReader<CopyEvent>,
     mut clipboard: ResMut<EditorClipboard>,
     mut old_clipboard: ResMut<Clipboard>,
-    selection: Res<BevySelectionManager>,
+    selection: Option<Res<BevySelectionManager>>,
     query: Query<(Entity, &Instance, &Transform, Option<&BasePart>)>,
     current_scene: Option<Res<CurrentScenePath>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
+    let Some(selection) = selection else { return };
     for event in events.read() {
         let selected_ids = selection.0.read().get_selected();
         
@@ -757,6 +757,7 @@ fn spawn_entity_from_data(
         class_name,
         archivable: true,
         id: data.id,
+        ..Default::default()
     };
     
     let entity = match class_name {
@@ -819,67 +820,20 @@ fn spawn_entity_from_data(
 }
 
 /// System to render cross-scene paste modal
+/// Note: Modal UI is now handled by Slint
 pub fn render_cross_scene_modal(
-    mut egui_ctx: bevy_egui::EguiContexts,
     mut clipboard: ResMut<EditorClipboard>,
     mut paste_events: MessageWriter<PasteEvent>,
 ) {
-    if !clipboard.cross_scene_modal.open {
-        return;
-    }
-    
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    
-    egui::Window::new("Cross-Scene Paste")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.set_min_width(350.0);
-            
-            ui.vertical_centered(|ui| {
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("⚠️").size(32.0));
-                ui.add_space(5.0);
-                
-                ui.label(format!(
-                    "Pasting from '{}'",
-                    clipboard.cross_scene_modal.source_scene_name
-                ));
-                ui.add_space(5.0);
-                ui.label("This data is from a different scene.");
-                ui.add_space(15.0);
-            });
-            
-            ui.separator();
-            ui.add_space(10.0);
-            
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
-                
-                if ui.button("Paste").clicked() {
-                    clipboard.cross_scene_modal.open = false;
-                    paste_events.write(PasteEvent {
-                        mode: PasteMode::Normal,
-                        target_position: None,
-                    });
-                }
-                
-                if ui.button("Paste with New IDs").clicked() {
-                    clipboard.cross_scene_modal.open = false;
-                    paste_events.write(PasteEvent {
-                        mode: PasteMode::NewIds,
-                        target_position: None,
-                    });
-                }
-                
-                if ui.button("Cancel").clicked() {
-                    clipboard.cross_scene_modal.open = false;
-                }
-            });
-            
-            ui.add_space(10.0);
+    // Cross-scene paste modal is now handled by Slint UI
+    // For now, auto-paste with new IDs when cross-scene is detected
+    if clipboard.cross_scene_modal.open {
+        clipboard.cross_scene_modal.open = false;
+        paste_events.write(PasteEvent {
+            mode: PasteMode::NewIds,
+            target_position: None,
         });
+    }
 }
 
 // ============================================================================

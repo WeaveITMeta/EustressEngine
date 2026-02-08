@@ -1,0 +1,201 @@
+// ============================================================================
+// Eustress Engine Studio - Output Console
+// Log viewer with filtering and search
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, ScrollView, Button, CheckBox } from "std-widgets.slint";
+import { Theme, LogEntry } from "theme.slint";
+
+// Log entry data
+export struct LogData {
+    id: int,
+    level: string,
+    timestamp: string,
+    message: string,
+    source: string,
+}
+
+export component OutputConsole inherits Rectangle {
+    // Properties
+    in property <[LogData]> logs: [];
+    in property <bool> show-info: true;
+    in property <bool> show-warnings: true;
+    in property <bool> show-errors: true;
+    in property <bool> show-debug: false;
+    in-out property <string> filter-text: "";
+    in property <bool> auto-scroll: true;
+    
+    // Callbacks
+    callback on-clear();
+    callback on-filter-changed(string);
+    callback on-toggle-level(string);
+    callback on-copy-log(int);
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Toolbar
+        Rectangle {
+            height: 28px;
+            background: Theme.header-background;
+            
+            HorizontalBox {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                
+                // Filter buttons
+                Rectangle {
+                    width: 24px;
+                    height: 20px;
+                    background: root.show-info ? Theme.output-info : transparent;
+                    border-radius: 2px;
+                    
+                    TouchArea {
+                        clicked => { root.on-toggle-level("info"); }
+                    }
+                    
+                    Text {
+                        text: "ℹ";
+                        color: root.show-info ? white : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 24px;
+                    height: 20px;
+                    background: root.show-warnings ? Theme.output-warning : transparent;
+                    border-radius: 2px;
+                    
+                    TouchArea {
+                        clicked => { root.on-toggle-level("warning"); }
+                    }
+                    
+                    Text {
+                        text: "⚠";
+                        color: root.show-warnings ? white : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 24px;
+                    height: 20px;
+                    background: root.show-errors ? Theme.output-error : transparent;
+                    border-radius: 2px;
+                    
+                    TouchArea {
+                        clicked => { root.on-toggle-level("error"); }
+                    }
+                    
+                    Text {
+                        text: "❌";
+                        color: root.show-errors ? white : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 24px;
+                    height: 20px;
+                    background: root.show-debug ? Theme.output-debug : transparent;
+                    border-radius: 2px;
+                    
+                    TouchArea {
+                        clicked => { root.on-toggle-level("debug"); }
+                    }
+                    
+                    Text {
+                        text: "🔍";
+                        color: root.show-debug ? white : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Search
+                Rectangle {
+                    horizontal-stretch: 1;
+                    max-width: 200px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.input-border;
+                    
+                    HorizontalBox {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        
+                        Text {
+                            width: 14px;
+                            text: "🔍";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "Filter...";
+                            text <=> root.filter-text;
+                            edited(text) => { root.on-filter-changed(text); }
+                        }
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Auto-scroll toggle
+                CheckBox {
+                    text: "Auto-scroll";
+                    checked: root.auto-scroll;
+                }
+                
+                // Clear button
+                Button {
+                    text: "Clear";
+                    clicked => { root.on-clear(); }
+                }
+            }
+        }
+        
+        // Log list
+        ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 0px;
+                spacing: 0px;
+                
+                for log in root.logs: LogEntry {
+                    level: log.level;
+                    timestamp: log.timestamp;
+                    message: log.message;
+                }
+                
+                // Empty state
+                if root.logs.length == 0: Rectangle {
+                    height: 40px;
+                    
+                    Text {
+                        text: "No log entries";
+                        color: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

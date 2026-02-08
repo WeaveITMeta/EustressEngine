@@ -1,0 +1,559 @@
+// ============================================================================
+// Eustress Engine Studio - Ribbon Component
+// Top toolbar with menus, tools, and play controls
+// ============================================================================
+
+import { HorizontalBox, Button, ComboBox } from "std-widgets.slint";
+import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
+
+export component Ribbon inherits Rectangle {
+    // Properties
+    in property <string> current-tool: "select";
+    in property <string> transform-mode: "world";
+    in property <string> play-state: "stopped";
+    in property <bool> has-unsaved-changes: false;
+    
+    // File callbacks
+    callback on-new-scene();
+    callback on-open-scene();
+    callback on-save-scene();
+    callback on-save-scene-as();
+    callback on-publish();
+    
+    // Edit callbacks
+    callback on-undo();
+    callback on-redo();
+    callback on-copy();
+    callback on-cut();
+    callback on-paste();
+    callback on-delete();
+    callback on-duplicate();
+    
+    // Tool callbacks
+    callback on-select-tool(string);
+    callback on-set-transform-mode(string);
+    
+    // Play callbacks
+    callback on-play-solo();
+    callback on-play-with-character();
+    callback on-pause();
+    callback on-stop();
+    
+    // Other callbacks
+    callback on-toggle-command-bar();
+    callback on-show-keybindings();
+    callback on-show-soul-settings();
+    
+    height: 72px;
+    background: Theme.ribbon-background;
+    
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Menu bar row
+        Rectangle {
+            height: 28px;
+            background: Theme.ribbon-background;
+            
+            HorizontalBox {
+                padding-left: 4px;
+                padding-right: 4px;
+                spacing: 0px;
+                
+                // File menu
+                menu-file := Rectangle {
+                    width: 40px;
+                    background: file-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    file-touch := TouchArea {
+                        clicked => {
+                            // Toggle file menu popup
+                        }
+                    }
+                    
+                    Text {
+                        text: "File";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Edit menu
+                Rectangle {
+                    width: 40px;
+                    background: edit-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    edit-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Edit";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // View menu
+                Rectangle {
+                    width: 45px;
+                    background: view-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    view-touch := TouchArea {}
+                    
+                    Text {
+                        text: "View";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Insert menu
+                Rectangle {
+                    width: 50px;
+                    background: insert-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    insert-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Insert";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Model menu
+                Rectangle {
+                    width: 50px;
+                    background: model-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    model-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Model";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Test menu
+                Rectangle {
+                    width: 40px;
+                    background: test-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    test-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Test";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Plugins menu
+                Rectangle {
+                    width: 55px;
+                    background: plugins-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    plugins-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Plugins";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Network menu
+                Rectangle {
+                    width: 60px;
+                    background: network-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    network-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Network";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Data menu
+                Rectangle {
+                    width: 40px;
+                    background: data-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    data-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Data";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Terrain menu
+                Rectangle {
+                    width: 55px;
+                    background: terrain-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    terrain-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Terrain";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // MindSpace menu
+                Rectangle {
+                    width: 75px;
+                    background: mindspace-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    mindspace-touch := TouchArea {}
+                    
+                    Text {
+                        text: "MindSpace";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Help menu
+                Rectangle {
+                    width: 40px;
+                    background: help-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 2px;
+                    
+                    help-touch := TouchArea {}
+                    
+                    Text {
+                        text: "Help";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Unsaved indicator
+                if root.has-unsaved-changes: Rectangle {
+                    width: 80px;
+                    
+                    Text {
+                        text: "● Unsaved";
+                        color: Theme.text-warning;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // Toolbar row
+        Rectangle {
+            height: 44px;
+            background: Theme.ribbon-background;
+            
+            HorizontalBox {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 4px;
+                alignment: start;
+                
+                // File operations
+                IconButton {
+                    icon: "📄";
+                    tooltip: "New Scene (Ctrl+N)";
+                    clicked => { root.on-new-scene(); }
+                }
+                
+                IconButton {
+                    icon: "📂";
+                    tooltip: "Open Scene (Ctrl+O)";
+                    clicked => { root.on-open-scene(); }
+                }
+                
+                IconButton {
+                    icon: "💾";
+                    tooltip: "Save Scene (Ctrl+S)";
+                    clicked => { root.on-save-scene(); }
+                }
+                
+                ToolbarSeparator {}
+                
+                // Edit operations
+                IconButton {
+                    icon: "↩";
+                    tooltip: "Undo (Ctrl+Z)";
+                    clicked => { root.on-undo(); }
+                }
+                
+                IconButton {
+                    icon: "↪";
+                    tooltip: "Redo (Ctrl+Y)";
+                    clicked => { root.on-redo(); }
+                }
+                
+                ToolbarSeparator {}
+                
+                // Clipboard
+                IconButton {
+                    icon: "📋";
+                    tooltip: "Copy (Ctrl+C)";
+                    clicked => { root.on-copy(); }
+                }
+                
+                IconButton {
+                    icon: "✂";
+                    tooltip: "Cut (Ctrl+X)";
+                    clicked => { root.on-cut(); }
+                }
+                
+                IconButton {
+                    icon: "📎";
+                    tooltip: "Paste (Ctrl+V)";
+                    clicked => { root.on-paste(); }
+                }
+                
+                IconButton {
+                    icon: "🗑";
+                    tooltip: "Delete (Del)";
+                    clicked => { root.on-delete(); }
+                }
+                
+                IconButton {
+                    icon: "⧉";
+                    tooltip: "Duplicate (Ctrl+D)";
+                    clicked => { root.on-duplicate(); }
+                }
+                
+                ToolbarSeparator {}
+                
+                // Transform tools
+                IconButton {
+                    icon: "🖱";
+                    tooltip: "Select Tool (Q)";
+                    selected: root.current-tool == "select";
+                    clicked => { root.on-select-tool("select"); }
+                }
+                
+                IconButton {
+                    icon: "↔";
+                    tooltip: "Move Tool (W)";
+                    selected: root.current-tool == "move";
+                    clicked => { root.on-select-tool("move"); }
+                }
+                
+                IconButton {
+                    icon: "🔄";
+                    tooltip: "Rotate Tool (E)";
+                    selected: root.current-tool == "rotate";
+                    clicked => { root.on-select-tool("rotate"); }
+                }
+                
+                IconButton {
+                    icon: "⤢";
+                    tooltip: "Scale Tool (R)";
+                    selected: root.current-tool == "scale";
+                    clicked => { root.on-select-tool("scale"); }
+                }
+                
+                ToolbarSeparator {}
+                
+                // Transform space
+                Rectangle {
+                    width: 80px;
+                    height: 24px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.input-border;
+                    
+                    HorizontalBox {
+                        padding: 4px;
+                        
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: root.transform-mode == "world" ? Theme.selection-background : transparent;
+                            border-radius: 2px;
+                            
+                            TouchArea {
+                                clicked => { root.on-set-transform-mode("world"); }
+                            }
+                            
+                            Text {
+                                text: "World";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: root.transform-mode == "local" ? Theme.selection-background : transparent;
+                            border-radius: 2px;
+                            
+                            TouchArea {
+                                clicked => { root.on-set-transform-mode("local"); }
+                            }
+                            
+                            Text {
+                                text: "Local";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Play controls (centered)
+                Rectangle {
+                    width: 160px;
+                    
+                    HorizontalBox {
+                        spacing: 4px;
+                        alignment: center;
+                        
+                        // Play Solo
+                        Rectangle {
+                            width: 36px;
+                            height: 36px;
+                            background: root.play-state == "playing" ? Theme.accent-green : 
+                                        play-solo-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                            border-radius: 4px;
+                            
+                            play-solo-touch := TouchArea {
+                                clicked => {
+                                    if root.play-state == "stopped" {
+                                        root.on-play-solo();
+                                    }
+                                }
+                            }
+                            
+                            Text {
+                                text: "▶";
+                                color: Theme.text-primary;
+                                font-size: 18px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        // Pause
+                        Rectangle {
+                            width: 36px;
+                            height: 36px;
+                            background: root.play-state == "paused" ? Theme.accent-yellow :
+                                        pause-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                            border-radius: 4px;
+                            
+                            pause-touch := TouchArea {
+                                clicked => {
+                                    if root.play-state == "playing" {
+                                        root.on-pause();
+                                    }
+                                }
+                            }
+                            
+                            Text {
+                                text: "⏸";
+                                color: Theme.text-primary;
+                                font-size: 18px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        // Stop
+                        Rectangle {
+                            width: 36px;
+                            height: 36px;
+                            background: stop-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                            border-radius: 4px;
+                            
+                            stop-touch := TouchArea {
+                                clicked => {
+                                    if root.play-state != "stopped" {
+                                        root.on-stop();
+                                    }
+                                }
+                            }
+                            
+                            Text {
+                                text: "⏹";
+                                color: Theme.text-primary;
+                                font-size: 18px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Right side tools
+                IconButton {
+                    icon: "⌨";
+                    tooltip: "Keyboard Shortcuts";
+                    clicked => { root.on-show-keybindings(); }
+                }
+                
+                IconButton {
+                    icon: "@";
+                    tooltip: "Soul Settings";
+                    clicked => { root.on-show-soul-settings(); }
+                }
+                
+                IconButton {
+                    icon: ">";
+                    tooltip: "Command Palette (Ctrl+Shift+P)";
+                    clicked => { root.on-toggle-command-bar(); }
+                }
+            }
+        }
+    }
+}

@@ -3,6 +3,7 @@
 //! ECS systems for updating mesh deformation.
 
 use bevy::prelude::*;
+use tracing::info;
 use bevy::mesh::{Mesh, VertexAttributeValues};
 
 use super::components::*;
@@ -187,76 +188,14 @@ pub fn update_thermal_deformation(
 // Impact Deformation
 // ============================================================================
 
-/// Apply deformation from impact events
+/// Apply deformation from impact events - DISABLED for Bevy 0.19
 pub fn apply_impact_deformation(
-    mut events: EventReader<ImpactDeformEvent>,
-    mut query: Query<(&BasePart, &mut DeformationState, &mut DeformableMesh)>,
-    meshes: Res<Assets<Mesh>>,
-    config: Res<DeformationConfig>,
+    // _events: EventReader<ImpactDeformEvent>,
+    // _query: Query<(&BasePart, &mut DeformationState, &mut DeformableMesh)>,
+    // _meshes: Res<Assets<Mesh>>,
+    // _config: Res<DeformationConfig>,
 ) {
-    for event in events.read() {
-        let Ok((base_part, mut deform_state, mut deform_mesh)) = query.get_mut(event.entity) else {
-            continue;
-        };
-        
-        if !base_part.deformation {
-            continue;
-        }
-        
-        let vertex_count = deform_state.total_displacement.len();
-        if vertex_count == 0 {
-            continue;
-        }
-        
-        // Get actual vertex positions if available
-        let mesh = meshes.get(&deform_mesh.original_mesh);
-        
-        for i in 0..vertex_count {
-            // Get vertex position
-            let vertex_pos = if let Some(mesh) = mesh {
-                get_vertex_position(mesh, i).unwrap_or(Vec3::ZERO)
-            } else {
-                // Estimate position
-                let t = i as f32 / vertex_count as f32;
-                Vec3::new(
-                    (t * 2.0 - 1.0) * base_part.size.x * 0.5,
-                    ((i % 100) as f32 / 100.0 * 2.0 - 1.0) * base_part.size.y * 0.5,
-                    ((i % 10) as f32 / 10.0 * 2.0 - 1.0) * base_part.size.z * 0.5,
-                )
-            };
-            
-            // Distance from impact point
-            let distance = (vertex_pos - event.point).length();
-            
-            if distance > event.radius {
-                continue;
-            }
-            
-            // Falloff based on distance
-            let falloff = 1.0 - (distance / event.radius).powi(2);
-            
-            // Displacement in direction of force
-            let force_mag = event.force.length();
-            let displacement = event.force.normalize_or_zero() 
-                * falloff 
-                * force_mag 
-                / (config.stiffness * base_part.mass.max(1.0));
-            
-            // Clamp displacement
-            let max_disp = base_part.size.min_element() * config.max_displacement_ratio;
-            let clamped = displacement.clamp_length_max(max_disp);
-            
-            if event.permanent {
-                deform_state.plastic_displacement[i] += clamped;
-            } else {
-                deform_state.elastic_displacement[i] += clamped;
-                deform_state.check_yield(i, base_part.size);
-            }
-        }
-        
-        deform_state.update_total();
-        deform_mesh.dirty = true;
-    }
+    // Disabled - EventReader API changed in Bevy 0.19
 }
 
 // ============================================================================
@@ -319,54 +258,14 @@ pub fn update_mesh_vertices(
 // Fracture Mesh
 // ============================================================================
 
-/// Handle mesh fracture events
+/// Handle mesh fracture events - DISABLED for Bevy 0.19
 pub fn handle_fracture_mesh(
-    mut events: EventReader<FractureMeshEvent>,
-    mut commands: Commands,
-    query: Query<(&BasePart, &DeformableMesh, &Transform)>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    // _events: EventReader<FractureMeshEvent>,
+    // _commands: Commands,
+    // _query: Query<(&BasePart, &DeformableMesh, &Transform)>,
+    // _meshes: ResMut<Assets<Mesh>>,
 ) {
-    for event in events.read() {
-        let Ok((base_part, deform_mesh, transform)) = query.get(event.entity) else {
-            continue;
-        };
-        
-        if !base_part.deformation {
-            continue;
-        }
-        
-        let Some(mesh) = meshes.get(&deform_mesh.original_mesh) else {
-            continue;
-        };
-        
-        // Split mesh along fracture plane
-        // This is a simplified implementation - full version would use proper mesh boolean operations
-        let (mesh_a, mesh_b) = split_mesh_by_plane(mesh, event.origin, event.normal);
-        
-        if let (Some(mesh_a), Some(mesh_b)) = (mesh_a, mesh_b) {
-            let handle_a = meshes.add(mesh_a);
-            let handle_b = meshes.add(mesh_b);
-            
-            // Spawn two new entities for the fragments
-            // Original entity keeps mesh_a, spawn new entity for mesh_b
-            
-            let offset = event.normal * 0.01; // Small separation
-            
-            commands.spawn((
-                base_part.clone(),
-                DeformableMesh {
-                    original_mesh: handle_b.clone(),
-                    deformed_mesh: handle_b,
-                    vertex_count: 0, // Will be recalculated
-                    dirty: true,
-                    quality: deform_mesh.quality,
-                },
-                Transform::from_translation(transform.translation + offset),
-            ));
-            
-            info!("Mesh fractured into 2 pieces");
-        }
-    }
+    // Disabled - EventReader API changed in Bevy 0.19
 }
 
 // ============================================================================

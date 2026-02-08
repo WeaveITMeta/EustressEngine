@@ -35,6 +35,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use tracing::info;
 
 // ============================================================================
 // Product Types

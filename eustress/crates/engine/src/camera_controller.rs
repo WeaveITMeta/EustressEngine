@@ -231,6 +231,8 @@ impl Plugin for CameraControllerPlugin {
             .add_message::<FrameSelectionEvent>()
             .add_systems(Update, (
                 ensure_camera_exists,
+                // NOTE: Viewport constraint disabled - camera now renders to texture for Slint
+                // update_camera_viewport_for_ui,
                 camera_view_input_system,
                 handle_snap_to_view,
                 handle_toggle_projection,
@@ -240,6 +242,44 @@ impl Plugin for CameraControllerPlugin {
                 update_eustress_camera_transform,
             ).chain());
     }
+}
+
+/// Update the 3D camera viewport to fit within the UI panel layout
+/// This constrains the 3D render to the center frame, leaving space for:
+/// - Left panel (Explorer/Toolbox): ~280px
+/// - Right panel (Properties): ~280px  
+/// - Top ribbon: ~100px
+/// - Bottom output: ~150px
+fn update_camera_viewport_for_ui(
+    mut camera_query: Query<&mut Camera, With<Camera3d>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    studio_state: Option<Res<crate::ui::StudioState>>,
+) {
+    let Some(window) = windows.iter().next() else { return };
+    let Some(mut camera) = camera_query.iter_mut().next() else { return };
+    
+    let window_width = window.width();
+    let window_height = window.height();
+    
+    // UI panel sizes (matching Slint layout)
+    // These should eventually come from StudioState for dynamic resizing
+    let left_panel_width = if studio_state.as_ref().map_or(true, |s| s.show_explorer) { 280.0 } else { 0.0 };
+    let right_panel_width = if studio_state.as_ref().map_or(true, |s| s.show_properties) { 280.0 } else { 0.0 };
+    let top_ribbon_height = 100.0; // Ribbon + toolbar
+    let bottom_output_height = if studio_state.as_ref().map_or(true, |s| s.show_output) { 150.0 } else { 0.0 };
+    
+    // Calculate viewport bounds (in pixels from top-left)
+    let viewport_x = left_panel_width;
+    let viewport_y = top_ribbon_height;
+    let viewport_width = (window_width - left_panel_width - right_panel_width).max(100.0);
+    let viewport_height = (window_height - top_ribbon_height - bottom_output_height).max(100.0);
+    
+    // Set the camera viewport using Bevy 0.17 API
+    camera.viewport = Some(bevy::camera::Viewport {
+        physical_position: UVec2::new(viewport_x as u32, viewport_y as u32),
+        physical_size: UVec2::new(viewport_width as u32, viewport_height as u32),
+        ..default()
+    });
 }
 
 /// Ensure at least one camera exists - auto-spawn if all cameras are deleted
@@ -275,6 +315,7 @@ fn ensure_camera_exists(
                 class_name: crate::classes::ClassName::Camera,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Name::new("Camera"),
         ));
@@ -291,14 +332,8 @@ fn camera_view_input_system(
     mut snap_events: MessageWriter<SnapToViewEvent>,
     mut toggle_events: MessageWriter<ToggleProjectionEvent>,
     mut frame_events: MessageWriter<FrameSelectionEvent>,
-    mut egui_ctx: bevy_egui::EguiContexts,
 ) {
-    // Don't process when UI has focus or is being interacted with
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    // Block if egui wants keyboard OR if user is interacting with any widget (dragging sliders, etc.)
-    if ctx.wants_keyboard_input() || ctx.is_using_pointer() || ctx.is_pointer_over_area() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     
@@ -527,7 +562,6 @@ fn eustress_camera_controls(
     time: Res<Time>,
     mut cam_query: Query<(&mut EustressCamera, &Transform, &Camera, &GlobalTransform), With<Camera3d>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut egui_ctx: bevy_egui::EguiContexts,
 ) {
     let (mut cam, transform, camera, global_transform) = match cam_query.single_mut() {
         Ok(c) => c,
@@ -538,13 +572,9 @@ fn eustress_camera_controls(
         return;
     }
     
-    // Don't control camera when typing in UI fields
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    
-    // Check if UI wants input - we need to CONSUME events even if we don't use them
-    // to prevent them from being processed on the next frame
-    let ui_wants_keyboard = ctx.wants_keyboard_input();
-    let ui_wants_pointer = ctx.wants_pointer_input() || ctx.is_pointer_over_area();
+    // TODO: Check Slint UI focus state to block input when UI has focus
+    let ui_wants_keyboard = false;
+    let ui_wants_pointer = false;
     
     // ALWAYS consume ALL mouse events to prevent buildup
     // Read mouse motion ONCE per frame

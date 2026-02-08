@@ -120,7 +120,7 @@ impl DynamicPropertiesPanel {
                 
                 // Render Attributes, Tags, and Parameters sections
                 ui.separator();
-                render_attributes_panel(ui, entity, world, &mut self.attributes_state);
+                render_attributes_panel(ui, &mut self.attributes_state);
             });
     }
     

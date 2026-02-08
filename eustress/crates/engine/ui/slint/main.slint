@@ -1,0 +1,956 @@
+// ============================================================================
+// Eustress Engine Studio - Main UI Layout
+// Slint 1.12 declarative UI replacing egui immediate-mode
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
+import { Ribbon } from "ribbon.slint";
+import { ExplorerPanel } from "explorer.slint";
+import { PropertiesPanel } from "properties.slint";
+import { OutputConsole } from "output.slint";
+import { CommandBar } from "command_bar.slint";
+import { Toolbox } from "toolbox.slint";
+import { AssetManager } from "asset_manager.slint";
+import { Collaboration } from "collaboration.slint";
+import { SoulPanel } from "soul_panel.slint";
+import { ScriptEditor } from "script_editor.slint";
+import { Notifications } from "notifications.slint";
+import { ViewSelector } from "view_selector.slint";
+import { AIGeneration } from "ai_generation.slint";
+import { PublishDialog } from "publish.slint";
+import { LoginDialog } from "login.slint";
+import { HistoryPanel } from "history_panel.slint";
+import { ContextMenu } from "context_menu.slint";
+import { Theme } from "theme.slint";
+// Dock layout system
+import { LayoutPresetSelector, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
+// New components for complete egui parity
+import { TerrainEditor } from "terrain_editor.slint";
+import { SettingsDialog } from "settings.slint";
+import { NetworkPanel } from "network_panel.slint";
+import { FindDialog } from "find_dialog.slint";
+import { ServiceProperties } from "service_properties.slint";
+// Modal dialogs
+import { SoulSettingsDialog } from "soul_settings.slint";
+import { ForgeConnectDialog } from "forge_connect.slint";
+import { StressTestDialog } from "stress_test.slint";
+import { DataSourcesDialog } from "data_sources.slint";
+import { ExitConfirmationDialog } from "exit_confirmation.slint";
+import { SyncDomainDialog } from "sync_domain.slint";
+
+// ============================================================================
+// Main Studio Window Component
+// ============================================================================
+
+export component StudioWindow inherits Window {
+    // Window properties
+    width: 1600px;
+    height: 900px;
+    title: "Eustress Engine";
+    background: transparent;  // Transparent so 3D scene shows through viewport; panels have own opaque backgrounds
+    default-font-family: "Segoe UI";
+    default-font-size: 13px;
+
+    // ========================================================================
+    // Global State Properties
+    // ========================================================================
+    
+    // Theme
+    in-out property <bool> dark-theme: true;
+    
+    // Panel visibility
+    in-out property <bool> show-explorer: true;
+    in-out property <bool> show-properties: true;
+    in-out property <bool> show-output: true;
+    in-out property <bool> show-toolbox: true;
+    in-out property <bool> show-assets: false;
+    in-out property <bool> show-collaboration: false;
+    in-out property <bool> show-soul-panel: false;
+    in-out property <bool> show-script-editor: false;
+    in-out property <bool> show-history: false;
+    in-out property <bool> show-ai-generation: false;
+    
+    // Command bar
+    in-out property <bool> show-command-bar: false;
+    in-out property <string> command-text: "";
+    
+    // Dialogs
+    in-out property <bool> show-publish-dialog: false;
+    in-out property <bool> show-login-dialog: false;
+    in-out property <bool> show-keybindings-dialog: false;
+    in-out property <bool> show-soul-settings-dialog: false;
+    in-out property <bool> show-exit-confirmation: false;
+    in-out property <bool> show-settings-dialog: false;
+    in-out property <bool> show-find-dialog: false;
+    
+    // New panels for egui parity
+    in-out property <bool> show-terrain-editor: false;
+    in-out property <bool> show-network-panel: false;
+    in-out property <bool> show-mindspace-panel: false;
+    in-out property <bool> show-global-sources-window: false;
+    in-out property <bool> show-domains-window: false;
+    in-out property <bool> show-global-variables-window: false;
+    
+    // Additional modal dialogs
+    in-out property <bool> show-forge-connect-dialog: false;
+    in-out property <bool> show-stress-test-dialog: false;
+    in-out property <bool> show-sync-domain-dialog: false;
+    
+    // Scene name for exit confirmation
+    in-out property <string> scene-name: "Untitled";
+    
+    // Terrain state
+    in-out property <bool> has-terrain: false;
+    in-out property <bool> terrain-edit-mode: false;
+    in-out property <string> terrain-brush: "raise";
+    
+    // Network state
+    in-out property <bool> server-running: false;
+    in-out property <bool> forge-connected: false;
+    
+    // Service selection (for service properties)
+    in-out property <string> selected-service: ""; // "workspace", "lighting", "players", etc.
+    
+    // Context menu
+    in-out property <bool> show-context-menu: false;
+    in-out property <length> context-menu-x: 0px;
+    in-out property <length> context-menu-y: 0px;
+    
+    // Current tool
+    in-out property <string> current-tool: "select";
+    
+    // Transform mode
+    in-out property <string> transform-mode: "world";
+    
+    // View mode
+    in-out property <string> view-mode: "perspective";
+    
+    // Play mode state
+    in-out property <string> play-state: "stopped"; // stopped, playing, paused
+    
+    // Selection info (for properties panel)
+    in-out property <int> selected-count: 0;
+    in-out property <string> selected-class: "";
+    
+    // Unsaved changes tracking
+    in-out property <bool> has-unsaved-changes: false;
+    
+    // Panel widths (resizable)
+    in-out property <length> left-panel-width: 280px;
+    in-out property <length> right-panel-width: 300px;
+    in-out property <length> output-height: 150px;
+    
+    // ========================================================================
+    // Dock Layout System Properties
+    // ========================================================================
+    
+    // Layout presets
+    in-out property <int> current-layout-preset: 0;
+    in-out property <bool> show-layout-dropdown: false;
+    
+    // Theme settings
+    in-out property <bool> show-theme-editor: false;
+    in-out property <bool> high-contrast-mode: false;
+    in-out property <float> ui-scale: 1.0;
+    
+    // Performance overlay
+    in-out property <bool> show-performance-overlay: true;
+    in-out property <float> current-fps: 60.0;
+    in-out property <float> current-frame-time: 16.67;
+    in-out property <float> current-memory-mb: 0.0;
+    in-out property <int> current-entity-count: 0;
+    
+    // Floating panels
+    in-out property <bool> has-floating-panels: false;
+    
+    // Drag-drop docking state
+    in-out property <bool> is-dragging-panel: false;
+    in-out property <DockZone> active-dock-zone: DockZone.center;
+    
+    // Viewport dimensions (reported to Bevy for render target sizing)
+    out property <float> viewport-width: viewport-area.width / 1px;
+    out property <float> viewport-height: viewport-area.height / 1px;
+    out property <float> viewport-x: viewport-area.x / 1px;
+    out property <float> viewport-y: viewport-area.y / 1px;
+    
+    // Viewport image (set by Bevy with rendered 3D scene)
+    in-out property <image> viewport-image;
+    
+    // Left panel tab
+    in-out property <int> left-tab-index: 0;
+    
+    // Right panel tab
+    in-out property <int> right-tab-index: 0;
+
+    // ========================================================================
+    // Callbacks (bound to Bevy systems)
+    // ========================================================================
+    
+    // File operations
+    callback new-scene();
+    callback open-scene();
+    callback save-scene();
+    callback save-scene-as();
+    callback publish();
+    
+    // Edit operations
+    callback undo();
+    callback redo();
+    callback copy();
+    callback cut();
+    callback paste();
+    callback delete-selected();
+    callback select-all();
+    callback duplicate();
+    
+    // Tool selection
+    callback select-tool(string);
+    
+    // Transform
+    callback set-transform-mode(string);
+    callback toggle-snap();
+    callback set-snap-increment(float);
+    
+    // View
+    callback set-view-mode(string);
+    callback focus-selected();
+    callback toggle-wireframe();
+    callback toggle-grid();
+    
+    // Play mode
+    callback play-solo();
+    callback play-with-character();
+    callback pause();
+    callback stop();
+    
+    // Explorer
+    callback select-entity(int);
+    callback expand-entity(int);
+    callback collapse-entity(int);
+    callback rename-entity(int, string);
+    callback reparent-entity(int, int);
+    
+    // Properties
+    callback property-changed(string, string);
+    
+    // Command bar
+    callback execute-command(string);
+    
+    // Context menu
+    callback context-action(string);
+    
+    // Soul/Scripts
+    callback build-script(int);
+    callback open-script(int);
+    
+    // Auth
+    callback login();
+    callback logout();
+    
+    // Terrain
+    callback generate-terrain(string); // "small", "medium", "large"
+    callback toggle-terrain-edit-mode();
+    callback set-terrain-brush(string);
+    callback import-heightmap();
+    callback export-heightmap();
+    
+    // Network
+    callback start-server();
+    callback stop-server();
+    callback connect-forge();
+    callback disconnect-forge();
+    callback allocate-forge-server();
+    callback spawn-synthetic-clients(int);
+    callback disconnect-all-clients();
+    
+    // Data menu
+    callback open-global-sources();
+    callback open-domains();
+    callback open-global-variables();
+    
+    // MindSpace
+    callback toggle-mindspace();
+    callback mindspace-add-label();
+    callback mindspace-connect();
+    
+    // Settings
+    callback open-settings();
+    callback open-find();
+    
+    // Dock Layout System Callbacks
+    callback apply-layout-preset(int);
+    callback save-layout-to-file();
+    callback load-layout-from-file();
+    callback reset-layout-to-default();
+    callback toggle-theme-editor();
+    callback apply-theme-settings(bool, bool, float); // dark-mode, high-contrast, ui-scale
+    callback detach-panel-to-window(string);
+    callback dock-panel(string, DockZone);
+    
+    // Native Window Integration Callbacks
+    // These are called when viewport bounds change so Bevy can reposition its window
+    callback viewport-bounds-changed(float, float, float, float); // x, y, width, height
+    callback close-requested();
+
+    // ========================================================================
+    // Main Layout
+    // ========================================================================
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // ====================================================================
+        // Top Ribbon
+        // ====================================================================
+        Ribbon {
+            current-tool: root.current-tool;
+            transform-mode: root.transform-mode;
+            play-state: root.play-state;
+            has-unsaved-changes: root.has-unsaved-changes;
+            
+            on-new-scene => { root.new-scene(); }
+            on-open-scene => { root.open-scene(); }
+            on-save-scene => { root.save-scene(); }
+            on-save-scene-as => { root.save-scene-as(); }
+            on-publish => { root.publish(); }
+            on-undo => { root.undo(); }
+            on-redo => { root.redo(); }
+            on-copy => { root.copy(); }
+            on-cut => { root.cut(); }
+            on-paste => { root.paste(); }
+            on-delete => { root.delete-selected(); }
+            on-duplicate => { root.duplicate(); }
+            on-select-tool(tool) => { root.select-tool(tool); }
+            on-set-transform-mode(mode) => { root.set-transform-mode(mode); }
+            on-play-solo => { root.play-solo(); }
+            on-play-with-character => { root.play-with-character(); }
+            on-pause => { root.pause(); }
+            on-stop => { root.stop(); }
+            on-toggle-command-bar => { root.show-command-bar = !root.show-command-bar; }
+            on-show-keybindings => { root.show-keybindings-dialog = true; }
+            on-show-soul-settings => { root.show-soul-settings-dialog = true; }
+        }
+
+        // ====================================================================
+        // Main Content Area (Left Panel | Viewport | Right Panel)
+        // ====================================================================
+        HorizontalBox {
+            spacing: 0px;
+            
+            // ================================================================
+            // Left Panel (Explorer, Toolbox, Assets, etc.)
+            // ================================================================
+            if root.show-explorer || root.show-toolbox || root.show-assets: Rectangle {
+                width: root.left-panel-width;
+                background: Theme.panel-background;
+                
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    
+                    // Tab bar
+                    HorizontalBox {
+                        height: 32px;
+                        padding-left: 4px;
+                        padding-right: 4px;
+                        spacing: 2px;
+                        
+                        Rectangle {
+                            background: root.left-tab-index == 0 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.left-tab-index = 0; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "📁 Explorer";
+                                    color: root.left-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: root.left-tab-index == 1 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.left-tab-index = 1; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "🛠 Toolbox";
+                                    color: root.left-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: root.left-tab-index == 2 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.left-tab-index = 2; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "📦 Assets";
+                                    color: root.left-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Tab content
+                    Rectangle {
+                        background: Theme.panel-background;
+                        
+                        if root.left-tab-index == 0: ExplorerPanel {
+                            on-select-entity(id) => { root.select-entity(id); }
+                            on-expand-entity(id) => { root.expand-entity(id); }
+                            on-collapse-entity(id) => { root.collapse-entity(id); }
+                            on-context-menu(x, y) => {
+                                root.context-menu-x = x;
+                                root.context-menu-y = y;
+                                root.show-context-menu = true;
+                            }
+                        }
+                        
+                        if root.left-tab-index == 1: Toolbox {
+                            current-tool: root.current-tool;
+                            on-select-tool(tool) => { root.select-tool(tool); }
+                        }
+                        
+                        if root.left-tab-index == 2: AssetManager {}
+                    }
+                }
+                
+                // Resize handle
+                Rectangle {
+                    x: parent.width - 4px;
+                    width: 4px;
+                    height: 100%;
+                    background: transparent;
+                    
+                    TouchArea {
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            root.left-panel-width = max(200px, min(500px, root.left-panel-width + (self.mouse-x - self.pressed-x)));
+                        }
+                    }
+                }
+            }
+
+            // ================================================================
+            // Central Viewport (displays Bevy 3D rendered texture)
+            // ================================================================
+            viewport-area := Rectangle {
+                horizontal-stretch: 1;
+                background: transparent;  // Transparent so Bevy 3D scene shows through
+                border-width: 0px;
+                
+                // Display Bevy-rendered 3D scene
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.viewport-image;
+                    image-fit: fill;
+                }
+                
+                // Layout Preset Selector (top-left, first item)
+                LayoutPresetSelector {
+                    x: 8px;
+                    y: 8px;
+                    current-preset-index: root.current-layout-preset;
+                    
+                    preset-selected(preset) => {
+                        root.show-explorer = preset.show-explorer;
+                        root.show-properties = preset.show-properties;
+                        root.show-output = preset.show-output;
+                        root.show-toolbox = preset.show-toolbox;
+                        root.show-assets = preset.show-assets;
+                        root.show-history = preset.show-history;
+                        root.show-soul-panel = preset.show-soul-panel;
+                        root.left-panel-width = preset.left-panel-width * 1px;
+                        root.right-panel-width = preset.right-panel-width * 1px;
+                        root.output-height = preset.output-height * 1px;
+                        root.left-tab-index = preset.left-tab-index;
+                        root.right-tab-index = preset.right-tab-index;
+                        root.apply-layout-preset(root.current-layout-preset);
+                    }
+                    save-current-layout => { root.save-layout-to-file(); }
+                    load-layout-from-file => { root.load-layout-from-file(); }
+                    reset-to-factory => { root.reset-layout-to-default(); }
+                }
+                
+                // Tool indicator overlay (below layout selector)
+                Rectangle {
+                    x: 8px;
+                    y: 48px;
+                    width: 120px;
+                    height: 28px;
+                    background: Theme.overlay-background;
+                    border-radius: 4px;
+                    
+                    HorizontalBox {
+                        padding: 6px;
+                        Text {
+                            text: root.current-tool == "select" ? "🖱 Select" :
+                                  root.current-tool == "move" ? "↔ Move" :
+                                  root.current-tool == "rotate" ? "🔄 Rotate" :
+                                  root.current-tool == "scale" ? "⤢ Scale" : root.current-tool;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // View selector overlay (top-right)
+                ViewSelector {
+                    x: parent.width - self.width - 8px;
+                    y: 8px;
+                    view-mode: root.view-mode;
+                    on-set-view-mode(mode) => { root.set-view-mode(mode); }
+                }
+                
+                // Performance Overlay (top-right, below view selector)
+                if root.show-performance-overlay: PerformanceOverlay {
+                    x: parent.width - self.width - 8px;
+                    y: 48px;
+                    fps: root.current-fps;
+                    frame-time-ms: root.current-frame-time;
+                    memory-mb: root.current-memory-mb;
+                    entity-count: root.current-entity-count;
+                }
+                
+                // Theme Editor toggle button (top-right corner)
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: parent.height - 36px;
+                    width: 28px;
+                    height: 28px;
+                    background: Theme.overlay-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.show-theme-editor = !root.show-theme-editor; }
+                        
+                        Text {
+                            text: "🎨";
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Selection info overlay (bottom-left)
+                if root.selected-count > 0: Rectangle {
+                    x: 8px;
+                    y: parent.height - self.height - 8px;
+                    width: 200px;
+                    height: 28px;
+                    background: Theme.overlay-background;
+                    border-radius: 4px;
+                    
+                    HorizontalBox {
+                        padding: 6px;
+                        Text {
+                            text: root.selected-count == 1 ? 
+                                  "1 " + root.selected-class + " selected" :
+                                  root.selected-count + " objects selected";
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Play mode indicator
+                if root.play-state != "stopped": Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 8px;
+                    width: 140px;
+                    height: 32px;
+                    background: root.play-state == "playing" ? #2d7d46 : #7d6d2d;
+                    border-radius: 4px;
+                    
+                    HorizontalBox {
+                        padding: 8px;
+                        alignment: center;
+                        Text {
+                            text: root.play-state == "playing" ? "▶ Playing" : "⏸ Paused";
+                            color: white;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ================================================================
+            // Right Panel (Properties, History, Soul, Script Editor)
+            // ================================================================
+            if root.show-properties || root.show-history || root.show-soul-panel || root.show-script-editor: Rectangle {
+                width: root.right-panel-width;
+                background: Theme.panel-background;
+                
+                // Resize handle
+                Rectangle {
+                    x: 0px;
+                    width: 4px;
+                    height: 100%;
+                    background: transparent;
+                    
+                    TouchArea {
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            root.right-panel-width = max(250px, min(600px, root.right-panel-width - (self.mouse-x - self.pressed-x)));
+                        }
+                    }
+                }
+                
+                VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    
+                    // Tab bar
+                    HorizontalBox {
+                        height: 32px;
+                        padding-left: 4px;
+                        padding-right: 4px;
+                        spacing: 2px;
+                        
+                        Rectangle {
+                            background: root.right-tab-index == 0 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.right-tab-index = 0; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "⚙ Properties";
+                                    color: root.right-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: root.right-tab-index == 1 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.right-tab-index = 1; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "📜 History";
+                                    color: root.right-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        
+                        Rectangle {
+                            background: root.right-tab-index == 2 ? Theme.tab-active : Theme.tab-inactive;
+                            border-radius: 4px;
+                            border-top-left-radius: 4px;
+                            border-top-right-radius: 4px;
+                            border-bottom-left-radius: 0px;
+                            border-bottom-right-radius: 0px;
+                            
+                            TouchArea {
+                                clicked => { root.right-tab-index = 2; }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                Text {
+                                    text: "@ Soul";
+                                    color: root.right-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Tab content
+                    Rectangle {
+                        background: Theme.panel-background;
+                        
+                        if root.right-tab-index == 0: PropertiesPanel {
+                            selected-count: root.selected-count;
+                            selected-class: root.selected-class;
+                            on-property-changed(name, value) => { root.property-changed(name, value); }
+                        }
+                        
+                        if root.right-tab-index == 1: HistoryPanel {
+                            on-undo => { root.undo(); }
+                            on-redo => { root.redo(); }
+                        }
+                        
+                        if root.right-tab-index == 2: SoulPanel {
+                            on-build-script(id) => { root.build-script(id); }
+                            on-open-script(id) => { root.open-script(id); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // Bottom Area (Output Console + Command Bar)
+        // ====================================================================
+        if root.show-output: Rectangle {
+            height: root.output-height;
+            background: Theme.panel-background;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            
+            // Resize handle
+            Rectangle {
+                y: 0px;
+                width: 100%;
+                height: 4px;
+                background: transparent;
+                
+                TouchArea {
+                    mouse-cursor: ns-resize;
+                    moved => {
+                        root.output-height = max(100px, min(400px, root.output-height - (self.mouse-y - self.pressed-y)));
+                    }
+                }
+            }
+            
+            VerticalBox {
+                padding: 0px;
+                spacing: 0px;
+                
+                // Output header
+                Rectangle {
+                    height: 28px;
+                    background: Theme.header-background;
+                    
+                    HorizontalBox {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        
+                        Text {
+                            text: "📋 Output";
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        
+                        Rectangle { horizontal-stretch: 1; }
+                        
+                        Button {
+                            text: "Clear";
+                            clicked => { /* Clear output */ }
+                        }
+                    }
+                }
+                
+                // Output content
+                OutputConsole {}
+            }
+        }
+        
+        // Command bar (toggle with Ctrl+Shift+P)
+        if root.show-command-bar: CommandBar {
+            command-text <=> root.command-text;
+            on-execute(cmd) => { root.execute-command(cmd); }
+            on-close => { root.show-command-bar = false; }
+        }
+    }
+
+    // ========================================================================
+    // Overlays and Dialogs
+    // ========================================================================
+    
+    // Notifications (toast messages)
+    Notifications {
+        x: parent.width - 320px;
+        y: 80px;
+    }
+    
+    // Context menu
+    if root.show-context-menu: ContextMenu {
+        x: root.context-menu-x;
+        y: root.context-menu-y;
+        on-action(action) => {
+            root.context-action(action);
+            root.show-context-menu = false;
+        }
+        on-close => { root.show-context-menu = false; }
+    }
+    
+    // Publish dialog
+    if root.show-publish-dialog: PublishDialog {
+        on-publish => { root.publish(); }
+        on-close => { root.show-publish-dialog = false; }
+    }
+    
+    // Login dialog
+    if root.show-login-dialog: LoginDialog {
+        on-login => { root.login(); }
+        on-close => { root.show-login-dialog = false; }
+    }
+    
+    // Exit confirmation
+    if root.show-exit-confirmation: ExitConfirmationDialog {
+        scene-name: root.scene-name;
+        on-save-and-exit => {
+            root.save-scene();
+            root.show-exit-confirmation = false;
+            // Trigger exit after save
+        }
+        on-exit-without-saving => {
+            root.show-exit-confirmation = false;
+            // Trigger exit without save
+        }
+        on-cancel => { root.show-exit-confirmation = false; }
+    }
+    
+    // Settings dialog
+    if root.show-settings-dialog: SettingsDialog {
+        on-save => { root.show-settings-dialog = false; }
+        on-close => { root.show-settings-dialog = false; }
+    }
+    
+    // Theme Editor panel (floating overlay)
+    if root.show-theme-editor: Rectangle {
+        x: parent.width - 280px;
+        y: parent.height - 320px;
+        width: 260px;
+        height: 300px;
+        background: Theme.panel-background;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000060;
+        
+        VerticalBox {
+            padding: 0px;
+            
+            // Header with close button
+            Rectangle {
+                height: 32px;
+                background: Theme.header-background;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                
+                HorizontalBox {
+                    padding: 8px;
+                    
+                    Text {
+                        text: "🎨 Theme Settings";
+                        color: Theme.text-primary;
+                        font-weight: 600;
+                        horizontal-stretch: 1;
+                    }
+                    
+                    TouchArea {
+                        width: 20px;
+                        clicked => { root.show-theme-editor = false; }
+                        
+                        Text {
+                            text: "×";
+                            color: Theme.text-secondary;
+                            font-size: 16px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            
+            ThemeEditor {
+                dark-mode: root.dark-theme;
+                high-contrast: root.high-contrast-mode;
+                ui-scale: root.ui-scale;
+                
+                theme-changed => {
+                    root.dark-theme = self.dark-mode;
+                    root.high-contrast-mode = self.high-contrast;
+                    root.ui-scale = self.ui-scale;
+                }
+                
+                apply-theme => {
+                    root.apply-theme-settings(root.dark-theme, root.high-contrast-mode, root.ui-scale);
+                    root.show-theme-editor = false;
+                }
+            }
+        }
+    }
+    
+    // Find dialog
+    if root.show-find-dialog: FindDialog {
+        on-close => { root.show-find-dialog = false; }
+    }
+    
+    // Soul settings dialog
+    if root.show-soul-settings-dialog: SoulSettingsDialog {
+        on-save => { root.show-soul-settings-dialog = false; }
+        on-close => { root.show-soul-settings-dialog = false; }
+    }
+    
+    // Forge connect dialog
+    if root.show-forge-connect-dialog: ForgeConnectDialog {
+        on-connect => { root.connect-forge(); }
+        on-close => { root.show-forge-connect-dialog = false; }
+    }
+    
+    // Stress test dialog
+    if root.show-stress-test-dialog: StressTestDialog {
+        on-start => { /* start stress test */ }
+        on-stop => { /* stop stress test */ }
+        on-close => { root.show-stress-test-dialog = false; }
+    }
+    
+    // Data sources dialog
+    if root.show-global-sources-window: DataSourcesDialog {
+        on-close => { root.show-global-sources-window = false; }
+    }
+    
+    // Sync domain dialog
+    if root.show-sync-domain-dialog: SyncDomainDialog {
+        on-sync => { root.show-sync-domain-dialog = false; }
+        on-close => { root.show-sync-domain-dialog = false; }
+    }
+}

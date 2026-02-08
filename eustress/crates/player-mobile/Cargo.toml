@@ -25,8 +25,8 @@ ios = []
 # Shared game logic
 # eustress-common = { path = "../common", features = ["mobile"] }
 
-# Bevy with mobile support
-bevy = { version = "0.17", default-features = false, features = [
+# Bevy with mobile support (matching engine's Bevy 0.19 from git)
+bevy = { git = "https://github.com/bevyengine/bevy", branch = "main", default-features = false, features = [
     "bevy_asset",
     "bevy_render",
     "bevy_winit",

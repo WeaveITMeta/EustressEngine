@@ -1,0 +1,268 @@
+// ============================================================================
+// Eustress Engine Studio - Script Editor
+// Tabbed code editor for Soul scripts
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Open script tab
+export struct ScriptTab {
+    entity-id: int,
+    name: string,
+    dirty: bool,
+    content: string,
+}
+
+component EditorTab inherits Rectangle {
+    in property <string> name: "";
+    in property <bool> dirty: false;
+    in property <bool> active: false;
+    
+    callback clicked();
+    callback close();
+    
+    height: 32px;
+    min-width: 100px;
+    max-width: 200px;
+    background: self.active ? Theme.tab-active : Theme.tab-inactive;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    
+    HorizontalBox {
+        padding-left: 12px;
+        padding-right: 4px;
+        spacing: 4px;
+        
+        TouchArea {
+            horizontal-stretch: 1;
+            clicked => { root.clicked(); }
+            
+            HorizontalBox {
+                Text {
+                    text: root.name;
+                    color: root.active ? Theme.text-primary : Theme.text-secondary;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                
+                if root.dirty: Text {
+                    text: "●";
+                    color: Theme.text-warning;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        
+        // Close button
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            background: close-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 4px;
+            
+            close-touch := TouchArea {
+                clicked => { root.close(); }
+            }
+            
+            Text {
+                text: "✕";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component ScriptEditor inherits Rectangle {
+    // Properties
+    in property <[ScriptTab]> tabs: [];
+    in property <int> active-tab: 0;
+    in-out property <string> current-content: "";
+    in property <int> cursor-line: 1;
+    in property <int> cursor-column: 1;
+    
+    // Callbacks
+    callback on-tab-selected(int);
+    callback on-tab-closed(int);
+    callback on-content-changed(string);
+    callback on-save();
+    callback on-build();
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Tab bar
+        Rectangle {
+            height: 32px;
+            background: Theme.background-secondary;
+            
+            HorizontalBox {
+                padding-left: 4px;
+                spacing: 2px;
+                
+                for tab[index] in root.tabs: EditorTab {
+                    name: tab.name;
+                    dirty: tab.dirty;
+                    active: index == root.active-tab;
+                    
+                    clicked => { root.on-tab-selected(index); }
+                    close => { root.on-tab-closed(index); }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        
+        // Toolbar
+        Rectangle {
+            height: 32px;
+            background: Theme.header-background;
+            
+            HorizontalBox {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 8px;
+                
+                // Save button
+                Rectangle {
+                    width: 60px;
+                    height: 24px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-save(); }
+                    }
+                    
+                    HorizontalBox {
+                        padding: 4px;
+                        spacing: 4px;
+                        
+                        Text {
+                            text: "💾";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        
+                        Text {
+                            text: "Save";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Build button
+                Rectangle {
+                    width: 70px;
+                    height: 24px;
+                    background: Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-build(); }
+                    }
+                    
+                    HorizontalBox {
+                        padding: 4px;
+                        spacing: 4px;
+                        
+                        Text {
+                            text: "🔨";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        
+                        Text {
+                            text: "Build";
+                            color: white;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Cursor position
+                Text {
+                    text: "Ln " + root.cursor-line + ", Col " + root.cursor-column;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        
+        // Editor area
+        if root.tabs.length == 0: Rectangle {
+            vertical-stretch: 1;
+            background: Theme.viewport-background;
+            
+            VerticalBox {
+                alignment: center;
+                
+                Text {
+                    text: "📜";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "No scripts open";
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Double-click a Soul script in the Explorer to edit";
+                    color: Theme.text-disabled;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        
+        if root.tabs.length > 0: Rectangle {
+            vertical-stretch: 1;
+            background: Theme.viewport-background;
+            
+            HorizontalBox {
+                // Line numbers
+                Rectangle {
+                    width: 50px;
+                    background: Theme.background-secondary;
+                    
+                    // Line numbers would be rendered here
+                    Text {
+                        text: "1\n2\n3\n4\n5";
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                        font-family: "Consolas";
+                        horizontal-alignment: right;
+                        padding-right: 8px;
+                        padding-top: 4px;
+                    }
+                }
+                
+                // Code editor
+                TextEdit {
+                    horizontal-stretch: 1;
+                    text <=> root.current-content;
+                    font-size: 13px;
+                    
+                    edited(text) => { root.on-content-changed(text); }
+                }
+            }
+        }
+    }
+}

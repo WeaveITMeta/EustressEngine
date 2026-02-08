@@ -23,6 +23,7 @@ pub mod prelude {
 }
 
 use bevy::prelude::*;
+use tracing::info;
 
 /// Materials science plugin
 pub struct MaterialsPlugin;

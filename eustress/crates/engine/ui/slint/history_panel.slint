@@ -1,0 +1,243 @@
+// ============================================================================
+// Eustress Engine Studio - History Panel
+// Undo/Redo history visualization
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// History entry data
+export struct HistoryEntry {
+    id: int,
+    action: string,
+    description: string,
+    timestamp: string,
+    is-current: bool,
+    can-undo: bool,
+}
+
+component HistoryItem inherits Rectangle {
+    in property <string> action: "";
+    in property <string> description: "";
+    in property <string> timestamp: "";
+    in property <bool> is-current: false;
+    in property <bool> is-future: false;
+    
+    callback clicked();
+    
+    height: 40px;
+    background: self.is-current ? Theme.selection-background : 
+                touch.has-hover ? Theme.explorer-item-hover : transparent;
+    opacity: self.is-future ? 0.5 : 1.0;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        
+        // Current indicator
+        Rectangle {
+            width: 4px;
+            height: 24px;
+            background: root.is-current ? Theme.accent-blue : transparent;
+            border-radius: 2px;
+        }
+        
+        // Icon
+        Text {
+            width: 20px;
+            text: root.action == "create" ? "+" :
+                  root.action == "delete" ? "-" :
+                  root.action == "move" ? "↔" :
+                  root.action == "rotate" ? "🔄" :
+                  root.action == "scale" ? "⤢" :
+                  root.action == "property" ? "⚙" :
+                  root.action == "paste" ? "📋" : "•";
+            color: root.is-current ? Theme.accent-blue : Theme.text-secondary;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        
+        // Description
+        VerticalBox {
+            horizontal-stretch: 1;
+            spacing: 0px;
+            
+            Text {
+                text: root.description;
+                color: root.is-current ? Theme.text-primary : 
+                       root.is-future ? Theme.text-disabled : Theme.text-primary;
+                font-size: 12px;
+                overflow: elide;
+            }
+            
+            Text {
+                text: root.timestamp;
+                color: Theme.text-disabled;
+                font-size: 10px;
+            }
+        }
+    }
+}
+
+export component HistoryPanel inherits Rectangle {
+    // Properties
+    in property <[HistoryEntry]> history: [];
+    in property <int> current-index: 0;
+    
+    // Callbacks
+    callback on-undo();
+    callback on-redo();
+    callback on-jump-to(int);
+    callback on-clear-history();
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Header with undo/redo buttons
+        Rectangle {
+            height: 40px;
+            background: Theme.header-background;
+            
+            HorizontalBox {
+                padding: 4px;
+                spacing: 4px;
+                
+                // Undo button
+                Rectangle {
+                    width: 60px;
+                    height: 28px;
+                    background: undo-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                    border-radius: 4px;
+                    
+                    undo-touch := TouchArea {
+                        clicked => { root.on-undo(); }
+                    }
+                    
+                    HorizontalBox {
+                        padding: 4px;
+                        spacing: 4px;
+                        alignment: center;
+                        
+                        Text {
+                            text: "↩";
+                            color: Theme.text-primary;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        
+                        Text {
+                            text: "Undo";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Redo button
+                Rectangle {
+                    width: 60px;
+                    height: 28px;
+                    background: redo-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                    border-radius: 4px;
+                    
+                    redo-touch := TouchArea {
+                        clicked => { root.on-redo(); }
+                    }
+                    
+                    HorizontalBox {
+                        padding: 4px;
+                        spacing: 4px;
+                        alignment: center;
+                        
+                        Text {
+                            text: "↪";
+                            color: Theme.text-primary;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        
+                        Text {
+                            text: "Redo";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Clear button
+                Rectangle {
+                    width: 50px;
+                    height: 28px;
+                    background: clear-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 4px;
+                    
+                    clear-touch := TouchArea {
+                        clicked => { root.on-clear-history(); }
+                    }
+                    
+                    Text {
+                        text: "Clear";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // History list
+        if root.history.length == 0: Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                alignment: center;
+                
+                Text {
+                    text: "📜";
+                    color: Theme.text-secondary;
+                    font-size: 32px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "No history";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        
+        if root.history.length > 0: ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 4px;
+                spacing: 2px;
+                
+                for entry[index] in root.history: HistoryItem {
+                    action: entry.action;
+                    description: entry.description;
+                    timestamp: entry.timestamp;
+                    is-current: entry.is-current;
+                    is-future: index > root.current-index;
+                    
+                    clicked => { root.on-jump-to(entry.id); }
+                }
+            }
+        }
+    }
+}

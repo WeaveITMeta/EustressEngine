@@ -19,6 +19,7 @@
 //! ```
 
 use bevy::prelude::*;
+use tracing::info;
 #[allow(unused_imports)]
 use crate::scene::{Scene, AtmosphereSettings, WorkspaceSettings, PlayerSettings, SpawnLocationData};
 use crate::services::{LightingService, Workspace, PlayerService};

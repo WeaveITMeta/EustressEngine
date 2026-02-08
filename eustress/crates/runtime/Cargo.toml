@@ -16,13 +16,13 @@ eustress-common = { path = "../common" }
 # Networking (optional - for replication sync)
 eustress-networking = { path = "../common/eustress-networking", optional = true }
 
-# Physics (optional - for Avian integration)
-avian3d = { workspace = true, optional = true }
+# Physics (optional - for Avian integration) - DISABLED until Bevy 0.19 support
+# avian3d = { workspace = true, optional = true }
 
 # Utilities
 tracing = "0.1"
 
 [features]
-default = ["networking", "physics"]
+default = ["networking"]
 networking = ["eustress-networking"]
-physics = ["avian3d"]
+# physics = ["avian3d"]

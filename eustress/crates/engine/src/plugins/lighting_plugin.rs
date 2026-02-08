@@ -101,7 +101,8 @@ fn setup_lighting_explorer_entities(
                 name: "Sun".to_string(),
                 class_name: ClassName::Sun,
                 archivable: true,
-                id: entity.index(),
+                id: entity.index().index(),
+                ..Default::default()
             },
             sun_class,
             LightingServiceOwner,
@@ -116,7 +117,8 @@ fn setup_lighting_explorer_entities(
                 name: "Moon".to_string(),
                 class_name: ClassName::Moon,
                 archivable: true,
-                id: entity.index(),
+                id: entity.index().index(),
+                ..Default::default()
             },
             MoonClass::default(),
             LightingServiceOwner,
@@ -139,6 +141,7 @@ fn setup_lighting_explorer_entities(
                 class_name: ClassName::Atmosphere,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
         )).id();
         
@@ -147,7 +150,8 @@ fn setup_lighting_explorer_entities(
             name: "Atmosphere".to_string(),
             class_name: ClassName::Atmosphere,
             archivable: true,
-            id: atmo_entity.index(),
+            id: atmo_entity.index().index(),
+            ..Default::default()
         });
     }
 }

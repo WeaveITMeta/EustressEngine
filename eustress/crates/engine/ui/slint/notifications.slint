@@ -1,0 +1,153 @@
+// ============================================================================
+// Eustress Engine Studio - Notifications
+// Toast notification system
+// ============================================================================
+
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Notification data
+export struct NotificationData {
+    id: int,
+    level: string, // "info", "success", "warning", "error"
+    title: string,
+    message: string,
+    duration-ms: int,
+    dismissible: bool,
+}
+
+component NotificationToast inherits Rectangle {
+    in property <string> level: "info";
+    in property <string> title: "";
+    in property <string> message: "";
+    in property <bool> dismissible: true;
+    
+    callback dismissed();
+    
+    width: 300px;
+    height: 72px;
+    background: Theme.dialog-background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.level == "error" ? Theme.accent-red :
+                  root.level == "warning" ? Theme.accent-yellow :
+                  root.level == "success" ? Theme.accent-green :
+                  Theme.accent-blue;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: Theme.shadow-color;
+    
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+        
+        // Icon
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            background: root.level == "error" ? Theme.accent-red :
+                        root.level == "warning" ? Theme.accent-yellow :
+                        root.level == "success" ? Theme.accent-green :
+                        Theme.accent-blue;
+            border-radius: 16px;
+            
+            Text {
+                text: root.level == "error" ? "✕" :
+                      root.level == "warning" ? "!" :
+                      root.level == "success" ? "✓" : "i";
+                color: white;
+                font-size: 16px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        // Content
+        VerticalBox {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-weight: 600;
+                overflow: elide;
+            }
+            
+            Text {
+                text: root.message;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                overflow: elide;
+                wrap: word-wrap;
+            }
+        }
+        
+        // Dismiss button
+        if root.dismissible: Rectangle {
+            width: 24px;
+            height: 24px;
+            background: dismiss-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 4px;
+            
+            dismiss-touch := TouchArea {
+                clicked => { root.dismissed(); }
+            }
+            
+            Text {
+                text: "✕";
+                color: Theme.text-secondary;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    
+    // Progress bar for auto-dismiss
+    Rectangle {
+        y: parent.height - 3px;
+        width: parent.width;
+        height: 3px;
+        background: transparent;
+        border-bottom-left-radius: 8px;
+        border-bottom-right-radius: 8px;
+        clip: true;
+        
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: root.level == "error" ? Theme.accent-red :
+                        root.level == "warning" ? Theme.accent-yellow :
+                        root.level == "success" ? Theme.accent-green :
+                        Theme.accent-blue;
+            // Animation would be controlled from Rust
+        }
+    }
+}
+
+export component Notifications inherits Rectangle {
+    // Properties
+    in property <[NotificationData]> notifications: [];
+    
+    // Callbacks
+    callback on-dismiss(int);
+    
+    width: 320px;
+    background: transparent;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 8px;
+        alignment: start;
+        
+        for notification in root.notifications: NotificationToast {
+            level: notification.level;
+            title: notification.title;
+            message: notification.message;
+            dismissible: notification.dismissible;
+            
+            dismissed => { root.on-dismiss(notification.id); }
+        }
+    }
+}

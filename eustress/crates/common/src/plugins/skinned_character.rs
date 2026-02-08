@@ -18,7 +18,9 @@
 //! ```
 
 use bevy::prelude::*;
+#[cfg(feature = "physics")]
 use avian3d::prelude::*;
+use tracing::info;
 
 use crate::services::animation::{AnimationStateMachine, LocomotionController, ProceduralAnimation};
 use crate::services::player::{Character, CharacterRoot};
@@ -193,17 +195,17 @@ pub fn spawn_skinned_character(
         Name::new("SkinnedCharacter"),
     )).id();
     
-    // Add physics components
-    commands.entity(character_entity).insert((
-        RigidBody::Dynamic,
-        Collider::capsule(capsule_radius, capsule_half_height),
-        CollisionMargin(0.02),
-        LockedAxes::ROTATION_LOCKED,
-        Friction::new(1.0),
-        Restitution::new(0.0),
-        GravityScale(1.0),
-        LinearVelocity::default(),
-    ));
+    // Add physics components - DISABLED for Bevy 0.19
+    // commands.entity(character_entity).insert((
+    //     RigidBody::Dynamic,
+    //     Collider::capsule(capsule_radius, capsule_half_height),
+    //     CollisionMargin(0.02),
+    //     LockedAxes::ROTATION_LOCKED,
+    //     Friction::new(1.0),
+    //     Restitution::new(0.0),
+    //     GravityScale(1.0),
+    //     LinearVelocity::default(),
+    // ));
     
     // Add character components (including movement components for SharedCharacterPlugin)
     commands.entity(character_entity).insert((

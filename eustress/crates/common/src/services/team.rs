@@ -17,6 +17,7 @@
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 // ============================================================================
 // BrickColor - Roblox-style color palette

@@ -274,6 +274,7 @@ impl CommandBarPanel {
                                     .fill(match config.mode {
                                         GenerativeMode::Soul => egui::Color32::from_rgb(75, 0, 130),    // Purple for Soul
                                         GenerativeMode::Abstract => egui::Color32::from_rgb(0, 100, 150), // Teal for Abstract
+                                        _ => egui::Color32::from_rgb(50, 50, 50), // Default for other modes
                                     })
                             );
                             if mode_response.clicked() {
@@ -292,7 +293,7 @@ impl CommandBarPanel {
                         
                         // === Abstract Confirmation Button ===
                         let awaiting_count = world.get_resource::<GenerativePipelineState>()
-                            .map(|s| s.awaiting_confirmation.len())
+                            .map(|s| if s.awaiting_confirmation { 1 } else { 0 })
                             .unwrap_or(0);
                         
                         if awaiting_count > 0 {
@@ -302,7 +303,7 @@ impl CommandBarPanel {
                                 .on_hover_text("Confirm and finalize all generated Abstract parts.\nThis replaces placeholders with the generated content.")
                                 .clicked() 
                             {
-                                world.write_message(ConfirmAbstractEvent { entities: vec![] });
+                                world.write_message(ConfirmAbstractEvent { tag: AbstractTag::default(), confirmed: true });
                                 state.status = format!("Confirming {} Abstract part(s)...", awaiting_count);
                             }
                         }
@@ -715,14 +716,14 @@ impl CommandBarPanel {
             // Abstract confirmation command
             "confirm" => {
                 let awaiting = world.get_resource::<GenerativePipelineState>()
-                    .map(|s| s.awaiting_confirmation.len())
+                    .map(|s| if s.awaiting_confirmation { 1 } else { 0 })
                     .unwrap_or(0);
                 
                 if awaiting == 0 {
                     return CommandResult::Success("No Abstract parts awaiting confirmation".to_string());
                 }
                 
-                world.write_message(ConfirmAbstractEvent { entities: vec![] });
+                world.write_message(ConfirmAbstractEvent { tag: AbstractTag::default(), confirmed: true });
                 CommandResult::Success(format!("✓ Confirming {} Abstract part(s)...", awaiting))
             }
             
@@ -755,7 +756,7 @@ impl CommandBarPanel {
                         for id_str in &selected {
                             if let Some(entity) = parse_entity_from_debug(id_str) {
                                 if world.get_entity(entity).is_ok() {
-                                    world.entity_mut(entity).insert(AbstractTag::new(prompt.clone()));
+                                    world.entity_mut(entity).insert(AbstractTag::new(format!("abstract_{}", count), prompt.clone()));
                                     count += 1;
                                 }
                             }
@@ -791,6 +792,7 @@ impl CommandBarPanel {
                             let status = match &tag.status {
                                 AbstractStatus::Pending => "⏳",
                                 AbstractStatus::Generating => "🔄",
+                                AbstractStatus::Processing => "⚙️",
                                 AbstractStatus::Complete => "✅",
                                 AbstractStatus::Failed(_) => "❌",
                                 AbstractStatus::Confirmed => "✓",
@@ -1234,11 +1236,10 @@ impl CommandBarPanel {
             
             // Update drag hover state
             state.drag_hover = i.raw.hovered_files.iter().any(|f| {
-                f.name.ends_with(".png")
-                    || f.name.ends_with(".jpg")
-                    || f.name.ends_with(".jpeg")
-                    || f.name.ends_with(".webp")
-                    || f.name.ends_with(".gif")
+                f.path.as_ref().map_or(false, |p| {
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    matches!(ext.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
+                })
             });
         });
     }

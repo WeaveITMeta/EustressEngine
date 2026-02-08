@@ -219,12 +219,9 @@ impl PluginManager {
     }
     
     /// Render UI for all enabled plugins
-    pub fn render_ui(&mut self, ctx: &bevy_egui::egui::Context, registry: &mut PluginRegistry) {
-        for plugin_id in &self.enabled.clone() {
-            if let (Some(plugin), Some(api)) = (registry.get_mut(plugin_id), self.apis.get_mut(plugin_id)) {
-                plugin.on_ui(ctx, api);
-            }
-        }
+    /// Note: Plugin UI rendering is now handled via Slint integration
+    pub fn render_ui(&mut self, _registry: &mut PluginRegistry) {
+        // Plugin UI is now handled by Slint - see slint_ui.rs
     }
     
     /// Handle menu action for plugins

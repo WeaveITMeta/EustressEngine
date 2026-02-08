@@ -1,0 +1,14 @@
+//! # Notifications
+//!
+//! Stub module for UI notifications.
+
+use bevy::prelude::*;
+
+/// Notifications plugin placeholder
+pub struct NotificationsPlugin;
+
+impl Plugin for NotificationsPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement notifications
+    }
+}

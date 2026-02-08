@@ -1,0 +1,14 @@
+//! # Rune API (UI)
+//!
+//! Stub module for Rune API UI integration.
+
+use bevy::prelude::*;
+
+/// Rune API UI plugin placeholder
+pub struct RuneApiUiPlugin;
+
+impl Plugin for RuneApiUiPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement Rune API UI
+    }
+}

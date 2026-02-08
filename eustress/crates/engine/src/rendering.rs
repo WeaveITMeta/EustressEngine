@@ -120,8 +120,8 @@ fn setup_scene(
             .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Add ambient light (Bevy 0.17)
-    commands.insert_resource(AmbientLight {
+    // Add ambient light (Bevy 0.18 - GlobalAmbientLight is the Resource)
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 300.0,
         affects_lightmapped_meshes: true,
@@ -376,11 +376,12 @@ fn update_part_transforms_old(
 #[cfg(not(target_arch = "wasm32"))]
 fn update_selection_highlights(
     mut commands: Commands,
-    selection_manager: Res<BevySelectionManager>,
+    selection_manager: Option<Res<BevySelectionManager>>,
     part_entities: Res<PartEntities>,
     highlighted: Query<Entity, With<SelectionHighlight>>,
     _parts: Query<&PartEntity>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     // Get currently selected part IDs
     let selected = selection_manager.0.read().get_selected();
 

@@ -1,0 +1,37 @@
+//! # Explorer Search UI
+//!
+//! Stub module for explorer search UI.
+
+use bevy::prelude::*;
+use bevy_egui::egui;
+
+/// Explorer search UI plugin placeholder
+pub struct ExplorerSearchUiPlugin;
+
+impl Plugin for ExplorerSearchUiPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement explorer search UI
+    }
+}
+
+/// Show advanced search panel
+pub fn show_advanced_search_panel(
+    _ui: &mut egui::Ui,
+    _state: &mut super::explorer_search::AdvancedSearchState,
+    _engine: &mut super::explorer_search::ExplorerSearchEngine,
+) {
+    // TODO: Implement advanced search panel
+}
+
+/// Show search results
+pub fn show_search_results(
+    _ui: &mut egui::Ui,
+    _results: &[bevy::prelude::Entity],
+) {
+    // TODO: Implement search results display
+}
+
+/// Show syntax help
+pub fn show_syntax_help(_ui: &mut egui::Ui) {
+    // TODO: Implement syntax help
+}

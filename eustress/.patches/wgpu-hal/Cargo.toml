@@ -1,0 +1,43 @@
+[package]
+name = "wgpu-hal"
+version = "28.0.0"
+edition = "2021"
+description = "Hardware abstraction layer for wgpu"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90.0"
+
+[features]
+metal = []
+vulkan = ["ash", "gpu-descriptor", "smallvec"]
+gles = ["glow", "khronos-egl", "libloading"]
+dx12 = ["windows", "windows-core", "gpu-allocator/d3d12"]
+
+[dependencies]
+naga = { version = "0.28", features = ["spv-out", "msl-out", "wgsl-in"] }
+wgpu-types = { version = "28.0.0", default-features = false }
+bitflags = "2.9"
+cfg-if = "1"
+raw-window-handle = "0.6.2"
+thiserror = "2"
+
+# DX12 dependencies
+windows = { version = "0.62", optional = true }
+windows-core = { version = "0.62", optional = true }
+gpu-allocator = { version = "0.28", optional = true, default-features = false }
+
+# Vulkan dependencies
+ash = { version = "0.38", optional = true }
+gpu-descriptor = { version = "0.3", optional = true }
+smallvec = { version = "1.14", optional = true, features = ["union"] }
+
+# GLES dependencies
+glow = { version = "0.16", optional = true }
+khronos-egl = { version = "6", features = ["dynamic"], optional = true }
+libloading = { version = "0.8", optional = true }
+
+# Vulkan on Unix
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[build-dependencies]
+cfg_aliases = "0.2"

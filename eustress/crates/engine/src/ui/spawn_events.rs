@@ -45,11 +45,14 @@ pub fn handle_spawn_part_events(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
-    selection_manager: Res<BevySelectionManager>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    selection_manager: Option<Res<BevySelectionManager>>,
     mut camera_query: Query<&mut EustressCamera>,
-    play_mode_state: Res<State<PlayModeState>>,
+    play_mode_state: Option<Res<State<PlayModeState>>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
+    let Some(mut notifications) = notifications else { return };
+    let Some(play_mode_state) = play_mode_state else { return };
     let is_playing = *play_mode_state.get() != PlayModeState::Editing;
     for event in spawn_events.read() {
         // Determine part name based on type
@@ -81,6 +84,7 @@ pub fn handle_spawn_part_events(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() % u32::MAX as u128) as u32, // Generate ID from timestamp
+            ..Default::default()
         };
         
         // Calculate actual position (center + half height to sit on ground)
@@ -105,6 +109,7 @@ pub fn handle_spawn_part_events(
             collision_group: "Default".to_string(),
             density: 700.0,
             mass: 0.0,
+            ..Default::default()
         };
         
         // Create Part
@@ -157,9 +162,11 @@ pub fn handle_paste_part_events(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    selection_manager: Res<BevySelectionManager>,
-    play_mode_state: Res<State<PlayModeState>>,
+    selection_manager: Option<Res<BevySelectionManager>>,
+    play_mode_state: Option<Res<State<PlayModeState>>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
+    let Some(play_mode_state) = play_mode_state else { return };
     let is_playing = *play_mode_state.get() != PlayModeState::Editing;
     
     // Collect all pasted entity IDs for selection
@@ -175,6 +182,7 @@ pub fn handle_paste_part_events(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() % u32::MAX as u128) as u32,
+            ..Default::default()
         };
         
         // Create BasePart with all the copied properties
@@ -200,6 +208,7 @@ pub fn handle_paste_part_events(
             collision_group: "Default".to_string(),
             density: 700.0,
             mass: 0.0,
+            ..Default::default()
         };
         
         // Create Part with the original shape
@@ -288,8 +297,9 @@ pub fn handle_spawn_terrain_events(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     existing_terrain: Query<Entity, With<TerrainRoot>>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
+    let Some(mut notifications) = notifications else { return };
     for event in spawn_events.read() {
         // Remove existing terrain
         for entity in existing_terrain.iter() {
@@ -313,9 +323,11 @@ pub fn handle_spawn_terrain_events(
 /// System to handle terrain edit toggle
 pub fn handle_toggle_terrain_edit(
     mut toggle_events: MessageReader<ToggleTerrainEditEvent>,
-    mut mode: ResMut<TerrainMode>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
+    mode: Option<ResMut<TerrainMode>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
+    let Some(mut mode) = mode else { return };
+    let Some(mut notifications) = notifications else { return };
     for _event in toggle_events.read() {
         *mode = match *mode {
             TerrainMode::Render => {
@@ -333,9 +345,11 @@ pub fn handle_toggle_terrain_edit(
 /// System to handle terrain brush mode changes
 pub fn handle_set_terrain_brush(
     mut brush_events: MessageReader<SetTerrainBrushEvent>,
-    mut brush: ResMut<TerrainBrush>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
+    brush: Option<ResMut<TerrainBrush>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
+    let Some(mut brush) = brush else { return };
+    let Some(mut notifications) = notifications else { return };
     for event in brush_events.read() {
         brush.mode = event.mode;
         notifications.info(format!("Terrain Brush: {:?}", event.mode));

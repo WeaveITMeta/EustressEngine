@@ -1,0 +1,757 @@
+// ============================================================================
+// Dock Layout System - Containerized Panel Management
+// Features: Layout Presets, Advanced Tabs, Floating Panels, Context-Aware Docking,
+//           Theme/Accessibility, Performance Feedback
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, Button, ComboBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// ============================================================================
+// Layout Preset Definition
+// ============================================================================
+
+export struct LayoutPreset {
+    name: string,
+    description: string,
+    icon: string,
+    // Panel visibility
+    show-explorer: bool,
+    show-properties: bool,
+    show-output: bool,
+    show-toolbox: bool,
+    show-assets: bool,
+    show-history: bool,
+    show-soul-panel: bool,
+    // Panel sizes
+    left-panel-width: float,
+    right-panel-width: float,
+    output-height: float,
+    // Tab indices
+    left-tab-index: int,
+    right-tab-index: int,
+}
+
+// ============================================================================
+// Tab Definition for Advanced Tab Management
+// ============================================================================
+
+export struct DockTab {
+    id: string,
+    title: string,
+    icon: string,
+    color: color,
+    pinned: bool,
+    closable: bool,
+}
+
+// ============================================================================
+// Dock Zone for Context-Aware Docking
+// ============================================================================
+
+export enum DockZone {
+    left,
+    right,
+    top,
+    bottom,
+    center,
+    floating,
+}
+
+// ============================================================================
+// Layout Preset Selector Component
+// ============================================================================
+
+export component LayoutPresetSelector inherits Rectangle {
+    in-out property <[LayoutPreset]> presets: [
+        {
+            name: "Default",
+            description: "Standard studio layout",
+            icon: "🏠",
+            show-explorer: true,
+            show-properties: true,
+            show-output: true,
+            show-toolbox: true,
+            show-assets: false,
+            show-history: false,
+            show-soul-panel: false,
+            left-panel-width: 280.0,
+            right-panel-width: 300.0,
+            output-height: 150.0,
+            left-tab-index: 0,
+            right-tab-index: 0,
+        },
+        {
+            name: "Scripting",
+            description: "Focus on code and output",
+            icon: "💻",
+            show-explorer: true,
+            show-properties: false,
+            show-output: true,
+            show-toolbox: false,
+            show-assets: false,
+            show-history: false,
+            show-soul-panel: true,
+            left-panel-width: 250.0,
+            right-panel-width: 400.0,
+            output-height: 250.0,
+            left-tab-index: 0,
+            right-tab-index: 2,
+        },
+        {
+            name: "Building",
+            description: "Focus on 3D viewport",
+            icon: "🏗",
+            show-explorer: true,
+            show-properties: true,
+            show-output: false,
+            show-toolbox: true,
+            show-assets: true,
+            show-history: false,
+            show-soul-panel: false,
+            left-panel-width: 220.0,
+            right-panel-width: 280.0,
+            output-height: 100.0,
+            left-tab-index: 1,
+            right-tab-index: 0,
+        },
+        {
+            name: "Minimal",
+            description: "Maximum viewport space",
+            icon: "🔲",
+            show-explorer: false,
+            show-properties: false,
+            show-output: false,
+            show-toolbox: false,
+            show-assets: false,
+            show-history: false,
+            show-soul-panel: false,
+            left-panel-width: 0.0,
+            right-panel-width: 0.0,
+            output-height: 0.0,
+            left-tab-index: 0,
+            right-tab-index: 0,
+        },
+        {
+            name: "Wide Panels",
+            description: "Extra wide side panels",
+            icon: "↔",
+            show-explorer: true,
+            show-properties: true,
+            show-output: true,
+            show-toolbox: true,
+            show-assets: true,
+            show-history: true,
+            show-soul-panel: false,
+            left-panel-width: 350.0,
+            right-panel-width: 400.0,
+            output-height: 200.0,
+            left-tab-index: 0,
+            right-tab-index: 0,
+        },
+    ];
+    
+    in-out property <int> current-preset-index: 0;
+    in-out property <bool> dropdown-open: false;
+    
+    callback preset-selected(LayoutPreset);
+    callback save-current-layout();
+    callback load-layout-from-file();
+    callback reset-to-factory();
+    
+    width: 200px;
+    height: 32px;
+    background: Theme.button-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    
+    HorizontalBox {
+        padding: 4px;
+        spacing: 4px;
+        
+        // Current preset display
+        TouchArea {
+            horizontal-stretch: 1;
+            clicked => { root.dropdown-open = !root.dropdown-open; }
+            
+            HorizontalBox {
+                spacing: 4px;
+                Text {
+                    text: root.presets[root.current-preset-index].icon;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.presets[root.current-preset-index].name;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.dropdown-open ? "▲" : "▼";
+                    color: Theme.text-secondary;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        
+        // Quick actions
+        Rectangle {
+            width: 1px;
+            background: Theme.border-color;
+        }
+        
+        TouchArea {
+            width: 24px;
+            clicked => { root.save-current-layout(); }
+            Text {
+                text: "💾";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    
+    // Dropdown menu
+    if root.dropdown-open: Rectangle {
+        y: parent.height + 2px;
+        width: parent.width + 60px;
+        height: (root.presets.length * 40px) + 80px;
+        background: Theme.panel-background;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000040;
+        
+        VerticalBox {
+            padding: 4px;
+            spacing: 2px;
+            
+            // Preset list
+            for preset[index] in root.presets: Rectangle {
+                height: 36px;
+                background: index == root.current-preset-index ? Theme.accent-blue : transparent;
+                border-radius: 4px;
+                
+                TouchArea {
+                    clicked => {
+                        root.current-preset-index = index;
+                        root.preset-selected(preset);
+                        root.dropdown-open = false;
+                    }
+                    
+                    HorizontalBox {
+                        padding: 8px;
+                        spacing: 8px;
+                        
+                        Text {
+                            text: preset.icon;
+                            vertical-alignment: center;
+                        }
+                        VerticalBox {
+                            spacing: 2px;
+                            Text {
+                                text: preset.name;
+                                color: Theme.text-primary;
+                                font-weight: 500;
+                            }
+                            Text {
+                                text: preset.description;
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Separator
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+            
+            // Actions
+            Rectangle {
+                height: 32px;
+                TouchArea {
+                    clicked => {
+                        root.load-layout-from-file();
+                        root.dropdown-open = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "📂 Import Layout..."; color: Theme.text-primary; }
+                    }
+                }
+            }
+            
+            Rectangle {
+                height: 32px;
+                TouchArea {
+                    clicked => {
+                        root.reset-to-factory();
+                        root.dropdown-open = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "🔄 Reset to Default"; color: Theme.text-primary; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Advanced Tab Bar with Context Menu, Overflow, Color-Coding
+// ============================================================================
+
+export component AdvancedTabBar inherits Rectangle {
+    in-out property <[DockTab]> tabs: [];
+    in-out property <int> active-tab-index: 0;
+    in-out property <bool> show-context-menu: false;
+    in-out property <int> context-menu-tab-index: 0;
+    in-out property <length> context-menu-x: 0px;
+    in-out property <length> context-menu-y: 0px;
+    
+    callback tab-selected(int);
+    callback tab-closed(int);
+    callback tab-pinned(int);
+    callback tab-detached(int);
+    callback tabs-reordered(int, int);
+    
+    height: 32px;
+    background: Theme.header-background;
+    
+    HorizontalBox {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 2px;
+        
+        // Render tabs (max 8 visible, rest in overflow)
+        for tab[index] in root.tabs: Rectangle {
+            visible: index < 8;
+            min-width: 80px;
+            max-width: 160px;
+            background: index == root.active-tab-index ? Theme.tab-active : Theme.tab-inactive;
+            border-radius: 4px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            border-bottom-left-radius: 0px;
+            border-bottom-right-radius: 0px;
+            
+            // Color indicator bar
+            Rectangle {
+                y: 0px;
+                height: 3px;
+                width: 100%;
+                background: tab.color;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            
+            TouchArea {
+                clicked => { 
+                    root.active-tab-index = index;
+                    root.tab-selected(index); 
+                }
+                pointer-event(event) => {
+                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                        root.context-menu-tab-index = index;
+                        root.context-menu-x = self.absolute-position.x + self.mouse-x;
+                        root.context-menu-y = self.absolute-position.y + self.mouse-y;
+                        root.show-context-menu = true;
+                    }
+                }
+                
+                HorizontalBox {
+                    padding: 6px;
+                    spacing: 4px;
+                    
+                    // Pin indicator
+                    if tab.pinned: Text {
+                        text: "📌";
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                    
+                    // Icon
+                    Text {
+                        text: tab.icon;
+                        vertical-alignment: center;
+                    }
+                    
+                    // Title
+                    Text {
+                        text: tab.title;
+                        color: index == root.active-tab-index ? Theme.text-primary : Theme.text-secondary;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    
+                    // Close button (if closable and not pinned)
+                    if tab.closable && !tab.pinned: TouchArea {
+                        width: 16px;
+                        clicked => { root.tab-closed(index); }
+                        
+                        Rectangle {
+                            width: 16px;
+                            height: 16px;
+                            border-radius: 8px;
+                            background: parent.has-hover ? Theme.button-hover : transparent;
+                            
+                            Text {
+                                text: "×";
+                                color: Theme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Overflow dropdown (if more than 8 tabs)
+        if root.tabs.length > 8: Rectangle {
+            width: 32px;
+            background: Theme.tab-inactive;
+            border-radius: 4px;
+            
+            TouchArea {
+                // TODO: Show overflow dropdown
+                Text {
+                    text: "+" + (root.tabs.length - 8);
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        
+        // Spacer
+        Rectangle { horizontal-stretch: 1; }
+    }
+    
+    // Context menu
+    if root.show-context-menu: Rectangle {
+        x: root.context-menu-x;
+        y: root.context-menu-y;
+        width: 180px;
+        height: 160px;
+        background: Theme.panel-background;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000040;
+        
+        VerticalBox {
+            padding: 4px;
+            
+            Rectangle {
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        root.tab-closed(root.context-menu-tab-index);
+                        root.show-context-menu = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "Close"; color: Theme.text-primary; }
+                    }
+                }
+            }
+            
+            Rectangle {
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        // Close all but this
+                        root.show-context-menu = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "Close Others"; color: Theme.text-primary; }
+                    }
+                }
+            }
+            
+            Rectangle {
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        root.tab-pinned(root.context-menu-tab-index);
+                        root.show-context-menu = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { 
+                            text: root.tabs[root.context-menu-tab-index].pinned ? "Unpin Tab" : "Pin Tab"; 
+                            color: Theme.text-primary; 
+                        }
+                    }
+                }
+            }
+            
+            Rectangle { height: 1px; background: Theme.border-color; }
+            
+            Rectangle {
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        root.tab-detached(root.context-menu-tab-index);
+                        root.show-context-menu = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "Detach to Window"; color: Theme.text-primary; }
+                    }
+                }
+            }
+            
+            Rectangle {
+                height: 28px;
+                TouchArea {
+                    clicked => {
+                        // Rename tab
+                        root.show-context-menu = false;
+                    }
+                    HorizontalBox {
+                        padding: 8px;
+                        Text { text: "Rename..."; color: Theme.text-primary; }
+                    }
+                }
+            }
+        }
+        
+        // Click outside to close
+        init => {
+            // Auto-close after a delay or on outside click
+        }
+    }
+}
+
+// ============================================================================
+// Performance Overlay (FPS, Memory, Auto-hide inactive)
+// ============================================================================
+
+export component PerformanceOverlay inherits Rectangle {
+    in-out property <float> fps: 60.0;
+    in-out property <float> frame-time-ms: 16.67;
+    in-out property <float> memory-mb: 0.0;
+    in-out property <int> entity-count: 0;
+    in-out property <bool> show-detailed: false;
+    
+    width: root.show-detailed ? 200px : 80px;
+    height: root.show-detailed ? 100px : 28px;
+    background: Theme.overlay-background;
+    border-radius: 4px;
+    
+    TouchArea {
+        clicked => { root.show-detailed = !root.show-detailed; }
+        
+        if !root.show-detailed: HorizontalBox {
+            padding: 6px;
+            spacing: 4px;
+            
+            Text {
+                text: Math.round(root.fps) + " FPS";
+                color: root.fps >= 55 ? #4ade80 : root.fps >= 30 ? #fbbf24 : #ef4444;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+        
+        if root.show-detailed: VerticalBox {
+            padding: 8px;
+            spacing: 4px;
+            
+            HorizontalBox {
+                Text { text: "FPS:"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                Text { 
+                    text: Math.round(root.fps * 10) / 10; 
+                    color: root.fps >= 55 ? #4ade80 : root.fps >= 30 ? #fbbf24 : #ef4444;
+                    font-weight: 600;
+                }
+            }
+            
+            HorizontalBox {
+                Text { text: "Frame:"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                Text { 
+                    text: Math.round(root.frame-time-ms * 100) / 100 + "ms"; 
+                    color: Theme.text-primary;
+                }
+            }
+            
+            HorizontalBox {
+                Text { text: "Memory:"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                Text { 
+                    text: Math.round(root.memory-mb) + " MB"; 
+                    color: Theme.text-primary;
+                }
+            }
+            
+            HorizontalBox {
+                Text { text: "Entities:"; color: Theme.text-secondary; horizontal-stretch: 1; }
+                Text { 
+                    text: root.entity-count; 
+                    color: Theme.text-primary;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Dock Zone Indicator (for drag-drop feedback)
+// ============================================================================
+
+export component DockZoneIndicator inherits Rectangle {
+    in-out property <bool> active: false;
+    in-out property <DockZone> zone: DockZone.center;
+    in-out property <float> highlight-intensity: 0.0;
+    
+    background: root.active ? Theme.accent-blue.with-alpha(0.3 + root.highlight-intensity * 0.3) : transparent;
+    border-width: root.active ? 2px : 0px;
+    border-color: Theme.accent-blue;
+    border-radius: 4px;
+    
+    animate background { duration: 150ms; }
+    animate border-width { duration: 150ms; }
+    
+    if root.active: Rectangle {
+        width: 60px;
+        height: 60px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.accent-blue.with-alpha(0.8);
+        border-radius: 8px;
+        
+        Text {
+            text: root.zone == DockZone.left ? "◀" :
+                  root.zone == DockZone.right ? "▶" :
+                  root.zone == DockZone.top ? "▲" :
+                  root.zone == DockZone.bottom ? "▼" :
+                  root.zone == DockZone.center ? "⊞" : "◇";
+            color: white;
+            font-size: 24px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ============================================================================
+// Theme Editor Panel
+// ============================================================================
+
+export component ThemeEditor inherits Rectangle {
+    in-out property <bool> dark-mode: true;
+    in-out property <bool> high-contrast: false;
+    in-out property <float> ui-scale: 1.0;
+    in-out property <color> accent-color: #3b82f6;
+    
+    callback theme-changed();
+    callback apply-theme();
+    
+    background: Theme.panel-background;
+    border-radius: 4px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 12px;
+        
+        Text {
+            text: "🎨 Theme Settings";
+            color: Theme.text-primary;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        // Dark/Light mode toggle
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "Dark Mode"; color: Theme.text-primary; horizontal-stretch: 1; }
+            Rectangle {
+                width: 48px;
+                height: 24px;
+                background: root.dark-mode ? Theme.accent-blue : Theme.button-background;
+                border-radius: 12px;
+                
+                TouchArea {
+                    clicked => {
+                        root.dark-mode = !root.dark-mode;
+                        root.theme-changed();
+                    }
+                }
+                
+                Rectangle {
+                    x: root.dark-mode ? parent.width - self.width - 2px : 2px;
+                    y: 2px;
+                    width: 20px;
+                    height: 20px;
+                    background: white;
+                    border-radius: 10px;
+                    
+                    animate x { duration: 150ms; }
+                }
+            }
+        }
+        
+        // High contrast toggle
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "High Contrast"; color: Theme.text-primary; horizontal-stretch: 1; }
+            Rectangle {
+                width: 48px;
+                height: 24px;
+                background: root.high-contrast ? Theme.accent-blue : Theme.button-background;
+                border-radius: 12px;
+                
+                TouchArea {
+                    clicked => {
+                        root.high-contrast = !root.high-contrast;
+                        root.theme-changed();
+                    }
+                }
+                
+                Rectangle {
+                    x: root.high-contrast ? parent.width - self.width - 2px : 2px;
+                    y: 2px;
+                    width: 20px;
+                    height: 20px;
+                    background: white;
+                    border-radius: 10px;
+                    
+                    animate x { duration: 150ms; }
+                }
+            }
+        }
+        
+        // UI Scale
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "UI Scale"; color: Theme.text-primary; }
+            Text { text: Math.round(root.ui-scale * 100) + "%"; color: Theme.text-secondary; horizontal-stretch: 1; }
+        }
+        
+        HorizontalBox {
+            spacing: 4px;
+            Button { text: "90%"; clicked => { root.ui-scale = 0.9; root.theme-changed(); } }
+            Button { text: "100%"; clicked => { root.ui-scale = 1.0; root.theme-changed(); } }
+            Button { text: "110%"; clicked => { root.ui-scale = 1.1; root.theme-changed(); } }
+            Button { text: "125%"; clicked => { root.ui-scale = 1.25; root.theme-changed(); } }
+        }
+        
+        Rectangle { height: 1px; background: Theme.border-color; }
+        
+        Button {
+            text: "Apply Theme";
+            clicked => { root.apply-theme(); }
+        }
+    }
+}

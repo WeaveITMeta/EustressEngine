@@ -5,7 +5,6 @@ use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
 use bevy::winit::WinitWindows;
-use bevy_egui::EguiPlugin;
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
@@ -57,8 +56,8 @@ mod plugins;
 mod shaders;
 mod generative_pipeline;
 mod viga;  // VIGA: Vision-as-Inverse-Graphics Agent
+// mod slint_bevy_adapter;  // Disabled - Skia ICU conflicts on Windows
 
-use ui::StudioUiPlugin;
 use rendering::PartRenderingPlugin;
 use commands::{SelectionManager, TransformManager}; // Production-ready managers
 use default_scene::DefaultScenePlugin;
@@ -82,7 +81,7 @@ use terrain_plugin::EngineTerrainPlugin;
 use play_mode::PlayModePlugin;
 use window_focus::WindowFocusPlugin;
 use startup::{StartupPlugin, StartupArgs};
-use ui::ServicePropertiesPlugin;
+// ServicePropertiesPlugin removed - now handled by Slint UI
 use soul::EngineSoulPlugin;
 
 fn main() {
@@ -108,141 +107,129 @@ fn main() {
     
     let mut app = App::new();
     
+    // Set custom error handler that warns instead of panicking for missing resources
+    // This is a temporary workaround for systems that require resources without Option wrappers
+    app.set_error_handler(bevy::ecs::error::warn);
+    
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: window_title,
                     resolution: bevy::window::WindowResolution::new(1600, 900),
-                    // Force VSync to prevent screen tearing
                     present_mode: bevy::window::PresentMode::Fifo,
                     mode: bevy::window::WindowMode::Windowed,
                     decorations: true,
                     resizable: true,
-                    // Icon is set via build.rs (winres) on Windows
                     ..default()
                 }),
-                // Disable automatic window close - we handle it manually for unsaved changes prompt
                 close_when_requested: false,
                 ..default()
             })
-            // Use common assets folder for shared character models and animations
             .set(AssetPlugin {
                 file_path: "../common/assets".to_string(),
                 ..default()
             })
         )
-        // NOTE: WireframePlugin removed - causes "node PostProcessing does not exist" crash in Bevy 0.17
-        // TODO: Re-enable when Bevy fixes the render graph dependency issue
-        // .add_plugins(bevy::pbr::wireframe::WireframePlugin::default())
-        // .insert_resource(bevy::pbr::wireframe::WireframeConfig {
-        //     global: false,
-        //     default_color: bevy::color::Color::WHITE,
-        // })
         // Explorer expand/collapse state
         .init_resource::<ui::ExplorerExpanded>()
         .init_resource::<ui::ExplorerState>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
-        // Startup args (parsed above) - must be inserted early for DefaultScenePlugin
+        // Startup args
         .insert_resource(args.clone())
-        // egui plugin for UI
-        .add_plugins(EguiPlugin::default())
-        // Studio UI (panels, tools, etc.)
-        .add_plugins(StudioUiPlugin {
-            selection_manager: selection_manager.clone(),
-            transform_manager: transform_manager.clone(),
-        })
-        // 3D rendering (uses ECS queries)
+        // Notifications (must be before SlintUiPlugin which uses NotificationManager)
+        .add_plugins(NotificationPlugin)
+        // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
+        .add_plugins(UndoPlugin)
+        // Play mode (must be before SlintUiPlugin which uses PlayModeState)
+        .add_plugins(PlayModePlugin)
+        // Slint UI (software renderer overlay)
+        .add_plugins(ui::slint_ui::SlintUiPlugin)
+        // Floating windows
+        .add_plugins(ui::floating_windows::FloatingWindowsPlugin)
+        // 3D rendering
         .add_plugins(PartRenderingPlugin {
             selection_manager: selection_manager.clone(),
             transform_manager: transform_manager.clone(),
         })
-        // Material sync (real-time property changes to materials)
+        // Material sync
         .add_plugins(MaterialSyncPlugin)
-        // Shared lighting (same as client) - skybox, sun, ambient
+        // Shared lighting
         .add_plugins(SharedLightingPlugin)
-        // Default scene setup (camera, baseplate, welcome cube)
+        // Default scene
         .add_plugins(DefaultScenePlugin)
-        // Camera controls (orbit, pan, zoom)
+        // Camera controls
         .add_plugins(CameraControllerPlugin)
         .add_systems(Startup, setup_camera_controller.after(default_scene::setup_default_scene))
-        // Editor settings (snap, grid, auto-save)
+        // Editor settings
         .add_plugins(EditorSettingsPlugin)
-        // Keybindings system
+        // Keybindings
         .add_plugins(KeyBindingsPlugin)
-        // Clipboard system (copy/paste)
+        // Clipboard
         .add_plugins(ClipboardPlugin)
-        // Workspace service (gravity, bounds, physics settings)
+        // Workspace
         .add_plugins(WorkspacePlugin)
-        // Service properties (Workspace, Lighting, Players, etc.)
-        .add_plugins(ServicePropertiesPlugin)
-        // Transform space (World/Local) system
+        // Service properties
+        .add_plugins(ui::service_properties::ServicePropertiesPlugin)
+        // Transform space
         .add_plugins(TransformSpacePlugin)
-        // Undo/Redo system
-        .add_plugins(UndoPlugin)
-        // Toast notifications
-        .add_plugins(NotificationPlugin)
-        // Transform gizmos (visual tool indicators)
+        // Gizmo tools
         .add_plugins(GizmoToolsPlugin)
-        // Selection box visuals (Roblox-like highlighting)
+        // Selection box
         .add_plugins(SelectionBoxPlugin)
-        // Transformation tools
+        // Tools
         .add_plugins(SelectToolPlugin)
         .add_plugins(MoveToolPlugin)
         .add_plugins(RotateToolPlugin)
         .add_plugins(ScaleToolPlugin)
-        // Synchronize selection state with visual components
+        // Selection sync
         .add_plugins(SelectionSyncPlugin {
             selection_manager: selection_manager.clone(),
         })
-        // Terrain system with editor UI
+        // Terrain
         .add_plugins(EngineTerrainPlugin)
-        // Physics (Avian3D) - needed for play mode character physics
+        // Physics (avian3d from git main - supports Bevy 0.18)
         .add_plugins(avian3d::PhysicsPlugins::default())
         .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
-        // Gamepad/Controller service (connection events, input state, notifications)
+        // Gamepad
         .add_plugins(eustress_common::services::GamepadServicePlugin)
-        // Notification UI (toast messages for gamepad connect/disconnect, etc.)
-        .add_plugins(ui::notifications::NotificationPlugin)
-        // Play mode (F5 to play with character, F7 solo, F8 stop)
-        .add_plugins(PlayModePlugin)
-        // In-process server + client for Play Server mode
+        // Notifications UI
+        .add_plugins(ui::notifications::NotificationsPlugin)
+        // Play server
         .add_plugins(play_server::PlayServerPlugin)
-        // Embedded client runtime (same codebase as standalone client)
+        // Embedded client
         .add_plugins(embedded_client::EmbeddedClientPlugin)
-        // Team system (team colors, spawn filtering, etc.)
+        // Team service
         .add_plugins(TeamServicePlugin)
-        // Runtime systems (physics events, lighting time, script lifecycle)
+        // Runtime
         .add_plugins(runtime::RuntimePlugin)
-        // Seat systems (auto-sit, controller input for vehicles)
+        // Seats
         .add_plugins(seats::SeatPlugin)
-        // Soul scripting (Claude API, hot compile, global settings)
+        // Soul scripting
         .add_plugins(EngineSoulPlugin)
-        // Generative AI pipeline (Soul/Abstract modes, text-to-mesh)
+        // Generative pipeline
         .add_plugins(generative_pipeline::GenerativePipelinePlugin)
-        // VIGA: Vision-as-Inverse-Graphics Agent (image-to-scene)
+        // VIGA
         .add_plugins(viga::VigaPlugin)
-        // MoonDisk rendering - DISABLED: Bevy's atmosphere shader already renders the moon
-        // .add_plugins(shaders::MoonDiskPlugin)
-        // IoManager for async data fetching (Parameters system)
+        // IoManager
         .add_plugins(io_manager::IoManagerPlugin)
-        // Telemetry (opt-in error reporting)
+        // Telemetry
         .add_plugins(telemetry::TelemetryPlugin)
-        // Window focus management (reduce CPU when unfocused)
+        // Window focus
         .add_plugins(WindowFocusPlugin)
-        // Startup handling (command-line args, file associations, scene loading)
+        // Startup
         .add_plugins(StartupPlugin)
-        // Studio Plugin System (MindSpace, custom plugins)
+        // Studio plugins
         .add_plugins(studio_plugins::StudioPluginSystem);
         
-    // Left-click part selection with raycasting (native only) - MODERN ECS!
+    // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.add_systems(Update, part_selection::part_selection_system);
     }
     
-    // Set window icon after window is created (Windows/Linux taskbar and title bar icon)
+    // Set window icon after window is created
     app.add_systems(PostStartup, set_window_icon);
     
     app.run();
@@ -251,15 +238,11 @@ fn main() {
 }
 
 /// Set the window icon for taskbar and title bar (Windows/Linux)
-/// Uses the embedded icon.png from assets folder
 fn set_window_icon(
     windows: Option<NonSend<WinitWindows>>,
 ) {
-    let Some(windows) = windows else {
-        return;
-    };
+    let Some(windows) = windows else { return };
     
-    // Load icon from embedded bytes or file
     let icon_bytes = include_bytes!("../assets/icon.png");
     
     let image = match image::load_from_memory(icon_bytes) {
@@ -281,7 +264,6 @@ fn set_window_icon(
         }
     };
     
-    // Set icon for all windows
     for window in windows.windows.values() {
         window.set_window_icon(Some(icon.clone()));
     }

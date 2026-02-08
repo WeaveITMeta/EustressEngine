@@ -312,7 +312,7 @@ fn sync_directional_light_with_sun(
 /// Update ambient lighting based on celestial state
 fn update_ambient_lighting(
     celestial_state: Res<CelestialState>,
-    mut ambient_light: ResMut<AmbientLight>,
+    mut ambient_light: ResMut<GlobalAmbientLight>,
 ) {
     ambient_light.color = celestial_state.ambient_color;
     

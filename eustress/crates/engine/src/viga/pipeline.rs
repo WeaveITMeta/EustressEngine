@@ -724,9 +724,9 @@ pub struct VigaPipelinePlugin;
 impl Plugin for VigaPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VigaPipeline>()
-            .add_event::<VigaRequestEvent>()
-            .add_event::<VigaCodeReadyEvent>()
-            .add_event::<VigaCompleteEvent>()
+            .add_message::<VigaRequestEvent>()
+            .add_message::<VigaCodeReadyEvent>()
+            .add_message::<VigaCompleteEvent>()
             .add_systems(Update, (
                 process_viga_requests,
                 tick_viga_pipeline,
@@ -738,7 +738,7 @@ impl Plugin for VigaPipelinePlugin {
 }
 
 /// Event to request VIGA processing
-#[derive(Event)]
+#[derive(Event, Message, Clone)]
 pub struct VigaRequestEvent {
     /// Reference image (base64 data URL)
     pub reference_image: String,
@@ -747,14 +747,14 @@ pub struct VigaRequestEvent {
 }
 
 /// Event when VIGA has code ready for execution
-#[derive(Event)]
+#[derive(Event, Message, Clone)]
 pub struct VigaCodeReadyEvent {
     /// Generated Rune code
     pub code: String,
 }
 
 /// Event when VIGA completes
-#[derive(Event)]
+#[derive(Event, Message, Clone)]
 pub struct VigaCompleteEvent {
     /// Result
     pub result: VigaResult,
@@ -762,7 +762,7 @@ pub struct VigaCompleteEvent {
 
 /// Process incoming VIGA requests
 fn process_viga_requests(
-    mut events: EventReader<VigaRequestEvent>,
+    mut events: MessageReader<VigaRequestEvent>,
     mut pipeline: ResMut<VigaPipeline>,
 ) {
     for event in events.read() {
@@ -779,8 +779,8 @@ fn process_viga_requests(
 /// Tick the VIGA pipeline
 fn tick_viga_pipeline(
     mut pipeline: ResMut<VigaPipeline>,
-    mut code_events: EventWriter<VigaCodeReadyEvent>,
-    mut complete_events: EventWriter<VigaCompleteEvent>,
+    mut code_events: MessageWriter<VigaCodeReadyEvent>,
+    mut complete_events: MessageWriter<VigaCompleteEvent>,
     soul_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
 ) {
@@ -795,18 +795,18 @@ fn tick_viga_pipeline(
     
     // Tick pipeline
     if let Some(code) = pipeline.tick(api_key.as_deref()) {
-        code_events.send(VigaCodeReadyEvent { code });
+        code_events.write(VigaCodeReadyEvent { code });
     }
     
     // Check for completed results
     while let Some(result) = pipeline.poll_result() {
-        complete_events.send(VigaCompleteEvent { result });
+        complete_events.write(VigaCompleteEvent { result });
     }
 }
 
 /// Handle code ready events (execute via Soul pipeline)
 fn handle_viga_code_ready(
-    mut events: EventReader<VigaCodeReadyEvent>,
+    mut events: MessageReader<VigaCodeReadyEvent>,
     mut pipeline: ResMut<VigaPipeline>,
 ) {
     for event in events.read() {

@@ -281,10 +281,10 @@ impl SoulBuildPipeline {
     pub fn new(config: SoulConfig) -> Self {
         let claude_config = config.claude.clone();
         
-        let error_tracker = RuneErrorTracker::load();
+        let error_tracker = RuneErrorTracker::new();
         
         // Log error tracker summary on startup
-        let stats = error_tracker.get_stats();
+        let stats = error_tracker.get_stats().clone();
         if stats.total_errors > 0 {
             info!("📊 Rune Error Tracker: {} total errors tracked", stats.total_errors);
             if !stats.top_missing_functions.is_empty() {
@@ -326,15 +326,12 @@ impl SoulBuildPipeline {
     
     /// Get error statistics
     pub fn get_error_stats(&self) -> super::error_tracker::ErrorStats {
-        self.error_tracker.get_stats()
+        self.error_tracker.get_stats().clone()
     }
     
     /// Get functions that need implementation (high frequency missing functions)
     pub fn get_implementation_candidates(&self) -> Vec<String> {
-        self.error_tracker.get_implementation_candidates(3)
-            .iter()
-            .map(|e| e.identifier.clone())
-            .collect()
+        self.error_tracker.get_implementation_candidates()
     }
     
     /// Print full error report to terminal
@@ -611,10 +608,16 @@ impl SoulBuildPipeline {
                         let mut injected_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
                         
                         for iteration in 1..=max_fix_iterations {
-                            warn!("⚠️ Rune validation failed (attempt {}/{}): {}", iteration, max_fix_iterations, current_error);
-                            self.error_tracker.track_error(&current_error);
+                            let error_str = current_error.join("\n");
+                            warn!("⚠️ Rune validation failed (attempt {}/{}): {}", iteration, max_fix_iterations, error_str);
+                            self.error_tracker.track_error(super::error_tracker::TrackedError {
+                                category: "validation".to_string(),
+                                message: error_str.clone(),
+                                timestamp: std::time::Instant::now(),
+                                context: None,
+                            });
                             
-                            if let Some(fix) = self.error_tracker.get_deterministic_fix(&current_error) {
+                            if let Some(fix) = self.error_tracker.get_deterministic_fix(&error_str) {
                                 let fix_key = format!("{:?}", fix);
                                 if injected_vars.contains(&fix_key) {
                                     warn!("⚠️ Already tried fix {:?}, but error persists", fix);
@@ -636,12 +639,12 @@ impl SoulBuildPipeline {
                                     }
                                 }
                             } else {
-                                warn!("⚠️ No deterministic fix for error: {}", current_error);
+                                warn!("⚠️ No deterministic fix for error: {}", error_str);
                                 break;
                             }
                         }
                         
-                        self.error_tracker.save();
+                        let _ = self.error_tracker.save(std::path::Path::new("error_tracker.json"));
                         
                         if fixed {
                             if let Some(ref mut gen) = build.generated_code {
@@ -650,15 +653,15 @@ impl SoulBuildPipeline {
                             build.fix_iterations += 1;
                             build.stage = BuildStage::Loading;
                         } else {
+                            let error_str = rune_error.join("\n");
                             crate::telemetry::report_rune_validation_error(
                                 &build.request.name,
-                                &rune_error,
-                                &code,
+                                &error_str,
                             );
                             
                             build.stage = BuildStage::Failed {
                                 stage: "Rune Validation".to_string(),
-                                error: format!("Rune script validation failed after {} fix attempts:\n{}", max_fix_iterations, rune_error),
+                                error: format!("Rune script validation failed after {} fix attempts:\n{}", max_fix_iterations, error_str),
                             };
                         }
                     }
@@ -680,7 +683,6 @@ impl SoulBuildPipeline {
                 crate::telemetry::report_claude_generation_error(
                     &build.request.name,
                     &error_str,
-                    Some(&build.request.source),
                 );
                 
                 build.stage = BuildStage::Failed {
@@ -694,7 +696,6 @@ impl SoulBuildPipeline {
                 crate::telemetry::report_claude_generation_error(
                     &build.request.name,
                     &error_str,
-                    Some(&build.request.source),
                 );
                 
                 build.stage = BuildStage::Failed {
@@ -900,23 +901,11 @@ pub fn process_build_pipeline(
 }
 
 /// System to update UI with build status (for visual feedback)
+/// Build status is now communicated via Slint UI bindings
 pub fn update_build_status_ui(
-    pipeline: Res<SoulBuildPipeline>,
-    mut contexts: bevy_egui::EguiContexts,
+    _pipeline: Res<SoulBuildPipeline>,
 ) {
-    let Ok(ctx) = contexts.ctx_mut() else { return };
-    
-    if pipeline.is_building() {
-        let status = pipeline.current_stage().to_string();
-        ctx.data_mut(|d| {
-            d.insert_temp(bevy_egui::egui::Id::new("build_status"), status);
-        });
-    } else {
-        // Clear build status when not building
-        ctx.data_mut(|d| {
-            d.remove::<String>(bevy_egui::egui::Id::new("build_status"));
-        });
-    }
+    // Build status UI is handled by Slint - see slint_ui.rs
 }
 
 /// Event to trigger a build
@@ -1047,21 +1036,16 @@ pub fn handle_command_bar_builds(
             info!("🔄 Command Bar: Re-executing cached script");
             
             // Execute the cached Rune script directly
-            match crate::soul::execute_rune_script(&event.command) {
-                Ok(commands) => {
-                    info!("✅ Re-executed {} commands from cache", commands.len());
-                    
-                    for cmd in &commands {
-                        info!("  → {:?}", cmd);
-                    }
-                    
-                    crate::soul::rune_api::push_commands(commands.clone());
+            let mut context = crate::soul::soul_context::SoulContext::default();
+            match crate::soul::execute_rune_script(&event.command, &mut context) {
+                Ok(()) => {
+                    info!("✅ Re-executed script from cache");
                     
                     state.result = Some(CommandBarResult {
                         success: true,
                         rune_code: Some(event.command.clone()),
                         error: None,
-                        output: commands.iter().map(|c| format!("{:?}", c)).collect(),
+                        output: vec!["Script executed successfully".to_string()],
                     });
                 }
                 Err(e) => {
@@ -1138,24 +1122,16 @@ pub fn handle_command_bar_builds(
                         info!("✅ Code generated, executing...");
                         
                         // Execute the Rune script
-                        match crate::soul::execute_rune_script(&generated.source) {
-                            Ok(commands) => {
-                                info!("✅ Executed {} commands", commands.len());
-                                
-                                // Log each command
-                                for cmd in &commands {
-                                    info!("  → {:?}", cmd);
-                                }
-                                
-                                // Push commands back to the global queue so they get processed
-                                // by process_script_commands or process_editor_commands
-                                crate::soul::rune_api::push_commands(commands.clone());
+                        let mut context = crate::soul::soul_context::SoulContext::default();
+                        match crate::soul::execute_rune_script(&generated.source, &mut context) {
+                            Ok(()) => {
+                                info!("✅ Script executed successfully");
                                 
                                 state.result = Some(CommandBarResult {
                                     success: true,
                                     rune_code: Some(generated.source.clone()),
                                     error: None,
-                                    output: vec![format!("Executed {} commands", commands.len())],
+                                    output: vec!["Script executed successfully".to_string()],
                                 });
                                 
                                 // Cache the Rune script in CommandBarState for history re-execution
@@ -1232,7 +1208,6 @@ pub fn apply_build_results(
                 crate::telemetry::report_rune_success(
                     &result.name,
                     result.duration_ms,
-                    result.fix_iterations,
                 );
                 
                 if !result.warnings.is_empty() {

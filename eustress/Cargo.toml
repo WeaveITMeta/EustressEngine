@@ -21,19 +21,15 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-# Core Bevy 0.17.3 (November 2025)
-# Note: reflect_auto_register is required for GLTF scene spawning to work
-bevy = { version = "0.17.3", default-features = false, features = ["reflect_auto_register"] }
+# Core Bevy 0.18 (uses wgpu 28 for Slint GPU renderer compatibility)
+bevy = { version = "0.18", default-features = false }
 
-# UI (compatible with Bevy 0.17 / egui 0.33)
-egui = "0.33"
-bevy_egui = "0.38"
-egui_extras = { version = "0.33", features = ["image"] }
-egui-notify = "0.21"
-egui_dock = "0.18"
+# UI - Slint from git with software renderer (renders to pixel buffer, uploaded to Bevy texture)
+slint = { git = "https://github.com/slint-ui/slint", branch = "master", features = ["std", "compat-1-2", "renderer-software"] }
+# egui REMOVED - using Slint exclusively
 
-# Input (compatible with Bevy 0.17)
-leafwing-input-manager = "0.18"
+# Input - DISABLED until leafwing-input-manager supports Bevy 0.19
+# leafwing-input-manager = { git = "https://github.com/Leafwing-Studios/leafwing-input-manager", branch = "main", default-features = false, features = ["asset", "mouse", "keyboard"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -45,10 +41,10 @@ uuid = { version = "1.8", features = ["v4", "serde"] }
 parking_lot = "0.12"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
-rfd = "0.14"
+rfd = "0.15"
 
-# Networking (Lightyear 0.17 + QUIC)
-lightyear = "0.17"
+# Networking (Lightyear 0.19 + QUIC)
+lightyear = "0.19"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 thiserror = "2.0"
@@ -57,11 +53,11 @@ bincode = "1.3"
 
 # P2P & CRDTs for Persistent Distributed Worlds
 loro = "1.4"  # High-perf CRDT library
-bevy_quinnet = "0.12"  # QUIC client/server for P2P
+bevy_quinnet = "0.14"  # QUIC client/server for P2P (Bevy 0.19 compatible)
 quinn = "0.11"  # Underlying QUIC transport
 
-# Physics (Avian 0.4 - Bevy 0.17 compatible)
-avian3d = "0.4"
+# Physics (Avian from git main - supports Bevy 0.18.0)
+avian3d = { git = "https://github.com/avianphysics/avian", branch = "main", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene"] }
 
 [profile.dev]
 opt-level = 1
@@ -82,3 +78,4 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+

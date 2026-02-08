@@ -1,0 +1,439 @@
+// ============================================================================
+// Eustress Engine Studio - Network Panel
+// Server management and multiplayer testing
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, Slider, Button } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// Connected client data
+export struct ClientData {
+    id: int,
+    name: string,
+    ping: int,
+    status: string,
+    is-synthetic: bool,
+}
+
+export component NetworkPanel inherits Rectangle {
+    // Properties
+    in property <bool> server-running: false;
+    in property <string> server-address: "";
+    in property <int> server-port: 7777;
+    in property <[ClientData]> clients: [];
+    in property <int> synthetic-client-count: 0;
+    in property <bool> forge-connected: false;
+    in property <string> forge-status: "";
+    
+    // Stats
+    in property <int> bytes-sent: 0;
+    in property <int> bytes-received: 0;
+    in property <int> packets-per-second: 0;
+    in property <float> avg-latency: 0;
+    
+    // Callbacks
+    callback on-start-server();
+    callback on-stop-server();
+    callback on-connect-forge();
+    callback on-disconnect-forge();
+    callback on-allocate-server();
+    callback on-spawn-synthetic-clients(int);
+    callback on-disconnect-all();
+    callback on-kick-client(int);
+    callback on-start-stress-test();
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        PanelHeader {
+            title: "Network";
+        }
+        
+        ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 12px;
+                
+                // Server section
+                Text {
+                    text: "Local Server";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                Rectangle {
+                    height: 60px;
+                    background: Theme.background-tertiary;
+                    border-radius: 4px;
+                    
+                    HorizontalBox {
+                        padding: 12px;
+                        spacing: 12px;
+                        
+                        // Status indicator
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            background: root.server-running ? Theme.accent-green : Theme.text-secondary;
+                            border-radius: 6px;
+                        }
+                        
+                        VerticalBox {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            
+                            Text {
+                                text: root.server-running ? "Server Running" : "Server Stopped";
+                                color: Theme.text-primary;
+                                font-weight: 500;
+                            }
+                            
+                            if root.server-running: Text {
+                                text: root.server-address + ":" + root.server-port;
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                            }
+                        }
+                        
+                        Rectangle {
+                            width: 80px;
+                            height: 32px;
+                            background: root.server-running ? Theme.accent-red : Theme.button-primary;
+                            border-radius: 4px;
+                            
+                            TouchArea {
+                                clicked => {
+                                    if root.server-running {
+                                        root.on-stop-server();
+                                    } else {
+                                        root.on-start-server();
+                                    }
+                                }
+                            }
+                            
+                            Text {
+                                text: root.server-running ? "Stop" : "Start";
+                                color: white;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                
+                // Forge Cloud section
+                Text {
+                    text: "Forge Cloud";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                Rectangle {
+                    height: 48px;
+                    background: Theme.background-tertiary;
+                    border-radius: 4px;
+                    
+                    HorizontalBox {
+                        padding: 12px;
+                        spacing: 12px;
+                        
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            background: root.forge-connected ? Theme.accent-green : Theme.text-secondary;
+                            border-radius: 6px;
+                        }
+                        
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.forge-connected ? root.forge-status : "Not connected";
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        
+                        Rectangle {
+                            width: 80px;
+                            height: 28px;
+                            background: Theme.button-background;
+                            border-radius: 4px;
+                            
+                            TouchArea {
+                                clicked => {
+                                    if root.forge-connected {
+                                        root.on-disconnect-forge();
+                                    } else {
+                                        root.on-connect-forge();
+                                    }
+                                }
+                            }
+                            
+                            Text {
+                                text: root.forge-connected ? "Disconnect" : "Connect";
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                
+                if root.forge-connected: Rectangle {
+                    height: 32px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-allocate-server(); }
+                    }
+                    
+                    Text {
+                        text: "Allocate Cloud Server";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Stats section
+                if root.server-running: VerticalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        text: "Statistics";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    
+                    Rectangle {
+                        height: 80px;
+                        background: Theme.background-tertiary;
+                        border-radius: 4px;
+                        
+                        HorizontalBox {
+                            padding: 12px;
+                            spacing: 16px;
+                            
+                            VerticalBox {
+                                horizontal-stretch: 1;
+                                
+                                Text {
+                                    text: root.clients.length;
+                                    color: Theme.accent-blue;
+                                    font-size: 24px;
+                                    font-weight: 600;
+                                }
+                                
+                                Text {
+                                    text: "Clients";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                }
+                            }
+                            
+                            VerticalBox {
+                                horizontal-stretch: 1;
+                                
+                                Text {
+                                    text: round(root.avg-latency) + "ms";
+                                    color: Theme.accent-green;
+                                    font-size: 24px;
+                                    font-weight: 600;
+                                }
+                                
+                                Text {
+                                    text: "Avg Latency";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                }
+                            }
+                            
+                            VerticalBox {
+                                horizontal-stretch: 1;
+                                
+                                Text {
+                                    text: root.packets-per-second;
+                                    color: Theme.accent-yellow;
+                                    font-size: 24px;
+                                    font-weight: 600;
+                                }
+                                
+                                Text {
+                                    text: "Packets/s";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Synthetic clients section
+                Text {
+                    text: "Synthetic Clients";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        text: "Count:";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 100;
+                        value: root.synthetic-client-count;
+                    }
+                    
+                    Text {
+                        width: 30px;
+                        text: root.synthetic-client-count;
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 32px;
+                        background: Theme.button-primary;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.on-spawn-synthetic-clients(root.synthetic-client-count); }
+                        }
+                        
+                        Text {
+                            text: "Spawn";
+                            color: white;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 32px;
+                        background: Theme.button-background;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.on-disconnect-all(); }
+                        }
+                        
+                        Text {
+                            text: "Disconnect All";
+                            color: Theme.text-primary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Stress test
+                Rectangle {
+                    height: 32px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-start-stress-test(); }
+                    }
+                    
+                    Text {
+                        text: "Start Stress Test...";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                // Connected clients list
+                if root.clients.length > 0: VerticalBox {
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "Connected Clients";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    
+                    for client in root.clients: Rectangle {
+                        height: 36px;
+                        background: client-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                        border-radius: 4px;
+                        
+                        client-touch := TouchArea {}
+                        
+                        HorizontalBox {
+                            padding: 8px;
+                            spacing: 8px;
+                            
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                background: client.status == "connected" ? Theme.accent-green : Theme.text-secondary;
+                                border-radius: 4px;
+                            }
+                            
+                            Text {
+                                horizontal-stretch: 1;
+                                text: client.name + (client.is-synthetic ? " (synthetic)" : "");
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Text {
+                                text: client.ping + "ms";
+                                color: client.ping < 50 ? Theme.accent-green :
+                                       client.ping < 100 ? Theme.accent-yellow :
+                                       Theme.accent-red;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            
+                            Rectangle {
+                                width: 50px;
+                                height: 24px;
+                                background: Theme.button-background;
+                                border-radius: 4px;
+                                
+                                TouchArea {
+                                    clicked => { root.on-kick-client(client.id); }
+                                }
+                                
+                                Text {
+                                    text: "Kick";
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

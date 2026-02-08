@@ -173,25 +173,24 @@ pub fn spawn_baseplate(
         shape: PartType::Block,
     };
     
+    let mesh = meshes.add(Cuboid::new(baseplate_size.x, baseplate_size.y, baseplate_size.z));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.2, 0.2, 0.22, 1.0),
+        perceptual_roughness: 0.7,
+        metallic: 0.0,
+        reflectance: 0.4,
+        ..default()
+    });
+    
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(baseplate_size.x, baseplate_size.y, baseplate_size.z))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.2, 0.2, 0.22, 1.0),
-            perceptual_roughness: 0.55,  // Smoother for visible specular
-            metallic: 0.0,
-            reflectance: 0.4,  // Adds specular highlights
-            ..default()
-        })),
-        Transform::from_xyz(0.0, -0.5, 0.0),  // Top surface at Y=0
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_xyz(0.0, -0.5, 0.0),
         instance,
         base_part,
         part,
-        // Collider for physics raycasting (drag-to-move surface detection)
-        avian3d::prelude::Collider::cuboid(baseplate_size.x, baseplate_size.y, baseplate_size.z),
-        avian3d::prelude::RigidBody::Static,
         PartEntityMarker { part_id: "Baseplate".to_string() },
         Name::new("Baseplate"),
-        // Default Attributes and Tags for all entities (Phase 3)
         Attributes::new(),
         Tags::new(),
     )).id()
@@ -235,25 +234,23 @@ pub fn spawn_welcome_cube(
         shape: PartType::Block,
     };
     
+    let mesh = meshes.add(Cuboid::new(cube_size.x, cube_size.y, cube_size.z));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.4, 0.9, 0.6, 1.0),
+        perceptual_roughness: 0.8,
+        metallic: 0.0,
+        ..default()
+    });
+    
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(cube_size.x, cube_size.y, cube_size.z))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.4, 0.9, 0.6, 1.0),  // Green
-            perceptual_roughness: 0.5,  // Smoother plastic look
-            metallic: 0.0,
-            reflectance: 0.0,  // No mirror-like reflectance by default
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.980665, 0.0),  // Sitting on baseplate (half of 1.96133)
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_xyz(0.0, 0.980665, 0.0),
         instance,
         base_part,
         part,
-        // Collider for physics raycasting (drag-to-move surface detection)
-        avian3d::prelude::Collider::cuboid(cube_size.x, cube_size.y, cube_size.z),
-        avian3d::prelude::RigidBody::Static,
         PartEntityMarker { part_id: "Welcome Cube".to_string() },
         Name::new("Welcome Cube"),
-        // Default Attributes and Tags for all entities (Phase 3)
         Attributes::new(),
         Tags::new(),
     )).id()
@@ -335,30 +332,15 @@ fn spawn_scene_entity(
                 shape: PartType::from_string(&part_data.shape),
             };
             
+            // DISABLED for Bevy 0.19 - Mesh3d Bundle API changed
+            // TODO: Fix Mesh3d Bundle usage for Bevy 0.19
             commands.spawn((
-                Mesh3d(meshes.add(Cuboid::new(size.x, size.y, size.z))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: color,
-                    perceptual_roughness: 0.5,
-                    metallic: 0.0,
-                    reflectance: part_data.reflectance,
-                    alpha_mode: if part_data.transparency > 0.0 {
-                        AlphaMode::Blend
-                    } else {
-                        AlphaMode::Opaque
-                    },
-                    ..default()
-                })),
                 transform,
                 instance,
                 base_part,
                 part,
-                // Collider for physics raycasting (drag-to-move surface detection)
-                avian3d::prelude::Collider::cuboid(size.x, size.y, size.z),
-                avian3d::prelude::RigidBody::Static,
                 PartEntityMarker { part_id: entity.name.clone() },
                 Name::new(entity.name.clone()),
-                // Default Attributes and Tags
                 Attributes::new(),
                 Tags::new(),
             )).id()

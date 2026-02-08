@@ -2,7 +2,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 #[allow(unused_imports)]
 use bevy::gizmos::config::{GizmoConfigStore, GizmoConfigGroup, DefaultGizmoConfigGroup};
 
@@ -163,7 +162,6 @@ fn handle_rotate_interaction(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut egui_ctx: EguiContexts,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<SelectionBox>>,
     // Query for parents to check hierarchy relationships (ChildOf in Bevy 0.17)
     parent_query: Query<&ChildOf>,
@@ -174,11 +172,7 @@ fn handle_rotate_interaction(
         return;
     }
     
-    // Skip if cursor is over egui UI
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    if ctx.wants_pointer_input() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -344,7 +338,8 @@ fn detect_circle_hit(
         let axis_vec = axis.to_vec3();
         
         // Find intersection with plane perpendicular to axis
-        if let Some(plane_hit) = ray_plane_intersection(ray, center, axis_vec) {
+        if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec) {
+            let plane_hit = ray.origin + *ray.direction * t;
             let to_hit = plane_hit - center;
             let distance_to_center = to_hit.length();
             
@@ -368,7 +363,8 @@ fn detect_circle_hit(
 fn calculate_rotation_angle(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
     let axis_vec = axis.to_vec3();
     
-    if let Some(plane_hit) = ray_plane_intersection(ray, center, axis_vec) {
+    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec) {
+        let plane_hit = ray.origin + *ray.direction * t;
         let to_hit = plane_hit - center;
         
         // Get reference vector perpendicular to axis

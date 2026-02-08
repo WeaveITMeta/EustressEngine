@@ -1,0 +1,302 @@
+// ============================================================================
+// Eustress Engine Studio - Soul Settings Dialog
+// Claude API configuration for Soul scripting
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, CheckBox, Button, ComboBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component SoulSettingsDialog inherits Rectangle {
+    // Properties
+    in-out property <string> api-key: "";
+    in-out property <bool> use-global-key: true;
+    in-out property <string> model: "claude-sonnet-4-20250514";
+    in-out property <int> max-tokens: 4096;
+    in-out property <float> temperature: 0.7;
+    in property <bool> api-key-valid: false;
+    in property <string> error-message: "";
+    
+    // Callbacks
+    callback on-save();
+    callback on-close();
+    callback on-test-connection();
+    callback on-clear-cache();
+    
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+    
+    TouchArea {
+        clicked => { root.on-close(); }
+    }
+    
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 500px;
+        height: 480px;
+        background: Theme.dialog-background;
+        border-radius: 8px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-color;
+        
+        TouchArea {}
+        
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+            
+            // Header
+            HorizontalBox {
+                Text {
+                    text: "⚙ Soul Settings";
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 600;
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: close-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 4px;
+                    
+                    close-touch := TouchArea {
+                        clicked => { root.on-close(); }
+                    }
+                    
+                    Text {
+                        text: "✕";
+                        color: Theme.text-secondary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            // API Key section
+            Text {
+                text: "Claude API Configuration";
+                color: Theme.text-secondary;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            
+            CheckBox {
+                text: "Use global API key";
+                checked <=> root.use-global-key;
+            }
+            
+            VerticalBox {
+                spacing: 4px;
+                
+                Text {
+                    text: "API Key";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                }
+                
+                Rectangle {
+                    height: 36px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.api-key-valid ? Theme.accent-green : Theme.input-border;
+                    
+                    HorizontalBox {
+                        padding: 8px;
+                        
+                        LineEdit {
+                            horizontal-stretch: 1;
+                            text <=> root.api-key;
+                            input-type: password;
+                        }
+                        
+                        if root.api-key-valid: Text {
+                            text: "✓";
+                            color: Theme.accent-green;
+                            font-size: 16px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            
+            // Model selection
+            VerticalBox {
+                spacing: 4px;
+                
+                Text {
+                    text: "Model";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                }
+                
+                ComboBox {
+                    model: ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"];
+                    current-value <=> root.model;
+                }
+            }
+            
+            // Parameters
+            HorizontalBox {
+                spacing: 16px;
+                
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "Max Tokens";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                    }
+                    
+                    Rectangle {
+                        height: 36px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+                        
+                        LineEdit {
+                            text: root.max-tokens;
+                        }
+                    }
+                }
+                
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+                    
+                    Text {
+                        text: "Temperature";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                    }
+                    
+                    Rectangle {
+                        height: 36px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+                        
+                        LineEdit {
+                            text: root.temperature;
+                        }
+                    }
+                }
+            }
+            
+            // Error message
+            if root.error-message != "": Rectangle {
+                height: 36px;
+                background: #4a2020;
+                border-radius: 4px;
+                
+                HorizontalBox {
+                    padding: 8px;
+                    
+                    Text {
+                        text: "⚠ " + root.error-message;
+                        color: Theme.text-error;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            // Actions
+            HorizontalBox {
+                spacing: 8px;
+                
+                Rectangle {
+                    width: 120px;
+                    height: 32px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-test-connection(); }
+                    }
+                    
+                    Text {
+                        text: "Test Connection";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 100px;
+                    height: 32px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-clear-cache(); }
+                    }
+                    
+                    Text {
+                        text: "Clear Cache";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            Rectangle { vertical-stretch: 1; }
+            
+            // Footer
+            HorizontalBox {
+                spacing: 8px;
+                alignment: end;
+                
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-close(); }
+                    }
+                    
+                    Text {
+                        text: "Cancel";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-save(); }
+                    }
+                    
+                    Text {
+                        text: "Save";
+                        color: white;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

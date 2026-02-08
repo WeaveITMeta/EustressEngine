@@ -5,6 +5,15 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Gamepad service plugin
+pub struct GamepadServicePlugin;
+
+impl Plugin for GamepadServicePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<GamepadService>();
+    }
+}
+
 /// Gamepad service resource
 #[derive(Resource, Default, Clone, Debug)]
 pub struct GamepadService {

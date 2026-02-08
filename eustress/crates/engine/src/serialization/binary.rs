@@ -1800,6 +1800,7 @@ pub fn load_binary_scene_to_world(
                     name: name.clone(),
                     class_name,
                     archivable: (data.flags & 0x01) != 0,
+                    ..Default::default()
                 };
                 
                 // Spawn based on class

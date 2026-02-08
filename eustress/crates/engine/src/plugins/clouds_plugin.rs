@@ -1009,6 +1009,7 @@ pub fn spawn_clouds(commands: &mut Commands) -> Entity {
             class_name: ClassName::Clouds,
             archivable: true,
             id: 0,
+            ..Default::default()
         },
         Clouds::default(),
     )).id()
@@ -1025,6 +1026,7 @@ pub mod presets {
                 class_name: ClassName::Clouds,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Clouds::clear(),
         )).id()
@@ -1037,6 +1039,7 @@ pub mod presets {
                 class_name: ClassName::Clouds,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Clouds::partly_cloudy(),
         )).id()
@@ -1049,6 +1052,7 @@ pub mod presets {
                 class_name: ClassName::Clouds,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Clouds::overcast(),
         )).id()
@@ -1061,6 +1065,7 @@ pub mod presets {
                 class_name: ClassName::Clouds,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Clouds::stormy(),
         )).id()

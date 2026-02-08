@@ -22,7 +22,9 @@ use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::core_pipeline::tonemapping::Tonemapping;
+#[cfg(feature = "physics")]
 use avian3d::prelude::*;
+use tracing::info;
 
 use crate::classes::{Instance, ClassName};
 use crate::services::player::{
@@ -172,18 +174,21 @@ impl Plugin for SharedCharacterPlugin {
                 camera_mouse_look,
                 camera_zoom,
                 character_movement_input,
-                character_movement_physics,
-                character_jump,
-                ground_check,
-                update_locomotion,
-                update_character_facing,
-                update_animation_state_machine,
-                // Humanoid-specific animation systems
-                update_character_facing_system,
-                update_head_look_system,
-                apply_procedural_limb_animation,
-                camera_follow,
-            ).chain().run_if(has_play_mode_character));
+                // Character systems - DISABLED for Bevy 0.19
+                // update_input,
+                // update_mouse_look,
+                // ground_check,
+                // character_movement_physics,
+                // character_jump,
+                // update_locomotion,
+                // update_character_facing,
+                // update_animation_state_machine,
+                // // Humanoid-specific animation systems
+                // update_character_facing_system,
+                // update_head_look_system,
+                // apply_procedural_limb_animation,
+                // camera_follow,
+            ).run_if(has_play_mode_character));
     }
 }
 
@@ -414,117 +419,57 @@ fn character_movement_input(
     }
 }
 
-/// Apply movement physics
+/// Apply movement physics - DISABLED for Bevy 0.19
 fn character_movement_physics(
-    time: Res<Time>,
-    mut query: Query<(
-        &MovementIntent,
-        &Character,
-        &CharacterPhysics,
-        &mut LinearVelocity,
-        &LocomotionController,
-    ), With<PlayModeCharacter>>,
+    // _time: Res<Time>,
+    // _query: Query<(
+    //     &MovementIntent,
+    //     &Character,
+    //     &CharacterPhysics,
+    //     &mut LinearVelocity,
+    //     &LocomotionController,
+    // ), With<PlayModeCharacter>>,
 ) {
-    let delta = time.delta_secs();
-    
-    for (intent, character, physics, mut velocity, locomotion) in query.iter_mut() {
-        let grounded = locomotion.grounded;
-        
-        // Calculate target velocity
-        let mut target_speed = character.walk_speed;
-        if intent.sprint {
-            target_speed *= character.sprint_multiplier;
-        }
-        
-        let target_velocity = intent.direction * target_speed * intent.speed;
-        
-        // Apply movement with different handling for ground/air
-        if grounded {
-            let acceleration = physics.ground_friction * delta;
-            velocity.x = velocity.x.lerp(target_velocity.x, acceleration.min(1.0));
-            velocity.z = velocity.z.lerp(target_velocity.z, acceleration.min(1.0));
-            
-            if intent.speed < 0.1 {
-                velocity.x *= 1.0 - (physics.ground_friction * delta).min(1.0);
-                velocity.z *= 1.0 - (physics.ground_friction * delta).min(1.0);
-            }
-        } else {
-            let air_accel = physics.air_control * delta * 10.0;
-            velocity.x += (target_velocity.x - velocity.x) * air_accel;
-            velocity.z += (target_velocity.z - velocity.z) * air_accel;
-            
-            velocity.x *= 1.0 - physics.air_drag * delta;
-            velocity.z *= 1.0 - physics.air_drag * delta;
-        }
-    }
+    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
 }
 
-/// Handle jumping
+/// Handle jumping - DISABLED for Bevy 0.19
 fn character_jump(
-    mut query: Query<(
-        &MovementIntent,
-        &Character,
-        &LocomotionController,
-        &mut LinearVelocity,
-        &mut AnimationStateMachine,
-    ), With<PlayModeCharacter>>,
+    // _query: Query<(
+    //     &MovementIntent,
+    //     &Character,
+    //     &LocomotionController,
+    //     &mut LinearVelocity,
+    //     &mut AnimationStateMachine,
+    // ), With<PlayModeCharacter>>,
 ) {
-    for (intent, character, locomotion, mut velocity, mut state_machine) in query.iter_mut() {
-        if intent.jump && locomotion.grounded && character.can_jump {
-            velocity.y = character.jump_power;
-            state_machine.request_transition(AnimationState::JumpStart);
-        }
-    }
+    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
 }
 
 /// Ground detection using raycasts
 fn ground_check(
-    spatial_query: SpatialQuery,
-    mut query: Query<(
-        &Transform,
-        &CharacterPhysics,
-        &mut LocomotionController,
-        &mut Character,
-    ), With<PlayModeCharacter>>,
+    // DISABLED - avian3d physics not available
+    // _spatial_query: SpatialQuery,
+    // mut _query: Query<(
+    //     &Transform,
+    //     &CharacterPhysics,
+    //     &mut LocomotionController,
+    //     &mut Character,
+    // ), With<PlayModeCharacter>>,
 ) {
-    for (transform, physics, mut locomotion, mut character) in query.iter_mut() {
-        let ray_origin = transform.translation + Vec3::Y * physics.ground_ray_offset;
-        let ray_dir = Dir3::NEG_Y;
-        let max_dist = physics.ground_ray_length + physics.ground_ray_offset;
-        
-        let hit = spatial_query.cast_ray(
-            ray_origin,
-            ray_dir,
-            max_dist,
-            true,
-            &SpatialQueryFilter::default(),
-        );
-        
-        locomotion.grounded = hit.is_some();
-        character.grounded = hit.is_some();
-    }
+    // DISABLED for Bevy 0.19 - avian3d not yet compatible
 }
 
-/// Update locomotion controller from velocity
+/// Update locomotion controller from velocity - DISABLED for Bevy 0.19
 fn update_locomotion(
-    time: Res<Time>,
-    mut query: Query<(
-        &LinearVelocity,
-        &MovementIntent,
-        &mut LocomotionController,
-    ), With<PlayModeCharacter>>,
+    // _time: Res<Time>,
+    // _query: Query<(
+    //     &LinearVelocity,
+    //     &MovementIntent,
+    //     &mut LocomotionController,
+    // ), With<PlayModeCharacter>>,
 ) {
-    let delta = time.delta_secs();
-    
-    for (velocity, intent, mut locomotion) in query.iter_mut() {
-        let forward = if intent.direction.length_squared() > 0.01 {
-            intent.direction.normalize()
-        } else {
-            Vec3::NEG_Z
-        };
-        let grounded = locomotion.grounded;
-        locomotion.update_from_velocity(velocity.0, forward, grounded, delta);
-    }
+    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
 }
 
 /// Update character facing direction

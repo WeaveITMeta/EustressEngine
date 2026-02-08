@@ -1,0 +1,276 @@
+// ============================================================================
+// Eustress Engine Studio - Toolbox Panel
+// Part insertion tools and primitives
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, GridBox } from "std-widgets.slint";
+import { Theme, PanelHeader, IconButton } from "theme.slint";
+
+// Tool category
+export struct ToolCategory {
+    name: string,
+    icon: string,
+    expanded: bool,
+}
+
+// Tool item
+export struct ToolItem {
+    id: string,
+    name: string,
+    icon: string,
+    tooltip: string,
+    category: string,
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> icon: "";
+    in property <string> label: "";
+    in property <string> tooltip: "";
+    in property <bool> selected: false;
+    
+    callback clicked();
+    
+    width: 64px;
+    height: 64px;
+    background: self.selected ? Theme.selection-background : 
+                touch.has-hover ? Theme.explorer-item-hover : transparent;
+    border-radius: 4px;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    
+    VerticalBox {
+        padding: 4px;
+        spacing: 2px;
+        alignment: center;
+        
+        Text {
+            text: root.icon;
+            color: root.selected ? Theme.accent-blue : Theme.text-primary;
+            font-size: 24px;
+            horizontal-alignment: center;
+        }
+        
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component Toolbox inherits Rectangle {
+    // Properties
+    in property <string> current-tool: "select";
+    in property <[ToolItem]> tools: [];
+    
+    // Callbacks
+    callback on-select-tool(string);
+    callback on-insert-part(string);
+    
+    background: Theme.panel-background;
+    
+    ScrollView {
+        VerticalBox {
+            padding: 8px;
+            spacing: 8px;
+            
+            // Transform Tools
+            PanelHeader {
+                title: "Transform";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "🖱";
+                    label: "Select";
+                    selected: root.current-tool == "select";
+                    clicked => { root.on-select-tool("select"); }
+                }
+                
+                ToolButton {
+                    icon: "↔";
+                    label: "Move";
+                    selected: root.current-tool == "move";
+                    clicked => { root.on-select-tool("move"); }
+                }
+                
+                ToolButton {
+                    icon: "🔄";
+                    label: "Rotate";
+                    selected: root.current-tool == "rotate";
+                    clicked => { root.on-select-tool("rotate"); }
+                }
+                
+                ToolButton {
+                    icon: "⤢";
+                    label: "Scale";
+                    selected: root.current-tool == "scale";
+                    clicked => { root.on-select-tool("scale"); }
+                }
+            }
+            
+            // Primitives
+            PanelHeader {
+                title: "Primitives";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "▢";
+                    label: "Block";
+                    clicked => { root.on-insert-part("Part"); }
+                }
+                
+                ToolButton {
+                    icon: "◯";
+                    label: "Sphere";
+                    clicked => { root.on-insert-part("SpherePart"); }
+                }
+                
+                ToolButton {
+                    icon: "△";
+                    label: "Wedge";
+                    clicked => { root.on-insert-part("WedgePart"); }
+                }
+                
+                ToolButton {
+                    icon: "⬡";
+                    label: "Cylinder";
+                    clicked => { root.on-insert-part("CylinderPart"); }
+                }
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "⊕";
+                    label: "Corner";
+                    clicked => { root.on-insert-part("CornerWedgePart"); }
+                }
+                
+                ToolButton {
+                    icon: "🔲";
+                    label: "Truss";
+                    clicked => { root.on-insert-part("TrussPart"); }
+                }
+            }
+            
+            // Models
+            PanelHeader {
+                title: "Models";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "📦";
+                    label: "Model";
+                    clicked => { root.on-insert-part("Model"); }
+                }
+                
+                ToolButton {
+                    icon: "📁";
+                    label: "Folder";
+                    clicked => { root.on-insert-part("Folder"); }
+                }
+            }
+            
+            // Lighting
+            PanelHeader {
+                title: "Lighting";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "💡";
+                    label: "Point";
+                    clicked => { root.on-insert-part("PointLight"); }
+                }
+                
+                ToolButton {
+                    icon: "🔦";
+                    label: "Spot";
+                    clicked => { root.on-insert-part("SpotLight"); }
+                }
+                
+                ToolButton {
+                    icon: "☀";
+                    label: "Surface";
+                    clicked => { root.on-insert-part("SurfaceLight"); }
+                }
+            }
+            
+            // Physics
+            PanelHeader {
+                title: "Physics";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "⚓";
+                    label: "Anchor";
+                    clicked => { root.on-insert-part("Attachment"); }
+                }
+                
+                ToolButton {
+                    icon: "🔗";
+                    label: "Weld";
+                    clicked => { root.on-insert-part("WeldConstraint"); }
+                }
+                
+                ToolButton {
+                    icon: "🔩";
+                    label: "Hinge";
+                    clicked => { root.on-insert-part("HingeConstraint"); }
+                }
+            }
+            
+            // Scripts
+            PanelHeader {
+                title: "Scripts";
+                collapsible: true;
+            }
+            
+            HorizontalBox {
+                spacing: 4px;
+                
+                ToolButton {
+                    icon: "@";
+                    label: "Soul";
+                    clicked => { root.on-insert-part("SoulScript"); }
+                }
+                
+                ToolButton {
+                    icon: "📜";
+                    label: "Local";
+                    clicked => { root.on-insert-part("LocalScript"); }
+                }
+                
+                ToolButton {
+                    icon: "📋";
+                    label: "Module";
+                    clicked => { root.on-insert-part("ModuleScript"); }
+                }
+            }
+        }
+    }
+}

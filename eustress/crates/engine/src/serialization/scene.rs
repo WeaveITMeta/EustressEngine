@@ -146,8 +146,13 @@ fn attribute_value_to_json(value: &AttributeValue) -> serde_json::Value {
         }
         AttributeValue::BrickColor(bc) => serde_json::json!({"type": "BrickColor", "value": bc}),
         AttributeValue::EntityRef(e) => serde_json::json!({"type": "EntityRef", "value": e}),
-        AttributeValue::UDim2 { scale_x, offset_x, scale_y, offset_y } => {
-            serde_json::json!({"type": "UDim2", "value": [scale_x, offset_x, scale_y, offset_y]})
+        AttributeValue::Color3(c) => {
+            let srgba = c.to_srgba();
+            serde_json::json!({"type": "Color3", "value": [srgba.red, srgba.green, srgba.blue]})
+        }
+        AttributeValue::Object(e) => serde_json::json!({"type": "Object", "value": e}),
+        AttributeValue::UDim2 { x_scale, x_offset, y_scale, y_offset } => {
+            serde_json::json!({"type": "UDim2", "value": [x_scale, x_offset, y_scale, y_offset]})
         }
         AttributeValue::Rect { min, max } => {
             serde_json::json!({"type": "Rect", "value": {"min": [min.x, min.y], "max": [max.x, max.y]}})
@@ -342,7 +347,12 @@ pub fn save_scene(
             scene.domain_configs = Some(serde_json::to_value(&registry.domains).unwrap_or_default());
         }
         if !registry.global_variables.is_empty() {
-            scene.global_variables = Some(registry.global_variables.clone());
+            // Convert serde_json::Value to String for serialization
+            let string_vars: HashMap<String, String> = registry.global_variables
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_string()))
+                .collect();
+            scene.global_variables = Some(string_vars);
         }
     }
     
@@ -775,19 +785,23 @@ pub fn load_scene(
     let mut registry = GlobalParametersRegistry::new();
     
     if let Some(ref sources_json) = scene.global_sources {
-        if let Ok(sources) = serde_json::from_value::<HashMap<String, GlobalDataSource>>(sources_json.clone()) {
+        if let Ok(sources) = serde_json::from_value::<Vec<GlobalDataSource>>(sources_json.clone()) {
             registry.sources = sources;
         }
     }
     
     if let Some(ref domains_json) = scene.domain_configs {
-        if let Ok(domains) = serde_json::from_value::<HashMap<String, DomainConfig>>(domains_json.clone()) {
+        if let Ok(domains) = serde_json::from_value::<Vec<DomainConfig>>(domains_json.clone()) {
             registry.domains = domains;
         }
     }
     
     if let Some(ref vars) = scene.global_variables {
-        registry.global_variables = vars.clone();
+        // Convert HashMap<String, String> to HashMap<String, serde_json::Value>
+        registry.global_variables = vars
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
     }
     
     // Insert/update the registry resource
@@ -851,6 +865,7 @@ fn spawn_entity_from_data(
         archivable: data.properties.get("Archivable")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        ..Default::default()
     };
     
     // Spawn based on class using spawn helpers
@@ -1037,7 +1052,7 @@ fn spawn_entity_from_data(
         let mut attributes = Attributes::new();
         for (key, json_value) in &data.attributes {
             if let Some(attr_value) = json_to_attribute_value(json_value) {
-                attributes.set(key.clone(), attr_value);
+                attributes.set(key, attr_value);
             }
         }
         commands.entity(entity).insert(attributes);
@@ -1047,7 +1062,7 @@ fn spawn_entity_from_data(
     if !data.tags.is_empty() {
         let mut tags = Tags::new();
         for tag in &data.tags {
-            tags.add(tag.clone());
+            tags.add(tag);
         }
         commands.entity(entity).insert(tags);
     }
@@ -2362,6 +2377,7 @@ pub fn load_scene_from_world(
             class_name,
             archivable: true,
             id: entity_data.id,
+            ..Default::default()
         };
         
         // Spawn with class-specific components

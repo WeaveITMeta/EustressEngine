@@ -1,0 +1,231 @@
+
+  warning: eustress-engine@0.1.0: Γ£à Icon embedded in executable successfully
+     Compiling eustress-engine v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\engine)
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+     = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+     = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+     = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+       = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+    = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+     = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of unresolved module or unlinked crate `avian3d`
+      = help: if you wanted to use a crate named `avian3d`, use `cargo add avian3d` to add it to your `Cargo.toml`
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                 ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                 ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in this scope
+      |                            ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `Physics` in this scope
+      |                    +++++++++
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `Physics` in this scope
+       |                       +++++++++
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `Physics` in this scope
+       |                                         +++++++++
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `RigidBody` in this scope
+       |                              +++++++++++
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                 ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in this scope
+      |                      ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                       ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+       |                      ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in module `bevy::ecs::event`
+      |                                 ^^^^^^^^^^^ not found in `bevy::ecs::event`
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                 ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in this scope
+      |                      ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                       ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `SpatialQuery` in this scope
+      |                    ^^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `SpatialQuery` in this scope
+      |                     ^^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventReader` in this scope
+      |                 ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in this scope
+      |                      ^^^^^^^^^^^ not found in this scope
+  System.Management.Automation.RemoteException
+> error[E0425]: cannot find type `EventWriter` in this scope
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  System.Management.Automation.RemoteException
+> error[E0277]: `bevy::prelude::AmbientLight` is not a `Resource`
+      |                                   ^^^^^^^^ required by this bound in `ResMut`
+  System.Management.Automation.RemoteException
+> error[E0277]: `bevy::prelude::AmbientLight` is not a `Resource`
+      |                               ^^^^^^^^ required by this bound in `Commands::<'w, 's>::insert_resource`
+  System.Management.Automation.RemoteException
+> error[E0599]: the method `chain` exists for tuple `(..., ..., ..., ..., ...)`, but its trait bounds were not satisfied
+     = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0609]: no field `color` on type `bevy::prelude::ResMut<'_, bevy::prelude::AmbientLight>`
+      |                   ^^^^^ unknown field
+  System.Management.Automation.RemoteException
+> error[E0609]: no field `brightness` on type `bevy::prelude::ResMut<'_, bevy::prelude::AmbientLight>`
+      |                   ^^^^^^^^^^ unknown field
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `add_event` found for mutable reference `&mut bevy::prelude::App` in the current scope
+     |
+  System.Management.Automation.RemoteException
+> error[E0599]: the method `chain` exists for tuple `(fn({type error}, ...) {handle_start_server}, ..., ..., ..., ...)`, but its trait bounds were not satisfied
+     = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+      |                                ^^^^^^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+      |                                    ^^^^^^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+      |                          ^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+       |                                       ^^^^^^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+       |                                ^^^^^^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0605]: non-primitive cast: `EntityIndex` as `u64`
+       |                                ^^^^^^^^^^^^^^^^^^^^^ an `as` expression can only be used to convert between primitive types or to coerce to a specific trait object
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+       |                         ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+       |                     ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+       |                             ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+       |                             ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `LinearVelocity`
+       |                             ^^^^^^^^^^^^^^ use of undeclared type `LinearVelocity`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `AngularVelocity`
+       |                             ^^^^^^^^^^^^^^^ use of undeclared type `AngularVelocity`
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `add_event` found for mutable reference `&mut bevy::prelude::App` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `add_event` found for mutable reference `&mut bevy::prelude::App` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: the method `chain` exists for tuple `(fn(Option<...>) {render_slint_to_buffer}, ..., ..., ..., ...)`, but its trait bounds were not satisfied
+      = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0277]: `for<'a> fn(bevy::prelude::Res<'a, SlintBevyBridge>, {type error}) {check_slint_close_request}` does not describe a valid system configuration
+      = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0560]: struct `bevy::prelude::Camera` has no field named `target`
+      = note: available fields are: `viewport`, `is_active`, `computed`, `output_mode`, `msaa_writeback` ... and 3 others
+  System.Management.Automation.RemoteException
+> error[E0277]: `(fn(..., ..., ..., ...) {manage_tool_activation}, ..., ...)` does not describe a valid system configuration
+      = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_, TransformGizmoGroup>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: the method `chain` exists for tuple `(..., ..., ..., ...)`, but its trait bounds were not satisfied
+      = note: consider using `--verbose` to print the full type name to the console
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `SpatialQueryFilter`
+      |                      ^^^^^^^^^^^^^^^^^^ use of undeclared type `SpatialQueryFilter`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `SpatialQueryFilter`
+      |                  ^^^^^^^^^^^^^^^^^^ use of undeclared type `SpatialQueryFilter`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `Collider`
+      |                                       ^^^^^^^^ use of undeclared type `Collider`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `Collider`
+      |                                           ^^^^^^^^ use of undeclared type `Collider`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `Collider`
+      |                          ^^^^^^^^ use of undeclared type `Collider`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+      |                     ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `Collider`
+      |                     ^^^^^^^^ use of undeclared type `Collider`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+      |                     ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `cuboid` found for struct `bevy::prelude::Gizmos<'_, '_>` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0308]: mismatched types
+      |     ^^^^
+  System.Management.Automation.RemoteException
+> error[E0308]: mismatched types
+      |     ^^^^
+  System.Management.Automation.RemoteException
+> error[E0599]: no method named `add_event` found for mutable reference `&mut bevy::prelude::App` in the current scope
+      |
+  System.Management.Automation.RemoteException
+> error[E0599]: the method `chain` exists for tuple `(fn({type error}, ResMut<'a, ...>) {process_viga_requests}, ..., ...)`, but its trait bounds were not satisfied
+     |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ray_direction`
+  System.Management.Automation.RemoteException
+> error[E0433]: failed to resolve: use of undeclared type `RigidBody`
+       |                                                              ^^^^^^^^^ use of undeclared type `RigidBody`
+  System.Management.Automation.RemoteException
+> error[E0308]: mismatched types
+      |                     ^^^^^^^^^^^^^^ expected `u32`, found `EntityIndex`
+  System.Management.Automation.RemoteException
+> error[E0308]: mismatched types
+      |                     ^^^^^^^^^^^^^^ expected `u32`, found `EntityIndex`
+  System.Management.Automation.RemoteException
+> error[E0308]: mismatched types
+
+

@@ -102,7 +102,7 @@ pub mod prelude {
     };
     
     pub use bevy::prelude::*;
-    pub use bevy_egui::egui;
+    // egui removed - using Slint UI
 }
 
 /// Message to trigger a plugin menu action
@@ -153,9 +153,8 @@ impl Plugin for StudioPluginSystem {
                 sync_mindspace_selection,
             ).chain())
             // handle_plugin_action_events runs in PostUpdate to process messages written by apply_ui_actions
-            .add_systems(PostUpdate, handle_plugin_action_events)
-            // render_plugin_ui must run in EguiPrimaryContextPass to avoid "available_rect before Context::run" panic
-            .add_systems(bevy_egui::EguiPrimaryContextPass, render_plugin_ui.run_if(crate::ui::egui_is_ready));
+            .add_systems(PostUpdate, handle_plugin_action_events);
+            // Plugin UI is now handled by Slint - see slint_ui.rs
     }
 }
 
@@ -221,11 +220,12 @@ fn handle_plugin_menu_actions(
 fn handle_plugin_action_events(
     mut commands: Commands,
     mut events: MessageReader<PluginActionEvent>,
-    selection_manager: Res<crate::ui::BevySelectionManager>,
+    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
     mut studio_state: ResMut<crate::ui::StudioState>,
     instance_query: Query<(Entity, &crate::classes::Instance)>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
     
     for event in events.read() {
@@ -286,6 +286,7 @@ fn handle_plugin_action_events(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
@@ -306,6 +307,7 @@ fn handle_plugin_action_events(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 let mut text_label = TextLabel::default();
                 text_label.text = label_text.clone();
@@ -416,8 +418,8 @@ fn handle_plugin_action_events(
                             };
                             let mut beam = Beam::default();
                             // Use entity index as u32 ID for attachment references
-                            beam.attachment0 = Some(source_att_entity.index());
-                            beam.attachment1 = Some(target_att_entity.index());
+                            beam.attachment0 = Some(source_att_entity.index().index());
+                            beam.attachment1 = Some(target_att_entity.index().index());
                             // Green color sequence for the beam
                             beam.color_sequence = vec![(0.0, bevy::color::Color::srgb(0.3, 0.8, 0.3))];
                             beam.width0 = 0.1;
@@ -453,15 +455,12 @@ fn handle_plugin_action_events(
 }
 
 /// Render UI for all active plugins
-/// Note: This must run after egui context is initialized (after EguiSet::BeginPass)
+/// Note: Plugin UI is now handled by Slint integration
 fn render_plugin_ui(
     mut manager: ResMut<PluginManager>,
     mut registry: ResMut<PluginRegistry>,
-    mut contexts: bevy_egui::EguiContexts,
 ) {
-    // Get the context - this will fail gracefully if not ready
-    let Ok(ctx) = contexts.ctx_mut() else { return; };
-    manager.render_ui(ctx, &mut registry);
+    manager.render_ui(&mut registry);
 }
 
 /// Sync pending tab registrations from plugins to TabRegistry
@@ -482,7 +481,7 @@ fn sync_plugin_tabs(
                 priority: tab.priority,
                 visible: true,
                 sections: Vec::new(),
-                owner_plugin: tab.owner_plugin,
+                owner_plugin: Some(tab.owner_plugin),
             });
         }
         
@@ -490,6 +489,7 @@ fn sync_plugin_tabs(
         for section in sections {
             tab_registry.add_section(&section.tab_id, tab_api::TabSection {
                 id: section.section_id,
+                name: section.label.clone(),
                 label: section.label,
                 buttons: Vec::new(),
                 collapsible: false,
@@ -503,7 +503,7 @@ fn sync_plugin_tabs(
                 id: button.button_id,
                 label: button.label,
                 icon: button.icon,
-                tooltip: button.tooltip,
+                tooltip: Some(button.tooltip),
                 action_id: button.action_id,
                 size: match button.size {
                     api::TabButtonSize::Small => tab_api::TabButtonSize::Small,
@@ -521,9 +521,10 @@ fn process_plugin_actions(
     mut commands: Commands,
     mut manager: ResMut<PluginManager>,
     mut clock: ResMut<SimClock>,
-    selection_manager: Res<crate::ui::BevySelectionManager>,
+    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     // Collect all pending actions
     let actions = manager.collect_actions();
     
@@ -783,7 +784,7 @@ fn process_plugin_actions(
 /// When selection changes, populate the edit buffer with the TextLabel text (if present)
 fn sync_mindspace_selection(
     mut studio_state: ResMut<crate::ui::StudioState>,
-    selection_manager: Res<crate::ui::BevySelectionManager>,
+    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
     // Query to find entities by their Instance component
     instance_query: Query<(Entity, &crate::classes::Instance)>,
     // Query to find BillboardGui children
@@ -793,6 +794,7 @@ fn sync_mindspace_selection(
     // Query to check for BillboardGuiMarker
     billboard_marker_query: Query<(), With<crate::spawn::BillboardGuiMarker>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     // Only sync when MindSpace panel is visible and in Edit mode
     if !studio_state.mindspace_panel_visible || studio_state.mindspace_mode != crate::ui::MindSpaceMode::Edit {
         return;

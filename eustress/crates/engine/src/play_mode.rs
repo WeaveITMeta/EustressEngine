@@ -644,7 +644,7 @@ fn handle_start_play(
         let mut snapshot = WorldSnapshot::new(0, "Play Start");
         
         for (entity, transform, instance, basepart, humanoid, part, model) in snapshot_query.iter() {
-            let entity_index = entity.index() as u64;
+            let entity_index = entity.to_bits() as u64;
             let mut entity_snapshot = EntitySnapshot::new(entity_index);
             
             // Capture transform
@@ -927,7 +927,7 @@ fn handle_stop_play(
             let mut restored_count = 0;
             let mut transform_restored = 0;
             for (entity, transform, instance, basepart, humanoid) in restore_query.iter_mut() {
-                let entity_index = entity.index() as u64;
+                let entity_index = entity.to_bits() as u64;
                 
                 if let Some(entity_snapshot) = snapshot.entities.get(&entity_index) {
                     restored_count += 1;
@@ -966,7 +966,7 @@ fn handle_stop_play(
             // Build set of current entity indices
             let current_entity_indices: std::collections::HashSet<u64> = all_entities
                 .iter()
-                .map(|e| e.index() as u64)
+                .map(|e| e.to_bits() as u64)
                 .collect();
             
             // Find entities in snapshot that no longer exist
@@ -1014,7 +1014,7 @@ fn handle_stop_play(
                                     let mut query = world.query_filtered::<(Entity, &Instance), 
                                         (Without<PlayModeCharacter>, Without<SpawnedDuringPlayMode>)>();
                                     for (entity, _) in query.iter(world) {
-                                        let entity_id = entity.index() as u64;
+                                        let entity_id = entity.to_bits() as u64;
                                         if !should_exist.contains(&entity_id) {
                                             to_despawn.push(entity);
                                         }
@@ -1095,7 +1095,7 @@ fn handle_create_save_point(
         let mut snapshot = WorldSnapshot::new(0, &event.name);
         
         for (entity, transform, instance, basepart, humanoid) in snapshot_query.iter() {
-            let entity_index = entity.index() as u64;
+            let entity_index = entity.to_bits() as u64;
             let mut entity_snapshot = EntitySnapshot::new(entity_index);
             
             if let Some(t) = transform {
@@ -1168,7 +1168,7 @@ fn handle_restore_save_point(
         info!("🔄 Restoring to save point '{}'", snapshot.name);
         
         for (entity, transform, instance, basepart, humanoid) in restore_query.iter_mut() {
-            let entity_index = entity.index() as u64;
+            let entity_index = entity.to_bits() as u64;
             
             if let Some(entity_snapshot) = snapshot.entities.get(&entity_index) {
                 if let (Some(mut t), Some(ts)) = (transform, &entity_snapshot.transform) {
@@ -1906,7 +1906,8 @@ fn start_play_server_if_server_mode(
     if play_mode.play_type == PlayModeType::Server {
         info!("🖥️ Starting in-process play server...");
         start_server.write(crate::play_server::StartPlayServerMessage {
-            server_addr: None, // Use default 127.0.0.1:7778
+            port: 0, // Auto-allocate port
+            max_players: 8,
         });
     }
 }

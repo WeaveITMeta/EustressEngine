@@ -1,0 +1,176 @@
+// ============================================================================
+// Eustress Engine Studio - Login Dialog
+// SSO authentication dialog
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component LoginDialog inherits Rectangle {
+    // Properties
+    in property <bool> is-loading: false;
+    in property <string> error-message: "";
+    in property <string> status-message: "";
+    
+    // Callbacks
+    callback on-login();
+    callback on-close();
+    callback on-login-with-google();
+    callback on-login-with-github();
+    
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+    
+    TouchArea {
+        clicked => { root.on-close(); }
+    }
+    
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 400px;
+        height: 360px;
+        background: Theme.dialog-background;
+        border-radius: 8px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-color;
+        
+        TouchArea {
+            // Prevent click-through
+        }
+        
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+            alignment: center;
+            
+            // Logo/Title
+            Text {
+                text: "🎮";
+                font-size: 48px;
+                horizontal-alignment: center;
+            }
+            
+            Text {
+                text: "Sign in to Eustress";
+                color: Theme.text-primary;
+                font-size: 20px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            
+            Text {
+                text: "Connect your account to publish experiences and access cloud features";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+            
+            Rectangle { height: 8px; }
+            
+            // SSO Buttons
+            Rectangle {
+                height: 44px;
+                background: white;
+                border-radius: 4px;
+                
+                TouchArea {
+                    enabled: !root.is-loading;
+                    clicked => { root.on-login-with-google(); }
+                }
+                
+                HorizontalBox {
+                    padding: 12px;
+                    spacing: 12px;
+                    alignment: center;
+                    
+                    Text {
+                        text: "G";
+                        color: #4285f4;
+                        font-size: 18px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    
+                    Text {
+                        text: "Continue with Google";
+                        color: #333333;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            Rectangle {
+                height: 44px;
+                background: #24292e;
+                border-radius: 4px;
+                
+                TouchArea {
+                    enabled: !root.is-loading;
+                    clicked => { root.on-login-with-github(); }
+                }
+                
+                HorizontalBox {
+                    padding: 12px;
+                    spacing: 12px;
+                    alignment: center;
+                    
+                    Text {
+                        text: "⚙";
+                        color: white;
+                        font-size: 18px;
+                        vertical-alignment: center;
+                    }
+                    
+                    Text {
+                        text: "Continue with GitHub";
+                        color: white;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            // Status/Error
+            if root.status-message != "": Text {
+                text: root.status-message;
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+            
+            if root.error-message != "": Text {
+                text: root.error-message;
+                color: Theme.text-error;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+            
+            // Loading indicator
+            if root.is-loading: Text {
+                text: "Connecting...";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+            
+            Rectangle { vertical-stretch: 1; }
+            
+            // Close link
+            TouchArea {
+                height: 20px;
+                clicked => { root.on-close(); }
+                
+                Text {
+                    text: "Cancel";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

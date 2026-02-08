@@ -1,0 +1,93 @@
+//! # Explorer Search
+//!
+//! Stub module for explorer search functionality.
+
+use bevy::prelude::*;
+
+/// Explorer search plugin placeholder
+pub struct ExplorerSearchPlugin;
+
+impl Plugin for ExplorerSearchPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement explorer search
+    }
+}
+
+/// Search query structure
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    pub text: String,
+    pub criteria: Vec<SearchCriterion>,
+}
+
+/// Search criterion
+#[derive(Debug, Clone)]
+pub struct SearchCriterion {
+    pub property: String,
+    pub op: CompareOp,
+    pub value: String,
+}
+
+/// Search result
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub entity: Entity,
+    pub name: String,
+    pub class_name: String,
+    pub score: f32,
+}
+
+/// Comparison operator
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Equals,
+    NotEquals,
+    Contains,
+    GreaterThan,
+    LessThan,
+}
+
+/// Explorer search engine
+#[derive(Resource, Debug, Default)]
+pub struct ExplorerSearchEngine {
+    pub results: Vec<SearchResult>,
+    pub query: SearchQuery,
+}
+
+/// Advanced search state
+#[derive(Resource, Debug, Default)]
+pub struct AdvancedSearchState {
+    pub visible: bool,
+    pub query_text: String,
+    pub step: FilterBuilderStep,
+    pub query: String,
+    pub results: Vec<bevy::prelude::Entity>,
+    pub show_panel: bool,
+}
+
+/// Filter builder step
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterBuilderStep {
+    #[default]
+    SelectProperty,
+    SelectOperator,
+    EnterValue,
+}
+
+/// Search presets
+#[derive(Debug, Clone, Default)]
+pub struct SearchPresets {
+    pub presets: Vec<(String, SearchQuery)>,
+}
+
+/// Property info for searchable properties
+#[derive(Debug, Clone)]
+pub struct PropertyInfo {
+    pub name: String,
+    pub property_type: String,
+}
+
+/// Get searchable properties for a class
+pub fn get_searchable_properties(_class_name: &str) -> Vec<PropertyInfo> {
+    Vec::new()
+}

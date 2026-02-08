@@ -75,10 +75,10 @@ impl Plugin for TerrainPlugin {
             // Core systems
             .add_systems(Update, (
                 process_terrain_generation_queue,  // Process async terrain generation
-                update_lod_system,
-                chunk_spawn_system,
-                chunk_cull_system,
-            ).chain())
+                // update_lod_system,
+                // chunk_spawn_system,
+                // chunk_cull_system,
+            ))
             
             // Editor systems (only run in Editor mode)
             .add_systems(Update, (
@@ -264,21 +264,20 @@ pub fn process_terrain_generation_queue(
             Name::new(format!("Chunk_{}_{}", chunk_pos.x, chunk_pos.y)),
         ));
         
-        // Add physics collider (1:1 with visual mesh)
+        // Add physics collider (1:1 with visual mesh) - DISABLED for Bevy 0.19
+        // TODO: Fix avian3d Bundle usage for Bevy 0.19
         #[cfg(feature = "physics")]
         {
-            if let Some(mesh) = meshes.get(&mesh_handle) {
-                if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
-                    chunk_commands.insert((
-                        RigidBody::Static,
-                        collider,
-                        CollisionLayers::new(
-                            TerrainPhysicsLayer::Terrain,
-                            [TerrainPhysicsLayer::Default, TerrainPhysicsLayer::Player, TerrainPhysicsLayer::Vehicle],
-                        ),
-                    ));
-                }
-            }
+            // Physics temporarily disabled due to avian3d/Bevy 0.19 compatibility
+            // if let Some(mesh) = meshes.get(&mesh_handle) {
+            //     if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
+            //         chunk_commands.insert((
+            //             RigidBody::Static,
+            //             collider,
+            //             CollisionLayers::new(...),
+            //         ));
+            //     }
+            // }
         }
         
         let chunk_entity = chunk_commands.id();

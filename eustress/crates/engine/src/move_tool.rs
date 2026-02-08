@@ -3,7 +3,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use crate::selection_box::SelectionBox;
 use crate::editor_settings::EditorSettings;
@@ -109,7 +108,7 @@ fn draw_move_gizmos(
         // Include the selected part itself
         let size = base_part.map(|bp| bp.size).unwrap_or(transform.scale);
         let half_size = size * 0.5;
-        let (part_min, part_max) = calculate_rotated_aabb(transform.translation, transform.rotation, half_size);
+        let (part_min, part_max) = calculate_rotated_aabb(transform.translation, half_size, transform.rotation);
         bounds_min = bounds_min.min(part_min);
         bounds_max = bounds_max.max(part_max);
         count += 1;
@@ -121,7 +120,7 @@ fn draw_move_gizmos(
                     let child_t = child_global.compute_transform();
                     let child_size = child_bp.map(|bp| bp.size).unwrap_or(child_t.scale);
                     let child_half = child_size * 0.5;
-                    let (c_min, c_max) = calculate_rotated_aabb(child_t.translation, child_t.rotation, child_half);
+                    let (c_min, c_max) = calculate_rotated_aabb(child_t.translation, child_half, child_t.rotation);
                     bounds_min = bounds_min.min(c_min);
                     bounds_max = bounds_max.max(c_max);
                     count += 1;
@@ -268,7 +267,6 @@ fn handle_move_interaction(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut egui_ctx: EguiContexts,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<SelectionBox>>,
     // Query for children of selected entities (for Model support - bounds only)
     children_query: Query<&Children>,
@@ -287,11 +285,7 @@ fn handle_move_interaction(
         return;
     }
     
-    // Skip if cursor is over egui UI
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    if ctx.wants_pointer_input() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -322,7 +316,7 @@ fn handle_move_interaction(
             
             // Use precise OBB intersection check (handles rotation)
             let half_size = size * 0.5;
-            let (part_min, part_max) = calculate_rotated_aabb(t.translation, t.rotation, half_size);
+            let (part_min, part_max) = calculate_rotated_aabb(t.translation, half_size, t.rotation);
             bounds_min = bounds_min.min(part_min);
             bounds_max = bounds_max.max(part_max);
             count += 1;
@@ -336,7 +330,7 @@ fn handle_move_interaction(
                         let child_size = child_bp.map(|bp| bp.size).unwrap_or(child_t.scale);
                         
                         let child_half = child_size * 0.5;
-                        let (c_min, c_max) = calculate_rotated_aabb(child_t.translation, child_t.rotation, child_half);
+                        let (c_min, c_max) = calculate_rotated_aabb(child_t.translation, child_half, child_t.rotation);
                         bounds_min = bounds_min.min(c_min);
                         bounds_max = bounds_max.max(c_max);
                         count += 1;
@@ -387,8 +381,8 @@ fn handle_move_interaction(
             // Calculate initial world position at drag start
             // Use a plane that contains the axis but faces the camera for reliable intersection
             let plane_normal = get_axis_drag_plane_normal(axis.to_vec3(), camera_forward);
-            if let Some(world_pos) = ray_plane_intersection(&ray, center, plane_normal) {
-                state.initial_mouse_world = world_pos;
+            if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, plane_normal) {
+                state.initial_mouse_world = ray.origin + *ray.direction * t;
             }
         } else {
             // No axis handle hit - check if clicking on a selected part for free drag
@@ -397,7 +391,7 @@ fn handle_move_interaction(
                 let size = base_part.as_ref().map(|bp| bp.size).unwrap_or(t.scale);
                 
                 // Check if ray intersects this part
-                if ray_intersects_part(&ray, t.translation, size) {
+                if ray_intersects_part(ray.origin, *ray.direction, transform, size).is_some() {
                     // Start free drag mode
                     state.free_drag = true;
                     state.dragged_axis = None;
@@ -415,8 +409,8 @@ fn handle_move_interaction(
                     
                     // Calculate initial world position using horizontal plane at group center
                     let plane_normal = Vec3::Y;
-                    if let Some(world_pos) = ray_plane_intersection(&ray, center, plane_normal) {
-                        state.initial_mouse_world = world_pos;
+                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, plane_normal) {
+                        state.initial_mouse_world = ray.origin + *ray.direction * t;
                     }
                     break;
                 }
@@ -429,7 +423,8 @@ fn handle_move_interaction(
             
             // Use the same plane calculation as drag start for consistency
             let plane_normal = get_axis_drag_plane_normal(axis_vec, camera_forward);
-            if let Some(current_world_pos) = ray_plane_intersection(&ray, state.group_center, plane_normal) {
+            if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, plane_normal) {
+                let current_world_pos = ray.origin + *ray.direction * t;
                 // Calculate delta in world space
                 let delta = current_world_pos - state.initial_mouse_world;
                 
@@ -533,7 +528,8 @@ fn handle_move_interaction(
         } else if state.free_drag {
             // Free drag mode - move on horizontal plane
             let plane_normal = Vec3::Y;
-            if let Some(current_world_pos) = ray_plane_intersection(&ray, state.group_center, plane_normal) {
+            if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, plane_normal) {
+                let current_world_pos = ray.origin + *ray.direction * t;
                 let delta = current_world_pos - state.initial_mouse_world;
                 
                 // Apply snapping
@@ -645,7 +641,8 @@ fn detect_axis_hit(
             let axis_end = center + axis_vec * handle_length * direction;
             
             // Find closest point on ray to the axis line segment
-            if let Some(dist) = ray_to_line_segment_distance(ray, axis_start, axis_end) {
+            let dist = ray_to_line_segment_distance(ray.origin, *ray.direction, axis_start, axis_end);
+            if dist < f32::MAX {
                 if dist < hit_radius {
                     // Calculate distance from camera to the axis for depth sorting
                     let axis_center = (axis_start + axis_end) * 0.5;

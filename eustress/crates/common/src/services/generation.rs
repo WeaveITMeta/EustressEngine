@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
+use tracing::{info, warn};
 
 #[allow(unused_imports)]
 use crate::scene::{DetailLevel, NodeCategory, GenerationStatus};

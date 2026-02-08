@@ -424,6 +424,7 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                     class_name: crate::classes::ClassName::Part,
                     archivable: true,
                     id: data.id,
+                    ..Default::default()
                 },
                 Name::new(data.name.clone()),
             ));
@@ -919,8 +920,7 @@ fn apply_folder_domain(id: u32, domain: Option<String>, source_override: Option<
 /// Apply sync config to an entity's Parameters
 fn apply_folder_sync_config(id: u32, config_json: Option<String>, world: &mut World) {
     use crate::classes::Instance;
-    use eustress_common::classes::DomainSyncConfig;
-    use eustress_common::parameters::Parameters;
+    use eustress_common::parameters::{Parameters, DomainSyncConfig};
     
     let entity = {
         let mut query = world.query::<(Entity, &Instance)>();
@@ -965,7 +965,7 @@ fn apply_attributes_to_entity(id: u32, attrs_json: &str, world: &mut World) {
         Ok(values) => {
             let mut attrs = Attributes::new();
             for (key, value) in values {
-                attrs.set(key, value);
+                attrs.set(&key, value);
             }
             world.entity_mut(entity).insert(attrs);
             info!("Applied Attributes to entity {}", id);
@@ -993,10 +993,10 @@ fn add_attribute_to_entity(id: u32, key: &str, value_json: &str, world: &mut Wor
     
     if let Ok(value) = serde_json::from_str::<AttributeValue>(value_json) {
         if let Some(mut attrs) = world.get_mut::<Attributes>(entity) {
-            attrs.set(key.to_string(), value);
+            attrs.set(key, value);
         } else {
             let mut attrs = Attributes::new();
-            attrs.set(key.to_string(), value);
+            attrs.set(key, value);
             world.entity_mut(entity).insert(attrs);
         }
     }
@@ -1043,7 +1043,7 @@ fn apply_tags_to_entity(id: u32, tag_list: Vec<String>, world: &mut World) {
     
     let mut tags = Tags::new();
     for tag in tag_list {
-        tags.add(tag);
+        tags.add(&tag);
     }
     world.entity_mut(entity).insert(tags);
     info!("Applied Tags to entity {}", id);
@@ -1065,10 +1065,10 @@ fn add_tag_to_entity(id: u32, tag: &str, world: &mut World) {
     };
     
     if let Some(mut tags) = world.get_mut::<Tags>(entity) {
-        tags.add(tag.to_string());
+        tags.add(tag);
     } else {
         let mut tags = Tags::new();
-        tags.add(tag.to_string());
+        tags.add(tag);
         world.entity_mut(entity).insert(tags);
     }
 }

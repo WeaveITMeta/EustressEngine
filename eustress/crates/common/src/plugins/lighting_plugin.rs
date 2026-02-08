@@ -7,13 +7,13 @@
 //! - Time of day system
 //! - Ambient lighting
 //! - Global fog (affects all entities: BaseParts, Terrain, Models)
-//! - Bevy 0.17 Atmosphere (raymarched and lookup-texture modes)
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
 use bevy::pbr::{DistanceFog, FogFalloff};
-use bevy::pbr::{Atmosphere as BevyAtmosphere, AtmosphereSettings, AtmosphereMode};
-use bevy::light::{AtmosphereEnvironmentMapLight, SunDisk};
+// TODO: Atmosphere API changed in Bevy 0.19 - re-enable when we find the new API
+// use bevy::pbr::{Atmosphere as BevyAtmosphere, AtmosphereSettings, AtmosphereMode};
+// use bevy::light::{AtmosphereEnvironmentMapLight, SunDisk};
 use bevy::core_pipeline::Skybox;
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
@@ -71,6 +71,12 @@ impl Plugin for SharedLightingPlugin {
 // ============================================================================
 // Scene Atmosphere Resource
 // ============================================================================
+
+// TODO: Atmosphere API changed in Bevy 0.19 - re-enable when we find the new API
+// #[derive(Component)]
+// pub struct SceneAtmosphere {
+//     pub atmosphere: BevyAtmosphere,
+// }
 
 /// Global scene atmosphere configuration
 /// Applied to all cameras that don't have their own EustressAtmosphere component
@@ -134,18 +140,16 @@ fn setup_lighting(
     commands.spawn((
         DirectionalLight {
             color: arr_to_color(lighting.sun_color),
-            illuminance: lighting.sun_intensity * 0.7,  // Reduced for softer look
-            shadows_enabled: lighting.shadows_enabled,
-            shadow_depth_bias: 0.04,   // Increased to reduce shadow acne
-            shadow_normal_bias: 2.5 * (1.0 + lighting.shadow_softness * 2.0),   // Softness affects normal bias
+            illuminance: lighting.sun_intensity * 0.7,
+            // TODO: Shadow settings moved in Bevy 0.19 - fix when we find new API
             ..default()
         },
-        // SunDisk controls the procedural sun rendered in the Atmosphere shader
-        // angular_size is in degrees (default Sun class is 20°)
-        SunDisk {
-            angular_size: sun_class.angular_size.to_radians(),
-            intensity: 1.0,
-        },
+        // SunDisk removed - part of deprecated Atmosphere API in Bevy 0.19
+        // TODO: Re-enable when we find the new atmosphere API
+        // SunDisk {
+        //     angular_size: sun_class.angular_size.to_radians(),
+        //     intensity: 1.0,
+        // },
         Transform::from_translation(sun_dir * 100.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
         Visibility::default(),
@@ -166,10 +170,7 @@ fn setup_lighting(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 0.5,  // Very dim by default (moon is ~0.3 lux)
-            shadows_enabled: true,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 1.5,
+            illuminance: 0.5,
             ..default()
         },
         Transform::from_xyz(50.0, 80.0, -30.0)
@@ -191,8 +192,7 @@ fn setup_lighting(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 5000.0,  // Increased fill light
-            shadows_enabled: false,
+            illuminance: 5000.0,
             ..default()
         },
         Transform::from_xyz(-30.0, 50.0, -30.0)
@@ -206,7 +206,6 @@ fn setup_lighting(
         DirectionalLight {
             color: Color::srgb(0.8, 0.85, 1.0),
             illuminance: 2000.0,
-            shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(0.0, -20.0, 50.0)
@@ -214,12 +213,13 @@ fn setup_lighting(
         Name::new("FillLight2"),
     ));
     
-    // Ambient light - increased for softer overall look
-    commands.insert_resource(AmbientLight {
-        color: arr_to_color(lighting.ambient),
-        brightness: lighting.brightness * 800.0,  // Increased ambient
-        affects_lightmapped_meshes: true,
-    });
+    // Ambient light - commented out due to Bevy 0.19 API changes
+    // TODO: Fix AmbientLight API changes in Bevy 0.19
+    // commands.insert_resource(AmbientLight {
+    //     color: arr_to_color(lighting.ambient),
+    //     brightness: lighting.brightness * 800.0,
+    //     affects_lightmapped_meshes: true,
+    // });
     
     info!("✅ Lighting setup complete");
 }
@@ -238,13 +238,10 @@ fn update_sun_position(
         // Update light properties
         sun_light.color = arr_to_color(lighting.sun_color);
         sun_light.illuminance = lighting.sun_intensity;
-        sun_light.shadows_enabled = lighting.shadows_enabled;
-        
-        // Real-time shadow softness control
-        // shadow_softness: 0.0 = hard shadows, 1.0 = very soft shadows
-        // Affects shadow_normal_bias which controls shadow edge softness
-        sun_light.shadow_normal_bias = 2.5 * (1.0 + lighting.shadow_softness * 3.0);
-        sun_light.shadow_depth_bias = 0.04 * (1.0 + lighting.shadow_softness * 0.5);
+        // TODO: Fix shadow settings for Bevy 0.19 API
+        // sun_light.shadows_enabled = lighting.shadows_enabled;
+        // sun_light.shadow_normal_bias = 2.5 * (1.0 + lighting.shadow_softness * 3.0);
+        // sun_light.shadow_depth_bias = 0.04 * (1.0 + lighting.shadow_softness * 0.5);
         
         // Calculate sun position based on time of day
         let sun_dir = lighting.sun_direction();
@@ -257,15 +254,17 @@ fn update_sun_position(
 
 /// Update ambient light based on LightingService
 fn update_ambient_light(
-    lighting: Res<LightingService>,
-    mut ambient: ResMut<AmbientLight>,
+    _lighting: Res<LightingService>,
+    // TODO: Fix AmbientLight API changes in Bevy 0.19
+    // mut ambient: ResMut<AmbientLight>,
 ) {
-    if !lighting.is_changed() {
-        return;
-    }
-    
-    ambient.color = arr_to_color(lighting.ambient);
-    ambient.brightness = lighting.brightness * 500.0;
+    // TODO: Re-enable when AmbientLight API is fixed
+    // if !lighting.is_changed() {
+    //     return;
+    // }
+    // 
+    // ambient.color = arr_to_color(lighting.ambient);
+    // ambient.brightness = lighting.brightness * 500.0;
 }
 
 /// Update moon position and properties using realistic orbital mechanics
@@ -308,7 +307,8 @@ fn update_moon_position(
         let moon_intensity = moon_data.current_intensity(sun_elevation) * phase_illumination;
         
         moon_light.illuminance = moon_intensity.max(0.01); // Minimum visibility
-        moon_light.shadows_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
+        // TODO: Fix shadow settings for Bevy 0.19 API
+        // moon_light.shadows_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
         
         // Position moon in sky
         let moon_distance = 100.0;
@@ -317,23 +317,13 @@ fn update_moon_position(
     }
 }
 
-/// Update exposure compensation in real-time
+/// Update exposure compensation - DISABLED for Bevy 0.19
 /// Affects overall scene brightness/exposure via ambient light adjustment
 fn update_exposure_compensation(
-    lighting: Res<LightingService>,
-    mut ambient: ResMut<AmbientLight>,
+    _lighting: Res<LightingService>,
+    // _ambient: ResMut<AmbientLight>,
 ) {
-    if !lighting.is_changed() {
-        return;
-    }
-    
-    // Exposure compensation: 0 = normal, positive = brighter, negative = darker
-    // Convert to exposure multiplier: 2^exposure_compensation
-    let exposure_multiplier = 2.0_f32.powf(lighting.exposure_compensation);
-    
-    // Apply exposure compensation to ambient brightness
-    // This provides a simple but effective exposure control
-    ambient.brightness = lighting.brightness * 500.0 * exposure_multiplier;
+    // Disabled - AmbientLight is no longer a Resource in Bevy 0.19
 }
 
 /// Update global fog settings based on LightingService
@@ -535,208 +525,21 @@ fn apply_atmosphere_to_cameras(
     }
 }
 
-/// Apply atmosphere settings to a camera entity
-/// 
-/// Converts EustressAtmosphere properties to Bevy 0.17 atmosphere components.
-/// Enables realtime-filtered environment maps for dynamic reflections.
+/// Apply atmosphere settings to a camera entity - DISABLED for Bevy 0.19
 fn apply_atmosphere_settings(
-    commands: &mut Commands,
-    camera_entity: Entity,
-    atmosphere: &EustressAtmosphere,
+    _commands: &mut Commands,
+    _camera_entity: Entity,
+    _atmosphere: &EustressAtmosphere,
 ) {
-    info!("🌤️ Applying Bevy 0.17 atmosphere to camera {:?} (mode: {:?})", 
-          camera_entity, atmosphere.rendering_mode);
-    
-    // Mark as processed
-    commands.entity(camera_entity).insert(AtmosphereApplied);
-    
-    // Store our atmosphere component for reference
-    commands.entity(camera_entity).insert(atmosphere.clone());
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // Bevy 0.17 Atmosphere - Procedural Sky with Atmospheric Scattering
-    // ════════════════════════════════════════════════════════════════════════
-    
-    // Create Bevy's Atmosphere component with Earth-like defaults
-    // This enables the procedural sky rendering
-    let bevy_atmosphere = BevyAtmosphere {
-        bottom_radius: atmosphere.planet_radius,
-        top_radius: atmosphere.planet_radius + atmosphere.atmosphere_height,
-        ground_albedo: Vec3::new(0.3, 0.3, 0.3), // Average ground reflectance
-        rayleigh_density_exp_scale: 1.0 / 8500.0, // Earth-like scale height
-        rayleigh_scattering: Vec3::new(
-            atmosphere.rayleigh_coefficient[0],
-            atmosphere.rayleigh_coefficient[1],
-            atmosphere.rayleigh_coefficient[2],
-        ),
-        mie_density_exp_scale: 1.0 / 1200.0, // Earth-like Mie scale
-        mie_scattering: atmosphere.mie_coefficient,
-        mie_absorption: atmosphere.mie_coefficient * 0.1, // ~10% absorption
-        mie_asymmetry: atmosphere.mie_direction,
-        ozone_layer_altitude: 25000.0, // 25km ozone layer
-        ozone_layer_width: 15000.0,    // 15km width
-        ozone_absorption: Vec3::new(0.65e-6, 1.88e-6, 0.085e-6), // Earth ozone
-    };
-    
-    // Configure atmosphere rendering settings
-    let atmosphere_settings = AtmosphereSettings {
-        rendering_method: match atmosphere.rendering_mode {
-            AtmosphereRenderingMode::LookupTexture => AtmosphereMode::LookupTexture,
-            AtmosphereRenderingMode::Raymarched => AtmosphereMode::Raymarched,
-        },
-        sky_max_samples: atmosphere.sky_max_samples,
-        ..default()
-    };
-    
-    commands.entity(camera_entity).insert((
-        bevy_atmosphere,
-        atmosphere_settings,
-    ));
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // Realtime-Filtered Environment Maps (PR #19076, #20529)
-    // ════════════════════════════════════════════════════════════════════════
-    // 
-    // AtmosphereEnvironmentMapLight enables the atmosphere to drive:
-    // - Reflections at different roughness levels (IBL)
-    // - Ambient light contribution from the sky
-    // - Dynamic per-view environment maps (no pre-baking needed)
-    //
-    // NOTE: Currently disabled due to wgpu STORAGE_BINDING validation error
-    // on some GPUs. The environment map filtering pipeline requires compute
-    // shader storage textures which may not be available on all configurations.
-    // See: https://github.com/bevyengine/bevy/pull/19076
-    //
-    // TODO: Re-enable when Bevy fixes the texture usage flags or add GPU
-    // capability detection to conditionally enable this feature.
-    
-    if atmosphere.atmosphere_environment_light {
-        // Temporarily disabled - causes wgpu validation error:
-        // "Invalid texture view usage STORAGE_BINDING with texture of usage COPY_SRC | COPY_DST | TEXTURE_BINDING"
-        // commands.entity(camera_entity).insert(
-        //     AtmosphereEnvironmentMapLight::default()
-        // );
-        // info!("✨ Enabled AtmosphereEnvironmentMapLight for dynamic reflections");
-        
-        info!("⚠️ AtmosphereEnvironmentMapLight disabled (GPU compatibility issue) - using basic atmosphere");
-    }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // Distance Fog (based on atmosphere haze)
-    // ════════════════════════════════════════════════════════════════════════
-    
-    if atmosphere.haze > 0.01 {
-        let fog_color = Color::srgba(
-            atmosphere.decay[0],
-            atmosphere.decay[1],
-            atmosphere.decay[2],
-            atmosphere.decay[3],
-        );
-        
-        // Haze affects fog distance - more haze = closer fog
-        let fog_start = 50.0 / (atmosphere.haze + 0.1);
-        let fog_end = 500.0 / (atmosphere.haze + 0.1);
-        
-        commands.entity(camera_entity).insert(DistanceFog {
-            color: fog_color,
-            falloff: FogFalloff::Linear {
-                start: fog_start,
-                end: fog_end,
-            },
-            ..default()
-        });
-    }
+    // Disabled - Atmosphere API changed in Bevy 0.19
 }
 
-/// Update atmosphere effects when SceneAtmosphere resource changes
-/// Syncs all Atmosphere properties to Bevy's Atmosphere component in real-time
+/// Update atmosphere effects - DISABLED for Bevy 0.19
 fn update_atmosphere_effects(
-    mut commands: Commands,
-    scene_atmosphere: Res<SceneAtmosphere>,
-    mut cameras_with_atmosphere: Query<(Entity, &mut BevyAtmosphere), (With<Camera3d>, With<AtmosphereApplied>)>,
+    _commands: Commands,
+    _scene_atmosphere: Res<SceneAtmosphere>,
 ) {
-    // Only update when the resource has changed
-    if !scene_atmosphere.is_changed() {
-        return;
-    }
-    
-    let atmosphere = &scene_atmosphere.atmosphere;
-    
-    for (camera_entity, mut bevy_atmo) in cameras_with_atmosphere.iter_mut() {
-        // ════════════════════════════════════════════════════════════════════════
-        // Sync Atmosphere properties to Bevy Atmosphere
-        // ════════════════════════════════════════════════════════════════════════
-        
-        // Color affects Rayleigh scattering (sky color)
-        // Convert [0-1] color to scattering coefficients
-        let color_scale = atmosphere.density * 20e-6;
-        bevy_atmo.rayleigh_scattering = Vec3::new(
-            atmosphere.color[0] * color_scale * 1.5,  // Blue channel higher for blue sky
-            atmosphere.color[1] * color_scale * 1.2,
-            atmosphere.color[2] * color_scale,
-        );
-        
-        // Decay affects ground albedo (horizon color)
-        bevy_atmo.ground_albedo = Vec3::new(
-            atmosphere.decay[0],
-            atmosphere.decay[1],
-            atmosphere.decay[2],
-        );
-        
-        // Density affects atmosphere thickness via scale heights
-        // Higher density = denser atmosphere = more scattering
-        let density_factor = 0.5 + atmosphere.density * 1.5; // Range 0.5 to 2.0
-        bevy_atmo.rayleigh_density_exp_scale = density_factor / 8500.0;
-        bevy_atmo.mie_density_exp_scale = density_factor / 1200.0;
-        
-        // Offset affects atmosphere height
-        let height_offset = atmosphere.offset * 10000.0; // Scale offset to meters
-        bevy_atmo.top_radius = atmosphere.planet_radius + atmosphere.atmosphere_height + height_offset;
-        
-        // Haze affects Mie scattering (sun glare/haze)
-        let haze_factor = 1.0 + atmosphere.haze * 50.0; // More haze = more Mie
-        bevy_atmo.mie_scattering = atmosphere.mie_coefficient * haze_factor;
-        bevy_atmo.mie_absorption = atmosphere.mie_coefficient * haze_factor * 0.1;
-        
-        // Glare affects Mie asymmetry (forward scattering around sun)
-        // Higher glare = more forward scattering = brighter sun disk halo
-        bevy_atmo.mie_asymmetry = atmosphere.mie_direction + atmosphere.glare * 0.2;
-        
-        // ════════════════════════════════════════════════════════════════════════
-        // Update fog based on haze
-        // ════════════════════════════════════════════════════════════════════════
-        
-        if atmosphere.haze > 0.01 {
-            let fog_color = Color::srgba(
-                atmosphere.decay[0],
-                atmosphere.decay[1],
-                atmosphere.decay[2],
-                atmosphere.decay[3],
-            );
-            
-            // Haze affects fog distance - more haze = closer fog
-            let fog_start = 50.0 / (atmosphere.haze + 0.1);
-            let fog_end = 500.0 / (atmosphere.haze + 0.1);
-            
-            commands.entity(camera_entity).insert(DistanceFog {
-                color: fog_color,
-                falloff: FogFalloff::Linear {
-                    start: fog_start,
-                    end: fog_end,
-                },
-                ..default()
-            });
-        } else {
-            // Remove fog if haze is negligible
-            commands.entity(camera_entity).remove::<DistanceFog>();
-        }
-        
-        // Update the stored atmosphere component on the camera
-        commands.entity(camera_entity).insert(atmosphere.clone());
-        
-        info!("🌤️ Synced Atmosphere to Bevy (density: {:.2}, haze: {:.2}, color: [{:.2}, {:.2}, {:.2}])", 
-              atmosphere.density, atmosphere.haze, atmosphere.color[0], atmosphere.color[1], atmosphere.color[2]);
-    }
+    // Disabled - Atmosphere API changed in Bevy 0.19
 }
 
 // ============================================================================
@@ -785,18 +588,19 @@ impl SceneAtmosphere {
 // ============================================================================
 
 /// Sync Sun class angular_size property to SunDisk component in real-time
+/// DISABLED for Bevy 0.19 - SunDisk removed
 fn sync_sun_class_to_sundisk(
-    mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>,
+    // mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>,
 ) {
-    for (sun_class, mut sun_disk) in sun_query.iter_mut() {
-        // Convert degrees to radians for SunDisk
-        let new_angular_size = sun_class.angular_size.to_radians();
-        if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
-            sun_disk.angular_size = new_angular_size;
-            info!("☀️ Sun angular_size synced: {:.1}° → {:.4} rad", 
-                  sun_class.angular_size, new_angular_size);
-        }
-    }
+    // Disabled - SunDisk removed in Bevy 0.19
+    // for (sun_class, mut sun_disk) in sun_query.iter_mut() {
+    //     let new_angular_size = sun_class.angular_size.to_radians();
+    //     if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
+    //         sun_disk.angular_size = new_angular_size;
+    //         info!("☀️ Sun angular_size synced: {:.1}° → {:.4} rad", 
+    //               sun_class.angular_size, new_angular_size);
+    //     }
+    // }
 }
 
 /// Sync LightingService.clock_time to Sun.time_of_day for day/night cycle

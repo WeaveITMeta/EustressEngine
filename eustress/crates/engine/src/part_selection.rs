@@ -3,9 +3,8 @@ use bevy::window::PrimaryWindow;
 use crate::rendering::PartEntity;
 use crate::classes::{Instance, BasePart};
 use crate::selection_box::SelectionBox;
-use bevy_egui::EguiContexts;
 use crate::math_utils::ray_obb_intersection;
-use crate::entity_utils::entity_to_id;
+use crate::entity_utils::entity_to_id_string;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::BevySelectionManager;
@@ -28,36 +27,19 @@ pub fn part_selection_system(
     selected_query: Query<(Entity, &GlobalTransform, Option<&BasePart>), With<SelectionBox>>,
     // Query to check if a parent entity is a Model
     parent_query: Query<&Instance>,
-    selection_manager: Res<BevySelectionManager>,
-    mut egui_contexts: EguiContexts,
+    selection_manager: Option<Res<BevySelectionManager>>,
     move_state: Res<crate::move_tool::MoveToolState>,
     scale_state: Res<crate::scale_tool::ScaleToolState>,
     rotate_state: Res<crate::rotate_tool::RotateToolState>,
     _studio_state: Res<crate::ui::StudioState>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     // Only trigger on left click press
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }
     
-    // CRITICAL: Don't select/deselect parts if clicking on UI!
-    let Ok(ctx) = egui_contexts.ctx_mut() else { return; };
-    
-    // Block if egui is actively using pointer (dragging slider, typing, etc.)
-    if ctx.is_using_pointer() {
-        return;
-    }
-    
-    // Block if pointer is over ANY egui area (panels, windows, etc.)
-    // This prevents deselection when clicking on Properties panel or other UI
-    if ctx.is_pointer_over_area() {
-        return;
-    }
-    
-    // Also block if egui wants pointer input (text fields, sliders, etc.)
-    if ctx.wants_pointer_input() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     // Check if Shift or Ctrl is pressed for multi-select
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -106,7 +88,7 @@ pub fn part_selection_system(
                 // Use calculated AABB for accurate center (matches MoveTool logic)
                 let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
                 let half_size = size * 0.5;
-                let (part_min, part_max) = crate::move_tool::calculate_rotated_aabb(t.translation, t.rotation, half_size);
+                let (part_min, part_max) = crate::move_tool::calculate_rotated_aabb(t.translation, half_size, t.rotation);
                 
                 bounds_min = bounds_min.min(part_min);
                 bounds_max = bounds_max.max(part_max);
@@ -119,7 +101,7 @@ pub fn part_selection_system(
                             let child_t = child_global.compute_transform();
                             let child_size = child_bp.map(|bp| bp.size).unwrap_or(child_t.scale);
                             let child_half = child_size * 0.5;
-                            let (c_min, c_max) = crate::move_tool::calculate_rotated_aabb(child_t.translation, child_t.rotation, child_half);
+                            let (c_min, c_max) = crate::move_tool::calculate_rotated_aabb(child_t.translation, child_half, child_t.rotation);
                             
                             bounds_min = bounds_min.min(c_min);
                             bounds_max = bounds_max.max(c_max);
@@ -186,7 +168,7 @@ pub fn part_selection_system(
     for (entity, part_entity, instance, transform, _mesh_handle, basepart, child_of) in part_entities_query.iter() {
         // Skip entities that don't have either PartEntity or Instance (not selectable)
         // Entity ID format must match: "indexVgeneration" e.g. "68v0"
-        let entity_id = entity_to_id(entity);
+        let entity_id = entity_to_id_string(entity);
         
         let part_id = if let Some(pe) = part_entity {
             if !pe.part_id.is_empty() {
@@ -218,7 +200,7 @@ pub fn part_selection_system(
         let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
         
         // Use precise OBB (Oriented Bounding Box) intersection
-        if let Some(distance) = ray_obb_intersection(&ray, part_position, part_rotation, part_size) {
+        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_position, part_size, part_rotation) {
             // Check if this entity has a parent that is a Model
             let parent_model = child_of.and_then(|c| {
                 let parent_entity = c.0;
@@ -262,7 +244,7 @@ pub fn part_selection_system(
             part_id.clone()
         } else if let Some(model_entity) = parent_model {
             // Part has a parent Model - select the Model instead
-            let model_id = entity_to_id(model_entity);
+            let model_id = entity_to_id_string(model_entity);
             // Selecting parent Model
             model_id
         } else {
@@ -315,7 +297,7 @@ pub fn part_selection_system(
                 
                 for (entity, part_entity, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
                     // Get part ID from either component (format: "indexVgeneration")
-                    let entity_id = entity_to_id(entity);
+                    let entity_id = entity_to_id_string(entity);
                     let part_id = part_entity.map(|pe| pe.part_id.clone())
                         .filter(|id| !id.is_empty())
                         .or_else(|| instance.map(|_| entity_id));
@@ -349,7 +331,7 @@ pub fn part_selection_system(
             
             for (entity, part_entity, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
                 // Get part ID from either component (format: "indexVgeneration")
-                let entity_id = entity_to_id(entity);
+                let entity_id = entity_to_id_string(entity);
                 let part_id = part_entity.map(|pe| pe.part_id.clone())
                     .filter(|id| !id.is_empty())
                     .or_else(|| instance.map(|_| entity_id));

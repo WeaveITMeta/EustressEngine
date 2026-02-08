@@ -1,0 +1,7 @@
+Starting Eustress Engine...
+✅ Loaded editor settings from "C:\\Users\\miksu\\.eustress_studio\\settings.json"
+🎬 Setting up default scene (shared with Client)...
+✅ Default scene ready (shared with Client: Baseplate + Welcome Cube)!
+🌤️ Sky and Atmosphere entities spawned for Lighting service
+☀️ Sun and Moon are spawned by SharedLightingPlugin with DirectionalLight
+✅ Eustress Camera: Empowering focus and flow enabled

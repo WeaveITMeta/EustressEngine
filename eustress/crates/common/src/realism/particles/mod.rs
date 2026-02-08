@@ -23,6 +23,7 @@ pub mod prelude {
 }
 
 use bevy::prelude::*;
+use tracing::info;
 
 /// Particle physics plugin
 pub struct ParticlePlugin;

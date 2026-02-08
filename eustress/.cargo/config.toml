@@ -1,10 +1,22 @@
 [build]
-# Disable incremental compilation to avoid Windows file locking issues
-incremental = false
+# Enable incremental compilation for faster rebuilds
+incremental = true
 
-# Use all cores but with better coordination
+# Use all cores
 jobs = 8
 
 [target.x86_64-pc-windows-msvc]
-# Optimize linker for Windows
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# Use standard MSVC linker - rust-lld has issues with Skia ICU duplicate symbols
+# linker = "rust-lld.exe"
+
+[profile.dev]
+# Minimal optimization for fast compile
+opt-level = 0
+# Skip debug info for faster compile (comment out if you need debugging)
+debug = 0
+# Split debuginfo for faster linking
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Optimize dependencies even in dev mode (they don't change often)
+opt-level = 2

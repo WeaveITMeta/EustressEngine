@@ -1,0 +1,209 @@
+// ============================================================================
+// Eustress Engine Studio - Explorer Panel
+// Hierarchical entity tree view with services
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, ScrollView, StandardListView } from "std-widgets.slint";
+import { Theme, TreeItem, PanelHeader } from "theme.slint";
+
+// Entity data structure for the tree
+export struct EntityNode {
+    id: int,
+    name: string,
+    class-name: string,
+    icon: string,
+    depth: int,
+    expandable: bool,
+    expanded: bool,
+    selected: bool,
+    visible: bool,
+}
+
+export component ExplorerPanel inherits Rectangle {
+    // Properties
+    in property <[EntityNode]> entities: [];
+    in-out property <string> search-text: "";
+    
+    // Callbacks
+    callback on-select-entity(int);
+    callback on-expand-entity(int);
+    callback on-collapse-entity(int);
+    callback on-context-menu(length, length);
+    callback on-search-changed(string);
+    callback on-rename-entity(int, string);
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Search bar
+        Rectangle {
+            height: 32px;
+            background: Theme.header-background;
+            
+            HorizontalBox {
+                padding: 4px;
+                
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: search-input.has-focus ? Theme.input-focus : Theme.input-border;
+                    
+                    HorizontalBox {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        
+                        Text {
+                            width: 16px;
+                            text: "🔍";
+                            color: Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                        
+                        search-input := LineEdit {
+                            horizontal-stretch: 1;
+                            placeholder-text: "Search entities...";
+                            text <=> root.search-text;
+                            edited(text) => { root.on-search-changed(text); }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Entity tree
+        ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 0px;
+                spacing: 0px;
+                
+                // Services header
+                PanelHeader {
+                    title: "Services";
+                    collapsible: true;
+                }
+                
+                // Service nodes (always visible)
+                TreeItem {
+                    depth: 0;
+                    icon: "@";
+                    label: "Workspace";
+                    expandable: true;
+                    expanded: true;
+                    clicked => { root.on-select-entity(-1); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "P";
+                    label: "Players";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-2); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "*";
+                    label: "Lighting";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-3); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "S";
+                    label: "SoulService";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-4); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "$";
+                    label: "ServerStorage";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-5); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "G";
+                    label: "StarterGui";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-6); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "K";
+                    label: "StarterPack";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-7); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "P";
+                    label: "StarterPlayer";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-8); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "~";
+                    label: "SoundService";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-9); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: "T";
+                    label: "Teams";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-10); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                // Dynamic entity list would be rendered here via Rust binding
+                // For now, placeholder showing how entities would be displayed
+                for entity in root.entities: TreeItem {
+                    depth: entity.depth;
+                    icon: entity.icon;
+                    label: entity.name;
+                    expandable: entity.expandable;
+                    expanded: entity.expanded;
+                    selected: entity.selected;
+                    visible: entity.visible;
+                    
+                    clicked => { root.on-select-entity(entity.id); }
+                    toggle-expanded => {
+                        if entity.expanded {
+                            root.on-collapse-entity(entity.id);
+                        } else {
+                            root.on-expand-entity(entity.id);
+                        }
+                    }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+            }
+        }
+    }
+}

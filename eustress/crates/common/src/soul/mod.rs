@@ -55,6 +55,7 @@ pub use config::*;
 pub use toon::*;
 
 use bevy::prelude::*;
+use tracing::info;
 
 // ============================================================================
 // Soul Plugin

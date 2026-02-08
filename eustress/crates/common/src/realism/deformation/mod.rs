@@ -32,17 +32,18 @@ pub mod prelude {
 }
 
 use bevy::prelude::*;
+use tracing::info;
 
 /// Mesh deformation plugin
 pub struct DeformationPlugin;
 
 impl Plugin for DeformationPlugin {
     fn build(&self, app: &mut App) {
+        // Event registration DISABLED for Bevy 0.19
+        // TODO: Fix event registration for Bevy 0.19
         app
             .register_type::<components::DeformableMesh>()
             .register_type::<components::DeformationState>()
-            .add_event::<components::FractureMeshEvent>()
-            .add_event::<components::ImpactDeformEvent>()
             .add_systems(Update, (
                 systems::init_deformable_meshes,
                 systems::update_stress_deformation,
@@ -50,7 +51,7 @@ impl Plugin for DeformationPlugin {
                 systems::apply_impact_deformation,
                 systems::update_mesh_vertices,
                 systems::handle_fracture_mesh,
-            ).chain());
+            ));
         
         info!("DeformationPlugin initialized - Vertex deformation ready");
     }

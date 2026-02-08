@@ -1,0 +1,53 @@
+//! # CEF Browser
+//!
+//! Stub module for CEF browser integration.
+
+use bevy::prelude::*;
+
+/// CEF browser plugin placeholder
+pub struct CefBrowserPlugin;
+
+impl Plugin for CefBrowserPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<CefBrowserState>();
+    }
+}
+
+/// CEF browser state
+#[derive(Resource, Debug, Default)]
+pub struct CefBrowserState {
+    pub initialized: bool,
+    pub browsers: Vec<CefBrowserInstance>,
+}
+
+impl CefBrowserState {
+    /// Check if CEF is available and initialized
+    pub fn is_available(&self) -> bool {
+        self.initialized
+    }
+}
+
+/// CEF browser instance
+#[derive(Debug, Clone, Default)]
+pub struct CefBrowserInstance {
+    pub id: u32,
+    pub url: String,
+}
+
+/// Check if CEF is enabled
+pub fn is_cef_enabled() -> bool {
+    false
+}
+
+/// Render CEF browser panel
+pub fn render_cef_browser_panel(
+    _ui: &mut bevy_egui::egui::Ui,
+    _state: &mut CefBrowserState,
+) {
+    // TODO: Implement CEF browser panel
+}
+
+/// Get CEF status message
+pub fn get_cef_status_message() -> &'static str {
+    "CEF not available"
+}

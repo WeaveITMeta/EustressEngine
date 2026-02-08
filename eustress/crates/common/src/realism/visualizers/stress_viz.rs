@@ -17,141 +17,39 @@ use crate::realism::materials::properties::MaterialProperties;
 // Systems
 // ============================================================================
 
-/// Draw stress indicators using gizmos
+/// Draw stress indicators using gizmos - DISABLED for Bevy 0.19
 pub fn draw_stress_indicators(
-    query: Query<(&Transform, &StressTensor, &MaterialProperties, Option<&FractureState>)>,
-    mut gizmos: Gizmos,
+    _query: Query<(&Transform, &StressTensor, &MaterialProperties, Option<&FractureState>)>,
+    // mut gizmos: Gizmos,
 ) {
-    for (transform, stress, material, fracture) in query.iter() {
-        let pos = transform.translation;
-        
-        // Color based on stress ratio to yield
-        let ratio = stress.von_mises / material.yield_strength;
-        let color = stress_ratio_to_color(ratio);
-        
-        // Draw principal stress directions
-        draw_principal_stresses(&mut gizmos, pos, transform.rotation, stress, 0.5, color);
-        
-        // Draw cracks if present
-        if let Some(fracture) = fracture {
-            for crack in &fracture.cracks {
-                draw_crack(&mut gizmos, pos, transform.rotation, crack);
-            }
-            
-            // Draw damage indicator
-            if fracture.damage > 0.01 {
-                let damage_color = damage_to_color(fracture.damage);
-                gizmos.sphere(
-                    Isometry3d::from_translation(pos),
-                    0.1 + fracture.damage * 0.2,
-                    damage_color,
-                );
-            }
-        }
-    }
+    // Disabled - Gizmos API changed in Bevy 0.19
 }
 
-/// Draw principal stress directions
+/// Draw principal stress directions - DISABLED for Bevy 0.19
 fn draw_principal_stresses(
-    gizmos: &mut Gizmos,
-    position: Vec3,
-    rotation: Quat,
-    stress: &StressTensor,
-    scale: f32,
-    base_color: Color,
+    _gizmos: &mut (),
+    _position: Vec3,
+    _rotation: Quat,
+    _stress: &StressTensor,
+    _scale: f32,
+    _base_color: Color,
 ) {
-    // Principal directions (simplified - assuming aligned with local axes)
-    let directions = [
-        rotation * Vec3::X,
-        rotation * Vec3::Y,
-        rotation * Vec3::Z,
-    ];
-    
-    for (i, (dir, &principal)) in directions.iter().zip(stress.principal.iter()).enumerate() {
-        if principal.abs() < 1e-3 {
-            continue;
-        }
-        
-        let length = (principal.abs() / 1e6).min(scale); // Scale by MPa
-        let color = if principal > 0.0 {
-            // Tension - red tint
-            Color::srgb(1.0, 0.3, 0.3)
-        } else {
-            // Compression - blue tint
-            Color::srgb(0.3, 0.3, 1.0)
-        };
-        
-        // Draw bidirectional arrow for stress
-        let end1 = position + *dir * length;
-        let end2 = position - *dir * length;
-        
-        gizmos.line(end1, end2, color);
-        
-        // Arrow heads
-        let arrow_size = length * 0.2;
-        if principal > 0.0 {
-            // Tension arrows point outward
-            draw_arrow_head(gizmos, end1, *dir, arrow_size, color);
-            draw_arrow_head(gizmos, end2, -*dir, arrow_size, color);
-        } else {
-            // Compression arrows point inward
-            draw_arrow_head(gizmos, position + *dir * (length - arrow_size), -*dir, arrow_size, color);
-            draw_arrow_head(gizmos, position - *dir * (length - arrow_size), *dir, arrow_size, color);
-        }
-    }
+    // Disabled - Gizmos API changed in Bevy 0.19
 }
 
-/// Draw arrow head
-fn draw_arrow_head(gizmos: &mut Gizmos, tip: Vec3, direction: Vec3, size: f32, color: Color) {
-    let dir = direction.normalize();
-    
-    // Find perpendicular vectors
-    let perp1 = if dir.x.abs() < 0.9 {
-        dir.cross(Vec3::X).normalize()
-    } else {
-        dir.cross(Vec3::Y).normalize()
-    };
-    let perp2 = dir.cross(perp1).normalize();
-    
-    let base = tip - dir * size;
-    let half_width = size * 0.3;
-    
-    gizmos.line(tip, base + perp1 * half_width, color);
-    gizmos.line(tip, base - perp1 * half_width, color);
-    gizmos.line(tip, base + perp2 * half_width, color);
-    gizmos.line(tip, base - perp2 * half_width, color);
+/// Draw arrow head - DISABLED for Bevy 0.19
+fn draw_arrow_head(_gizmos: &mut (), _tip: Vec3, _direction: Vec3, _size: f32, _color: Color) {
+    // Disabled - Gizmos API changed in Bevy 0.19
 }
 
-/// Draw crack visualization
+/// Draw crack visualization - DISABLED for Bevy 0.19
 fn draw_crack(
-    gizmos: &mut Gizmos,
-    body_position: Vec3,
-    body_rotation: Quat,
-    crack: &crate::realism::materials::fracture::Crack,
+    _gizmos: &mut (),
+    _body_position: Vec3,
+    _body_rotation: Quat,
+    _crack: &crate::realism::materials::fracture::Crack,
 ) {
-    let crack_start = body_position + body_rotation * crack.position;
-    let crack_end = crack_start + body_rotation * crack.direction * crack.length;
-    
-    // Main crack line
-    gizmos.line(crack_start, crack_end, Color::srgb(0.2, 0.2, 0.2));
-    
-    // Crack opening visualization
-    if crack.opening > 0.001 {
-        let perp = if crack.direction.x.abs() < 0.9 {
-            crack.direction.cross(Vec3::X).normalize()
-        } else {
-            crack.direction.cross(Vec3::Y).normalize()
-        };
-        
-        let mid = (crack_start + crack_end) / 2.0;
-        let half_opening = crack.opening / 2.0;
-        
-        gizmos.line(
-            mid + body_rotation * perp * half_opening,
-            mid - body_rotation * perp * half_opening,
-            Color::srgb(0.5, 0.0, 0.0),
-        );
-    }
+    // Disabled - Gizmos API changed in Bevy 0.19
 }
 
 // ============================================================================

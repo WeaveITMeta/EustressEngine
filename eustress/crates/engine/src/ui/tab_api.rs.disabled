@@ -1,0 +1,14 @@
+//! # Tab API
+//!
+//! Stub module for tab API.
+
+use bevy::prelude::*;
+
+/// Tab API plugin placeholder
+pub struct TabApiPlugin;
+
+impl Plugin for TabApiPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement tab API
+    }
+}

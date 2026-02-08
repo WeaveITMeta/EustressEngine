@@ -14,7 +14,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 use avian3d::prelude::*;
 use crate::selection_box::SelectionBox;
 use crate::rendering::PartEntity;
@@ -130,8 +129,9 @@ impl Plugin for SelectToolPlugin {
 /// Debug gizmos to visualize raycast hits and surface normals during drag
 fn debug_drag_gizmos(
     mut gizmos: Gizmos,
-    state: Res<SelectToolState>,
+    state: Option<Res<SelectToolState>>,
 ) {
+    let Some(state) = state else { return };
     // Only show debug when actively dragging
     if !state.dragging || !state.drag_started {
         return;
@@ -165,12 +165,11 @@ fn debug_drag_gizmos(
 /// - Physics-based surface snapping via Avian3D
 /// - Grid snapping when enabled
 fn handle_select_drag(
-    mut state: ResMut<SelectToolState>,
-    studio_state: Res<StudioState>,
+    state: Option<ResMut<SelectToolState>>,
+    studio_state: Option<Res<StudioState>>,
     input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut egui_ctx: EguiContexts,
     // Support both PartEntity (legacy) and Instance (modern) components
     mut selected_query: Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<SelectionBox>>,
     all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<SelectionBox>>,
@@ -181,11 +180,13 @@ fn handle_select_drag(
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
 ) {
+    let Some(mut state) = state else { return };
     let (mouse, keys) = input;
     let (children_query, parent_query) = hierarchy_queries;
     let (editor_settings, mut undo_stack) = settings_and_undo;
     let (move_state, scale_state, rotate_state) = tool_states;
     // Active with Select, Move, Scale, or Rotate tools
+    let Some(studio_state) = studio_state else { return };
     let drag_enabled = matches!(
         studio_state.current_tool,
         Tool::Select | Tool::Move | Tool::Scale | Tool::Rotate
@@ -199,11 +200,7 @@ fn handle_select_drag(
         return;
     }
     
-    // Skip if cursor is over egui UI (but NOT the viewport - is_pointer_over_area includes viewport)
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    if ctx.wants_pointer_input() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -223,7 +220,7 @@ fn handle_select_drag(
                 let t = global_transform.compute_transform();
                 let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
                 let half_size = size * 0.5;
-                let (part_min, part_max) = calculate_rotated_aabb(t.translation, t.rotation, half_size);
+                let (part_min, part_max) = calculate_rotated_aabb(t.translation, half_size, t.rotation);
                 bounds_min = bounds_min.min(part_min);
                 bounds_max = bounds_max.max(part_max);
                 count += 1;
@@ -318,8 +315,8 @@ fn handle_select_drag(
                     // Get rotated extents for accurate bounding box
                     let (part_min, part_max) = calculate_rotated_aabb(
                         sel_transform.translation,
-                        sel_transform.rotation,
-                        half_size
+                        half_size,
+                        sel_transform.rotation
                     );
                     
                     bounds_min = bounds_min.min(part_min);
@@ -398,14 +395,15 @@ fn handle_select_drag(
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
-                    if let Some(ground_pos) = ray_plane_intersection(&ray, Vec3::ZERO, Vec3::Y) {
+                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y) {
+                         let ground_pos = ray.origin + *ray.direction * t;
                          // Calculate offset using original rotation
                          let offset = calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
                          ground_pos + Vec3::new(0.0, offset + 0.01, 0.0)
                     } else {
                         // Fallback: Use intersection with horizontal plane at leader's initial height
-                         if let Some(plane_pos) = ray_plane_intersection(&ray, initial_leader_pos, Vec3::Y) {
-                             plane_pos
+                         if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, initial_leader_pos, Vec3::Y) {
+                             ray.origin + *ray.direction * t
                          } else {
                              initial_leader_pos
                          }
@@ -801,13 +799,13 @@ fn calculate_group_surface_offset(group_size: &Vec3, normal: &Vec3) -> f32 {
 
 /// Check if ray intersects with part using precise OBB intersection (with rotation)
 pub fn ray_intersects_part_rotated(ray: &Ray3d, position: Vec3, rotation: Quat, size: Vec3) -> bool {
-    ray_obb_intersection(ray, position, rotation, size).is_some()
+    ray_obb_intersection(ray.origin, *ray.direction, position, size, rotation).is_some()
 }
 
 /// Ray-OBB intersection returning distance (for paste raycasting)
 /// Works on ALL parts regardless of can_collide setting
 pub fn ray_intersects_part_rotated_distance(ray: &Ray3d, position: Vec3, rotation: Quat, size: Vec3) -> Option<f32> {
-    ray_obb_intersection(ray, position, rotation, size)
+    ray_obb_intersection(ray.origin, *ray.direction, position, size, rotation)
 }
 
 /// Find the surface under the cursor using Avian3D physics raycasting
@@ -877,7 +875,7 @@ fn find_surface_under_cursor(
         let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
         
         // Use OBB intersection for precise surface detection
-        if let Some(distance) = ray_obb_intersection(ray, part_pos, part_transform.rotation, part_size) {
+        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_pos, part_size, part_transform.rotation) {
             let _hit_point = ray.origin + *ray.direction * distance;
             
             // Calculate the top surface considering rotation
@@ -918,7 +916,7 @@ fn find_surface_under_cursor_with_normal(
         let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
         
         // Use OBB intersection for precise surface detection
-        if let Some(distance) = ray_obb_intersection(ray, part_pos, part_rot, part_size) {
+        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_pos, part_size, part_rot) {
             let hit_point = ray.origin + *ray.direction * distance;
             
             // Calculate which face was hit based on the hit point relative to the box center
@@ -976,18 +974,20 @@ fn snap_to_grid(position: Vec3, grid_size: f32) -> Vec3 {
 /// System to handle box selection (drag to select multiple entities)
 fn handle_box_selection(
     mut box_state: ResMut<BoxSelectionState>,
-    select_state: Res<SelectToolState>,
-    studio_state: Res<StudioState>,
+    select_state: Option<Res<SelectToolState>>,
+    studio_state: Option<Res<StudioState>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut egui_ctx: EguiContexts,
-    selection_manager: Res<BevySelectionManager>,
+    selection_manager: Option<Res<BevySelectionManager>>,
     // Query entities with PartEntity OR Instance (supports both legacy and modern)
     parts_query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&PartEntity>, Option<&Instance>), Or<(With<PartEntity>, With<Instance>)>>,
     selected_query: Query<Entity, With<SelectionBox>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
+    let Some(studio_state) = studio_state else { return };
+    let Some(select_state) = select_state else { return };
     // Active in Select, Move, Scale, and Rotate tool modes
     // Box selection should work in all transformation tools
     let box_select_enabled = matches!(
@@ -1003,25 +1003,7 @@ fn handle_box_selection(
         return;
     }
     
-    // Skip if cursor is over egui UI panels (Properties, Explorer, etc.)
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    
-    // Block if egui is actively using pointer (dragging slider, typing, etc.)
-    if ctx.is_using_pointer() {
-        if box_state.pending && !box_state.active {
-            box_state.pending = false;
-        }
-        return;
-    }
-    
-    // Block if egui wants pointer input (actual UI widgets, not just viewport)
-    // Note: is_pointer_over_area() returns true for viewport too, so we only check wants_pointer_input
-    if ctx.wants_pointer_input() {
-        if box_state.pending && !box_state.active {
-            box_state.pending = false;
-        }
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -1050,9 +1032,9 @@ fn handle_box_selection(
                         return false;
                     }
                 }
-                let pos = transform.translation();
+                let t = transform.compute_transform();
                 let size = basepart.map(|bp| bp.size).unwrap_or(Vec3::ONE);
-                ray_intersects_part(&r, pos, size)
+                ray_intersects_part(r.origin, *r.direction, &t, size).is_some()
             })
         }).unwrap_or(false);
         
@@ -1178,64 +1160,10 @@ fn handle_box_selection(
 }
 
 /// System to render the box selection rectangle
+/// TODO: Implement with Bevy gizmos or Slint overlay
 fn render_box_selection(
-    box_state: Res<BoxSelectionState>,
-    mut egui_ctx: EguiContexts,
+    _box_state: Res<BoxSelectionState>,
 ) {
-    if !box_state.active {
-        return;
-    }
-    
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    
-    // Calculate rectangle bounds
-    let min_x = box_state.start_pos.x.min(box_state.current_pos.x);
-    let max_x = box_state.start_pos.x.max(box_state.current_pos.x);
-    let min_y = box_state.start_pos.y.min(box_state.current_pos.y);
-    let max_y = box_state.start_pos.y.max(box_state.current_pos.y);
-    
-    // Draw selection rectangle using egui painter
-    let painter = ctx.layer_painter(bevy_egui::egui::LayerId::new(
-        bevy_egui::egui::Order::Foreground,
-        bevy_egui::egui::Id::new("box_selection"),
-    ));
-    
-    let rect = bevy_egui::egui::Rect::from_min_max(
-        bevy_egui::egui::pos2(min_x, min_y),
-        bevy_egui::egui::pos2(max_x, max_y),
-    );
-    
-    // Fill color (semi-transparent blue)
-    let fill_color = if box_state.additive {
-        bevy_egui::egui::Color32::from_rgba_unmultiplied(100, 200, 100, 50) // Green for additive
-    } else {
-        bevy_egui::egui::Color32::from_rgba_unmultiplied(100, 150, 255, 50) // Blue for replace
-    };
-    
-    // Stroke color
-    let stroke_color = if box_state.additive {
-        bevy_egui::egui::Color32::from_rgb(100, 255, 100) // Green
-    } else {
-        bevy_egui::egui::Color32::from_rgb(100, 150, 255) // Blue
-    };
-    
-    painter.rect_filled(rect, bevy_egui::egui::CornerRadius::ZERO, fill_color);
-    painter.rect_stroke(
-        rect, 
-        bevy_egui::egui::CornerRadius::ZERO, 
-        bevy_egui::egui::Stroke::new(2.0, stroke_color),
-        bevy_egui::egui::StrokeKind::Outside,
-    );
-    
-    // Show count of entities in box
-    let count_text = format!("{} selected", 
-        if box_state.additive { "+" } else { "" }
-    );
-    painter.text(
-        bevy_egui::egui::pos2(min_x + 5.0, min_y + 5.0),
-        bevy_egui::egui::Align2::LEFT_TOP,
-        count_text,
-        bevy_egui::egui::FontId::proportional(12.0),
-        stroke_color,
-    );
+    // Box selection rendering will be handled by Slint UI overlay
+    // The selection logic still works, just the visual rectangle is not drawn
 }

@@ -1,0 +1,115 @@
+//! # Docking
+//!
+//! Stub module for UI docking systems.
+
+use bevy::prelude::*;
+
+/// Docking plugin placeholder
+pub struct DockingPlugin;
+
+impl Plugin for DockingPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement docking
+    }
+}
+
+/// Docking layout configuration
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DockingLayout {
+    pub zones: Vec<DockZone>,
+}
+
+impl DockingLayout {
+    pub fn move_panel(&mut self, _panel_id: &PanelId, _area: DockArea) {
+        // TODO: Implement panel moving
+    }
+    
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        // TODO: Implement layout saving
+        Ok(())
+    }
+    
+    pub fn load() -> Option<Self> {
+        // TODO: Implement layout loading
+        None
+    }
+}
+
+/// Dock drag state
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DockDragState {
+    pub dragging: bool,
+    pub panel_id: Option<PanelId>,
+}
+
+impl DockDragState {
+    pub fn start_drag(&mut self, panel_id: PanelId) {
+        self.dragging = true;
+        self.panel_id = Some(panel_id);
+    }
+    
+    pub fn update_drag(&mut self, _position: bevy::math::Vec2) {
+        // TODO: Update drag position
+    }
+    
+    pub fn end_drag(&mut self) {
+        self.dragging = false;
+        self.panel_id = None;
+    }
+    
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+}
+
+/// Dock zone
+#[derive(Debug, Clone)]
+pub struct DockZone {
+    pub id: String,
+    pub area: DockArea,
+}
+
+/// Dock area
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockArea {
+    #[default]
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// Panel identifier
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct PanelId(pub String);
+
+impl PanelId {
+    pub fn explorer() -> Self { Self("Explorer".to_string()) }
+    pub fn toolbox() -> Self { Self("Toolbox".to_string()) }
+    pub fn assets() -> Self { Self("Assets".to_string()) }
+    pub fn properties() -> Self { Self("Properties".to_string()) }
+    pub fn output() -> Self { Self("Output".to_string()) }
+    pub fn viewport() -> Self { Self("Viewport".to_string()) }
+    pub fn history() -> Self { Self("History".to_string()) }
+    pub fn collaborate() -> Self { Self("Collaborate".to_string()) }
+    
+    // Associated constants for backwards compatibility
+    pub const Explorer: PanelId = PanelId(String::new());
+    pub const Toolbox: PanelId = PanelId(String::new());
+    pub const Assets: PanelId = PanelId(String::new());
+    pub const Properties: PanelId = PanelId(String::new());
+    pub const Output: PanelId = PanelId(String::new());
+    pub const Viewport: PanelId = PanelId(String::new());
+    pub const History: PanelId = PanelId(String::new());
+    pub const Collaborate: PanelId = PanelId(String::new());
+}
+
+/// Render drop zones for docking
+pub fn render_drop_zones(
+    _ui: &mut bevy_egui::egui::Ui,
+    _layout: &DockingLayout,
+    _drag_state: &DockDragState,
+) {
+    // TODO: Implement drop zone rendering
+}

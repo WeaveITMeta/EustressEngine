@@ -23,6 +23,7 @@ pub mod prelude {
 }
 
 use bevy::prelude::*;
+use tracing::info;
 
 /// Visualizers plugin
 pub struct VisualizersPlugin;

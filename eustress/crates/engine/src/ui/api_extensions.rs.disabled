@@ -1,0 +1,14 @@
+//! # API Extensions
+//!
+//! Stub module for API extensions UI.
+
+use bevy::prelude::*;
+
+/// API extensions plugin placeholder
+pub struct ApiExtensionsPlugin;
+
+impl Plugin for ApiExtensionsPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement API extensions
+    }
+}

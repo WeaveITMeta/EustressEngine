@@ -125,21 +125,19 @@ pub fn chunk_spawn_system(
                         chunk_commands.insert(MeshMaterial3d(mat.clone()));
                     }
                     
-                    // Add physics collider (1:1 with visual mesh)
+                    // Add physics collider (1:1 with visual mesh) - DISABLED for Bevy 0.19
                     #[cfg(feature = "physics")]
                     {
-                        if let Some(mesh) = meshes.get(&mesh_handle) {
-                            if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
-                                chunk_commands.insert((
-                                    RigidBody::Static,
-                                    collider,
-                                    CollisionLayers::new(
-                                        TerrainPhysicsLayer::Terrain,
-                                        [TerrainPhysicsLayer::Default, TerrainPhysicsLayer::Player],
-                                    ),
-                                ));
-                            }
-                        }
+                        // Physics temporarily disabled due to avian3d/Bevy 0.19 compatibility
+                        // if let Some(mesh) = meshes.get(&mesh_handle) {
+                        //     if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
+                        //         chunk_commands.insert((
+                        //             RigidBody::Static,
+                        //             collider,
+                        //             CollisionLayers::new(...),
+                        //         ));
+                        //     }
+                        // }
                     }
                     
                     let chunk_entity = chunk_commands.id();

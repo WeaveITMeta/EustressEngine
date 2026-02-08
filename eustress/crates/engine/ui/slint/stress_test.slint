@@ -1,0 +1,320 @@
+// ============================================================================
+// Eustress Engine Studio - Stress Test Dialog
+// Network stress testing configuration
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit, Slider, CheckBox, Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component StressTestDialog inherits Rectangle {
+    // Properties
+    in-out property <int> client-count: 50;
+    in-out property <int> message-rate: 10; // messages per second
+    in-out property <int> duration-seconds: 60;
+    in-out property <bool> simulate-movement: true;
+    in-out property <bool> simulate-interactions: false;
+    in property <bool> running: false;
+    in property <float> progress: 0;
+    in property <string> status: "";
+    
+    // Results
+    in property <int> total-messages: 0;
+    in property <float> avg-latency: 0;
+    in property <int> errors: 0;
+    
+    // Callbacks
+    callback on-start();
+    callback on-stop();
+    callback on-close();
+    
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+    
+    TouchArea {
+        clicked => { root.on-close(); }
+    }
+    
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 450px;
+        height: 480px;
+        background: Theme.dialog-background;
+        border-radius: 8px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-color;
+        
+        TouchArea {}
+        
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+            
+            // Header
+            HorizontalBox {
+                Text {
+                    text: "🔥 Stress Test";
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 600;
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: close-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 4px;
+                    
+                    close-touch := TouchArea {
+                        clicked => { root.on-close(); }
+                    }
+                    
+                    Text {
+                        text: "✕";
+                        color: Theme.text-secondary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            
+            // Configuration
+            Text {
+                text: "Configuration";
+                color: Theme.text-secondary;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            
+            HorizontalBox {
+                spacing: 8px;
+                
+                Text {
+                    width: 120px;
+                    text: "Clients";
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                }
+                
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 1;
+                    maximum: 200;
+                    value: root.client-count;
+                }
+                
+                Text {
+                    width: 40px;
+                    text: root.client-count;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+            
+            HorizontalBox {
+                spacing: 8px;
+                
+                Text {
+                    width: 120px;
+                    text: "Messages/sec";
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                }
+                
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 1;
+                    maximum: 100;
+                    value: root.message-rate;
+                }
+                
+                Text {
+                    width: 40px;
+                    text: root.message-rate;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+            
+            HorizontalBox {
+                spacing: 8px;
+                
+                Text {
+                    width: 120px;
+                    text: "Duration (sec)";
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                }
+                
+                Slider {
+                    horizontal-stretch: 1;
+                    minimum: 10;
+                    maximum: 300;
+                    value: root.duration-seconds;
+                }
+                
+                Text {
+                    width: 40px;
+                    text: root.duration-seconds;
+                    color: Theme.text-secondary;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+            
+            CheckBox {
+                text: "Simulate movement";
+                checked <=> root.simulate-movement;
+            }
+            
+            CheckBox {
+                text: "Simulate interactions";
+                checked <=> root.simulate-interactions;
+            }
+            
+            // Progress
+            if root.running: VerticalBox {
+                spacing: 8px;
+                
+                Text {
+                    text: root.status;
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                }
+                
+                Rectangle {
+                    height: 8px;
+                    background: Theme.background-secondary;
+                    border-radius: 4px;
+                    
+                    Rectangle {
+                        width: parent.width * root.progress;
+                        height: 100%;
+                        background: Theme.accent-blue;
+                        border-radius: 4px;
+                    }
+                }
+            }
+            
+            // Results
+            if root.total-messages > 0: Rectangle {
+                height: 80px;
+                background: Theme.background-tertiary;
+                border-radius: 4px;
+                
+                HorizontalBox {
+                    padding: 12px;
+                    spacing: 16px;
+                    
+                    VerticalBox {
+                        horizontal-stretch: 1;
+                        
+                        Text {
+                            text: root.total-messages;
+                            color: Theme.accent-blue;
+                            font-size: 20px;
+                            font-weight: 600;
+                        }
+                        
+                        Text {
+                            text: "Messages";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                        }
+                    }
+                    
+                    VerticalBox {
+                        horizontal-stretch: 1;
+                        
+                        Text {
+                            text: round(root.avg-latency) + "ms";
+                            color: Theme.accent-green;
+                            font-size: 20px;
+                            font-weight: 600;
+                        }
+                        
+                        Text {
+                            text: "Avg Latency";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                        }
+                    }
+                    
+                    VerticalBox {
+                        horizontal-stretch: 1;
+                        
+                        Text {
+                            text: root.errors;
+                            color: root.errors > 0 ? Theme.accent-red : Theme.accent-green;
+                            font-size: 20px;
+                            font-weight: 600;
+                        }
+                        
+                        Text {
+                            text: "Errors";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                        }
+                    }
+                }
+            }
+            
+            Rectangle { vertical-stretch: 1; }
+            
+            // Footer
+            HorizontalBox {
+                spacing: 8px;
+                alignment: end;
+                
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-close(); }
+                    }
+                    
+                    Text {
+                        text: "Close";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 100px;
+                    height: 36px;
+                    background: root.running ? Theme.accent-red : Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => {
+                            if root.running {
+                                root.on-stop();
+                            } else {
+                                root.on-start();
+                            }
+                        }
+                    }
+                    
+                    Text {
+                        text: root.running ? "Stop" : "Start Test";
+                        color: white;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

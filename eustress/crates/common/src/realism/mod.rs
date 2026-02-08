@@ -69,6 +69,7 @@ pub mod symbolic;
 pub mod scripting;
 
 use bevy::prelude::*;
+use tracing::info;
 
 pub mod prelude {
     pub use super::constants;

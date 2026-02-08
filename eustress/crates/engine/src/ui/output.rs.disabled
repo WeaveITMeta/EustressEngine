@@ -22,6 +22,7 @@ pub enum LogLevel {
     Info,
     Warning,
     Error,
+    Debug,
     System,  // Internal debug/system messages
 }
 
@@ -235,6 +236,7 @@ impl OutputPanel {
                                 LogLevel::Info => "INFO",
                                 LogLevel::Warning => "WARN",
                                 LogLevel::Error => "ERROR",
+                                LogLevel::Debug => "DEBUG",
                                 LogLevel::System => "SYS",
                             };
                             format!("[{}] {} {}", timestamp, icon, entry.message)
@@ -313,6 +315,7 @@ impl OutputPanel {
                     LogLevel::Info => console.show_info,
                     LogLevel::Warning => console.show_warning,
                     LogLevel::Error => console.show_error,
+                    LogLevel::Debug => console.show_system,
                     LogLevel::System => console.show_system,
                 };
                 
@@ -329,6 +332,7 @@ impl OutputPanel {
                     LogLevel::Info => ("i", egui::Color32::from_rgb(100, 200, 255)),
                     LogLevel::Warning => ("!", egui::Color32::YELLOW),
                     LogLevel::Error => ("X", egui::Color32::from_rgb(255, 100, 100)),
+                    LogLevel::Debug => ("D", egui::Color32::from_rgb(180, 180, 180)),
                     LogLevel::System => ("*", egui::Color32::from_rgb(150, 150, 150)),
                 };
                 

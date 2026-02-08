@@ -1,0 +1,534 @@
+// ============================================================================
+// Eustress Engine Studio - Settings Dialog
+// Application settings and keybindings
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, CheckBox, ComboBox, Slider, LineEdit, TabWidget } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Keybinding data
+export struct KeybindingData {
+    action: string,
+    category: string,
+    current-key: string,
+    default-key: string,
+}
+
+export component SettingsDialog inherits Rectangle {
+    // Properties
+    in-out property <int> active-tab: 0; // 0=General, 1=Keybindings, 2=Graphics, 3=Audio
+    in property <[KeybindingData]> keybindings: [];
+    
+    // General settings
+    in-out property <bool> auto-save: true;
+    in-out property <int> auto-save-interval: 5; // minutes
+    in-out property <bool> show-grid: true;
+    in-out property <bool> snap-to-grid: true;
+    in-out property <float> grid-size: 1.0;
+    in-out property <bool> dark-theme: true;
+    
+    // Graphics settings
+    in-out property <string> render-quality: "High";
+    in-out property <bool> vsync: true;
+    in-out property <bool> shadows: true;
+    in-out property <bool> anti-aliasing: true;
+    in-out property <int> max-fps: 60;
+    
+    // Audio settings
+    in-out property <float> master-volume: 1.0;
+    in-out property <float> sfx-volume: 1.0;
+    in-out property <float> music-volume: 0.5;
+    
+    // Callbacks
+    callback on-close();
+    callback on-save();
+    callback on-reset-defaults();
+    callback on-rebind-key(string); // action name
+    
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+    
+    TouchArea {
+        clicked => { root.on-close(); }
+    }
+    
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 600px;
+        height: 500px;
+        background: Theme.dialog-background;
+        border-radius: 8px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-color;
+        
+        TouchArea {}
+        
+        VerticalBox {
+            padding: 0px;
+            spacing: 0px;
+            
+            // Header
+            Rectangle {
+                height: 48px;
+                background: Theme.header-background;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                
+                HorizontalBox {
+                    padding: 16px;
+                    
+                    Text {
+                        text: "Settings";
+                        color: Theme.text-primary;
+                        font-size: 18px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    
+                    Rectangle { horizontal-stretch: 1; }
+                    
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        background: close-touch.has-hover ? Theme.button-hover : transparent;
+                        border-radius: 4px;
+                        
+                        close-touch := TouchArea {
+                            clicked => { root.on-close(); }
+                        }
+                        
+                        Text {
+                            text: "✕";
+                            color: Theme.text-secondary;
+                            font-size: 16px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            
+            // Tab bar
+            Rectangle {
+                height: 40px;
+                background: Theme.background-secondary;
+                
+                HorizontalBox {
+                    padding: 4px;
+                    spacing: 2px;
+                    
+                    for tab[idx] in ["General", "Keybindings", "Graphics", "Audio"]: Rectangle {
+                        horizontal-stretch: 1;
+                        background: idx == root.active-tab ? Theme.tab-active : Theme.tab-inactive;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.active-tab = idx; }
+                        }
+                        
+                        Text {
+                            text: tab;
+                            color: idx == root.active-tab ? Theme.text-primary : Theme.text-secondary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            
+            // Content
+            Rectangle {
+                vertical-stretch: 1;
+                
+                // General tab
+                if root.active-tab == 0: ScrollView {
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 16px;
+                        
+                        // Auto-save section
+                        Text {
+                            text: "Auto-Save";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        CheckBox {
+                            text: "Enable auto-save";
+                            checked <=> root.auto-save;
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                text: "Interval (minutes):";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Slider {
+                                width: 150px;
+                                minimum: 1;
+                                maximum: 30;
+                                value: root.auto-save-interval;
+                            }
+                            
+                            Text {
+                                text: root.auto-save-interval;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        Rectangle { height: 8px; }
+                        
+                        // Grid section
+                        Text {
+                            text: "Grid & Snapping";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        CheckBox {
+                            text: "Show grid";
+                            checked <=> root.show-grid;
+                        }
+                        
+                        CheckBox {
+                            text: "Snap to grid";
+                            checked <=> root.snap-to-grid;
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                text: "Grid size:";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            ComboBox {
+                                width: 100px;
+                                model: ["0.25", "0.5", "1.0", "2.0", "4.0"];
+                                current-value: "1.0";
+                            }
+                        }
+                        
+                        Rectangle { height: 8px; }
+                        
+                        // Theme section
+                        Text {
+                            text: "Appearance";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        CheckBox {
+                            text: "Dark theme";
+                            checked <=> root.dark-theme;
+                        }
+                    }
+                }
+                
+                // Keybindings tab
+                if root.active-tab == 1: ScrollView {
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 8px;
+                        
+                        Text {
+                            text: "Click on a keybinding to change it";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                        }
+                        
+                        for binding in root.keybindings: Rectangle {
+                            height: 36px;
+                            background: binding-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 4px;
+                            
+                            binding-touch := TouchArea {
+                                clicked => { root.on-rebind-key(binding.action); }
+                            }
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: binding.action;
+                                    color: Theme.text-primary;
+                                    vertical-alignment: center;
+                                }
+                                
+                                Rectangle {
+                                    width: 100px;
+                                    height: 24px;
+                                    background: Theme.input-background;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: Theme.input-border;
+                                    
+                                    Text {
+                                        text: binding.current-key;
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Graphics tab
+                if root.active-tab == 2: ScrollView {
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 16px;
+                        
+                        Text {
+                            text: "Render Quality";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        ComboBox {
+                            width: 200px;
+                            model: ["Low", "Medium", "High", "Ultra"];
+                            current-value <=> root.render-quality;
+                        }
+                        
+                        Rectangle { height: 8px; }
+                        
+                        Text {
+                            text: "Display";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        CheckBox {
+                            text: "V-Sync";
+                            checked <=> root.vsync;
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                text: "Max FPS:";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Slider {
+                                width: 150px;
+                                minimum: 30;
+                                maximum: 240;
+                                value: root.max-fps;
+                            }
+                            
+                            Text {
+                                text: root.max-fps;
+                                color: Theme.text-secondary;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        Rectangle { height: 8px; }
+                        
+                        Text {
+                            text: "Effects";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        CheckBox {
+                            text: "Shadows";
+                            checked <=> root.shadows;
+                        }
+                        
+                        CheckBox {
+                            text: "Anti-aliasing";
+                            checked <=> root.anti-aliasing;
+                        }
+                    }
+                }
+                
+                // Audio tab
+                if root.active-tab == 3: ScrollView {
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 16px;
+                        
+                        Text {
+                            text: "Volume";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                width: 80px;
+                                text: "Master";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 1;
+                                value <=> root.master-volume;
+                            }
+                            
+                            Text {
+                                width: 40px;
+                                text: round(root.master-volume * 100) + "%";
+                                color: Theme.text-secondary;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                width: 80px;
+                                text: "Effects";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 1;
+                                value <=> root.sfx-volume;
+                            }
+                            
+                            Text {
+                                width: 40px;
+                                text: round(root.sfx-volume * 100) + "%";
+                                color: Theme.text-secondary;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        HorizontalBox {
+                            spacing: 8px;
+                            
+                            Text {
+                                width: 80px;
+                                text: "Music";
+                                color: Theme.text-primary;
+                                vertical-alignment: center;
+                            }
+                            
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: 1;
+                                value <=> root.music-volume;
+                            }
+                            
+                            Text {
+                                width: 40px;
+                                text: round(root.music-volume * 100) + "%";
+                                color: Theme.text-secondary;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Footer
+            Rectangle {
+                height: 56px;
+                background: Theme.header-background;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+                
+                HorizontalBox {
+                    padding: 12px;
+                    spacing: 8px;
+                    
+                    Rectangle {
+                        width: 120px;
+                        height: 32px;
+                        background: Theme.button-background;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.on-reset-defaults(); }
+                        }
+                        
+                        Text {
+                            text: "Reset Defaults";
+                            color: Theme.text-primary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    Rectangle { horizontal-stretch: 1; }
+                    
+                    Rectangle {
+                        width: 80px;
+                        height: 32px;
+                        background: Theme.button-background;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.on-close(); }
+                        }
+                        
+                        Text {
+                            text: "Cancel";
+                            color: Theme.text-primary;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    Rectangle {
+                        width: 80px;
+                        height: 32px;
+                        background: Theme.button-primary;
+                        border-radius: 4px;
+                        
+                        TouchArea {
+                            clicked => { root.on-save(); }
+                        }
+                        
+                        Text {
+                            text: "Save";
+                            color: white;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

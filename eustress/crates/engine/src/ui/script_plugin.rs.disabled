@@ -1,0 +1,14 @@
+//! # Script Plugin
+//!
+//! Stub module for script plugin UI.
+
+use bevy::prelude::*;
+
+/// Script plugin placeholder
+pub struct ScriptPluginUi;
+
+impl Plugin for ScriptPluginUi {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement script plugin UI
+    }
+}

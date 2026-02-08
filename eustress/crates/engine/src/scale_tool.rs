@@ -3,7 +3,6 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy_egui::EguiContexts;
 #[allow(unused_imports)]
 use bevy::gizmos::config::{GizmoConfigStore, DefaultGizmoConfigGroup};
 use crate::selection_box::SelectionBox;
@@ -136,12 +135,12 @@ fn draw_scale_gizmos(
         let x_end_pos = start_x_pos + local_x * handle_length;
         let x_end_neg = start_x_neg - local_x * handle_length;
         gizmos.line(start_x_pos, x_end_pos, if highlight_x_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(x_end_pos).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_x_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) }
         );
         gizmos.line(start_x_neg, x_end_neg, if highlight_x_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(x_end_neg).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_x_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(1.0, 0.0, 0.0) }
         );
@@ -150,12 +149,12 @@ fn draw_scale_gizmos(
         let y_end_pos = start_y_pos + local_y * handle_length;
         let y_end_neg = start_y_neg - local_y * handle_length;
         gizmos.line(start_y_pos, y_end_pos, if highlight_y_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 1.0, 0.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(y_end_pos).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_y_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 1.0, 0.0) }
         );
         gizmos.line(start_y_neg, y_end_neg, if highlight_y_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 1.0, 0.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(y_end_neg).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_y_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 1.0, 0.0) }
         );
@@ -164,12 +163,12 @@ fn draw_scale_gizmos(
         let z_end_pos = start_z_pos + local_z * handle_length;
         let z_end_neg = start_z_neg - local_z * handle_length;
         gizmos.line(start_z_pos, z_end_pos, if highlight_z_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 0.0, 1.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(z_end_pos).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_z_pos { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 0.0, 1.0) }
         );
         gizmos.line(start_z_neg, z_end_neg, if highlight_z_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 0.0, 1.0) });
-        gizmos.cuboid(
+        gizmos.cube(
             Transform::from_translation(z_end_neg).with_rotation(rot).with_scale(Vec3::splat(cube_size)),
             if highlight_z_neg { Color::srgb(1.0, 1.0, 0.0) } else { Color::srgb(0.0, 0.0, 1.0) }
         );
@@ -186,7 +185,6 @@ fn handle_scale_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut egui_ctx: EguiContexts,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>), With<SelectionBox>>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -199,11 +197,7 @@ fn handle_scale_interaction(
         return;
     }
     
-    // Skip if cursor is over egui UI
-    let Ok(ctx) = egui_ctx.ctx_mut() else { return; };
-    if ctx.wants_pointer_input() {
-        return;
-    }
+    // TODO: Check Slint UI focus state to block input when UI has focus
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -260,8 +254,8 @@ fn handle_scale_interaction(
                 }
                 
                 // Calculate initial world position
-                if let Some(world_pos) = ray_plane_intersection(&ray, pos, Vec3::Y) {
-                    state.initial_mouse_world = world_pos;
+                if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, pos, Vec3::Y) {
+                    state.initial_mouse_world = ray.origin + *ray.direction * t;
                 }
                 clicked_handle = true;
                 break;
@@ -610,26 +604,26 @@ fn detect_handle_hit_with_rotation(ray: &Ray3d, pos: Vec3, rot: Quat, scale: Vec
     
     // Check axis handles FIRST (before center) - they should have priority
     // Check X axis cubes (BOTH directions)
-    if ray_to_point_distance(ray, x_cube_pos) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, x_cube_pos) < cube_size {
         return Some(ScaleAxis::XPos);
     }
-    if ray_to_point_distance(ray, x_cube_neg) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, x_cube_neg) < cube_size {
         return Some(ScaleAxis::XNeg);
     }
     
     // Check Y axis cubes (BOTH directions)
-    if ray_to_point_distance(ray, y_cube_pos) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, y_cube_pos) < cube_size {
         return Some(ScaleAxis::YPos);
     }
-    if ray_to_point_distance(ray, y_cube_neg) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, y_cube_neg) < cube_size {
         return Some(ScaleAxis::YNeg);
     }
     
     // Check Z axis cubes (BOTH directions)
-    if ray_to_point_distance(ray, z_cube_pos) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, z_cube_pos) < cube_size {
         return Some(ScaleAxis::ZPos);
     }
-    if ray_to_point_distance(ray, z_cube_neg) < cube_size {
+    if ray_to_point_distance(ray.origin, *ray.direction, z_cube_neg) < cube_size {
         return Some(ScaleAxis::ZNeg);
     }
     

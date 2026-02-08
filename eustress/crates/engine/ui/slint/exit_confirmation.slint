@@ -1,0 +1,134 @@
+// ============================================================================
+// Eustress Engine Studio - Exit Confirmation Dialog
+// Confirm exit with unsaved changes
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component ExitConfirmationDialog inherits Rectangle {
+    // Properties
+    in property <string> scene-name: "Untitled";
+    
+    // Callbacks
+    callback on-save-and-exit();
+    callback on-exit-without-saving();
+    callback on-cancel();
+    
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+    
+    TouchArea {
+        clicked => { root.on-cancel(); }
+    }
+    
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 400px;
+        height: 200px;
+        background: Theme.dialog-background;
+        border-radius: 8px;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow-color;
+        
+        TouchArea {}
+        
+        VerticalBox {
+            padding: 24px;
+            spacing: 16px;
+            
+            // Icon and message
+            HorizontalBox {
+                spacing: 16px;
+                
+                Text {
+                    text: "⚠";
+                    color: Theme.accent-yellow;
+                    font-size: 32px;
+                }
+                
+                VerticalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        text: "Unsaved Changes";
+                        color: Theme.text-primary;
+                        font-size: 18px;
+                        font-weight: 600;
+                    }
+                    
+                    Text {
+                        text: "Do you want to save changes to \"" + root.scene-name + "\" before closing?";
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            
+            Rectangle { vertical-stretch: 1; }
+            
+            // Buttons
+            HorizontalBox {
+                spacing: 8px;
+                alignment: end;
+                
+                Rectangle {
+                    width: 140px;
+                    height: 36px;
+                    background: Theme.accent-red;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-exit-without-saving(); }
+                    }
+                    
+                    Text {
+                        text: "Don't Save";
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 80px;
+                    height: 36px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-cancel(); }
+                    }
+                    
+                    Text {
+                        text: "Cancel";
+                        color: Theme.text-primary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle {
+                    width: 100px;
+                    height: 36px;
+                    background: Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-save-and-exit(); }
+                    }
+                    
+                    Text {
+                        text: "Save & Exit";
+                        color: white;
+                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

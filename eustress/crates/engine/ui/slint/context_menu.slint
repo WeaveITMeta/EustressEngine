@@ -1,0 +1,190 @@
+// ============================================================================
+// Eustress Engine Studio - Context Menu
+// Right-click context menu
+// ============================================================================
+
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Menu item data
+export struct MenuItem {
+    id: string,
+    label: string,
+    shortcut: string,
+    icon: string,
+    enabled: bool,
+    separator-after: bool,
+}
+
+component MenuItemRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> shortcut: "";
+    in property <string> icon: "";
+    in property <bool> enabled: true;
+    
+    callback clicked();
+    
+    height: 28px;
+    background: self.enabled && touch.has-hover ? Theme.explorer-item-hover : transparent;
+    opacity: self.enabled ? 1.0 : 0.5;
+    
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        
+        // Icon
+        Text {
+            width: 20px;
+            text: root.icon;
+            color: Theme.text-secondary;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        
+        // Label
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        
+        // Shortcut
+        if root.shortcut != "": Text {
+            text: root.shortcut;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ContextMenu inherits Rectangle {
+    // Properties
+    in property <[MenuItem]> items: [];
+    
+    // Callbacks
+    callback on-action(string);
+    callback on-close();
+    
+    width: 200px;
+    background: Theme.dialog-background;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 8px;
+    drop-shadow-color: Theme.shadow-color;
+    
+    // Click outside to close
+    init => {
+        // Would set up global click handler in Rust
+    }
+    
+    VerticalBox {
+        padding: 4px;
+        spacing: 0px;
+        
+        // Default items if none provided
+        if root.items.length == 0: VerticalBox {
+            MenuItemRow {
+                icon: "✂";
+                label: "Cut";
+                shortcut: "Ctrl+X";
+                clicked => { root.on-action("cut"); }
+            }
+            
+            MenuItemRow {
+                icon: "📋";
+                label: "Copy";
+                shortcut: "Ctrl+C";
+                clicked => { root.on-action("copy"); }
+            }
+            
+            MenuItemRow {
+                icon: "📎";
+                label: "Paste";
+                shortcut: "Ctrl+V";
+                clicked => { root.on-action("paste"); }
+            }
+            
+            MenuItemRow {
+                icon: "⧉";
+                label: "Duplicate";
+                shortcut: "Ctrl+D";
+                clicked => { root.on-action("duplicate"); }
+            }
+            
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+            
+            MenuItemRow {
+                icon: "🗑";
+                label: "Delete";
+                shortcut: "Del";
+                clicked => { root.on-action("delete"); }
+            }
+            
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+            
+            MenuItemRow {
+                icon: "✏";
+                label: "Rename";
+                shortcut: "F2";
+                clicked => { root.on-action("rename"); }
+            }
+            
+            MenuItemRow {
+                icon: "📁";
+                label: "Group";
+                shortcut: "Ctrl+G";
+                clicked => { root.on-action("group"); }
+            }
+            
+            MenuItemRow {
+                icon: "📂";
+                label: "Ungroup";
+                shortcut: "Ctrl+Shift+G";
+                clicked => { root.on-action("ungroup"); }
+            }
+            
+            Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+            
+            MenuItemRow {
+                icon: "➕";
+                label: "Insert Object...";
+                clicked => { root.on-action("insert"); }
+            }
+        }
+        
+        // Dynamic items
+        for item in root.items: VerticalBox {
+            MenuItemRow {
+                icon: item.icon;
+                label: item.label;
+                shortcut: item.shortcut;
+                enabled: item.enabled;
+                clicked => { root.on-action(item.id); }
+            }
+            
+            if item.separator-after: Rectangle {
+                height: 1px;
+                background: Theme.border-color;
+            }
+        }
+    }
+}

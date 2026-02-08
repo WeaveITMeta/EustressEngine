@@ -1,0 +1,55 @@
+//! # Webview
+//!
+//! Stub module for webview integration.
+
+use bevy::prelude::*;
+
+/// Webview plugin placeholder
+pub struct WebViewPlugin;
+
+impl Plugin for WebViewPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement webview
+    }
+}
+
+/// Webview manager resource
+#[derive(Resource, Debug, Default)]
+pub struct WebViewManager {
+    pub views: Vec<WebViewInstance>,
+}
+
+/// Webview instance
+#[derive(Debug, Clone, Default)]
+pub struct WebViewInstance {
+    pub id: String,
+    pub url: String,
+    pub visible: bool,
+}
+
+/// Webview bounds
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebViewBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WebViewManager {
+    pub fn navigate(&mut self, _url: &str) {
+        // TODO: Implement navigation
+    }
+    
+    pub fn show_browser(&mut self) {
+        // TODO: Show browser
+    }
+    
+    pub fn hide_browser(&mut self) {
+        // TODO: Hide browser
+    }
+    
+    pub fn is_available(&self) -> bool {
+        false
+    }
+}

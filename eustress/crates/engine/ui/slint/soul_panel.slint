@@ -1,0 +1,259 @@
+// ============================================================================
+// Eustress Engine Studio - Soul Panel
+// Soul script management and build status
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// Soul script data
+export struct SoulScriptData {
+    entity-id: int,
+    name: string,
+    status: string, // "idle", "building", "success", "error"
+    last-build: string,
+    error-message: string,
+    line-count: int,
+}
+
+component ScriptRow inherits Rectangle {
+    in property <string> name: "";
+    in property <string> status: "idle";
+    in property <string> last-build: "";
+    in property <bool> selected: false;
+    
+    callback clicked();
+    callback build();
+    callback open();
+    
+    height: 48px;
+    background: self.selected ? Theme.selection-background : 
+                touch.has-hover ? Theme.explorer-item-hover : transparent;
+    border-radius: 4px;
+    
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.open(); }
+    }
+    
+    HorizontalBox {
+        padding: 8px;
+        spacing: 8px;
+        
+        // Icon
+        Rectangle {
+            width: 32px;
+            height: 32px;
+            background: root.status == "success" ? Theme.accent-green :
+                        root.status == "error" ? Theme.accent-red :
+                        root.status == "building" ? Theme.accent-blue :
+                        Theme.background-tertiary;
+            border-radius: 4px;
+            
+            Text {
+                text: "@";
+                color: white;
+                font-size: 16px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        // Info
+        VerticalBox {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            
+            Text {
+                text: root.name;
+                color: Theme.text-primary;
+                font-weight: 500;
+            }
+            
+            Text {
+                text: root.status == "building" ? "Building..." :
+                      root.status == "error" ? "Build failed" :
+                      root.status == "success" ? "Built " + root.last-build :
+                      "Not built";
+                color: root.status == "error" ? Theme.text-error :
+                       root.status == "success" ? Theme.text-success :
+                       Theme.text-secondary;
+                font-size: 11px;
+            }
+        }
+        
+        // Build button
+        Rectangle {
+            width: 60px;
+            height: 28px;
+            background: root.status == "building" ? Theme.button-background : Theme.button-primary;
+            border-radius: 4px;
+            
+            TouchArea {
+                enabled: root.status != "building";
+                clicked => { root.build(); }
+            }
+            
+            Text {
+                text: root.status == "building" ? "..." : "Build";
+                color: white;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component SoulPanel inherits Rectangle {
+    // Properties
+    in property <[SoulScriptData]> scripts: [];
+    in property <int> selected-script: -1;
+    in property <string> api-key-status: "not-set"; // "not-set", "valid", "invalid"
+    
+    // Callbacks
+    callback on-build-script(int);
+    callback on-open-script(int);
+    callback on-build-all();
+    callback on-configure-api();
+    callback on-select-script(int);
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Header
+        PanelHeader {
+            title: "Soul Scripts";
+        }
+        
+        // API key status
+        if root.api-key-status != "valid": Rectangle {
+            height: 48px;
+            background: root.api-key-status == "invalid" ? #4a2020 : Theme.background-tertiary;
+            
+            HorizontalBox {
+                padding: 8px;
+                spacing: 8px;
+                
+                Text {
+                    text: root.api-key-status == "invalid" ? "⚠" : "ℹ";
+                    color: root.api-key-status == "invalid" ? Theme.text-error : Theme.text-warning;
+                    font-size: 16px;
+                    vertical-alignment: center;
+                }
+                
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.api-key-status == "invalid" ? "Invalid API key" : "API key not configured";
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                
+                Rectangle {
+                    width: 80px;
+                    height: 24px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-configure-api(); }
+                    }
+                    
+                    Text {
+                        text: "Configure";
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // Toolbar
+        Rectangle {
+            height: 36px;
+            background: Theme.header-background;
+            
+            HorizontalBox {
+                padding: 4px;
+                spacing: 8px;
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                Rectangle {
+                    width: 80px;
+                    height: 28px;
+                    background: Theme.button-primary;
+                    border-radius: 4px;
+                    
+                    TouchArea {
+                        clicked => { root.on-build-all(); }
+                    }
+                    
+                    Text {
+                        text: "Build All";
+                        color: white;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // Script list
+        if root.scripts.length == 0: Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                alignment: center;
+                
+                Text {
+                    text: "@";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "No Soul scripts";
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Add a SoulScript to an entity to get started";
+                    color: Theme.text-disabled;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        
+        if root.scripts.length > 0: ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 4px;
+                spacing: 2px;
+                
+                for script in root.scripts: ScriptRow {
+                    name: script.name;
+                    status: script.status;
+                    last-build: script.last-build;
+                    selected: script.entity-id == root.selected-script;
+                    
+                    clicked => { root.on-select-script(script.entity-id); }
+                    build => { root.on-build-script(script.entity-id); }
+                    open => { root.on-open-script(script.entity-id); }
+                }
+            }
+        }
+    }
+}

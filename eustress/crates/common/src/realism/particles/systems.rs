@@ -275,46 +275,13 @@ pub fn update_particle_lifetimes(
 // Debug Visualization
 // ============================================================================
 
-/// Draw debug gizmos for particles
+/// Draw debug gizmos for particles - DISABLED for Bevy 0.19
 pub fn draw_particle_gizmos(
-    query: Query<(&Particle, &Transform, Option<&KineticState>, Option<&ThermodynamicState>)>,
-    mut gizmos: Gizmos,
-    config: Res<RealismConfig>,
+    _query: Query<(&Particle, &Transform, Option<&KineticState>, Option<&ThermodynamicState>)>,
+    // mut gizmos: Gizmos,
+    _config: Res<RealismConfig>,
 ) {
-    if !config.visualizers_enabled {
-        return;
-    }
-    
-    for (particle, transform, kinetic, thermo) in query.iter() {
-        if !particle.active {
-            continue;
-        }
-        
-        // Color based on temperature if available
-        let color = if let Some(thermo) = thermo {
-            temperature_to_color(thermo.temperature)
-        } else {
-            Color::WHITE
-        };
-        
-        // Draw particle sphere
-        gizmos.sphere(
-            Isometry3d::from_translation(transform.translation),
-            particle.radius,
-            color,
-        );
-        
-        // Draw velocity vector
-        if let Some(kinetic) = kinetic {
-            if kinetic.velocity.length() > 0.01 {
-                gizmos.arrow(
-                    transform.translation,
-                    transform.translation + kinetic.velocity * 0.1,
-                    Color::srgb(0.0, 1.0, 0.0),
-                );
-            }
-        }
-    }
+    // Disabled - Gizmos API changed in Bevy 0.19
 }
 
 /// Convert temperature to color (blue = cold, red = hot)

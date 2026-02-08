@@ -17,39 +17,43 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common" }
+eustress-common = { path = "../common", features = ["physics"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
-eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
+# TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
+# eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
 
-# Workspace dependencies (Bevy 0.17)
-bevy = { workspace = true, features = [
+# Workspace dependencies (Bevy 0.18) - without audio to avoid windows conflicts
+bevy = { workspace = true, default-features = false, features = [
+    "bevy_log",
     "bevy_winit",
     "bevy_render",
     "bevy_pbr",
     "bevy_gizmos",
     "bevy_gltf",
     "bevy_scene",
-    "bevy_audio",
+    # "bevy_audio",  # DISABLED - uses cpal/rodio with Windows 0.54
     "bevy_state",
     "default_font",
     "bevy_asset",
     "bevy_animation",
     "bevy_color",
+    "bevy_ui",
     "png",
     "hdr",
     "x11",
     "wayland",
     "multi_threaded",
     "tonemapping_luts",
+    "zstd_rust",
 ] }
-bevy_egui = { workspace = true }
-egui_extras = { workspace = true }
-egui-notify = { workspace = true }
-egui_dock = { workspace = true }
-egui_material_icons = "0.5"
+# Slint UI (GPU renderer with wgpu 27)
+slint = { workspace = true }
+# Slint FemtoVG GPU renderer - disabled due to wgpu version conflicts
+# i-slint-renderer-femtovg = { version = "1.14", features = ["wgpu"] }
+# femtovg = { version = "0.20", features = ["image-loading"] }
 # CEF webview for browser tabs (macOS only currently)
 bevy_cef = { git = "https://github.com/not-elm/bevy_cef", branch = "main", optional = true }
-leafwing-input-manager = { workspace = true }
+# leafwing-input-manager = { workspace = true }  # DISABLED until Bevy 0.19 support
 avian3d = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -76,15 +80,36 @@ sentry = { version = "0.34", default-features = false, features = ["backtrace", 
 # Window icon (must match bevy's versions)
 image = "0.25"
 winit = "0.30"
+# WGPU version synced with Bevy 0.19 (wgpu 28)
+# wgpu = "27"
+# Note: Using Bevy's built-in wgpu instead of explicit dependency
+# Raw window handle for Slint platform integration
+raw-window-handle = "0.6"
+# QUIC networking for Play Server
+# Note: rustls 0.23 defaults to aws-lc-rs, we use ring to avoid cmake/nasm dependency
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.13"
+# Tokio for async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
+# DashMap for concurrent collections
+dashmap = "6"
+# Async channels for Slint+Bevy integration
+smol = "2"
+spin_on = "0.1"
+# Byte casting for GPU buffer operations
+bytemuck = { version = "1.16", features = ["derive"] }
 
 [build-dependencies]
 winres = "0.1"
 resvg = "0.44"
 ico = "0.3"
+slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
 
 [features]
 default = []
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]
+debug = ["bevy/bevy_debug_stepping"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]

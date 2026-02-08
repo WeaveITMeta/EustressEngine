@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ui::IsDefaultUiCamera;
 use eustress_common::plugins::lighting_plugin::SkyboxHandle;
 use eustress_common::classes::{Instance, ClassName, Sky, Atmosphere};
 use crate::startup::StartupArgs;
@@ -57,12 +58,15 @@ pub fn setup_default_scene(
                 intensity: 400.0,
                 ..default()
             },
+            // NOTE: Do NOT add IsDefaultUiCamera here - the Slint UI has its own
+            // dedicated Camera2d with IsDefaultUiCamera that renders the UI overlay.
             // Instance component so Camera appears in Explorer under Workspace
             Instance {
                 name: "Camera".to_string(),
                 class_name: ClassName::Camera,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Name::new("Camera"),
         ));
@@ -77,12 +81,15 @@ pub fn setup_default_scene(
                 fov: 70.0_f32.to_radians(),
                 ..default()
             }),
+            // NOTE: Do NOT add IsDefaultUiCamera here - the Slint UI has its own
+            // dedicated Camera2d with IsDefaultUiCamera that renders the UI overlay.
             // Instance component so Camera appears in Explorer under Workspace
             Instance {
                 name: "Camera".to_string(),
                 class_name: ClassName::Camera,
                 archivable: true,
                 id: 0,
+                ..Default::default()
             },
             Name::new("Camera"),
         ));
@@ -115,6 +122,7 @@ pub fn setup_default_scene(
             class_name: ClassName::Sky,
             archivable: true,
             id: 0,
+            ..Default::default()
         },
         Sky::default(),
         Name::new("Sky"),
@@ -129,6 +137,7 @@ pub fn setup_default_scene(
             class_name: ClassName::Atmosphere,
             archivable: true,
             id: 0,
+            ..Default::default()
         },
         Atmosphere::clear_day(),
         Name::new("Atmosphere"),

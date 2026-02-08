@@ -1,0 +1,105 @@
+// ============================================================================
+// Eustress Engine Studio - View Selector
+// Camera view mode selector (perspective, top, front, etc.)
+// ============================================================================
+
+import { HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component ViewSelector inherits Rectangle {
+    // Properties
+    in property <string> view-mode: "perspective";
+    
+    // Callbacks
+    callback on-set-view-mode(string);
+    
+    width: 140px;
+    height: 32px;
+    background: Theme.overlay-background;
+    border-radius: 4px;
+    
+    HorizontalBox {
+        padding: 4px;
+        spacing: 2px;
+        
+        // Perspective
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.view-mode == "perspective" ? Theme.selection-background : 
+                        persp-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 2px;
+            
+            persp-touch := TouchArea {
+                clicked => { root.on-set-view-mode("perspective"); }
+            }
+            
+            Text {
+                text: "3D";
+                color: root.view-mode == "perspective" ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        // Top
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.view-mode == "top" ? Theme.selection-background : 
+                        top-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 2px;
+            
+            top-touch := TouchArea {
+                clicked => { root.on-set-view-mode("top"); }
+            }
+            
+            Text {
+                text: "Top";
+                color: root.view-mode == "top" ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        // Front
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.view-mode == "front" ? Theme.selection-background : 
+                        front-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 2px;
+            
+            front-touch := TouchArea {
+                clicked => { root.on-set-view-mode("front"); }
+            }
+            
+            Text {
+                text: "Front";
+                color: root.view-mode == "front" ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        // Right
+        Rectangle {
+            horizontal-stretch: 1;
+            background: root.view-mode == "right" ? Theme.selection-background : 
+                        right-touch.has-hover ? Theme.button-hover : transparent;
+            border-radius: 2px;
+            
+            right-touch := TouchArea {
+                clicked => { root.on-set-view-mode("right"); }
+            }
+            
+            Text {
+                text: "Right";
+                color: root.view-mode == "right" ? Theme.text-primary : Theme.text-secondary;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

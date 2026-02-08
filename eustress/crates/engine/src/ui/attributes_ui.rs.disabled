@@ -1,0 +1,49 @@
+//! # Attributes UI
+//!
+//! Stub module for attributes UI panel.
+
+use bevy::prelude::*;
+use bevy_egui::egui;
+
+/// Attributes UI plugin placeholder
+pub struct AttributesUiPlugin;
+
+impl Plugin for AttributesUiPlugin {
+    fn build(&self, _app: &mut App) {
+        // TODO: Implement attributes UI
+    }
+}
+
+/// Attributes panel state
+#[derive(Resource, Debug, Clone, Default)]
+pub struct AttributesPanelState {
+    pub visible: bool,
+    pub selected_entity: Option<Entity>,
+}
+
+/// Add attribute state
+#[derive(Resource, Debug, Clone, Default)]
+pub struct AddAttributeState {
+    pub name: String,
+    pub value: String,
+}
+
+/// Add tag state
+#[derive(Resource, Debug, Clone, Default)]
+pub struct AddTagState {
+    pub tag: String,
+}
+
+/// Parameters editor state
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ParametersEditorState {
+    pub editing: bool,
+}
+
+/// Render attributes panel
+pub fn render_attributes_panel(
+    _ui: &mut egui::Ui,
+    _state: &mut AttributesPanelState,
+) {
+    // TODO: Implement attributes panel rendering
+}

@@ -3,6 +3,17 @@ fn main() {
     use std::fs::File;
     use std::io::BufWriter;
     
+    // Compile Slint UI files
+    let slint_config = slint_build::CompilerConfiguration::new()
+        .with_style("fluent-dark".into());
+    
+    slint_build::compile_with_config(
+        "ui/slint/main.slint",
+        slint_config,
+    ).expect("Failed to compile Slint UI");
+    
+    println!("cargo:rerun-if-changed=ui/slint/");
+    
     let svg_path = Path::new("assets/icon.svg");
     let ico_path = Path::new("assets/icon.ico");
     let png_path = Path::new("assets/icon.png");

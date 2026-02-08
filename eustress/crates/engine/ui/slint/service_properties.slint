@@ -1,0 +1,487 @@
+// ============================================================================
+// Eustress Engine Studio - Service Properties Panel
+// Properties for Workspace, Lighting, Players, etc.
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, Slider, CheckBox, LineEdit } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// Service type enum
+export struct ServiceData {
+    service-type: string, // "workspace", "lighting", "players", etc.
+    name: string,
+}
+
+// Workspace properties
+export struct WorkspaceProperties {
+    gravity: float,
+    fallen-parts-destroy-height: float,
+    air-density: float,
+    streaming-enabled: bool,
+    streaming-target-radius: float,
+    streaming-min-radius: float,
+}
+
+// Lighting properties
+export struct LightingProperties {
+    ambient-r: float,
+    ambient-g: float,
+    ambient-b: float,
+    brightness: float,
+    clock-time: float,
+    geographic-latitude: float,
+    global-shadows: bool,
+    exposure-compensation: float,
+    shadow-softness: float,
+}
+
+export component ServiceProperties inherits Rectangle {
+    // Properties
+    in property <string> service-type: ""; // "workspace", "lighting", "players", etc.
+    in property <string> service-name: "";
+    
+    // Workspace properties
+    in-out property <float> gravity: 196.2;
+    in-out property <float> fallen-parts-destroy-height: -500.0;
+    in-out property <float> air-density: 0.0012;
+    in-out property <bool> streaming-enabled: false;
+    in-out property <float> streaming-target-radius: 1024.0;
+    in-out property <float> streaming-min-radius: 64.0;
+    
+    // Lighting properties
+    in-out property <float> brightness: 1.0;
+    in-out property <float> clock-time: 14.0;
+    in-out property <float> geographic-latitude: 41.7;
+    in-out property <bool> global-shadows: true;
+    in-out property <float> exposure-compensation: 0.0;
+    in-out property <float> shadow-softness: 0.2;
+    
+    // Callbacks
+    callback on-property-changed(string, string);
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        PanelHeader {
+            title: root.service-name != "" ? root.service-name : "Properties";
+        }
+        
+        if root.service-type == "": Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                alignment: center;
+                
+                Text {
+                    text: "⚙";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Select a service";
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        
+        // Workspace properties
+        if root.service-type == "workspace": ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 12px;
+                
+                // Physics section
+                Text {
+                    text: "Physics";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 120px;
+                        text: "Gravity";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+                        
+                        LineEdit {
+                            text: root.gravity;
+                        }
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 120px;
+                        text: "Air Density";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+                        
+                        LineEdit {
+                            text: root.air-density;
+                        }
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 120px;
+                        text: "Destroy Height";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 28px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+                        
+                        LineEdit {
+                            text: root.fallen-parts-destroy-height;
+                        }
+                    }
+                }
+                
+                Rectangle { height: 8px; }
+                
+                // Streaming section
+                Text {
+                    text: "Streaming";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                CheckBox {
+                    text: "Streaming Enabled";
+                    checked <=> root.streaming-enabled;
+                }
+                
+                if root.streaming-enabled: VerticalBox {
+                    spacing: 8px;
+                    
+                    HorizontalBox {
+                        spacing: 8px;
+                        
+                        Text {
+                            width: 120px;
+                            text: "Target Radius";
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 64;
+                            maximum: 4096;
+                            value <=> root.streaming-target-radius;
+                        }
+                        
+                        Text {
+                            width: 50px;
+                            text: round(root.streaming-target-radius);
+                            color: Theme.text-secondary;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    HorizontalBox {
+                        spacing: 8px;
+                        
+                        Text {
+                            width: 120px;
+                            text: "Min Radius";
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                        }
+                        
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 16;
+                            maximum: 512;
+                            value <=> root.streaming-min-radius;
+                        }
+                        
+                        Text {
+                            width: 50px;
+                            text: round(root.streaming-min-radius);
+                            color: Theme.text-secondary;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Lighting properties
+        if root.service-type == "lighting": ScrollView {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 8px;
+                spacing: 12px;
+                
+                // Time section
+                Text {
+                    text: "Time of Day";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 100px;
+                        text: "Clock Time";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 24;
+                        value <=> root.clock-time;
+                    }
+                    
+                    Text {
+                        width: 50px;
+                        text: floor(root.clock-time) + ":" + (mod(round(root.clock-time * 60), 60) < 10 ? "0" : "") + mod(round(root.clock-time * 60), 60);
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 100px;
+                        text: "Latitude";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: -90;
+                        maximum: 90;
+                        value <=> root.geographic-latitude;
+                    }
+                    
+                    Text {
+                        width: 50px;
+                        text: round(root.geographic-latitude) + "°";
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle { height: 8px; }
+                
+                // Lighting section
+                Text {
+                    text: "Lighting";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 100px;
+                        text: "Brightness";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 10;
+                        value <=> root.brightness;
+                    }
+                    
+                    Text {
+                        width: 50px;
+                        text: round(root.brightness * 10) / 10;
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 100px;
+                        text: "Exposure";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: -3;
+                        maximum: 3;
+                        value <=> root.exposure-compensation;
+                    }
+                    
+                    Text {
+                        width: 50px;
+                        text: round(root.exposure-compensation * 10) / 10;
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+                
+                Rectangle { height: 8px; }
+                
+                // Shadows section
+                Text {
+                    text: "Shadows";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    font-weight: 600;
+                }
+                
+                CheckBox {
+                    text: "Global Shadows";
+                    checked <=> root.global-shadows;
+                }
+                
+                if root.global-shadows: HorizontalBox {
+                    spacing: 8px;
+                    
+                    Text {
+                        width: 100px;
+                        text: "Softness";
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                    
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: 1;
+                        value <=> root.shadow-softness;
+                    }
+                    
+                    Text {
+                        width: 50px;
+                        text: round(root.shadow-softness * 100) + "%";
+                        color: Theme.text-secondary;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // Players service
+        if root.service-type == "players": Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 16px;
+                alignment: center;
+                
+                Text {
+                    text: "👥";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Players Service";
+                    color: Theme.text-primary;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Runtime player management";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+        
+        // Other services
+        if root.service-type != "" && root.service-type != "workspace" && root.service-type != "lighting" && root.service-type != "players": Rectangle {
+            vertical-stretch: 1;
+            
+            VerticalBox {
+                padding: 16px;
+                alignment: center;
+                
+                Text {
+                    text: "📦";
+                    color: Theme.text-secondary;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: root.service-name;
+                    color: Theme.text-primary;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Service properties";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

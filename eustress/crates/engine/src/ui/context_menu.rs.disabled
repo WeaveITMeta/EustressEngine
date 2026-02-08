@@ -927,6 +927,7 @@ fn handle_insert_object_events(
             class_name: event.class_name,
             archivable: true,
             id: 0,
+            ..Default::default()
         };
         
         // Track spawned entity for auto-selection

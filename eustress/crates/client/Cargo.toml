@@ -14,7 +14,7 @@ eustress-common = { path = "../common" }
 eustress-networking = { path = "../common/eustress-networking", features = ["p2p"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 
-# Workspace dependencies (Bevy 0.17)
+# Workspace dependencies (Bevy 0.19)
 bevy = { workspace = true, features = [
     "bevy_winit",
     "bevy_render",
@@ -31,17 +31,16 @@ bevy = { workspace = true, features = [
     "x11",
     "wayland",
     "multi_threaded",
-    "animation",  # Required for GLTF animation loading (enables bevy_gltf/bevy_animation)
 ] }
 
-# Physics (Bevy 0.17 compatible)
-avian3d = "0.4"
+# Physics (Bevy 0.19 compatible) - DISABLED until Bevy 0.19 support
+# avian3d = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }
 
 # Enhancement pipeline (Bevy 0.17 compatible)
-bevy_egui = { workspace = true }
+# bevy_egui removed - using Slint UI
 tokio = { version = "1.38", features = ["rt-multi-thread", "macros"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde_json = { workspace = true }

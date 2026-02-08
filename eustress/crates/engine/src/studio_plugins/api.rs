@@ -13,7 +13,6 @@
 #[allow(dead_code)]
 
 use bevy::prelude::*;
-use bevy_egui::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -376,7 +375,8 @@ pub trait StudioPlugin: Send + Sync {
     fn on_update(&mut self, _api: &mut PluginApi, _clock: &SimClock) {}
     
     /// Called to render plugin UI (panels, overlays)
-    fn on_ui(&mut self, _ctx: &egui::Context, _api: &mut PluginApi) {}
+    /// Note: UI rendering is now handled by Slint integration
+    fn on_ui(&mut self, _api: &mut PluginApi) {}
     
     /// Called when a menu item is clicked
     fn on_menu_action(&mut self, _action_id: &str, _api: &mut PluginApi) {}

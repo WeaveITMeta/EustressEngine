@@ -479,22 +479,18 @@ impl ExplorerPanel {
         // ════════════════════════════════════════════════════════════════════
         
         // Advanced search panel (replaces simple search bar)
-        show_advanced_search_panel(ui, advanced_search, world);
+        show_advanced_search_panel(ui, advanced_search, &mut super::explorer_search::ExplorerSearchEngine::default());
         
         // Show search results if we have an active query
         if !advanced_search.results.is_empty() {
-            if let Some(selected_entity) = show_search_results(ui, advanced_search) {
-                // Select the entity in the selection manager (uses string ID)
-                let sm = selection_manager.0.read();
-                sm.select(format!("{:?}", selected_entity));
-            }
+            show_search_results(ui, &advanced_search.results);
             
             ui.separator();
         }
         
         // Sync simple search filter with advanced search for backwards compatibility
-        if !advanced_search.query.raw_query.is_empty() {
-            state.search_filter = advanced_search.query.raw_query.clone();
+        if !advanced_search.query.is_empty() {
+            state.search_filter = advanced_search.query.clone();
         }
         
         ui.add_space(2.0);

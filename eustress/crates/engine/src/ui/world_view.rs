@@ -7,6 +7,7 @@
 
 use bevy::prelude::*;
 use bevy::ecs::world::EntityWorldMut;
+use bevy::log::{info, warn};
 #[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 #[allow(unused_imports)]
@@ -567,8 +568,9 @@ pub fn extract_world_snapshot(
         Option<&crate::classes::BillboardGui>,
         Option<&crate::classes::TextLabel>,
     )>,
-    selection_manager: Res<BevySelectionManager>,
+    selection_manager: Option<Res<BevySelectionManager>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     // Clear previous snapshot
     snapshot.entities.clear();
     snapshot.roots.clear();
@@ -620,7 +622,7 @@ pub fn extract_world_snapshot(
             attributes: attributes.map(|a| a.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default(),
             tags: tags.map(|t| t.iter().cloned().collect()).unwrap_or_default(),
             has_parameters: parameters.is_some(),
-            data_source_type: parameters.map(|p| p.data_source_type),
+            data_source_type: parameters.and_then(|p| p.sources.values().next().map(|s| s.source_type.clone())),
             // Atmosphere properties
             atmosphere_density: atmosphere.map(|a| a.density),
             atmosphere_offset: atmosphere.map(|a| a.offset),
@@ -685,20 +687,27 @@ pub fn extract_world_snapshot(
 /// System to apply UI actions to World
 /// Runs AFTER UI systems
 pub fn apply_ui_actions(
-    mut action_queue: ResMut<UIActionQueue>,
+    action_queue: Option<ResMut<UIActionQueue>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    selection_manager: Res<BevySelectionManager>,
-    mut expanded: ResMut<super::ExplorerExpanded>,
+    selection_manager: Option<Res<BevySelectionManager>>,
+    expanded: Option<ResMut<super::ExplorerExpanded>>,
     query: Query<(Entity, &Instance, Option<&BasePart>)>,
-    play_mode_state: Res<State<PlayModeState>>,
-    mut undo_stack: ResMut<crate::undo::UndoStack>,
+    play_mode_state: Option<Res<State<PlayModeState>>>,
+    undo_stack: Option<ResMut<crate::undo::UndoStack>>,
     instance_query: Query<&Instance>,
     basepart_query: Query<&BasePart>,
-    mut modal_state: ResMut<PropertiesModalState>,
-    mut script_editor_state: ResMut<super::script_editor::ScriptEditorState>,
+    modal_state: Option<ResMut<PropertiesModalState>>,
+    script_editor_state: Option<ResMut<super::script_editor::ScriptEditorState>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
+    let Some(mut action_queue) = action_queue else { return };
+    let Some(mut expanded) = expanded else { return };
+    let Some(play_mode_state) = play_mode_state else { return };
+    let Some(mut undo_stack) = undo_stack else { return };
+    let Some(mut modal_state) = modal_state else { return };
+    let Some(mut script_editor_state) = script_editor_state else { return };
     let is_playing = *play_mode_state.get() != PlayModeState::Editing;
     for action in action_queue.drain() {
         match action {
@@ -769,6 +778,7 @@ pub fn apply_ui_actions(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 
                 let base_part = BasePart {
@@ -807,6 +817,7 @@ pub fn apply_ui_actions(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 
                 let base_part = BasePart {
@@ -845,6 +856,7 @@ pub fn apply_ui_actions(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 
                 let light = EustressPointLight::default();
@@ -873,6 +885,7 @@ pub fn apply_ui_actions(
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_nanos() % u32::MAX as u128) as u32,
+                    ..Default::default()
                 };
                 
                 let light = EustressSpotLight::default();
@@ -904,6 +917,7 @@ pub fn apply_ui_actions(
                     class_name,
                     archivable: true,
                     id,
+                    ..Default::default()
                 };
                 
                 // ServiceOwner tracks which service this entity belongs to
@@ -1023,10 +1037,8 @@ pub fn apply_ui_actions(
                 expanded.toggle_service(service);
             }
             UIAction::OpenScript(entity) => {
-                // Send OpenScriptEvent to be handled by the script editor system
-                commands.queue(move |world: &mut World| {
-                    world.send_event(super::OpenScriptEvent { entity });
-                });
+                // Script editor is now handled by Slint UI
+                info!("OpenScript action for {:?} - handled by Slint", entity);
             }
             UIAction::SetProperty { entity, property, value } => {
                 #[allow(unused_imports)]
@@ -1141,11 +1153,11 @@ pub fn apply_ui_actions(
                 if let Ok(mut entity_cmds) = commands.get_entity(entity) {
                     entity_cmds.queue(move |mut entity_mut: EntityWorldMut| {
                         if let Some(mut attrs) = entity_mut.get_mut::<eustress_common::attributes::Attributes>() {
-                            attrs.set(key.clone(), value.clone());
+                            attrs.set(&key, value.clone());
                         } else {
                             // Add Attributes component if it doesn't exist
                             let mut new_attrs = eustress_common::attributes::Attributes::new();
-                            new_attrs.set(key.clone(), value.clone());
+                            new_attrs.set(&key, value.clone());
                             entity_mut.insert(new_attrs);
                         }
                     });
@@ -1172,11 +1184,11 @@ pub fn apply_ui_actions(
                 if let Ok(mut entity_cmds) = commands.get_entity(entity) {
                     entity_cmds.queue(move |mut entity_mut: EntityWorldMut| {
                         if let Some(mut tags) = entity_mut.get_mut::<eustress_common::attributes::Tags>() {
-                            tags.add(tag.clone());
+                            tags.add(&tag);
                         } else {
                             // Add Tags component if it doesn't exist
                             let mut new_tags = eustress_common::attributes::Tags::new();
-                            new_tags.add(tag.clone());
+                            new_tags.add(&tag);
                             entity_mut.insert(new_tags);
                         }
                     });
@@ -1200,10 +1212,15 @@ pub fn apply_ui_actions(
             // === Parameters Actions ===
             UIAction::AddParameters { entity, source_type } => {
                 info!("AddParameters: {:?} on {:?}", source_type, entity);
-                let params = eustress_common::parameters::Parameters {
-                    data_source_type: source_type,
-                    ..Default::default()
-                };
+                let mut params = eustress_common::parameters::Parameters::default();
+                // Add a default source config with the specified type
+                params.sources.insert("default".to_string(), eustress_common::parameters::DataSourceConfig {
+                    source_type,
+                    auth: eustress_common::parameters::AuthType::None,
+                    anonymization: eustress_common::parameters::AnonymizationMode::None,
+                    update_mode: eustress_common::parameters::UpdateMode::Manual,
+                    mappings: Vec::new(),
+                });
                 commands.entity(entity).insert(params);
             }
             UIAction::RemoveParameters(entity) => {
@@ -1256,7 +1273,8 @@ pub fn apply_ui_actions(
                                 // Get ray from cursor
                                 if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) {
                                     // Find intersection with ground plane (Y=0) or use a default position
-                                    let target_pos = if let Some(hit_pos) = crate::math_utils::ray_plane_intersection(&ray, Vec3::ZERO, Vec3::Y) {
+                                    let target_pos = if let Some(t) = crate::math_utils::ray_plane_intersection(ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y) {
+                                        let hit_pos = ray.origin + *ray.direction * t;
                                         // Add small offset above ground to prevent z-fighting
                                         hit_pos + Vec3::new(0.0, 0.01, 0.0)
                                     } else {
@@ -1694,6 +1712,7 @@ impl Plugin for WorldViewPlugin {
             .init_resource::<UIWorldSnapshot>()
             .init_resource::<UIActionQueue>()
             .init_resource::<PropertiesModalState>()
+            .init_resource::<super::script_editor::ScriptEditorState>()
             // Extract snapshot BEFORE UI (in PreUpdate or early Update)
             .add_systems(PreUpdate, extract_world_snapshot)
             // Apply actions AFTER UI (in PostUpdate or late Update)

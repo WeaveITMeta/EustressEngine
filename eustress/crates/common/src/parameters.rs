@@ -404,10 +404,20 @@ pub struct ExportRequestEvent {
 // Legacy Compatibility (Original Parameters struct)
 // ============================================================================
 
-/// Parameters resource for data source configuration (legacy)
-#[derive(Resource, Default, Clone, Debug, Serialize, Deserialize)]
+/// Parameters component for entity-level data source configuration
+#[derive(Component, Resource, Default, Clone, Debug, Serialize, Deserialize)]
 pub struct Parameters {
     pub sources: HashMap<String, DataSourceConfig>,
+    pub domain: String,
+    pub global_source_ref: Option<String>,
+    pub sync_config: Option<DomainSyncConfig>,
+}
+
+/// Domain sync configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DomainSyncConfig {
+    pub enabled: bool,
+    pub interval_ms: u64,
 }
 
 /// Data source configuration
@@ -421,7 +431,7 @@ pub struct DataSourceConfig {
 }
 
 /// Type of data source
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum DataSourceType {
     #[default]
     None,
@@ -429,27 +439,218 @@ pub enum DataSourceType {
     Database,
     File,
     Stream,
+    Postgres,
+    Firebase,
+    REST,
+    GraphQL,
+    WebSocket,
+    MQTT,
+    CSV,
+    JSON,
+    FHIR,
+    // Additional data source types
+    XML,
+    Parquet,
+    Excel,
+    GRPC,
+    Kafka,
+    AMQP,
+    WebTransport,
+    SSE,
+    PostgreSQL,
+    MySQL,
+    SQLite,
+    MongoDB,
+    Redis,
+    Snowflake,
+    BigQuery,
+    S3,
+    AzureBlob,
+    GCS,
+    Supabase,
+    Oracle,
+    DigitalOcean,
+    // IoT/Industrial protocols
+    OPCUA,
+    Modbus,
+    BACnet,
+    CoAP,
+    LwM2M,
+    // Healthcare protocols
+    HL7v2,
+    HL7v3,
+    DICOM,
+    CDA,
+    OMOP,
+    OpenEHR,
+    IHE,
+    X12,
+    NCPDP,
+    // Additional protocols
+    LDAP,
+    SFTP,
+    FTP,
+    Email,
+    RSS,
+    Atom,
+    SOAP,
+}
+
+impl DataSourceType {
+    pub fn all_variants() -> &'static [Self] {
+        &[
+            Self::None, Self::Api, Self::Database, Self::File, Self::Stream,
+            Self::Postgres, Self::Firebase, Self::REST, Self::GraphQL, Self::WebSocket,
+            Self::MQTT, Self::CSV, Self::JSON, Self::FHIR, Self::XML, Self::Parquet,
+            Self::Excel, Self::GRPC, Self::Kafka, Self::AMQP, Self::WebTransport,
+            Self::SSE, Self::PostgreSQL, Self::MySQL, Self::SQLite, Self::MongoDB,
+            Self::Redis, Self::Snowflake, Self::BigQuery, Self::S3, Self::AzureBlob,
+            Self::GCS, Self::Supabase, Self::Oracle, Self::DigitalOcean,
+            Self::OPCUA, Self::Modbus, Self::BACnet, Self::CoAP, Self::LwM2M,
+            Self::HL7v2, Self::HL7v3, Self::DICOM, Self::CDA, Self::OMOP, Self::OpenEHR, Self::IHE,
+            Self::X12, Self::NCPDP, Self::LDAP, Self::SFTP, Self::FTP,
+            Self::Email, Self::RSS, Self::Atom, Self::SOAP,
+        ]
+    }
+    
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Api => "API",
+            Self::Database => "Database",
+            Self::File => "File",
+            Self::Stream => "Stream",
+            Self::Postgres => "PostgreSQL",
+            Self::Firebase => "Firebase",
+            Self::REST => "REST API",
+            Self::GraphQL => "GraphQL",
+            Self::WebSocket => "WebSocket",
+            Self::MQTT => "MQTT",
+            Self::CSV => "CSV",
+            Self::JSON => "JSON",
+            Self::FHIR => "FHIR",
+            Self::XML => "XML",
+            Self::Parquet => "Parquet",
+            Self::Excel => "Excel",
+            Self::GRPC => "gRPC",
+            Self::Kafka => "Kafka",
+            Self::AMQP => "AMQP",
+            Self::WebTransport => "WebTransport",
+            Self::SSE => "Server-Sent Events",
+            Self::PostgreSQL => "PostgreSQL",
+            Self::MySQL => "MySQL",
+            Self::SQLite => "SQLite",
+            Self::MongoDB => "MongoDB",
+            Self::Redis => "Redis",
+            Self::Snowflake => "Snowflake",
+            Self::BigQuery => "BigQuery",
+            Self::S3 => "Amazon S3",
+            Self::AzureBlob => "Azure Blob",
+            Self::GCS => "Google Cloud Storage",
+            Self::Supabase => "Supabase",
+            Self::Oracle => "Oracle",
+            Self::DigitalOcean => "DigitalOcean",
+            Self::OPCUA => "OPC UA",
+            Self::Modbus => "Modbus",
+            Self::BACnet => "BACnet",
+            Self::CoAP => "CoAP",
+            Self::LwM2M => "LwM2M",
+            Self::HL7v2 => "HL7 v2",
+            Self::HL7v3 => "HL7 v3",
+            Self::DICOM => "DICOM",
+            Self::CDA => "CDA",
+            Self::OMOP => "OMOP",
+            Self::OpenEHR => "OpenEHR",
+            Self::IHE => "IHE",
+            Self::X12 => "X12",
+            Self::NCPDP => "NCPDP",
+            Self::LDAP => "LDAP",
+            Self::SFTP => "SFTP",
+            Self::FTP => "FTP",
+            Self::Email => "Email",
+            Self::RSS => "RSS",
+            Self::Atom => "Atom",
+            Self::SOAP => "SOAP",
+        }
+    }
+    
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Api | Self::REST | Self::GraphQL | Self::GRPC | Self::SOAP => "API",
+            Self::Database | Self::Postgres | Self::PostgreSQL | Self::MySQL | 
+            Self::SQLite | Self::MongoDB | Self::Redis | Self::Snowflake | 
+            Self::BigQuery | Self::Oracle | Self::LDAP => "Database",
+            Self::File | Self::CSV | Self::JSON | Self::XML | Self::Parquet | Self::Excel | Self::SFTP | Self::FTP => "File",
+            Self::Stream | Self::WebSocket | Self::MQTT | Self::Kafka | 
+            Self::AMQP | Self::WebTransport | Self::SSE | Self::RSS | Self::Atom => "Stream",
+            Self::Firebase | Self::Supabase => "BaaS",
+            Self::S3 | Self::AzureBlob | Self::GCS | Self::DigitalOcean => "Cloud Storage",
+            Self::FHIR | Self::HL7v2 | Self::HL7v3 | Self::DICOM | Self::CDA | Self::OMOP | Self::OpenEHR | Self::IHE | Self::X12 | Self::NCPDP => "Healthcare",
+            Self::OPCUA | Self::Modbus | Self::BACnet | Self::CoAP | Self::LwM2M => "IoT",
+            Self::Email => "Communication",
+        }
+    }
 }
 
 /// Authentication type
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum AuthType {
     #[default]
     None,
     ApiKey,
+    APIKey,
     OAuth,
+    OAuth2,
     Basic,
     Token,
+    Bearer,
+}
+
+impl AuthType {
+    pub fn all_variants() -> &'static [Self] {
+        &[Self::None, Self::ApiKey, Self::APIKey, Self::OAuth, Self::OAuth2, Self::Basic, Self::Token, Self::Bearer]
+    }
+    
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::ApiKey => "API Key",
+            Self::APIKey => "API Key",
+            Self::OAuth => "OAuth",
+            Self::OAuth2 => "OAuth 2.0",
+            Self::Basic => "Basic Auth",
+            Self::Token => "Token",
+            Self::Bearer => "Bearer Token",
+        }
+    }
 }
 
 /// Data anonymization mode
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum AnonymizationMode {
     #[default]
     None,
     Hash,
     Mask,
     Redact,
+    Synthetic,
+}
+
+impl AnonymizationMode {
+    pub fn all_variants() -> &'static [Self] {
+        &[Self::None, Self::Hash, Self::Mask, Self::Redact, Self::Synthetic]
+    }
+    
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Hash => "Hash",
+            Self::Mask => "Mask",
+            Self::Redact => "Redact",
+            Self::Synthetic => "Synthetic",
+        }
+    }
 }
 
 /// Update mode for data
@@ -490,4 +691,133 @@ pub struct ValidationRule {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ValidationRules {
     pub rules: Vec<ValidationRule>,
+}
+
+// ============================================================================
+// Global Parameters Registry (for serialization)
+// ============================================================================
+
+/// Global parameters registry for scene serialization
+#[derive(Resource, Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GlobalParametersRegistry {
+    pub sources: Vec<GlobalDataSource>,
+    pub domains: Vec<DomainConfig>,
+    pub global_variables: HashMap<String, serde_json::Value>,
+}
+
+impl GlobalParametersRegistry {
+    /// Create a new empty registry
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Register a new data source
+    pub fn register_source(&mut self, source: GlobalDataSource) {
+        self.sources.push(source);
+    }
+    
+    /// Register a new domain
+    pub fn register_domain(&mut self, id: String, config: DomainConfig) {
+        self.domains.push(config);
+    }
+    
+    /// Set a global variable
+    pub fn set_variable(&mut self, key: String, value: serde_json::Value) {
+        self.global_variables.insert(key, value);
+    }
+    
+    /// Get a global variable
+    pub fn get_variable(&self, key: &str) -> Option<&serde_json::Value> {
+        self.global_variables.get(key)
+    }
+}
+
+/// Global data source configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GlobalDataSource {
+    pub id: String,
+    pub name: String,
+    pub source_type: DataSourceType,
+    pub connection_string: String,
+}
+
+/// Domain configuration
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct DomainConfig {
+    pub id: String,
+    pub name: String,
+    pub schema: HashMap<String, String>,
+}
+
+impl DomainConfig {
+    /// Create a new domain config
+    pub fn new(id: String, name: String) -> Self {
+        Self {
+            id,
+            name,
+            schema: HashMap::new(),
+        }
+    }
+}
+
+/// Mapping target type
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum MappingTargetType {
+    #[default]
+    Property,
+    Tag,
+    Attribute,
+    Color,
+    Vector3,
+    Number,
+    String,
+    Boolean,
+    // BasePart properties
+    Anchored,
+    CanCollide,
+    CanTouch,
+    Locked,
+    Visible,
+    Transparency,
+    Reflectance,
+}
+
+impl MappingTargetType {
+    pub fn all_variants() -> &'static [Self] {
+        &[
+            Self::Property, Self::Tag, Self::Attribute, Self::Color, Self::Vector3,
+            Self::Number, Self::String, Self::Boolean, Self::Anchored, Self::CanCollide,
+            Self::CanTouch, Self::Locked, Self::Visible, Self::Transparency, Self::Reflectance,
+        ]
+    }
+    
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Property => "Property",
+            Self::Tag => "Tag",
+            Self::Attribute => "Attribute",
+            Self::Color => "Color",
+            Self::Vector3 => "Vector3",
+            Self::Number => "Number",
+            Self::String => "String",
+            Self::Boolean => "Boolean",
+            Self::Anchored => "Anchored",
+            Self::CanCollide => "CanCollide",
+            Self::CanTouch => "CanTouch",
+            Self::Locked => "Locked",
+            Self::Visible => "Visible",
+            Self::Transparency => "Transparency",
+            Self::Reflectance => "Reflectance",
+        }
+    }
+    
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Property | Self::Tag | Self::Attribute => "General",
+            Self::Color | Self::Vector3 => "Spatial",
+            Self::Number | Self::String | Self::Boolean => "Primitive",
+            Self::Anchored | Self::CanCollide | Self::CanTouch | 
+            Self::Locked | Self::Visible | Self::Transparency | Self::Reflectance => "BasePart",
+        }
+    }
 }
