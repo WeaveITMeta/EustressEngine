@@ -129,32 +129,74 @@ fn create_beveled_box(width: f32, height: f32, depth: f32, bevel: f32) -> Mesh {
     Cuboid::new(width, height, depth).into()
 }
 
-/// Spawn a full humanoid character - DISABLED for Bevy 0.19
+/// Spawn a full humanoid character with visible mesh
 pub fn spawn_humanoid_character(
     commands: &mut Commands,
-    _meshes: &mut Assets<Mesh>,
-    _materials: &mut Assets<StandardMaterial>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
     spawn_pos: Vec3,
-    _config: &HumanoidConfig,
+    config: &HumanoidConfig,
 ) -> Entity {
-    // Disabled - Mesh3d Bundle API changed in Bevy 0.19
-    commands.spawn((
-        Transform::from_translation(spawn_pos),
+    // Create a capsule mesh for the character body
+    let body_mesh = meshes.add(Capsule3d::new(0.3, 1.2));
+    let body_material = materials.add(StandardMaterial {
+        base_color: config.skin_color,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    
+    // Head mesh
+    let head_mesh = meshes.add(Sphere::new(0.2));
+    let head_material = materials.add(StandardMaterial {
+        base_color: config.skin_color,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    
+    // Spawn root entity with body (split into two inserts to avoid tuple size limit)
+    let root = commands.spawn((
+        Mesh3d(body_mesh),
+        MeshMaterial3d(body_material),
+        Transform::from_translation(spawn_pos + Vec3::Y * 1.0),
         Visibility::default(),
-        Name::new("HumanoidPlaceholder"),
-    )).id()
+        CharacterRoot,
+        Character::default(),
+        PlayModeCharacter,
+        CharacterPhysics::default(),
+        CharacterFacing::default(),
+        MovementIntent::default(),
+        Name::new("Humanoid"),
+    )).id();
+    
+    commands.entity(root).insert((
+        LocomotionController::default(),
+        AnimationStateMachine::default(),
+        ProceduralAnimation::default(),
+        AnimationLayers::default(),
+        RootMotion::default(),
+        CharacterLimb::Hips,
+    ));
+    
+    // Spawn head as child
+    commands.spawn((
+        Mesh3d(head_mesh),
+        MeshMaterial3d(head_material),
+        Transform::from_xyz(0.0, 0.85, 0.0),
+        ChildOf(root),
+        CharacterLimb::Neck,
+        CharacterHead,
+        Name::new("Head"),
+    ));
+    
+    root
 }
 
-/// Apply procedural skeletal animation - DISABLED for Bevy 0.19
+/// Apply procedural skeletal animation
+/// Requires CharacterBody with valid entity references for each limb
 pub fn apply_procedural_limb_animation(
-    // _time: Res<Time>,
-    // _character_query: Query<(
-    //     &LocomotionController,
-    //     &CharacterBody,
-    // )>,
-    // _limb_query: Query<&mut Transform, With<CharacterLimb>>,
+    // Requires CharacterBody with populated entity refs (not yet set up in simplified humanoid)
 ) {
-    // Disabled - ProceduralAnimation not available in Bevy 0.19
+    // Will be enabled when full skeletal hierarchy is spawned with CharacterBody entity refs
 }
 
 fn animate_arm(

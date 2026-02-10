@@ -17,39 +17,90 @@ use crate::realism::materials::properties::MaterialProperties;
 // Systems
 // ============================================================================
 
-/// Draw stress indicators using gizmos - DISABLED for Bevy 0.19
+/// Draw stress indicators using gizmos
 pub fn draw_stress_indicators(
-    _query: Query<(&Transform, &StressTensor, &MaterialProperties, Option<&FractureState>)>,
-    // mut gizmos: Gizmos,
+    query: Query<(&Transform, &StressTensor, &MaterialProperties, Option<&FractureState>)>,
+    mut gizmos: Gizmos,
 ) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+    for (transform, stress, material, fracture) in query.iter() {
+        let position = transform.translation;
+        let rotation = transform.rotation;
+        
+        // Von Mises stress ratio
+        let von_mises = stress.von_mises;
+        let yield_stress = material.yield_strength;
+        let ratio = if yield_stress > 0.0 { von_mises / yield_stress } else { 0.0 };
+        let color = stress_ratio_to_color(ratio);
+        
+        // Draw stress indicator sphere
+        let scale = 0.1 + ratio.min(2.0) * 0.2;
+        gizmos.sphere(Isometry3d::new(position, rotation), scale, color);
+        
+        // Draw principal stress directions
+        draw_principal_stresses(&mut gizmos, position, rotation, stress, scale);
+        
+        // Draw cracks if fractured
+        if let Some(fracture_state) = fracture {
+            for crack in &fracture_state.cracks {
+                draw_crack(&mut gizmos, position, rotation, crack);
+            }
+        }
+    }
 }
 
-/// Draw principal stress directions - DISABLED for Bevy 0.19
+/// Draw principal stress directions
 fn draw_principal_stresses(
-    _gizmos: &mut (),
-    _position: Vec3,
-    _rotation: Quat,
-    _stress: &StressTensor,
-    _scale: f32,
-    _base_color: Color,
+    gizmos: &mut Gizmos,
+    position: Vec3,
+    rotation: Quat,
+    stress: &StressTensor,
+    scale: f32,
 ) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+    // Use principal stress values along local axes as approximation
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    
+    for i in 0..3 {
+        let dir = rotation * axes[i];
+        let magnitude = stress.principal[i].abs() * scale * 0.5;
+        let color = if stress.principal[i] >= 0.0 {
+            Color::srgb(1.0, 0.3, 0.3) // Tension - red
+        } else {
+            Color::srgb(0.3, 0.3, 1.0) // Compression - blue
+        };
+        
+        let tip = position + dir * magnitude;
+        gizmos.line(position, tip, color);
+        draw_arrow_head(gizmos, tip, dir, magnitude * 0.2, color);
+    }
 }
 
-/// Draw arrow head - DISABLED for Bevy 0.19
-fn draw_arrow_head(_gizmos: &mut (), _tip: Vec3, _direction: Vec3, _size: f32, _color: Color) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+/// Draw arrow head
+fn draw_arrow_head(gizmos: &mut Gizmos, tip: Vec3, direction: Vec3, size: f32, color: Color) {
+    if direction.length_squared() < 1e-6 || size < 1e-6 {
+        return;
+    }
+    let dir = direction.normalize();
+    let perp = if dir.abs_diff_eq(Vec3::Y, 0.99) { Vec3::X } else { Vec3::Y };
+    let side1 = dir.cross(perp).normalize() * size;
+    let side2 = dir.cross(side1).normalize() * size;
+    let base = tip - dir * size;
+    gizmos.line(tip, base + side1, color);
+    gizmos.line(tip, base - side1, color);
+    gizmos.line(tip, base + side2, color);
+    gizmos.line(tip, base - side2, color);
 }
 
-/// Draw crack visualization - DISABLED for Bevy 0.19
+/// Draw crack visualization
 fn draw_crack(
-    _gizmos: &mut (),
-    _body_position: Vec3,
-    _body_rotation: Quat,
-    _crack: &crate::realism::materials::fracture::Crack,
+    gizmos: &mut Gizmos,
+    body_position: Vec3,
+    body_rotation: Quat,
+    crack: &crate::realism::materials::fracture::Crack,
 ) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+    let crack_start = body_position + body_rotation * crack.position;
+    let crack_end = crack_start + (body_rotation * crack.direction) * crack.length;
+    let crack_color = Color::srgba(0.8, 0.0, 0.0, 0.8);
+    gizmos.line(crack_start, crack_end, crack_color);
 }
 
 // ============================================================================

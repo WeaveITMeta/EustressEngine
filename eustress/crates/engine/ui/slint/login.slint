@@ -46,9 +46,11 @@ export component LoginDialog inherits Rectangle {
             alignment: center;
             
             // Logo/Title
-            Text {
-                text: "🎮";
-                font-size: 48px;
+            Image {
+                width: 48px;
+                height: 48px;
+                source: @image-url("../../assets/icons/ui/gamepad.svg");
+                image-fit: contain;
                 horizontal-alignment: center;
             }
             
@@ -118,10 +120,11 @@ export component LoginDialog inherits Rectangle {
                     spacing: 12px;
                     alignment: center;
                     
-                    Text {
-                        text: "⚙";
-                        color: white;
-                        font-size: 18px;
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/settings.svg");
+                        image-fit: contain;
                         vertical-alignment: center;
                     }
                     

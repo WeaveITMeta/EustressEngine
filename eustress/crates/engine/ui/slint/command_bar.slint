@@ -76,10 +76,11 @@ export component CommandBar inherits Rectangle {
                 clicked => { root.on-close(); }
             }
             
-            Text {
-                text: "✕";
-                color: Theme.text-secondary;
-                font-size: 14px;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/close.svg");
+                image-fit: contain;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }

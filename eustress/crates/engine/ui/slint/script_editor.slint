@@ -66,10 +66,11 @@ component EditorTab inherits Rectangle {
                 clicked => { root.close(); }
             }
             
-            Text {
-                text: "✕";
-                color: Theme.text-secondary;
-                font-size: 12px;
+            Image {
+                width: 10px;
+                height: 10px;
+                source: @image-url("../../assets/icons/ui/close.svg");
+                image-fit: contain;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -145,9 +146,11 @@ export component ScriptEditor inherits Rectangle {
                         padding: 4px;
                         spacing: 4px;
                         
-                        Text {
-                            text: "💾";
-                            font-size: 12px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/save.svg");
+                            image-fit: contain;
                             vertical-alignment: center;
                         }
                         
@@ -175,9 +178,11 @@ export component ScriptEditor inherits Rectangle {
                         padding: 4px;
                         spacing: 4px;
                         
-                        Text {
-                            text: "🔨";
-                            font-size: 12px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/build.svg");
+                            image-fit: contain;
                             vertical-alignment: center;
                         }
                         
@@ -210,10 +215,11 @@ export component ScriptEditor inherits Rectangle {
             VerticalBox {
                 alignment: center;
                 
-                Text {
-                    text: "📜";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/ui/new-file.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 

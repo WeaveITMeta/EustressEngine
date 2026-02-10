@@ -3,15 +3,15 @@
 // Hierarchical entity tree view with services
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ScrollView, StandardListView } from "std-widgets.slint";
-import { Theme, TreeItem, PanelHeader } from "theme.slint";
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme, TreeItem } from "theme.slint";
 
 // Entity data structure for the tree
 export struct EntityNode {
     id: int,
     name: string,
     class-name: string,
-    icon: string,
+    icon: image,
     depth: int,
     expandable: bool,
     expanded: bool,
@@ -34,44 +34,23 @@ export component ExplorerPanel inherits Rectangle {
     
     background: Theme.panel-background;
     
-    VerticalBox {
+    VerticalLayout {
         padding: 0px;
         spacing: 0px;
         
         // Search bar
         Rectangle {
-            height: 32px;
+            height: 30px;
             background: Theme.header-background;
             
-            HorizontalBox {
+            HorizontalLayout {
                 padding: 4px;
                 
-                Rectangle {
+                search-input := LineEdit {
                     horizontal-stretch: 1;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: search-input.has-focus ? Theme.input-focus : Theme.input-border;
-                    
-                    HorizontalBox {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 4px;
-                        
-                        Text {
-                            width: 16px;
-                            text: "🔍";
-                            color: Theme.text-secondary;
-                            vertical-alignment: center;
-                        }
-                        
-                        search-input := LineEdit {
-                            horizontal-stretch: 1;
-                            placeholder-text: "Search entities...";
-                            text <=> root.search-text;
-                            edited(text) => { root.on-search-changed(text); }
-                        }
-                    }
+                    placeholder-text: "Search entities...";
+                    text <=> root.search-text;
+                    edited(text) => { root.on-search-changed(text); }
                 }
             }
         }
@@ -80,20 +59,19 @@ export component ExplorerPanel inherits Rectangle {
         ScrollView {
             vertical-stretch: 1;
             
-            VerticalBox {
+            VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
+                alignment: start;
                 
-                // Services header
-                PanelHeader {
-                    title: "Services";
-                    collapsible: true;
-                }
+                // ============================================================
+                // Services — flat list matching egui explorer (13 services)
+                // SVG icons from crates/engine/assets/icons/
+                // ============================================================
                 
-                // Service nodes (always visible)
                 TreeItem {
                     depth: 0;
-                    icon: "@";
+                    icon: @image-url("../../assets/icons/workspace.svg");
                     label: "Workspace";
                     expandable: true;
                     expanded: true;
@@ -103,7 +81,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "P";
+                    icon: @image-url("../../assets/icons/players.svg");
                     label: "Players";
                     expandable: true;
                     clicked => { root.on-select-entity(-2); }
@@ -112,7 +90,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "*";
+                    icon: @image-url("../../assets/icons/lighting.svg");
                     label: "Lighting";
                     expandable: true;
                     clicked => { root.on-select-entity(-3); }
@@ -121,7 +99,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "S";
+                    icon: @image-url("../../assets/icons/soulservice.svg");
                     label: "SoulService";
                     expandable: true;
                     clicked => { root.on-select-entity(-4); }
@@ -130,7 +108,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "$";
+                    icon: @image-url("../../assets/icons/serverstorage.svg");
                     label: "ServerStorage";
                     expandable: true;
                     clicked => { root.on-select-entity(-5); }
@@ -139,7 +117,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "G";
+                    icon: @image-url("../../assets/icons/startergui.svg");
                     label: "StarterGui";
                     expandable: true;
                     clicked => { root.on-select-entity(-6); }
@@ -148,7 +126,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "K";
+                    icon: @image-url("../../assets/icons/starterpack.svg");
                     label: "StarterPack";
                     expandable: true;
                     clicked => { root.on-select-entity(-7); }
@@ -157,7 +135,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "P";
+                    icon: @image-url("../../assets/icons/starterplayer.svg");
                     label: "StarterPlayer";
                     expandable: true;
                     clicked => { root.on-select-entity(-8); }
@@ -166,7 +144,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "~";
+                    icon: @image-url("../../assets/icons/soundservice.svg");
                     label: "SoundService";
                     expandable: true;
                     clicked => { root.on-select-entity(-9); }
@@ -175,15 +153,43 @@ export component ExplorerPanel inherits Rectangle {
                 
                 TreeItem {
                     depth: 0;
-                    icon: "T";
+                    icon: @image-url("../../assets/icons/teams.svg");
                     label: "Teams";
                     expandable: true;
                     clicked => { root.on-select-entity(-10); }
                     context-menu(x, y) => { root.on-context-menu(x, y); }
                 }
                 
-                // Dynamic entity list would be rendered here via Rust binding
-                // For now, placeholder showing how entities would be displayed
+                TreeItem {
+                    depth: 0;
+                    icon: @image-url("../../assets/icons/chat.svg");
+                    label: "Chat";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-11); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: @image-url("../../assets/icons/localizationservice.svg");
+                    label: "LocalizationService";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-12); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                TreeItem {
+                    depth: 0;
+                    icon: @image-url("../../assets/icons/testservice.svg");
+                    label: "TestService";
+                    expandable: true;
+                    clicked => { root.on-select-entity(-13); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                // ============================================================
+                // Dynamic entity list (pushed from Bevy each frame)
+                // ============================================================
                 for entity in root.entities: TreeItem {
                     depth: entity.depth;
                     icon: entity.icon;
@@ -191,7 +197,7 @@ export component ExplorerPanel inherits Rectangle {
                     expandable: entity.expandable;
                     expanded: entity.expanded;
                     selected: entity.selected;
-                    visible: entity.visible;
+                    show: entity.visible;
                     
                     clicked => { root.on-select-entity(entity.id); }
                     toggle-expanded => {

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- TestService - flask/beaker -->
+  <path d="M6 2h4v3l3 7H3l3-7V2z" fill="#A0A040" stroke="#808030" stroke-width="0.5"/>
+  <rect x="5.5" y="1.5" width="5" height="1.5" rx="0.5" fill="#B0B050" stroke="#808030" stroke-width="0.5"/>
+  <circle cx="7" cy="10" r="1" fill="#C0C060"/>
+  <circle cx="9.5" cy="9" r="0.7" fill="#C0C060"/>
+</svg>

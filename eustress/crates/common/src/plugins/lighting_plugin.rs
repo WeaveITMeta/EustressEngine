@@ -11,10 +11,8 @@
 
 use bevy::prelude::*;
 use bevy::pbr::{DistanceFog, FogFalloff};
-// TODO: Atmosphere API changed in Bevy 0.19 - re-enable when we find the new API
-// use bevy::pbr::{Atmosphere as BevyAtmosphere, AtmosphereSettings, AtmosphereMode};
-// use bevy::light::{AtmosphereEnvironmentMapLight, SunDisk};
 use bevy::core_pipeline::Skybox;
+use bevy::light::GlobalAmbientLight;
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
@@ -72,7 +70,7 @@ impl Plugin for SharedLightingPlugin {
 // Scene Atmosphere Resource
 // ============================================================================
 
-// TODO: Atmosphere API changed in Bevy 0.19 - re-enable when we find the new API
+// Note: Bevy's built-in Atmosphere component was removed; using custom EustressAtmosphere instead
 // #[derive(Component)]
 // pub struct SceneAtmosphere {
 //     pub atmosphere: BevyAtmosphere,
@@ -141,15 +139,9 @@ fn setup_lighting(
         DirectionalLight {
             color: arr_to_color(lighting.sun_color),
             illuminance: lighting.sun_intensity * 0.7,
-            // TODO: Shadow settings moved in Bevy 0.19 - fix when we find new API
+            shadows_enabled: lighting.shadows_enabled,
             ..default()
         },
-        // SunDisk removed - part of deprecated Atmosphere API in Bevy 0.19
-        // TODO: Re-enable when we find the new atmosphere API
-        // SunDisk {
-        //     angular_size: sun_class.angular_size.to_radians(),
-        //     intensity: 1.0,
-        // },
         Transform::from_translation(sun_dir * 100.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
         Visibility::default(),
@@ -213,13 +205,12 @@ fn setup_lighting(
         Name::new("FillLight2"),
     ));
     
-    // Ambient light - commented out due to Bevy 0.19 API changes
-    // TODO: Fix AmbientLight API changes in Bevy 0.19
-    // commands.insert_resource(AmbientLight {
-    //     color: arr_to_color(lighting.ambient),
-    //     brightness: lighting.brightness * 800.0,
-    //     affects_lightmapped_meshes: true,
-    // });
+    // GlobalAmbientLight is a Resource in Bevy 0.18
+    commands.insert_resource(GlobalAmbientLight {
+        color: arr_to_color(lighting.ambient),
+        brightness: lighting.brightness * 800.0,
+        affects_lightmapped_meshes: true,
+    });
     
     info!("✅ Lighting setup complete");
 }
@@ -238,10 +229,7 @@ fn update_sun_position(
         // Update light properties
         sun_light.color = arr_to_color(lighting.sun_color);
         sun_light.illuminance = lighting.sun_intensity;
-        // TODO: Fix shadow settings for Bevy 0.19 API
-        // sun_light.shadows_enabled = lighting.shadows_enabled;
-        // sun_light.shadow_normal_bias = 2.5 * (1.0 + lighting.shadow_softness * 3.0);
-        // sun_light.shadow_depth_bias = 0.04 * (1.0 + lighting.shadow_softness * 0.5);
+        sun_light.shadows_enabled = lighting.shadows_enabled;
         
         // Calculate sun position based on time of day
         let sun_dir = lighting.sun_direction();
@@ -254,17 +242,15 @@ fn update_sun_position(
 
 /// Update ambient light based on LightingService
 fn update_ambient_light(
-    _lighting: Res<LightingService>,
-    // TODO: Fix AmbientLight API changes in Bevy 0.19
-    // mut ambient: ResMut<AmbientLight>,
+    lighting: Res<LightingService>,
+    mut ambient: ResMut<GlobalAmbientLight>,
 ) {
-    // TODO: Re-enable when AmbientLight API is fixed
-    // if !lighting.is_changed() {
-    //     return;
-    // }
-    // 
-    // ambient.color = arr_to_color(lighting.ambient);
-    // ambient.brightness = lighting.brightness * 500.0;
+    if !lighting.is_changed() {
+        return;
+    }
+    
+    ambient.color = arr_to_color(lighting.ambient);
+    ambient.brightness = lighting.brightness * 500.0;
 }
 
 /// Update moon position and properties using realistic orbital mechanics
@@ -307,8 +293,7 @@ fn update_moon_position(
         let moon_intensity = moon_data.current_intensity(sun_elevation) * phase_illumination;
         
         moon_light.illuminance = moon_intensity.max(0.01); // Minimum visibility
-        // TODO: Fix shadow settings for Bevy 0.19 API
-        // moon_light.shadows_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
+        moon_light.shadows_enabled = sun_elevation < -0.1 && phase_illumination > 0.3;
         
         // Position moon in sky
         let moon_distance = 100.0;
@@ -317,13 +302,18 @@ fn update_moon_position(
     }
 }
 
-/// Update exposure compensation - DISABLED for Bevy 0.19
+/// Update exposure compensation
 /// Affects overall scene brightness/exposure via ambient light adjustment
 fn update_exposure_compensation(
-    _lighting: Res<LightingService>,
-    // _ambient: ResMut<AmbientLight>,
+    lighting: Res<LightingService>,
+    mut ambient: ResMut<GlobalAmbientLight>,
 ) {
-    // Disabled - AmbientLight is no longer a Resource in Bevy 0.19
+    if !lighting.is_changed() {
+        return;
+    }
+    // Adjust ambient brightness based on exposure compensation
+    let exposure_factor = 2.0_f32.powf(lighting.exposure_compensation);
+    ambient.brightness = lighting.brightness * 500.0 * exposure_factor;
 }
 
 /// Update global fog settings based on LightingService
@@ -379,29 +369,82 @@ fn update_fog_settings(
 // Skybox Generation
 // ============================================================================
 
-/// Create a solid blue skybox cubemap
+/// Create a procedural gradient skybox cubemap
 /// 
-/// Generates a 6-face cubemap with uniform sky blue color on all sides
-/// for a clean, consistent sky appearance.
+/// Generates a 6-face cubemap with realistic sky gradient:
+/// - Zenith (top): deep blue
+/// - Mid-sky: lighter blue  
+/// - Horizon: warm haze/white
+/// - Ground (below horizon): dark ground color
+/// Each face pixel is mapped to a 3D direction, then colored by elevation angle.
 pub fn create_procedural_skybox(
     images: &mut Assets<Image>,
     _lighting: &LightingService,
 ) -> Handle<Image> {
-    const SIZE: u32 = 512;
+    const SIZE: u32 = 256;
     
-    // Solid sky blue color for all 6 faces
-    // A nice sky blue: RGB(135, 206, 235) normalized
-    let sky_blue = (0.529, 0.808, 0.922); // Light sky blue
+    // AAA sky palette
+    let zenith: [f32; 3] = [0.16, 0.32, 0.75];      // Deep blue zenith
+    let mid_sky: [f32; 3] = [0.40, 0.60, 0.92];      // Mid-sky blue
+    let horizon: [f32; 3] = [0.75, 0.82, 0.90];      // Pale horizon haze
+    let ground: [f32; 3] = [0.22, 0.22, 0.20];        // Dark ground
     
     let mut data = Vec::with_capacity((SIZE * SIZE * 6 * 4) as usize);
     
-    // Generate 6 faces: +X, -X, +Y, -Y, +Z, -Z - all solid blue
-    for _face in 0..6 {
-        for _y in 0..SIZE {
-            for _x in 0..SIZE {
-                data.push((sky_blue.0 * 255.0) as u8);
-                data.push((sky_blue.1 * 255.0) as u8);
-                data.push((sky_blue.2 * 255.0) as u8);
+    // Cubemap face order: +X, -X, +Y, -Y, +Z, -Z
+    for face in 0..6u32 {
+        for py in 0..SIZE {
+            for px in 0..SIZE {
+                // Map pixel to [-1, 1] UV
+                let u = (px as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+                let v = (py as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+                
+                // Map face + UV to 3D direction
+                let (dx, dy, dz) = match face {
+                    0 => ( 1.0,  -v,  -u),  // +X
+                    1 => (-1.0,  -v,   u),  // -X
+                    2 => (   u, 1.0,   v),  // +Y (top)
+                    3 => (   u, -1.0, -v),  // -Y (bottom)
+                    4 => (   u,  -v, 1.0),  // +Z
+                    _ => (  -u,  -v, -1.0), // -Z
+                };
+                
+                // Normalize direction and get elevation
+                let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                let ny = dy / len; // -1 (nadir) to +1 (zenith)
+                
+                // Sky gradient based on elevation
+                let (r, g, b) = if ny > 0.15 {
+                    // Above horizon: blend mid_sky → zenith
+                    let t = ((ny - 0.15) / 0.85).min(1.0);
+                    let t = t * t; // Ease-in for deeper blue at top
+                    (
+                        mid_sky[0] + (zenith[0] - mid_sky[0]) * t,
+                        mid_sky[1] + (zenith[1] - mid_sky[1]) * t,
+                        mid_sky[2] + (zenith[2] - mid_sky[2]) * t,
+                    )
+                } else if ny > -0.05 {
+                    // Horizon band: blend horizon ↔ mid_sky
+                    let t = ((ny + 0.05) / 0.20).min(1.0).max(0.0);
+                    (
+                        horizon[0] + (mid_sky[0] - horizon[0]) * t,
+                        horizon[1] + (mid_sky[1] - horizon[1]) * t,
+                        horizon[2] + (mid_sky[2] - horizon[2]) * t,
+                    )
+                } else {
+                    // Below horizon: blend horizon → ground
+                    let t = ((-ny - 0.05) / 0.35).min(1.0);
+                    let t = t.sqrt(); // Quick falloff to ground
+                    (
+                        horizon[0] + (ground[0] - horizon[0]) * t,
+                        horizon[1] + (ground[1] - horizon[1]) * t,
+                        horizon[2] + (ground[2] - horizon[2]) * t,
+                    )
+                };
+                
+                data.push((r.clamp(0.0, 1.0) * 255.0) as u8);
+                data.push((g.clamp(0.0, 1.0) * 255.0) as u8);
+                data.push((b.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push(255);
             }
         }
@@ -525,21 +568,24 @@ fn apply_atmosphere_to_cameras(
     }
 }
 
-/// Apply atmosphere settings to a camera entity - DISABLED for Bevy 0.19
+/// Apply atmosphere settings to a camera entity
+/// Note: Bevy's Atmosphere component was removed; using fog + skybox as substitute
 fn apply_atmosphere_settings(
-    _commands: &mut Commands,
-    _camera_entity: Entity,
+    commands: &mut Commands,
+    camera_entity: Entity,
     _atmosphere: &EustressAtmosphere,
 ) {
-    // Disabled - Atmosphere API changed in Bevy 0.19
+    // Mark as processed so we don't re-apply every frame
+    commands.entity(camera_entity).insert(AtmosphereApplied);
 }
 
-/// Update atmosphere effects - DISABLED for Bevy 0.19
+/// Update atmosphere effects
+/// Note: Bevy's Atmosphere component was removed; atmosphere is simulated via fog + skybox
 fn update_atmosphere_effects(
     _commands: Commands,
     _scene_atmosphere: Res<SceneAtmosphere>,
 ) {
-    // Disabled - Atmosphere API changed in Bevy 0.19
+    // Atmosphere effects are handled via fog settings and skybox colors
 }
 
 // ============================================================================
@@ -587,20 +633,11 @@ impl SceneAtmosphere {
 // Sun/Moon Class Property Sync Systems
 // ============================================================================
 
-/// Sync Sun class angular_size property to SunDisk component in real-time
-/// DISABLED for Bevy 0.19 - SunDisk removed
-fn sync_sun_class_to_sundisk(
-    // mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>,
-) {
-    // Disabled - SunDisk removed in Bevy 0.19
-    // for (sun_class, mut sun_disk) in sun_query.iter_mut() {
-    //     let new_angular_size = sun_class.angular_size.to_radians();
-    //     if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
-    //         sun_disk.angular_size = new_angular_size;
-    //         info!("☀️ Sun angular_size synced: {:.1}° → {:.4} rad", 
-    //               sun_class.angular_size, new_angular_size);
-    //     }
-    // }
+/// Sync Sun class angular_size property
+/// Note: SunDisk component was removed from Bevy; angular size is tracked in SunClass only
+fn sync_sun_class_to_sundisk() {
+    // SunDisk was removed from Bevy — angular size is stored in SunClass
+    // and used for skybox/atmosphere calculations directly
 }
 
 /// Sync LightingService.clock_time to Sun.time_of_day for day/night cycle

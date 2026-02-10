@@ -5,9 +5,9 @@
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
 import { Ribbon } from "ribbon.slint";
-import { ExplorerPanel } from "explorer.slint";
-import { PropertiesPanel } from "properties.slint";
-import { OutputConsole } from "output.slint";
+import { ExplorerPanel, EntityNode } from "explorer.slint";
+import { PropertiesPanel, PropertyData } from "properties.slint";
+import { OutputConsole, LogData } from "output.slint";
 import { CommandBar } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
 import { AssetManager } from "asset_manager.slint";
@@ -135,6 +135,15 @@ export component StudioWindow inherits Window {
     // Unsaved changes tracking
     in-out property <bool> has-unsaved-changes: false;
     
+    // Output console log data (pushed from Bevy each frame)
+    in-out property <[LogData]> output-logs: [];
+    
+    // Explorer entity tree data (pushed from Bevy)
+    in-out property <[EntityNode]> explorer-entities: [];
+    
+    // Properties panel data (pushed from Bevy for selected entity)
+    in-out property <[PropertyData]> entity-properties: [];
+    
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
     in-out property <length> right-panel-width: 300px;
@@ -192,6 +201,8 @@ export component StudioWindow inherits Window {
     callback save-scene();
     callback save-scene-as();
     callback publish();
+    callback publish-as();
+    callback exit-app();
     
     // Edit operations
     callback undo();
@@ -202,6 +213,8 @@ export component StudioWindow inherits Window {
     callback delete-selected();
     callback select-all();
     callback duplicate();
+    callback group();
+    callback ungroup();
     
     // Tool selection
     callback select-tool(string);
@@ -236,6 +249,9 @@ export component StudioWindow inherits Window {
     // Command bar
     callback execute-command(string);
     
+    // Toolbox part insertion
+    callback insert-part(string);
+    
     // Context menu
     callback context-action(string);
     
@@ -267,13 +283,18 @@ export component StudioWindow inherits Window {
     callback open-global-sources();
     callback open-domains();
     callback open-global-variables();
+    callback open-sync-domain();
+    callback add-data-source(string);
     
-    // MindSpace
+    // MindSpace / Plugins
     callback toggle-mindspace();
     callback mindspace-add-label();
     callback mindspace-connect();
+    callback plugin-action(string);
+    callback open-url(string);
+    callback menu-action(string);
     
-    // Settings
+    // Settings / Panels
     callback open-settings();
     callback open-find();
     
@@ -296,8 +317,7 @@ export component StudioWindow inherits Window {
     // Main Layout
     // ========================================================================
     
-    VerticalBox {
-        padding: 0px;
+    VerticalLayout {
         spacing: 0px;
 
         // ====================================================================
@@ -309,11 +329,24 @@ export component StudioWindow inherits Window {
             play-state: root.play-state;
             has-unsaved-changes: root.has-unsaved-changes;
             
+            // Bind View menu panel visibility (two-way)
+            show-explorer <=> root.show-explorer;
+            show-properties <=> root.show-properties;
+            show-output <=> root.show-output;
+            show-assets <=> root.show-assets;
+            show-collaboration <=> root.show-collaboration;
+            show-command-bar <=> root.show-command-bar;
+            
+            // File
             on-new-scene => { root.new-scene(); }
             on-open-scene => { root.open-scene(); }
             on-save-scene => { root.save-scene(); }
             on-save-scene-as => { root.save-scene-as(); }
             on-publish => { root.publish(); }
+            on-publish-as => { root.publish-as(); }
+            on-exit => { root.exit-app(); }
+            
+            // Edit
             on-undo => { root.undo(); }
             on-redo => { root.redo(); }
             on-copy => { root.copy(); }
@@ -321,21 +354,59 @@ export component StudioWindow inherits Window {
             on-paste => { root.paste(); }
             on-delete => { root.delete-selected(); }
             on-duplicate => { root.duplicate(); }
+            on-select-all => { root.select-all(); }
+            on-group => { root.group(); }
+            on-ungroup => { root.ungroup(); }
+            
+            // Tools
             on-select-tool(tool) => { root.select-tool(tool); }
             on-set-transform-mode(mode) => { root.set-transform-mode(mode); }
+            
+            // View
+            on-focus-selection => { root.focus-selected(); }
+            
+            // Play
             on-play-solo => { root.play-solo(); }
             on-play-with-character => { root.play-with-character(); }
             on-pause => { root.pause(); }
             on-stop => { root.stop(); }
+            
+            // Network
+            on-start-server => { root.start-server(); }
+            on-stop-server => { root.stop-server(); }
+            on-show-forge-connect => { root.show-forge-connect-dialog = true; }
+            on-show-network-panel => { root.show-network-panel = true; }
+            on-show-stress-test => { root.show-stress-test-dialog = true; }
+            
+            // Data
+            on-show-global-sources => { root.open-global-sources(); }
+            on-show-domains => { root.open-domains(); }
+            on-show-global-variables => { root.open-global-variables(); }
+            on-show-sync-domain => { root.open-sync-domain(); }
+            on-add-data-source(source-type) => { root.add-data-source(source-type); }
+            
+            // Terrain
+            on-spawn-terrain(size) => { root.generate-terrain(size); }
+            on-toggle-terrain-edit => { root.toggle-terrain-edit-mode(); }
+            on-set-terrain-brush(brush) => { root.set-terrain-brush(brush); }
+            on-import-heightmap => { root.import-heightmap(); }
+            on-export-heightmap => { root.export-heightmap(); }
+            
+            // Plugins / MindSpace
+            on-plugin-action(action) => { root.plugin-action(action); }
+            
+            // Other
             on-toggle-command-bar => { root.show-command-bar = !root.show-command-bar; }
             on-show-keybindings => { root.show-keybindings-dialog = true; }
             on-show-soul-settings => { root.show-soul-settings-dialog = true; }
+            on-open-url(url) => { root.open-url(url); }
+            on-menu-action(action) => { root.menu-action(action); }
         }
 
         // ====================================================================
         // Main Content Area (Left Panel | Viewport | Right Panel)
         // ====================================================================
-        HorizontalBox {
+        HorizontalLayout {
             spacing: 0px;
             
             // ================================================================
@@ -344,79 +415,85 @@ export component StudioWindow inherits Window {
             if root.show-explorer || root.show-toolbox || root.show-assets: Rectangle {
                 width: root.left-panel-width;
                 background: Theme.panel-background;
+                border-width: 0px;
+                // Right edge separator
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    height: 100%;
+                    background: Theme.border-color;
+                }
                 
-                VerticalBox {
-                    padding: 0px;
+                VerticalLayout {
                     spacing: 0px;
                     
                     // Tab bar
-                    HorizontalBox {
-                        height: 32px;
-                        padding-left: 4px;
-                        padding-right: 4px;
-                        spacing: 2px;
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.header-background;
                         
-                        Rectangle {
-                            background: root.left-tab-index == 0 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
+                        HorizontalLayout {
+                            padding-left: 2px;
+                            padding-right: 2px;
+                            padding-top: 2px;
+                            spacing: 1px;
                             
-                            TouchArea {
-                                clicked => { root.left-tab-index = 0; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.left-tab-index == 0 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.left-tab-index = 0; }
+                                }
+                                
                                 Text {
-                                    text: "📁 Explorer";
+                                    text: "Explorer";
                                     color: root.left-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                        }
-                        
-                        Rectangle {
-                            background: root.left-tab-index == 1 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
                             
-                            TouchArea {
-                                clicked => { root.left-tab-index = 1; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.left-tab-index == 1 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.left-tab-index = 1; }
+                                }
+                                
                                 Text {
-                                    text: "🛠 Toolbox";
+                                    text: "Toolbox";
                                     color: root.left-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                        }
-                        
-                        Rectangle {
-                            background: root.left-tab-index == 2 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
                             
-                            TouchArea {
-                                clicked => { root.left-tab-index = 2; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.left-tab-index == 2 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.left-tab-index = 2; }
+                                }
+                                
                                 Text {
-                                    text: "📦 Assets";
+                                    text: "Assets";
                                     color: root.left-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
@@ -428,6 +505,7 @@ export component StudioWindow inherits Window {
                         background: Theme.panel-background;
                         
                         if root.left-tab-index == 0: ExplorerPanel {
+                            entities: root.explorer-entities;
                             on-select-entity(id) => { root.select-entity(id); }
                             on-expand-entity(id) => { root.expand-entity(id); }
                             on-collapse-entity(id) => { root.collapse-entity(id); }
@@ -441,6 +519,7 @@ export component StudioWindow inherits Window {
                         if root.left-tab-index == 1: Toolbox {
                             current-tool: root.current-tool;
                             on-select-tool(tool) => { root.select-tool(tool); }
+                            on-insert-part(part-type) => { root.insert-part(part-type); }
                         }
                         
                         if root.left-tab-index == 2: AssetManager {}
@@ -505,28 +584,6 @@ export component StudioWindow inherits Window {
                     reset-to-factory => { root.reset-layout-to-default(); }
                 }
                 
-                // Tool indicator overlay (below layout selector)
-                Rectangle {
-                    x: 8px;
-                    y: 48px;
-                    width: 120px;
-                    height: 28px;
-                    background: Theme.overlay-background;
-                    border-radius: 4px;
-                    
-                    HorizontalBox {
-                        padding: 6px;
-                        Text {
-                            text: root.current-tool == "select" ? "🖱 Select" :
-                                  root.current-tool == "move" ? "↔ Move" :
-                                  root.current-tool == "rotate" ? "🔄 Rotate" :
-                                  root.current-tool == "scale" ? "⤢ Scale" : root.current-tool;
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
                 // View selector overlay (top-right)
                 ViewSelector {
                     x: parent.width - self.width - 8px;
@@ -557,10 +614,13 @@ export component StudioWindow inherits Window {
                     TouchArea {
                         clicked => { root.show-theme-editor = !root.show-theme-editor; }
                         
-                        Text {
-                            text: "🎨";
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            x: 4px;
+                            y: 4px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/palette.svg");
+                            image-fit: contain;
                         }
                     }
                 }
@@ -615,6 +675,14 @@ export component StudioWindow inherits Window {
             if root.show-properties || root.show-history || root.show-soul-panel || root.show-script-editor: Rectangle {
                 width: root.right-panel-width;
                 background: Theme.panel-background;
+                border-width: 0px;
+                // Left edge separator
+                Rectangle {
+                    x: 0px;
+                    width: 1px;
+                    height: 100%;
+                    background: Theme.border-color;
+                }
                 
                 // Resize handle
                 Rectangle {
@@ -631,78 +699,76 @@ export component StudioWindow inherits Window {
                     }
                 }
                 
-                VerticalBox {
-                    padding: 0px;
+                VerticalLayout {
                     spacing: 0px;
                     
                     // Tab bar
-                    HorizontalBox {
-                        height: 32px;
-                        padding-left: 4px;
-                        padding-right: 4px;
-                        spacing: 2px;
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.header-background;
                         
-                        Rectangle {
-                            background: root.right-tab-index == 0 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
+                        HorizontalLayout {
+                            padding-left: 2px;
+                            padding-right: 2px;
+                            padding-top: 2px;
+                            spacing: 1px;
                             
-                            TouchArea {
-                                clicked => { root.right-tab-index = 0; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.right-tab-index == 0 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.right-tab-index = 0; }
+                                }
+                                
                                 Text {
-                                    text: "⚙ Properties";
+                                    text: "Properties";
                                     color: root.right-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                        }
-                        
-                        Rectangle {
-                            background: root.right-tab-index == 1 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
                             
-                            TouchArea {
-                                clicked => { root.right-tab-index = 1; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.right-tab-index == 1 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.right-tab-index = 1; }
+                                }
+                                
                                 Text {
-                                    text: "📜 History";
+                                    text: "History";
                                     color: root.right-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                        }
-                        
-                        Rectangle {
-                            background: root.right-tab-index == 2 ? Theme.tab-active : Theme.tab-inactive;
-                            border-radius: 4px;
-                            border-top-left-radius: 4px;
-                            border-top-right-radius: 4px;
-                            border-bottom-left-radius: 0px;
-                            border-bottom-right-radius: 0px;
                             
-                            TouchArea {
-                                clicked => { root.right-tab-index = 2; }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.right-tab-index == 2 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.right-tab-index = 2; }
+                                }
+                                
                                 Text {
-                                    text: "@ Soul";
+                                    text: "Soul";
                                     color: root.right-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
@@ -716,6 +782,7 @@ export component StudioWindow inherits Window {
                         if root.right-tab-index == 0: PropertiesPanel {
                             selected-count: root.selected-count;
                             selected-class: root.selected-class;
+                            properties: root.entity-properties;
                             on-property-changed(name, value) => { root.property-changed(name, value); }
                         }
                         
@@ -739,8 +806,14 @@ export component StudioWindow inherits Window {
         if root.show-output: Rectangle {
             height: root.output-height;
             background: Theme.panel-background;
-            border-width: 1px;
-            border-color: Theme.border-color;
+            border-width: 0px;
+            // Top edge separator only
+            Rectangle {
+                y: 0px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
             
             // Resize handle
             Rectangle {
@@ -757,36 +830,12 @@ export component StudioWindow inherits Window {
                 }
             }
             
-            VerticalBox {
-                padding: 0px;
-                spacing: 0px;
-                
-                // Output header
-                Rectangle {
-                    height: 28px;
-                    background: Theme.header-background;
-                    
-                    HorizontalBox {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        
-                        Text {
-                            text: "📋 Output";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                        
-                        Rectangle { horizontal-stretch: 1; }
-                        
-                        Button {
-                            text: "Clear";
-                            clicked => { /* Clear output */ }
-                        }
-                    }
-                }
-                
-                // Output content
-                OutputConsole {}
+            // Output content (has its own integrated toolbar)
+            OutputConsole {
+                vertical-stretch: 1;
+                logs: root.output-logs;
+                on-clear => { root.output-logs = []; }
+                on-close => { root.show-output = false; }
             }
         }
         
@@ -852,10 +901,13 @@ export component StudioWindow inherits Window {
         on-close => { root.show-settings-dialog = false; }
     }
     
-    // Theme Editor panel (floating overlay)
-    if root.show-theme-editor: Rectangle {
-        x: parent.width - 280px;
-        y: parent.height - 320px;
+    // Theme Editor panel (floating overlay — draggable)
+    if root.show-theme-editor: theme-panel := Rectangle {
+        property <length> drag-x: parent.width - 280px;
+        property <length> drag-y: parent.height - 320px;
+        
+        x: self.drag-x;
+        y: self.drag-y;
         width: 260px;
         height: 300px;
         background: Theme.panel-background;
@@ -868,18 +920,35 @@ export component StudioWindow inherits Window {
         VerticalBox {
             padding: 0px;
             
-            // Header with close button
+            // Draggable header with close button
             Rectangle {
                 height: 32px;
                 background: Theme.header-background;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
                 
+                theme-drag := TouchArea {
+                    mouse-cursor: move;
+                    moved => {
+                        if self.pressed {
+                            theme-panel.drag-x += self.mouse-x - self.pressed-x;
+                            theme-panel.drag-y += self.mouse-y - self.pressed-y;
+                        }
+                    }
+                }
+                
                 HorizontalBox {
                     padding: 8px;
                     
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/palette.svg");
+                        image-fit: contain;
+                        vertical-alignment: center;
+                    }
                     Text {
-                        text: "🎨 Theme Settings";
+                        text: " Theme Settings";
                         color: Theme.text-primary;
                         font-weight: 600;
                         horizontal-stretch: 1;
@@ -889,10 +958,11 @@ export component StudioWindow inherits Window {
                         width: 20px;
                         clicked => { root.show-theme-editor = false; }
                         
-                        Text {
-                            text: "×";
-                            color: Theme.text-secondary;
-                            font-size: 16px;
+                        Image {
+                            width: 12px;
+                            height: 12px;
+                            source: @image-url("../../assets/icons/ui/close.svg");
+                            image-fit: contain;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }

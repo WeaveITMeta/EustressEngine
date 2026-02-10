@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
-use bevy::winit::WinitWindows;
+// Window icon is embedded via winres in build.rs
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
@@ -229,44 +229,10 @@ fn main() {
         app.add_systems(Update, part_selection::part_selection_system);
     }
     
-    // Set window icon after window is created
-    app.add_systems(PostStartup, set_window_icon);
+    // Window icon is embedded in the exe via winres (build.rs)
+    // Windows uses the embedded icon for taskbar, title bar, and Alt+Tab
     
     app.run();
     
     println!("✅ Eustress Engine closed gracefully");
-}
-
-/// Set the window icon for taskbar and title bar (Windows/Linux)
-fn set_window_icon(
-    windows: Option<NonSend<WinitWindows>>,
-) {
-    let Some(windows) = windows else { return };
-    
-    let icon_bytes = include_bytes!("../assets/icon.png");
-    
-    let image = match image::load_from_memory(icon_bytes) {
-        Ok(img) => img.into_rgba8(),
-        Err(e) => {
-            warn!("Failed to load window icon: {}", e);
-            return;
-        }
-    };
-    
-    let (width, height) = image.dimensions();
-    let rgba = image.into_raw();
-    
-    let icon = match winit::window::Icon::from_rgba(rgba, width, height) {
-        Ok(icon) => icon,
-        Err(e) => {
-            warn!("Failed to create window icon: {}", e);
-            return;
-        }
-    };
-    
-    for window in windows.windows.values() {
-        window.set_window_icon(Some(icon.clone()));
-    }
-    
-    info!("✅ Window icon set successfully");
 }

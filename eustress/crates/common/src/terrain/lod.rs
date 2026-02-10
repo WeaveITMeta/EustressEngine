@@ -117,10 +117,11 @@ pub fn update_lod_system(
                 
                 commands.entity(entity).insert(Mesh3d(new_mesh_handle.clone()));
                 
-                // Update physics collider - DISABLED for Bevy 0.19
+                // Update physics collider
+                // Requires avian3d physics feature
                 #[cfg(feature = "physics")]
                 {
-                    // Physics temporarily disabled due to avian3d/Bevy 0.19 compatibility
+                    // TODO: Re-enable when avian3d Collider::trimesh_from_mesh is verified
                     // if let Some(mesh) = meshes.get(&new_mesh_handle) {
                     //     if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
                     //         commands.entity(entity).insert(collider);

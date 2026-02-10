@@ -195,7 +195,7 @@ pub fn spawn_skinned_character(
         Name::new("SkinnedCharacter"),
     )).id();
     
-    // Add physics components - DISABLED for Bevy 0.19
+    // Add physics components - requires avian3d physics feature
     // commands.entity(character_entity).insert((
     //     RigidBody::Dynamic,
     //     Collider::capsule(capsule_radius, capsule_half_height),

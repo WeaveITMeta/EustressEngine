@@ -9,7 +9,7 @@ import { Theme, PanelHeader, IconButton } from "theme.slint";
 // Tool category
 export struct ToolCategory {
     name: string,
-    icon: string,
+    icon: image,
     expanded: bool,
 }
 
@@ -17,13 +17,13 @@ export struct ToolCategory {
 export struct ToolItem {
     id: string,
     name: string,
-    icon: string,
+    icon: image,
     tooltip: string,
     category: string,
 }
 
 component ToolButton inherits Rectangle {
-    in property <string> icon: "";
+    in property <image> icon;
     in property <string> label: "";
     in property <string> tooltip: "";
     in property <bool> selected: false;
@@ -35,20 +35,28 @@ component ToolButton inherits Rectangle {
     background: self.selected ? Theme.selection-background : 
                 touch.has-hover ? Theme.explorer-item-hover : transparent;
     border-radius: 4px;
+    clip: false;
     
     touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.clicked(); }
+        moved => {
+            if root.tooltip != "" {
+                tb-popup.show();
+            }
+        }
     }
     
-    VerticalBox {
+    VerticalLayout {
         padding: 4px;
         spacing: 2px;
         alignment: center;
         
-        Text {
-            text: root.icon;
-            color: root.selected ? Theme.accent-blue : Theme.text-primary;
-            font-size: 24px;
+        Image {
+            source: root.icon;
+            width: 24px;
+            height: 24px;
+            image-fit: contain;
             horizontal-alignment: center;
         }
         
@@ -58,6 +66,34 @@ component ToolButton inherits Rectangle {
             font-size: 10px;
             horizontal-alignment: center;
             overflow: elide;
+        }
+    }
+    
+    // Tooltip popup — uses PopupWindow for correct z-ordering above all panels
+    tb-popup := PopupWindow {
+        x: 0px;
+        y: root.height + 2px;
+        
+        Rectangle {
+            background: #1e1e1e;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000060;
+            
+            HorizontalBox {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                
+                Text {
+                    text: root.tooltip;
+                    color: #d4d4d4;
+                    font-size: 11px;
+                }
+            }
         }
     }
 }
@@ -74,47 +110,9 @@ export component Toolbox inherits Rectangle {
     background: Theme.panel-background;
     
     ScrollView {
-        VerticalBox {
+        VerticalLayout {
             padding: 8px;
             spacing: 8px;
-            
-            // Transform Tools
-            PanelHeader {
-                title: "Transform";
-                collapsible: true;
-            }
-            
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "🖱";
-                    label: "Select";
-                    selected: root.current-tool == "select";
-                    clicked => { root.on-select-tool("select"); }
-                }
-                
-                ToolButton {
-                    icon: "↔";
-                    label: "Move";
-                    selected: root.current-tool == "move";
-                    clicked => { root.on-select-tool("move"); }
-                }
-                
-                ToolButton {
-                    icon: "🔄";
-                    label: "Rotate";
-                    selected: root.current-tool == "rotate";
-                    clicked => { root.on-select-tool("rotate"); }
-                }
-                
-                ToolButton {
-                    icon: "⤢";
-                    label: "Scale";
-                    selected: root.current-tool == "scale";
-                    clicked => { root.on-select-tool("scale"); }
-                }
-            }
             
             // Primitives
             PanelHeader {
@@ -122,48 +120,22 @@ export component Toolbox inherits Rectangle {
                 collapsible: true;
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "▢";
-                    label: "Block";
-                    clicked => { root.on-insert-part("Part"); }
-                }
-                
-                ToolButton {
-                    icon: "◯";
-                    label: "Sphere";
-                    clicked => { root.on-insert-part("SpherePart"); }
-                }
-                
-                ToolButton {
-                    icon: "△";
-                    label: "Wedge";
-                    clicked => { root.on-insert-part("WedgePart"); }
-                }
-                
-                ToolButton {
-                    icon: "⬡";
-                    label: "Cylinder";
-                    clicked => { root.on-insert-part("CylinderPart"); }
-                }
+            // Row 1: 4 items
+            Rectangle {
+                height: 64px;
+                property <length> row-w: 4 * 64px + 3 * 4px;
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/block.svg"); label: "Block"; clicked => { root.on-insert-part("Part"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/sphere.svg"); label: "Sphere"; clicked => { root.on-insert-part("SpherePart"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/wedge.svg"); label: "Wedge"; clicked => { root.on-insert-part("WedgePart"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 3 * 68px; icon: @image-url("../../assets/icons/ui/cylinder.svg"); label: "Cylinder"; clicked => { root.on-insert-part("CylinderPart"); } }
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "⊕";
-                    label: "Corner";
-                    clicked => { root.on-insert-part("CornerWedgePart"); }
-                }
-                
-                ToolButton {
-                    icon: "🔲";
-                    label: "Truss";
-                    clicked => { root.on-insert-part("TrussPart"); }
-                }
+            // Row 2: 2 items
+            Rectangle {
+                height: 64px;
+                property <length> row-w: 2 * 64px + 1 * 4px;
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/corner.svg"); label: "Corner"; clicked => { root.on-insert-part("CornerWedgePart"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/truss.svg"); label: "Truss"; clicked => { root.on-insert-part("TrussPart"); } }
             }
             
             // Models
@@ -172,20 +144,11 @@ export component Toolbox inherits Rectangle {
                 collapsible: true;
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "📦";
-                    label: "Model";
-                    clicked => { root.on-insert-part("Model"); }
-                }
-                
-                ToolButton {
-                    icon: "📁";
-                    label: "Folder";
-                    clicked => { root.on-insert-part("Folder"); }
-                }
+            Rectangle {
+                height: 64px;
+                property <length> row-w: 2 * 64px + 1 * 4px;
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/package.svg"); label: "Model"; clicked => { root.on-insert-part("Model"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/group.svg"); label: "Folder"; clicked => { root.on-insert-part("Folder"); } }
             }
             
             // Lighting
@@ -194,26 +157,12 @@ export component Toolbox inherits Rectangle {
                 collapsible: true;
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "💡";
-                    label: "Point";
-                    clicked => { root.on-insert-part("PointLight"); }
-                }
-                
-                ToolButton {
-                    icon: "🔦";
-                    label: "Spot";
-                    clicked => { root.on-insert-part("SpotLight"); }
-                }
-                
-                ToolButton {
-                    icon: "☀";
-                    label: "Surface";
-                    clicked => { root.on-insert-part("SurfaceLight"); }
-                }
+            Rectangle {
+                height: 64px;
+                property <length> row-w: 3 * 64px + 2 * 4px;
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Point"; clicked => { root.on-insert-part("PointLight"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/flashlight.svg"); label: "Spot"; clicked => { root.on-insert-part("SpotLight"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Surface"; clicked => { root.on-insert-part("SurfaceLight"); } }
             }
             
             // Physics
@@ -222,26 +171,12 @@ export component Toolbox inherits Rectangle {
                 collapsible: true;
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "⚓";
-                    label: "Anchor";
-                    clicked => { root.on-insert-part("Attachment"); }
-                }
-                
-                ToolButton {
-                    icon: "🔗";
-                    label: "Weld";
-                    clicked => { root.on-insert-part("WeldConstraint"); }
-                }
-                
-                ToolButton {
-                    icon: "🔩";
-                    label: "Hinge";
-                    clicked => { root.on-insert-part("HingeConstraint"); }
-                }
+            Rectangle {
+                height: 64px;
+                property <length> row-w: 3 * 64px + 2 * 4px;
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; clicked => { root.on-insert-part("Attachment"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/link.svg"); label: "Weld"; clicked => { root.on-insert-part("WeldConstraint"); } }
+                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/hinge.svg"); label: "Hinge"; clicked => { root.on-insert-part("HingeConstraint"); } }
             }
             
             // Scripts
@@ -250,26 +185,9 @@ export component Toolbox inherits Rectangle {
                 collapsible: true;
             }
             
-            HorizontalBox {
-                spacing: 4px;
-                
-                ToolButton {
-                    icon: "@";
-                    label: "Soul";
-                    clicked => { root.on-insert-part("SoulScript"); }
-                }
-                
-                ToolButton {
-                    icon: "📜";
-                    label: "Local";
-                    clicked => { root.on-insert-part("LocalScript"); }
-                }
-                
-                ToolButton {
-                    icon: "📋";
-                    label: "Module";
-                    clicked => { root.on-insert-part("ModuleScript"); }
-                }
+            Rectangle {
+                height: 64px;
+                ToolButton { x: (parent.width - 64px) / 2; icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; clicked => { root.on-insert-part("SoulScript"); } }
             }
         }
     }

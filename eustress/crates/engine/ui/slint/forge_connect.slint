@@ -46,7 +46,7 @@ export component ForgeConnectDialog inherits Rectangle {
             // Header
             HorizontalBox {
                 Text {
-                    text: "☁ Connect to Forge";
+                    text: "Connect to Forge";
                     color: Theme.text-primary;
                     font-size: 20px;
                     font-weight: 600;
@@ -64,10 +64,11 @@ export component ForgeConnectDialog inherits Rectangle {
                         clicked => { root.on-close(); }
                     }
                     
-                    Text {
-                        text: "✕";
-                        color: Theme.text-secondary;
-                        font-size: 16px;
+                    Image {
+                        width: 12px;
+                        height: 12px;
+                        source: @image-url("../../assets/icons/ui/close.svg");
+                        image-fit: contain;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -142,7 +143,7 @@ export component ForgeConnectDialog inherits Rectangle {
                     padding: 8px;
                     
                     Text {
-                        text: "⚠ " + root.error-message;
+                        text: root.error-message;
                         color: Theme.text-error;
                         font-size: 12px;
                         vertical-alignment: center;

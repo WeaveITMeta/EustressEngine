@@ -125,10 +125,11 @@ pub fn chunk_spawn_system(
                         chunk_commands.insert(MeshMaterial3d(mat.clone()));
                     }
                     
-                    // Add physics collider (1:1 with visual mesh) - DISABLED for Bevy 0.19
+                    // Add physics collider (1:1 with visual mesh)
+                    // Requires avian3d physics feature
                     #[cfg(feature = "physics")]
                     {
-                        // Physics temporarily disabled due to avian3d/Bevy 0.19 compatibility
+                        // TODO: Re-enable when avian3d Collider::trimesh_from_mesh is verified
                         // if let Some(mesh) = meshes.get(&mesh_handle) {
                         //     if let Some(collider) = Collider::trimesh_from_mesh(mesh) {
                         //         chunk_commands.insert((

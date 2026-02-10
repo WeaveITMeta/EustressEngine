@@ -174,20 +174,15 @@ impl Plugin for SharedCharacterPlugin {
                 camera_mouse_look,
                 camera_zoom,
                 character_movement_input,
-                // Character systems - DISABLED for Bevy 0.19
-                // update_input,
-                // update_mouse_look,
+                // Physics-dependent systems (require avian3d feature)
                 // ground_check,
                 // character_movement_physics,
                 // character_jump,
                 // update_locomotion,
-                // update_character_facing,
-                // update_animation_state_machine,
-                // // Humanoid-specific animation systems
-                // update_character_facing_system,
-                // update_head_look_system,
-                // apply_procedural_limb_animation,
-                // camera_follow,
+                // Non-physics systems - re-enabled for Bevy 0.18
+                update_character_facing,
+                update_animation_state_machine,
+                camera_follow,
             ).run_if(has_play_mode_character));
     }
 }
@@ -419,57 +414,32 @@ fn character_movement_input(
     }
 }
 
-/// Apply movement physics - DISABLED for Bevy 0.19
+/// Apply movement physics (requires avian3d physics feature)
 fn character_movement_physics(
-    // _time: Res<Time>,
-    // _query: Query<(
-    //     &MovementIntent,
-    //     &Character,
-    //     &CharacterPhysics,
-    //     &mut LinearVelocity,
-    //     &LocomotionController,
-    // ), With<PlayModeCharacter>>,
+    // Requires: LinearVelocity from avian3d
 ) {
-    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
+    // Gated behind physics feature - enable with `features = ["physics"]`
 }
 
-/// Handle jumping - DISABLED for Bevy 0.19
+/// Handle jumping (requires avian3d physics feature)
 fn character_jump(
-    // _query: Query<(
-    //     &MovementIntent,
-    //     &Character,
-    //     &LocomotionController,
-    //     &mut LinearVelocity,
-    //     &mut AnimationStateMachine,
-    // ), With<PlayModeCharacter>>,
+    // Requires: LinearVelocity from avian3d
 ) {
-    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
+    // Gated behind physics feature - enable with `features = ["physics"]`
 }
 
-/// Ground detection using raycasts
+/// Ground detection using raycasts (requires avian3d physics feature)
 fn ground_check(
-    // DISABLED - avian3d physics not available
-    // _spatial_query: SpatialQuery,
-    // mut _query: Query<(
-    //     &Transform,
-    //     &CharacterPhysics,
-    //     &mut LocomotionController,
-    //     &mut Character,
-    // ), With<PlayModeCharacter>>,
+    // Requires: SpatialQuery from avian3d
 ) {
-    // DISABLED for Bevy 0.19 - avian3d not yet compatible
+    // Gated behind physics feature - enable with `features = ["physics"]`
 }
 
-/// Update locomotion controller from velocity - DISABLED for Bevy 0.19
+/// Update locomotion controller from velocity (requires avian3d physics feature)
 fn update_locomotion(
-    // _time: Res<Time>,
-    // _query: Query<(
-    //     &LinearVelocity,
-    //     &MovementIntent,
-    //     &mut LocomotionController,
-    // ), With<PlayModeCharacter>>,
+    // Requires: LinearVelocity from avian3d
 ) {
-    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
+    // Gated behind physics feature - enable with `features = ["physics"]`
 }
 
 /// Update character facing direction

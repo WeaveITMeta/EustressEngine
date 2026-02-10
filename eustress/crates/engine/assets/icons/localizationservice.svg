@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- LocalizationService - globe with text lines -->
+  <circle cx="8" cy="8" r="6" fill="#6090D0" stroke="#4070B0" stroke-width="0.5"/>
+  <ellipse cx="8" cy="8" rx="6" ry="2.5" fill="none" stroke="#4070B0" stroke-width="0.5"/>
+  <line x1="2" y1="8" x2="14" y2="8" stroke="#4070B0" stroke-width="0.5"/>
+  <line x1="8" y1="2" x2="8" y2="14" stroke="#4070B0" stroke-width="0.5"/>
+  <text x="8" y="10" text-anchor="middle" font-size="5" fill="white" font-weight="bold">A</text>
+</svg>

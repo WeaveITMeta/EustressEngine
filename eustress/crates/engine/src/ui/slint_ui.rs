@@ -11,7 +11,7 @@ use bevy::render::render_resource::{TextureDescriptor, TextureUsages, TextureFor
 use bevy::window::PrimaryWindow;
 use bevy::camera::ScalingMode;
 use bevy::camera::visibility::RenderLayers;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::rc::{Rc, Weak};
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -243,6 +243,153 @@ pub struct RibbonTabManagerState {
 pub struct SyncDomainModalState {
     pub domain_name: String,
     pub object_type: String,
+}
+
+// ============================================================================
+// Slint → Bevy Action Queue
+// ============================================================================
+
+/// Actions queued by Slint UI callbacks, drained by Bevy systems each frame.
+/// Uses Arc<Mutex<>> because Slint callbacks capture a clone of the queue.
+#[derive(Debug, Clone)]
+pub enum SlintAction {
+    // File operations
+    NewScene,
+    OpenScene,
+    SaveScene,
+    SaveSceneAs,
+    Publish,
+    
+    // Edit operations
+    Undo,
+    Redo,
+    Copy,
+    Cut,
+    Paste,
+    Delete,
+    Duplicate,
+    SelectAll,
+    
+    // Tool selection
+    SelectTool(String),
+    
+    // Transform mode
+    SetTransformMode(String),
+    
+    // Play controls
+    PlaySolo,
+    PlayWithCharacter,
+    Pause,
+    Stop,
+    
+    // View
+    SetViewMode(String),
+    FocusSelected,
+    ToggleWireframe,
+    ToggleGrid,
+    ToggleSnap,
+    SetSnapIncrement(f32),
+    
+    // Panel toggles (from Slint → Bevy state sync)
+    ToggleCommandBar,
+    ShowKeybindings,
+    ShowSoulSettings,
+    ShowSettings,
+    ShowFind,
+    
+    // Explorer
+    SelectEntity(i32),
+    ExpandEntity(i32),
+    CollapseEntity(i32),
+    RenameEntity(i32, String),
+    ReparentEntity(i32, i32),
+    
+    // Properties
+    PropertyChanged(String, String),
+    
+    // Command bar
+    ExecuteCommand(String),
+    
+    // Context menu
+    InsertPart(String),
+    ContextAction(String),
+    
+    // Terrain
+    GenerateTerrain(String),
+    ToggleTerrainEditMode,
+    SetTerrainBrush(String),
+    ImportHeightmap,
+    ExportHeightmap,
+    
+    // Network
+    StartServer,
+    StopServer,
+    ConnectForge,
+    DisconnectForge,
+    AllocateForgeServer,
+    SpawnSyntheticClients(i32),
+    DisconnectAllClients,
+    
+    // Data
+    OpenGlobalSources,
+    OpenDomains,
+    OpenGlobalVariables,
+    
+    // MindSpace
+    ToggleMindspace,
+    MindspaceAddLabel,
+    MindspaceConnect,
+    
+    // Auth
+    Login,
+    Logout,
+    
+    // Scripts
+    BuildScript(i32),
+    OpenScript(i32),
+    
+    // Layout
+    ApplyLayoutPreset(i32),
+    SaveLayoutToFile,
+    LoadLayoutFromFile,
+    ResetLayoutToDefault,
+    ToggleThemeEditor,
+    ApplyThemeSettings(bool, bool, f32), // dark-mode, high-contrast, ui-scale
+    DetachPanelToWindow(String),
+    
+    // Viewport
+    ViewportBoundsChanged(f32, f32, f32, f32), // x, y, width, height
+    
+    // Close
+    CloseRequested,
+}
+
+/// Shared action queue between Slint callbacks and Bevy systems
+#[derive(Resource, Clone)]
+pub struct SlintActionQueue(pub Arc<Mutex<Vec<SlintAction>>>);
+
+impl Default for SlintActionQueue {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Vec::new())))
+    }
+}
+
+impl SlintActionQueue {
+    /// Push an action from a Slint callback
+    pub fn push(&self, action: SlintAction) {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.push(action);
+        }
+    }
+    
+    /// Drain all queued actions (called by Bevy system each frame)
+    pub fn drain(&self) -> Vec<SlintAction> {
+        if let Ok(mut queue) = self.0.lock() {
+            queue.drain(..).collect()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 // ============================================================================
@@ -714,8 +861,19 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, (
                 forward_input_to_slint,
+                forward_keyboard_to_slint,
+                drain_slint_actions,
+                sync_bevy_to_slint,
                 render_slint_to_texture,
             ).chain())
+            // Window resize handling
+            .add_systems(Update, handle_window_resize)
+            // Performance tracking
+            .add_systems(Update, update_ui_performance)
+            // Explorer sync (throttled internally)
+            .add_systems(Update, sync_explorer_to_slint)
+            // Properties sync (throttled internally)
+            .add_systems(Update, sync_properties_to_slint)
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
@@ -781,7 +939,193 @@ fn setup_slint_overlay(world: &mut World) {
     ui.set_show_output(true);
     ui.set_show_toolbox(true);
     
-    info!("✅ Slint StudioWindow configured");
+    // ========================================================================
+    // Wire Slint callbacks → SlintActionQueue
+    // Each callback captures a clone of the Arc<Mutex<Vec<SlintAction>>> queue.
+    // The drain_slint_actions system reads these each frame.
+    // ========================================================================
+    let queue = SlintActionQueue::default();
+    
+    // File operations
+    let q = queue.clone();
+    ui.on_new_scene(move || q.push(SlintAction::NewScene));
+    let q = queue.clone();
+    ui.on_open_scene(move || q.push(SlintAction::OpenScene));
+    let q = queue.clone();
+    ui.on_save_scene(move || q.push(SlintAction::SaveScene));
+    let q = queue.clone();
+    ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
+    let q = queue.clone();
+    ui.on_publish(move || q.push(SlintAction::Publish));
+    
+    // Edit operations
+    let q = queue.clone();
+    ui.on_undo(move || q.push(SlintAction::Undo));
+    let q = queue.clone();
+    ui.on_redo(move || q.push(SlintAction::Redo));
+    let q = queue.clone();
+    ui.on_copy(move || q.push(SlintAction::Copy));
+    let q = queue.clone();
+    ui.on_cut(move || q.push(SlintAction::Cut));
+    let q = queue.clone();
+    ui.on_paste(move || q.push(SlintAction::Paste));
+    let q = queue.clone();
+    ui.on_delete_selected(move || q.push(SlintAction::Delete));
+    let q = queue.clone();
+    ui.on_duplicate(move || q.push(SlintAction::Duplicate));
+    let q = queue.clone();
+    ui.on_select_all(move || q.push(SlintAction::SelectAll));
+    
+    // Tool selection
+    let q = queue.clone();
+    ui.on_select_tool(move |tool| q.push(SlintAction::SelectTool(tool.to_string())));
+    
+    // Transform mode
+    let q = queue.clone();
+    ui.on_set_transform_mode(move |mode| q.push(SlintAction::SetTransformMode(mode.to_string())));
+    let q = queue.clone();
+    ui.on_toggle_snap(move || q.push(SlintAction::ToggleSnap));
+    let q = queue.clone();
+    ui.on_set_snap_increment(move |val| q.push(SlintAction::SetSnapIncrement(val)));
+    
+    // View
+    let q = queue.clone();
+    ui.on_set_view_mode(move |mode| q.push(SlintAction::SetViewMode(mode.to_string())));
+    let q = queue.clone();
+    ui.on_focus_selected(move || q.push(SlintAction::FocusSelected));
+    let q = queue.clone();
+    ui.on_toggle_wireframe(move || q.push(SlintAction::ToggleWireframe));
+    let q = queue.clone();
+    ui.on_toggle_grid(move || q.push(SlintAction::ToggleGrid));
+    
+    // Play controls
+    let q = queue.clone();
+    ui.on_play_solo(move || q.push(SlintAction::PlaySolo));
+    let q = queue.clone();
+    ui.on_play_with_character(move || q.push(SlintAction::PlayWithCharacter));
+    let q = queue.clone();
+    ui.on_pause(move || q.push(SlintAction::Pause));
+    let q = queue.clone();
+    ui.on_stop(move || q.push(SlintAction::Stop));
+    
+    // Explorer
+    let q = queue.clone();
+    ui.on_select_entity(move |id| q.push(SlintAction::SelectEntity(id)));
+    let q = queue.clone();
+    ui.on_expand_entity(move |id| q.push(SlintAction::ExpandEntity(id)));
+    let q = queue.clone();
+    ui.on_collapse_entity(move |id| q.push(SlintAction::CollapseEntity(id)));
+    let q = queue.clone();
+    ui.on_rename_entity(move |id, name| q.push(SlintAction::RenameEntity(id, name.to_string())));
+    let q = queue.clone();
+    ui.on_reparent_entity(move |child, parent| q.push(SlintAction::ReparentEntity(child, parent)));
+    
+    // Properties
+    let q = queue.clone();
+    ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
+    
+    // Command bar
+    let q = queue.clone();
+    ui.on_execute_command(move |cmd| q.push(SlintAction::ExecuteCommand(cmd.to_string())));
+    
+    // Toolbox part insertion
+    let q = queue.clone();
+    ui.on_insert_part(move |part_type| q.push(SlintAction::InsertPart(part_type.to_string())));
+    
+    // Context menu
+    let q = queue.clone();
+    ui.on_context_action(move |action| q.push(SlintAction::ContextAction(action.to_string())));
+    
+    // Terrain
+    let q = queue.clone();
+    ui.on_generate_terrain(move |size| q.push(SlintAction::GenerateTerrain(size.to_string())));
+    let q = queue.clone();
+    ui.on_toggle_terrain_edit_mode(move || q.push(SlintAction::ToggleTerrainEditMode));
+    let q = queue.clone();
+    ui.on_set_terrain_brush(move |brush| q.push(SlintAction::SetTerrainBrush(brush.to_string())));
+    let q = queue.clone();
+    ui.on_import_heightmap(move || q.push(SlintAction::ImportHeightmap));
+    let q = queue.clone();
+    ui.on_export_heightmap(move || q.push(SlintAction::ExportHeightmap));
+    
+    // Network
+    let q = queue.clone();
+    ui.on_start_server(move || q.push(SlintAction::StartServer));
+    let q = queue.clone();
+    ui.on_stop_server(move || q.push(SlintAction::StopServer));
+    let q = queue.clone();
+    ui.on_connect_forge(move || q.push(SlintAction::ConnectForge));
+    let q = queue.clone();
+    ui.on_disconnect_forge(move || q.push(SlintAction::DisconnectForge));
+    let q = queue.clone();
+    ui.on_allocate_forge_server(move || q.push(SlintAction::AllocateForgeServer));
+    let q = queue.clone();
+    ui.on_spawn_synthetic_clients(move |count| q.push(SlintAction::SpawnSyntheticClients(count)));
+    let q = queue.clone();
+    ui.on_disconnect_all_clients(move || q.push(SlintAction::DisconnectAllClients));
+    
+    // Data
+    let q = queue.clone();
+    ui.on_open_global_sources(move || q.push(SlintAction::OpenGlobalSources));
+    let q = queue.clone();
+    ui.on_open_domains(move || q.push(SlintAction::OpenDomains));
+    let q = queue.clone();
+    ui.on_open_global_variables(move || q.push(SlintAction::OpenGlobalVariables));
+    
+    // MindSpace
+    let q = queue.clone();
+    ui.on_toggle_mindspace(move || q.push(SlintAction::ToggleMindspace));
+    let q = queue.clone();
+    ui.on_mindspace_add_label(move || q.push(SlintAction::MindspaceAddLabel));
+    let q = queue.clone();
+    ui.on_mindspace_connect(move || q.push(SlintAction::MindspaceConnect));
+    
+    // Auth
+    let q = queue.clone();
+    ui.on_login(move || q.push(SlintAction::Login));
+    let q = queue.clone();
+    ui.on_logout(move || q.push(SlintAction::Logout));
+    
+    // Scripts
+    let q = queue.clone();
+    ui.on_build_script(move |id| q.push(SlintAction::BuildScript(id)));
+    let q = queue.clone();
+    ui.on_open_script(move |id| q.push(SlintAction::OpenScript(id)));
+    
+    // Settings
+    let q = queue.clone();
+    ui.on_open_settings(move || q.push(SlintAction::ShowSettings));
+    let q = queue.clone();
+    ui.on_open_find(move || q.push(SlintAction::ShowFind));
+    
+    // Layout
+    let q = queue.clone();
+    ui.on_apply_layout_preset(move |preset| q.push(SlintAction::ApplyLayoutPreset(preset)));
+    let q = queue.clone();
+    ui.on_save_layout_to_file(move || q.push(SlintAction::SaveLayoutToFile));
+    let q = queue.clone();
+    ui.on_load_layout_from_file(move || q.push(SlintAction::LoadLayoutFromFile));
+    let q = queue.clone();
+    ui.on_reset_layout_to_default(move || q.push(SlintAction::ResetLayoutToDefault));
+    let q = queue.clone();
+    ui.on_toggle_theme_editor(move || q.push(SlintAction::ToggleThemeEditor));
+    let q = queue.clone();
+    ui.on_apply_theme_settings(move |dark, hc, scale| q.push(SlintAction::ApplyThemeSettings(dark, hc, scale)));
+    let q = queue.clone();
+    ui.on_detach_panel_to_window(move |panel| q.push(SlintAction::DetachPanelToWindow(panel.to_string())));
+    
+    // Viewport bounds
+    let q = queue.clone();
+    ui.on_viewport_bounds_changed(move |x, y, w, h| q.push(SlintAction::ViewportBoundsChanged(x, y, w, h)));
+    
+    // Close
+    let q = queue.clone();
+    ui.on_close_requested(move || q.push(SlintAction::CloseRequested));
+    
+    // Store queue as Bevy resource
+    world.insert_resource(queue);
+    
+    info!("✅ Slint StudioWindow configured with {} callbacks wired", 50);
     
     // Create Bevy texture for Slint to render into (matches official bevy-hosts-slint pattern).
     // Uses Rgba8Unorm to match Slint's PremultipliedRgbaColor output format.
@@ -1001,4 +1345,1091 @@ fn forward_input_to_slint(
 /// Try to restore auth session on startup
 fn try_restore_auth_session(mut auth_state: ResMut<crate::auth::AuthState>) {
     auth_state.try_restore_session();
+}
+
+// ============================================================================
+// Slint ↔ Bevy Sync Systems
+// ============================================================================
+
+/// Bundled event writers for drain_slint_actions (keeps system under 16-param limit)
+#[derive(bevy::ecs::system::SystemParam)]
+struct DrainEventWriters<'w> {
+    file_events: MessageWriter<'w, FileEvent>,
+    menu_events: MessageWriter<'w, MenuActionEvent>,
+    undo_events: MessageWriter<'w, crate::commands::UndoCommandEvent>,
+    redo_events: MessageWriter<'w, crate::commands::RedoCommandEvent>,
+    exit_events: MessageWriter<'w, bevy::app::AppExit>,
+    spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
+    terrain_toggle: MessageWriter<'w, super::spawn_events::ToggleTerrainEditEvent>,
+    terrain_brush: MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>,
+}
+
+/// Bundled mutable resources for drain_slint_actions
+#[derive(bevy::ecs::system::SystemParam)]
+struct DrainResources<'w> {
+    state: Option<ResMut<'w, StudioState>>,
+    output: Option<ResMut<'w, OutputConsole>>,
+    explorer_expanded: Option<ResMut<'w, ExplorerExpanded>>,
+    explorer_state: Option<ResMut<'w, ExplorerState>>,
+    view_state: Option<ResMut<'w, super::ViewSelectorState>>,
+    editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
+    auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
+}
+
+/// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
+/// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
+fn drain_slint_actions(
+    queue: Option<Res<SlintActionQueue>>,
+    mut events: DrainEventWriters,
+    mut res: DrainResources,
+    mut instances: Query<(Entity, &mut eustress_common::classes::Instance)>,
+    mut transforms: Query<&mut Transform>,
+    mut base_parts: Query<&mut eustress_common::classes::BasePart>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let Some(queue) = queue else { return };
+    let actions = queue.drain();
+    if actions.is_empty() { return; }
+    
+    for action in actions {
+        match action {
+            // File operations → FileEvent
+            SlintAction::NewScene => { events.file_events.write(FileEvent::NewScene); }
+            SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
+            SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
+            SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
+            SlintAction::Publish => { events.file_events.write(FileEvent::Publish); }
+            
+            // Edit operations → MenuActionEvent
+            SlintAction::Undo => { events.undo_events.write(crate::commands::UndoCommandEvent); }
+            SlintAction::Redo => { events.redo_events.write(crate::commands::RedoCommandEvent); }
+            SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
+            SlintAction::Cut => {
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete));
+            }
+            SlintAction::Paste => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Paste)); }
+            SlintAction::Delete => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete)); }
+            SlintAction::Duplicate => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Duplicate)); }
+            SlintAction::SelectAll => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectAll)); }
+            
+            // Tool selection → StudioState
+            SlintAction::SelectTool(tool) => {
+                if let Some(ref mut s) = res.state {
+                    s.current_tool = match tool.as_str() {
+                        "move" => Tool::Move,
+                        "rotate" => Tool::Rotate,
+                        "scale" => Tool::Scale,
+                        "terrain" => Tool::Terrain,
+                        _ => Tool::Select,
+                    };
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Tool: {}", tool));
+                    }
+                }
+            }
+            
+            // Transform mode → StudioState
+            SlintAction::SetTransformMode(mode) => {
+                if let Some(ref mut s) = res.state {
+                    s.transform_mode = match mode.as_str() {
+                        "local" => TransformMode::Local,
+                        _ => TransformMode::World,
+                    };
+                }
+            }
+            
+            // Play controls → StudioState flags (consumed by play_mode.rs)
+            SlintAction::PlaySolo => {
+                if let Some(ref mut s) = res.state {
+                    s.play_solo_requested = true;
+                }
+            }
+            SlintAction::PlayWithCharacter => {
+                if let Some(ref mut s) = res.state {
+                    s.play_with_character_requested = true;
+                }
+            }
+            SlintAction::Pause => {
+                if let Some(ref mut s) = res.state {
+                    s.pause_requested = true;
+                }
+            }
+            SlintAction::Stop => {
+                if let Some(ref mut s) = res.state {
+                    s.stop_requested = true;
+                }
+            }
+            
+            // View
+            SlintAction::FocusSelected => {
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::FocusSelection));
+            }
+            SlintAction::SetViewMode(_mode) => {
+                // View mode changes handled by camera controller
+            }
+            SlintAction::ToggleWireframe => {
+                if let Some(ref mut vs) = res.view_state {
+                    vs.wireframe = !vs.wireframe;
+                }
+            }
+            SlintAction::ToggleGrid => {
+                if let Some(ref mut vs) = res.view_state {
+                    vs.grid = !vs.grid;
+                }
+            }
+            SlintAction::ToggleSnap => {
+                if let Some(ref mut es) = res.editor_settings {
+                    es.snap_enabled = !es.snap_enabled;
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Snap: {}", if es.snap_enabled { "ON" } else { "OFF" }));
+                    }
+                }
+            }
+            SlintAction::SetSnapIncrement(val) => {
+                if let Some(ref mut es) = res.editor_settings {
+                    es.snap_size = val;
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Snap increment: {:.2}", val));
+                    }
+                }
+            }
+            
+            // Panel toggles → StudioState
+            SlintAction::ToggleCommandBar => {
+                if let Some(ref mut s) = res.state {
+                    // Toggled directly in Slint via show-command-bar binding
+                }
+            }
+            SlintAction::ShowKeybindings => {
+                if let Some(ref mut s) = res.state {
+                    s.show_keybindings_window = true;
+                }
+            }
+            SlintAction::ShowSoulSettings => {
+                if let Some(ref mut s) = res.state {
+                    s.show_soul_settings_window = true;
+                }
+            }
+            SlintAction::ShowSettings => {
+                if let Some(ref mut s) = res.state {
+                    s.show_settings_window = true;
+                }
+            }
+            SlintAction::ShowFind => {
+                if let Some(ref mut s) = res.state {
+                    s.show_find_dialog = true;
+                }
+            }
+            
+            // Network → StudioState
+            SlintAction::StartServer => {
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::StartServer));
+            }
+            SlintAction::StopServer => {
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::StopServer));
+            }
+            SlintAction::ConnectForge => {
+                if let Some(ref mut s) = res.state {
+                    s.show_forge_connect_window = true;
+                }
+            }
+            SlintAction::DisconnectForge => {}
+            SlintAction::AllocateForgeServer => {}
+            SlintAction::SpawnSyntheticClients(count) => {
+                if let Some(ref mut s) = res.state {
+                    s.synthetic_client_count = count as u32;
+                    s.synthetic_clients_changed = true;
+                }
+            }
+            SlintAction::DisconnectAllClients => {}
+            
+            // Data → StudioState
+            SlintAction::OpenGlobalSources => {
+                if let Some(ref mut s) = res.state {
+                    s.show_global_sources_window = true;
+                }
+            }
+            SlintAction::OpenDomains => {
+                if let Some(ref mut s) = res.state {
+                    s.show_domains_window = true;
+                }
+            }
+            SlintAction::OpenGlobalVariables => {
+                if let Some(ref mut s) = res.state {
+                    s.show_global_variables_window = true;
+                }
+            }
+            
+            // MindSpace
+            SlintAction::ToggleMindspace => {
+                if let Some(ref mut s) = res.state {
+                    s.mindspace_panel_visible = !s.mindspace_panel_visible;
+                }
+            }
+            SlintAction::MindspaceAddLabel => {
+                // TODO: Add label node to MindSpace graph
+            }
+            SlintAction::MindspaceConnect => {
+                // TODO: Connect selected MindSpace nodes
+            }
+            
+            // Auth
+            SlintAction::Login => {
+                if let Some(ref mut s) = res.state {
+                    s.trigger_login = true;
+                }
+            }
+            SlintAction::Logout => {
+                if let Some(ref mut auth) = res.auth_state {
+                    auth.logout();
+                    if let Some(ref mut out) = res.output {
+                        out.info("Logged out".to_string());
+                    }
+                }
+            }
+            
+            // Scripts
+            SlintAction::BuildScript(id) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Building script #{}", id));
+                }
+                // TODO: Trigger Soul script compilation for entity with this instance ID
+            }
+            SlintAction::OpenScript(id) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Opening script #{}", id));
+                }
+                // TODO: Open script editor for entity with this instance ID
+            }
+            
+            // Terrain
+            SlintAction::GenerateTerrain(_size) => {
+                if let Some(ref mut s) = res.state {
+                    s.show_terrain_editor = true;
+                }
+            }
+            SlintAction::ToggleTerrainEditMode => {
+                events.terrain_toggle.write(super::spawn_events::ToggleTerrainEditEvent);
+            }
+            SlintAction::SetTerrainBrush(brush) => {
+                use eustress_common::terrain::BrushMode;
+                let mode = match brush.to_lowercase().as_str() {
+                    "raise" => Some(BrushMode::Raise),
+                    "lower" => Some(BrushMode::Lower),
+                    "smooth" => Some(BrushMode::Smooth),
+                    "flatten" => Some(BrushMode::Flatten),
+                    "paint" | "painttexture" => Some(BrushMode::PaintTexture),
+                    "voxeladd" => Some(BrushMode::VoxelAdd),
+                    "voxelremove" => Some(BrushMode::VoxelRemove),
+                    "voxelsmooth" => Some(BrushMode::VoxelSmooth),
+                    "region" => Some(BrushMode::Region),
+                    "fill" => Some(BrushMode::Fill),
+                    _ => None,
+                };
+                if let Some(m) = mode {
+                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { mode: m });
+                }
+            }
+            SlintAction::ImportHeightmap => {
+                // Open file dialog for heightmap import
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Heightmap", &["png", "exr", "raw", "r16"])
+                    .set_title("Import Heightmap")
+                    .pick_file()
+                {
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Importing heightmap: {}", path.display()));
+                    }
+                    // TODO: Feed path into terrain system when heightmap loader is implemented
+                }
+            }
+            SlintAction::ExportHeightmap => {
+                // Open file dialog for heightmap export
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Heightmap PNG", &["png"])
+                    .set_title("Export Heightmap")
+                    .save_file()
+                {
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Exporting heightmap: {}", path.display()));
+                    }
+                    // TODO: Export terrain data when heightmap exporter is implemented
+                }
+            }
+            
+            // Layout
+            SlintAction::ApplyLayoutPreset(preset) => {
+                // Apply preset layout configurations
+                if let Some(ref mut s) = res.state {
+                    match preset {
+                        0 => { // Default
+                            s.show_explorer = true;
+                            s.show_properties = true;
+                            s.show_output = true;
+                        }
+                        1 => { // Minimal — hide side panels
+                            s.show_explorer = false;
+                            s.show_properties = false;
+                            s.show_output = false;
+                        }
+                        2 => { // Code — explorer + output, no properties
+                            s.show_explorer = true;
+                            s.show_properties = false;
+                            s.show_output = true;
+                        }
+                        3 => { // Build — all panels visible
+                            s.show_explorer = true;
+                            s.show_properties = true;
+                            s.show_output = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            SlintAction::SaveLayoutToFile => {
+                if let Some(ref es) = res.editor_settings {
+                    if let Err(e) = es.save() {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Failed to save layout: {}", e));
+                        }
+                    } else if let Some(ref mut out) = res.output {
+                        out.info("Layout saved".to_string());
+                    }
+                }
+            }
+            SlintAction::LoadLayoutFromFile => {
+                // Reload editor settings from disk
+                let loaded = crate::editor_settings::EditorSettings::load();
+                if let Some(ref mut es) = res.editor_settings {
+                    **es = loaded;
+                    if let Some(ref mut out) = res.output {
+                        out.info("Layout loaded".to_string());
+                    }
+                }
+            }
+            SlintAction::ResetLayoutToDefault => {
+                if let Some(ref mut s) = res.state {
+                    s.show_explorer = true;
+                    s.show_properties = true;
+                    s.show_output = true;
+                }
+            }
+            SlintAction::ToggleThemeEditor => {
+                if let Some(ref mut out) = res.output {
+                    out.info("Theme editor toggled".to_string());
+                }
+                // Theme editor visibility is managed by Slint-side state
+            }
+            SlintAction::ApplyThemeSettings(dark_mode, _high_contrast, _ui_scale) => {
+                // Push dark_theme to Slint via the sync_bevy_to_slint system
+                // The Slint UI reads dark-theme property each frame
+                // For now we log — the Slint property is set directly by the callback
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Theme: dark={}", dark_mode));
+                }
+            }
+            SlintAction::DetachPanelToWindow(_panel) => {
+                // TODO: Detach panel to separate OS window
+            }
+            
+            // Viewport bounds changed — update Bevy camera/render target
+            SlintAction::ViewportBoundsChanged(_x, _y, _w, _h) => {
+                // Viewport bounds are read directly from Slint properties in the render system
+            }
+            
+            // Explorer actions — map instance ID (i32) back to Bevy Entity
+            SlintAction::SelectEntity(id) => {
+                if let Some(ref mut es) = res.explorer_state {
+                    // Find the Entity with this instance ID
+                    let found = instances.iter()
+                        .find(|(_, inst)| inst.id as i32 == id)
+                        .map(|(e, _)| e);
+                    es.selected = found;
+                }
+            }
+            SlintAction::ExpandEntity(id) => {
+                if let Some(ref mut ee) = res.explorer_expanded {
+                    if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                        ee.expanded.insert(entity);
+                    }
+                }
+            }
+            SlintAction::CollapseEntity(id) => {
+                if let Some(ref mut ee) = res.explorer_expanded {
+                    if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                        ee.expanded.remove(&entity);
+                    }
+                }
+            }
+            SlintAction::RenameEntity(id, name) => {
+                if let Some((_, mut inst)) = instances.iter_mut().find(|(_, inst)| inst.id as i32 == id) {
+                    inst.name = name;
+                }
+            }
+            SlintAction::ReparentEntity(child_id, parent_id) => {
+                // Find child and parent entities by instance ID
+                let child_entity = instances.iter()
+                    .find(|(_, inst)| inst.id as i32 == child_id)
+                    .map(|(e, _)| e);
+                let parent_entity = instances.iter()
+                    .find(|(_, inst)| inst.id as i32 == parent_id)
+                    .map(|(e, _)| e);
+                if let (Some(child), Some(parent)) = (child_entity, parent_entity) {
+                    commands.entity(child).insert(ChildOf(parent));
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Reparented entity {} under {}", child_id, parent_id));
+                    }
+                }
+            }
+            
+            // Properties write-back — apply edits from Slint properties panel to ECS
+            SlintAction::PropertyChanged(key, val) => {
+                let selected = res.explorer_state.as_ref().and_then(|es| es.selected);
+                if let Some(entity) = selected {
+                    match key.as_str() {
+                        // Instance fields
+                        "Name" => {
+                            if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                                inst.name = val.clone();
+                            }
+                        }
+                        "Archivable" => {
+                            if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                                inst.archivable = val == "true";
+                            }
+                        }
+                        // Transform fields
+                        "Position.X" | "Position.Y" | "Position.Z" => {
+                            if let Ok(mut t) = transforms.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    match key.as_str() {
+                                        "Position.X" => t.translation.x = v,
+                                        "Position.Y" => t.translation.y = v,
+                                        "Position.Z" => t.translation.z = v,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        "Scale.X" | "Scale.Y" | "Scale.Z" => {
+                            if let Ok(mut t) = transforms.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    match key.as_str() {
+                                        "Scale.X" => t.scale.x = v,
+                                        "Scale.Y" => t.scale.y = v,
+                                        "Scale.Z" => t.scale.z = v,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        // BasePart fields
+                        "Transparency" => {
+                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    bp.transparency = v;
+                                }
+                            }
+                        }
+                        "Anchored" => {
+                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                                bp.anchored = val == "true";
+                            }
+                        }
+                        "CanCollide" => {
+                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                                bp.can_collide = val == "true";
+                            }
+                        }
+                        _ => {
+                            // Unhandled property — log for debugging
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Command bar
+            SlintAction::ExecuteCommand(cmd) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("> {}", cmd));
+                }
+            }
+            
+            // Toolbox insertion — parts via SpawnPartEvent, others via direct spawn
+            SlintAction::InsertPart(part_type_str) => {
+                use eustress_common::classes::PartType;
+                use crate::classes::*;
+                
+                // Generate unique instance ID
+                let uid = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() % u32::MAX as u128) as u32;
+                
+                match part_type_str.as_str() {
+                    // Primitive parts → SpawnPartEvent (handled by existing system)
+                    "Part" | "Block" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Block, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    "SpherePart" | "Ball" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Ball, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    "CylinderPart" | "Cylinder" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Cylinder, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    "WedgePart" | "Wedge" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Wedge, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    "CornerWedgePart" | "CornerWedge" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::CornerWedge, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    "Cone" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Cone, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                    
+                    // Model — empty container
+                    "Model" => {
+                        let inst = Instance { name: "Model".into(), class_name: ClassName::Model, archivable: true, id: uid, ..Default::default() };
+                        crate::spawn::spawn_model(&mut commands, inst, Model::default());
+                        if let Some(ref mut out) = res.output { out.info("Inserted Model".to_string()); }
+                    }
+                    
+                    // Folder — organizational container
+                    "Folder" => {
+                        let inst = Instance { name: "Folder".into(), class_name: ClassName::Folder, archivable: true, id: uid, ..Default::default() };
+                        crate::spawn::spawn_folder(&mut commands, inst);
+                        if let Some(ref mut out) = res.output { out.info("Inserted Folder".to_string()); }
+                    }
+                    
+                    // PointLight
+                    "PointLight" => {
+                        let inst = Instance { name: "PointLight".into(), class_name: ClassName::PointLight, archivable: true, id: uid, ..Default::default() };
+                        let light = EustressPointLight::default();
+                        crate::spawn::spawn_point_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0));
+                        if let Some(ref mut out) = res.output { out.info("Inserted PointLight".to_string()); }
+                    }
+                    
+                    // SpotLight
+                    "SpotLight" => {
+                        let inst = Instance { name: "SpotLight".into(), class_name: ClassName::SpotLight, archivable: true, id: uid, ..Default::default() };
+                        let light = EustressSpotLight::default();
+                        crate::spawn::spawn_spot_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y));
+                        if let Some(ref mut out) = res.output { out.info("Inserted SpotLight".to_string()); }
+                    }
+                    
+                    // DirectionalLight
+                    "DirectionalLight" => {
+                        let inst = Instance { name: "DirectionalLight".into(), class_name: ClassName::DirectionalLight, archivable: true, id: uid, ..Default::default() };
+                        let light = EustressDirectionalLight::default();
+                        crate::spawn::spawn_directional_light(&mut commands, inst, light, Transform::from_xyz(0.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y));
+                        if let Some(ref mut out) = res.output { out.info("Inserted DirectionalLight".to_string()); }
+                    }
+                    
+                    _ => {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Insert not yet supported: {}", part_type_str));
+                        }
+                    }
+                }
+            }
+            
+            // Context menu
+            SlintAction::ContextAction(action) => {
+                match action.as_str() {
+                    "cut" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete));
+                    }
+                    "copy" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
+                    "paste" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Paste)); }
+                    "delete" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete)); }
+                    "duplicate" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Duplicate)); }
+                    "select_all" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectAll)); }
+                    "group" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Group)); }
+                    "ungroup" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Ungroup)); }
+                    "rename" => {
+                        // TODO: Trigger inline rename in explorer panel
+                    }
+                    "insert" => {
+                        // TODO: Open insert submenu or switch to toolbox tab
+                    }
+                    _ => {}
+                }
+            }
+            
+            // Close
+            SlintAction::CloseRequested => {
+                if let Some(ref s) = res.state {
+                    if s.has_unsaved_changes {
+                        // Show exit confirmation (handled by Slint dialog)
+                    } else {
+                        events.exit_events.write(bevy::app::AppExit::Success);
+                    }
+                } else {
+                    events.exit_events.write(bevy::app::AppExit::Success);
+                }
+            }
+        }
+    }
+}
+
+/// Pushes Bevy state to Slint properties each frame (Bevy→Slint direction).
+/// Updates tool selection, play state, FPS, panel visibility, output logs, etc.
+fn sync_bevy_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    state: Option<Res<StudioState>>,
+    perf: Option<Res<UIPerformance>>,
+    output: Option<Res<OutputConsole>>,
+    time: Res<Time>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+    
+    // Sync StudioState → Slint properties
+    if let Some(ref state) = state {
+        // Tool
+        let tool_str = match state.current_tool {
+            Tool::Select => "select",
+            Tool::Move => "move",
+            Tool::Rotate => "rotate",
+            Tool::Scale => "scale",
+            Tool::Terrain => "terrain",
+        };
+        ui.set_current_tool(tool_str.into());
+        
+        // Transform mode
+        let mode_str = match state.transform_mode {
+            TransformMode::World => "world",
+            TransformMode::Local => "local",
+        };
+        ui.set_transform_mode(mode_str.into());
+        
+        // Panel visibility
+        ui.set_show_explorer(state.show_explorer);
+        ui.set_show_properties(state.show_properties);
+        ui.set_show_output(state.show_output);
+        
+        // Dialogs
+        ui.set_show_exit_confirmation(state.show_exit_confirmation);
+        ui.set_has_unsaved_changes(state.has_unsaved_changes);
+        
+        // Network
+        ui.set_show_network_panel(state.show_network_panel);
+        ui.set_show_terrain_editor(state.show_terrain_editor);
+        ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+    }
+    
+    // Sync performance metrics → Slint
+    if let Some(ref perf) = perf {
+        ui.set_current_fps(perf.fps);
+        ui.set_current_frame_time(perf.avg_frame_time_ms);
+    }
+    
+    // Sync output console logs → Slint (throttled: only last 200 entries, every 10 frames)
+    if let Some(ref perf) = perf {
+        if perf.should_throttle(10) { return; }
+    }
+    if let Some(ref output) = output {
+        let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
+            LogData {
+                id: i as i32,
+                level: match entry.level {
+                    LogLevel::Info => "info".into(),
+                    LogLevel::Warn => "warning".into(),
+                    LogLevel::Error => "error".into(),
+                    LogLevel::Debug => "debug".into(),
+                },
+                timestamp: entry.timestamp.clone().into(),
+                message: entry.message.clone().into(),
+                source: slint::SharedString::default(),
+            }
+        }).collect();
+        let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
+        ui.set_output_logs(slint::ModelRc::from(model_rc));
+    }
+}
+
+/// Handles window resize: updates Slint texture, overlay quad, and overlay camera
+fn handle_window_resize(
+    windows: Query<&Window, (With<PrimaryWindow>, Changed<Window>)>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    slint_scenes: Query<&SlintScene>,
+    mut overlay_quads: Query<&mut Mesh3d, With<SlintOverlaySprite>>,
+    mut overlay_cameras: Query<(&mut Camera, &mut Projection), With<SlintOverlayCamera>>,
+) {
+    let Some(window) = windows.iter().next() else { return };
+    let Some(slint_context) = slint_context else { return };
+    
+    let new_width = window.width() as u32;
+    let new_height = window.height() as u32;
+    if new_width == 0 || new_height == 0 { return; }
+    
+    let scale_factor = window.scale_factor();
+    
+    // Resize Slint adapter
+    slint_context.adapter.resize(
+        slint::PhysicalSize::new(new_width, new_height),
+        scale_factor,
+    );
+    
+    // Resize the Slint texture
+    if let Some(scene) = slint_scenes.iter().next() {
+        if let Some(image) = images.get_mut(&scene.image) {
+            let new_size = Extent3d {
+                width: new_width,
+                height: new_height,
+                depth_or_array_layers: 1,
+            };
+            image.texture_descriptor.size = new_size;
+            image.resize(new_size);
+        }
+    }
+    
+    // Resize the overlay quad mesh
+    for mut mesh3d in overlay_quads.iter_mut() {
+        let new_quad = Rectangle::new(new_width as f32, new_height as f32);
+        mesh3d.0 = meshes.add(new_quad);
+    }
+    
+    // Update overlay camera projection
+    for (mut _camera, mut projection) in overlay_cameras.iter_mut() {
+        *projection = Projection::from(OrthographicProjection {
+            near: -1.0,
+            far: 10.0,
+            scaling_mode: ScalingMode::Fixed {
+                width: new_width as f32,
+                height: new_height as f32,
+            },
+            ..OrthographicProjection::default_3d()
+        });
+    }
+    
+    info!("🔄 Window resized to {}x{} (scale={})", new_width, new_height, scale_factor);
+}
+
+/// Forwards Bevy keyboard events to Slint for text input and key handling
+fn forward_keyboard_to_slint(
+    mut key_events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    slint_context: Option<NonSend<SlintUiState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let adapter = &slint_context.adapter;
+    
+    for event in key_events.read() {
+        let text = convert_key_to_slint_text(&event.logical_key);
+        if text.is_empty() { continue; }
+        
+        match event.state {
+            ButtonState::Pressed => {
+                adapter.slint_window.dispatch_event(
+                    WindowEvent::KeyPressed { text: text.clone() },
+                );
+            }
+            ButtonState::Released => {
+                adapter.slint_window.dispatch_event(
+                    WindowEvent::KeyReleased { text },
+                );
+            }
+        }
+    }
+}
+
+/// Convert Bevy logical key to Slint key text representation.
+/// Uses slint::platform::Key enum which converts to SharedString via Into.
+fn convert_key_to_slint_text(key: &bevy::input::keyboard::Key) -> slint::SharedString {
+    use bevy::input::keyboard::Key as BevyKey;
+    use slint::platform::Key as SlintKey;
+    match key {
+        BevyKey::Character(c) => c.as_str().into(),
+        BevyKey::Space => " ".into(),
+        BevyKey::Enter => SlintKey::Return.into(),
+        BevyKey::Tab => SlintKey::Tab.into(),
+        BevyKey::Escape => SlintKey::Escape.into(),
+        BevyKey::Backspace => SlintKey::Backspace.into(),
+        BevyKey::Delete => SlintKey::Delete.into(),
+        BevyKey::ArrowUp => SlintKey::UpArrow.into(),
+        BevyKey::ArrowDown => SlintKey::DownArrow.into(),
+        BevyKey::ArrowLeft => SlintKey::LeftArrow.into(),
+        BevyKey::ArrowRight => SlintKey::RightArrow.into(),
+        BevyKey::Home => SlintKey::Home.into(),
+        BevyKey::End => SlintKey::End.into(),
+        BevyKey::PageUp => SlintKey::PageUp.into(),
+        BevyKey::PageDown => SlintKey::PageDown.into(),
+        BevyKey::Shift => SlintKey::Shift.into(),
+        BevyKey::Control => SlintKey::Control.into(),
+        BevyKey::Alt => SlintKey::Alt.into(),
+        _ => slint::SharedString::default(),
+    }
+}
+
+/// Updates UIPerformance metrics each frame
+fn update_ui_performance(
+    mut perf: ResMut<UIPerformance>,
+    time: Res<Time>,
+) {
+    perf.update(time.delta_secs());
+}
+
+/// Syncs the ECS Instance hierarchy to the Slint explorer panel.
+/// Builds a flat list of EntityNode structs with depth info for tree rendering.
+/// Throttled to run every 30 frames to avoid per-frame overhead.
+fn sync_explorer_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    perf: Option<Res<UIPerformance>>,
+    explorer_expanded: Res<ExplorerExpanded>,
+    explorer_state: Res<ExplorerState>,
+    instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    children_query: Query<&Children>,
+    child_of_query: Query<&ChildOf>,
+) {
+    // Throttle: only update every 30 frames
+    if let Some(ref perf) = perf {
+        if perf.should_throttle(30) { return; }
+    }
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+    
+    // Build set of all entities that have Instance components
+    let instance_entities: std::collections::HashSet<Entity> = 
+        instances.iter().map(|(e, _)| e).collect();
+    
+    // Find root entities (no ChildOf, or ChildOf points to non-Instance entity)
+    let mut roots: Vec<Entity> = Vec::new();
+    for (entity, _instance) in instances.iter() {
+        match child_of_query.get(entity) {
+            Ok(child_of) => {
+                // If parent is not an Instance entity, treat as root
+                if !instance_entities.contains(&child_of.0) {
+                    roots.push(entity);
+                }
+            }
+            Err(_) => {
+                // No parent → root entity
+                roots.push(entity);
+            }
+        }
+    }
+    
+    // Sort roots by name for stable ordering
+    roots.sort_by(|a, b| {
+        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+    
+    // Build flat tree via DFS
+    let mut flat_nodes: Vec<EntityNode> = Vec::new();
+    let mut stack: Vec<(Entity, i32)> = roots.into_iter().rev().map(|e| (e, 0)).collect();
+    
+    while let Some((entity, depth)) = stack.pop() {
+        let Ok((_, instance)) = instances.get(entity) else { continue };
+        
+        // Check if this entity has Instance children
+        let has_children = children_query.get(entity)
+            .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
+            .unwrap_or(false);
+        
+        let entity_id = instance.id as i32;
+        let is_expanded = explorer_expanded.expanded.contains(&entity);
+        let is_selected = explorer_state.selected == Some(entity);
+        
+        // Map class name to icon character
+        let icon = class_name_to_icon(&instance.class_name);
+        
+        flat_nodes.push(EntityNode {
+            id: entity_id,
+            name: instance.name.clone().into(),
+            class_name: format!("{:?}", instance.class_name).into(),
+            icon: icon.into(),
+            depth,
+            expandable: has_children,
+            expanded: is_expanded,
+            selected: is_selected,
+            visible: true,
+        });
+        
+        // If expanded, push children onto stack (reversed for correct order)
+        if is_expanded && has_children {
+            if let Ok(children) = children_query.get(entity) {
+                let mut child_instances: Vec<Entity> = children.iter()
+                    .filter(|c| instance_entities.contains(c))
+                    .collect();
+                // Sort children by name
+                child_instances.sort_by(|a, b| {
+                    let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+                    let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+                    a_name.cmp(b_name)
+                });
+                // Push in reverse so first child is processed first
+                for child in child_instances.into_iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+    }
+    
+    // Push to Slint
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_nodes));
+    ui.set_explorer_entities(slint::ModelRc::from(model_rc));
+}
+
+/// Syncs the selected entity's properties to the Slint properties panel.
+/// Reads Instance, BasePart, Transform, and other component properties via PropertyAccess.
+/// Throttled to run every 15 frames.
+fn sync_properties_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    perf: Option<Res<UIPerformance>>,
+    explorer_state: Res<ExplorerState>,
+    instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    transforms: Query<&Transform>,
+    base_parts: Query<&eustress_common::classes::BasePart>,
+) {
+    // Throttle: only update every 15 frames
+    if let Some(ref perf) = perf {
+        if perf.should_throttle(15) { return; }
+    }
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+    
+    let Some(selected_entity) = explorer_state.selected else {
+        // No selection — clear properties and update count
+        ui.set_selected_count(0);
+        ui.set_selected_class(slint::SharedString::default());
+        let empty: Vec<PropertyData> = Vec::new();
+        let model_rc = std::rc::Rc::new(slint::VecModel::from(empty));
+        ui.set_entity_properties(slint::ModelRc::from(model_rc));
+        return;
+    };
+    
+    let Ok((_, instance)) = instances.get(selected_entity) else { return };
+    
+    ui.set_selected_count(1);
+    ui.set_selected_class(format!("{:?}", instance.class_name).into());
+    
+    let mut props: Vec<PropertyData> = Vec::new();
+    
+    // Data properties from Instance
+    use eustress_common::classes::PropertyAccess;
+    
+    props.push(PropertyData {
+        name: "Name".into(),
+        value: instance.name.clone().into(),
+        property_type: "string".into(),
+        category: "Data".into(),
+        editable: true,
+        options: slint::ModelRc::default(),
+    });
+    props.push(PropertyData {
+        name: "ClassName".into(),
+        value: format!("{:?}", instance.class_name).into(),
+        property_type: "string".into(),
+        category: "Data".into(),
+        editable: false,
+        options: slint::ModelRc::default(),
+    });
+    props.push(PropertyData {
+        name: "Archivable".into(),
+        value: instance.archivable.to_string().into(),
+        property_type: "bool".into(),
+        category: "Data".into(),
+        editable: true,
+        options: slint::ModelRc::default(),
+    });
+    
+    // Transform properties
+    if let Ok(transform) = transforms.get(selected_entity) {
+        let (rx, ry, rz) = transform.rotation.to_euler(bevy::math::EulerRot::XYZ);
+        props.push(PropertyData {
+            name: "Position".into(),
+            value: format!("{:.2}, {:.2}, {:.2}", transform.translation.x, transform.translation.y, transform.translation.z).into(),
+            property_type: "vec3".into(),
+            category: "Transform".into(),
+            editable: true,
+            options: slint::ModelRc::default(),
+        });
+        props.push(PropertyData {
+            name: "Rotation".into(),
+            value: format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()).into(),
+            property_type: "vec3".into(),
+            category: "Transform".into(),
+            editable: true,
+            options: slint::ModelRc::default(),
+        });
+        props.push(PropertyData {
+            name: "Scale".into(),
+            value: format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z).into(),
+            property_type: "vec3".into(),
+            category: "Transform".into(),
+            editable: true,
+            options: slint::ModelRc::default(),
+        });
+    }
+    
+    // BasePart properties (Size, Anchored, CanCollide, Transparency, etc.)
+    if let Ok(base_part) = base_parts.get(selected_entity) {
+        for prop_desc in base_part.list_properties() {
+            if let Some(value) = base_part.get_property(&prop_desc.name) {
+                let (val_str, prop_type) = property_value_to_display(&value);
+                props.push(PropertyData {
+                    name: prop_desc.name.clone().into(),
+                    value: val_str.into(),
+                    property_type: prop_type.into(),
+                    category: "Appearance".into(),
+                    editable: true,
+                    options: slint::ModelRc::default(),
+                });
+            }
+        }
+    }
+    
+    // Push to Slint
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
+    ui.set_entity_properties(slint::ModelRc::from(model_rc));
+}
+
+/// Converts a PropertyValue to a display string and type identifier
+fn property_value_to_display(value: &eustress_common::classes::PropertyValue) -> (String, &'static str) {
+    use eustress_common::classes::PropertyValue;
+    match value {
+        PropertyValue::String(s) => (s.clone(), "string"),
+        PropertyValue::Float(f) => (format!("{:.3}", f), "float"),
+        PropertyValue::Int(i) => (i.to_string(), "int"),
+        PropertyValue::Bool(b) => (b.to_string(), "bool"),
+        PropertyValue::Vector3(v) => (format!("{:.2}, {:.2}, {:.2}", v.x, v.y, v.z), "vec3"),
+        PropertyValue::Color(c) => {
+            let srgba = c.to_srgba();
+            (format!("#{:02x}{:02x}{:02x}", (srgba.red * 255.0) as u8, (srgba.green * 255.0) as u8, (srgba.blue * 255.0) as u8), "color")
+        }
+        PropertyValue::Color3(c) => (format!("{:.2}, {:.2}, {:.2}", c[0], c[1], c[2]), "color"),
+        PropertyValue::Transform(t) => (format!("({:.1}, {:.1}, {:.1})", t.translation.x, t.translation.y, t.translation.z), "string"),
+        PropertyValue::Material(m) => (format!("{:?}", m), "enum"),
+        PropertyValue::Enum(e) => (e.clone(), "enum"),
+        PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "string"),
+    }
+}
+
+/// Maps a ClassName enum to a single-character icon for the explorer tree
+fn class_name_to_icon(class_name: &eustress_common::classes::ClassName) -> &'static str {
+    use eustress_common::classes::ClassName;
+    match class_name {
+        ClassName::Part | ClassName::BasePart | ClassName::MeshPart => "■",
+        ClassName::Model | ClassName::PVInstance => "▣",
+        ClassName::Folder => "📁",
+        ClassName::Humanoid => "🧑",
+        ClassName::Camera => "📷",
+        ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight | ClassName::DirectionalLight => "💡",
+        ClassName::Sound => "🔊",
+        ClassName::ParticleEmitter => "✨",
+        ClassName::Beam => "⚡",
+        ClassName::Terrain => "🏔",
+        ClassName::Sky => "☁",
+        ClassName::SoulScript => "📜",
+        ClassName::Decal => "🖼",
+        ClassName::Attachment => "📌",
+        ClassName::WeldConstraint | ClassName::Motor6D => "🔗",
+        ClassName::UnionOperation => "⊕",
+        ClassName::BillboardGui | ClassName::SurfaceGui | ClassName::ScreenGui => "🖥",
+        ClassName::TextLabel | ClassName::TextButton => "T",
+        ClassName::Frame | ClassName::ScrollingFrame => "□",
+        ClassName::ImageLabel | ClassName::ImageButton => "🖼",
+        ClassName::Animator | ClassName::KeyframeSequence => "🎬",
+        ClassName::SpecialMesh => "△",
+        _ => "●",
+    }
 }

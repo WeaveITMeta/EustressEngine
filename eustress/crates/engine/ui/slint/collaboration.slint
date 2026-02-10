@@ -48,10 +48,11 @@ export component Collaboration inherits Rectangle {
                 spacing: 12px;
                 alignment: center;
                 
-                Text {
-                    text: "👥";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/players.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 

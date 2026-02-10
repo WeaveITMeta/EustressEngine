@@ -167,12 +167,22 @@ export component AIGeneration inherits Rectangle {
                         clicked => { root.on-set-mode("mesh"); }
                     }
                     
-                    Text {
-                        text: "🧊 Mesh";
-                        color: root.generation-mode == "mesh" ? Theme.text-primary : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    HorizontalBox {
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/mesh.svg");
+                            image-fit: contain;
+                            horizontal-alignment: center;
+                        }
+                        
+                        Text {
+                            text: "Mesh";
+                            color: root.generation-mode == "mesh" ? Theme.text-primary : Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
                 
@@ -186,7 +196,7 @@ export component AIGeneration inherits Rectangle {
                     }
                     
                     Text {
-                        text: "🎨 Texture";
+                        text: "Texture";
                         color: root.generation-mode == "texture" ? Theme.text-primary : Theme.text-secondary;
                         font-size: 12px;
                         horizontal-alignment: center;
@@ -204,7 +214,7 @@ export component AIGeneration inherits Rectangle {
                     }
                     
                     Text {
-                        text: "🌍 Scene";
+                        text: "Scene";
                         color: root.generation-mode == "scene" ? Theme.text-primary : Theme.text-secondary;
                         font-size: 12px;
                         horizontal-alignment: center;
@@ -244,7 +254,7 @@ export component AIGeneration inherits Rectangle {
                         }
                         
                         Text {
-                            text: "✨ Generate";
+                            text: "Generate";
                             color: root.prompt-text == "" ? Theme.text-secondary : white;
                             font-size: 12px;
                             horizontal-alignment: center;
@@ -301,10 +311,11 @@ export component AIGeneration inherits Rectangle {
             VerticalBox {
                 alignment: center;
                 
-                Text {
-                    text: "✨";
-                    color: Theme.text-secondary;
-                    font-size: 32px;
+                Image {
+                    width: 32px;
+                    height: 32px;
+                    source: @image-url("../../assets/icons/ui/sparkle.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 

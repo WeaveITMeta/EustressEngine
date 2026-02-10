@@ -54,7 +54,7 @@ export component StressTestDialog inherits Rectangle {
             // Header
             HorizontalBox {
                 Text {
-                    text: "🔥 Stress Test";
+                    text: "Stress Test";
                     color: Theme.text-primary;
                     font-size: 20px;
                     font-weight: 600;
@@ -72,10 +72,11 @@ export component StressTestDialog inherits Rectangle {
                         clicked => { root.on-close(); }
                     }
                     
-                    Text {
-                        text: "✕";
-                        color: Theme.text-secondary;
-                        font-size: 16px;
+                    Image {
+                        width: 12px;
+                        height: 12px;
+                        source: @image-url("../../assets/icons/ui/close.svg");
+                        image-fit: contain;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }

@@ -3,8 +3,122 @@
 // Top toolbar with menus, tools, and play controls
 // ============================================================================
 
-import { HorizontalBox, Button, ComboBox } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
+
+// Grouped toolbar section with icon row + compact category label
+component ToolGroup inherits Rectangle {
+    in property <string> label: "";
+    
+    height: 42px;
+    background: transparent;
+    
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+        
+        // Icon row
+        HorizontalLayout {
+            height: 28px;
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 2px;
+            alignment: center;
+            
+            @children
+        }
+        
+        // Category label
+        Text {
+            height: 14px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 9px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Vertical group divider with subtle line
+component GroupDivider inherits Rectangle {
+    width: 1px;
+    height: 36px;
+    background: Theme.border-color;
+}
+
+// Dropdown menu item — clickable row with label and shortcut
+component DropdownItem inherits Rectangle {
+    in property <string> label: "";
+    in property <string> shortcut: "";
+    in property <bool> enabled: true;
+    callback clicked();
+    
+    height: 24px;
+    background: item-touch.has-hover && root.enabled ? Theme.button-hover : transparent;
+    opacity: root.enabled ? 1.0 : 0.4;
+    
+    item-touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+    
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 12px;
+        
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        
+        if root.shortcut != "": Text {
+            text: root.shortcut;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Dropdown section header
+component DropdownHeader inherits Rectangle {
+    in property <string> label: "";
+    
+    height: 20px;
+    
+    HorizontalLayout {
+        padding-left: 10px;
+        
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 9px;
+            font-weight: 600;
+            vertical-alignment: center;
+            letter-spacing: 0.5px;
+        }
+    }
+}
+
+// Dropdown separator line
+component DropdownSeparator inherits Rectangle {
+    height: 5px;
+    
+    Rectangle {
+        y: 2px;
+        height: 1px;
+        x: 8px;
+        width: parent.width - 16px;
+        background: Theme.border-color;
+    }
+}
 
 export component Ribbon inherits Rectangle {
     // Properties
@@ -13,12 +127,22 @@ export component Ribbon inherits Rectangle {
     in property <string> play-state: "stopped";
     in property <bool> has-unsaved-changes: false;
     
+    // Panel visibility (bound from main)
+    in-out property <bool> show-explorer: true;
+    in-out property <bool> show-properties: true;
+    in-out property <bool> show-output: true;
+    in-out property <bool> show-assets: false;
+    in-out property <bool> show-collaboration: false;
+    in-out property <bool> show-command-bar: false;
+    
     // File callbacks
     callback on-new-scene();
     callback on-open-scene();
     callback on-save-scene();
     callback on-save-scene-as();
     callback on-publish();
+    callback on-publish-as();
+    callback on-exit();
     
     // Edit callbacks
     callback on-undo();
@@ -28,6 +152,9 @@ export component Ribbon inherits Rectangle {
     callback on-paste();
     callback on-delete();
     callback on-duplicate();
+    callback on-select-all();
+    callback on-group();
+    callback on-ungroup();
     
     // Tool callbacks
     callback on-select-tool(string);
@@ -39,233 +166,604 @@ export component Ribbon inherits Rectangle {
     callback on-pause();
     callback on-stop();
     
+    // View callbacks
+    callback on-focus-selection();
+    
+    // Network callbacks
+    callback on-start-server();
+    callback on-stop-server();
+    callback on-show-forge-connect();
+    callback on-show-network-panel();
+    callback on-show-stress-test();
+    
+    // Data callbacks
+    callback on-show-global-sources();
+    callback on-show-domains();
+    callback on-show-global-variables();
+    callback on-show-sync-domain();
+    callback on-add-data-source(string);
+    
+    // Terrain callbacks
+    callback on-spawn-terrain(string);
+    callback on-toggle-terrain-edit();
+    callback on-set-terrain-brush(string);
+    callback on-import-heightmap();
+    callback on-export-heightmap();
+    
+    // Plugin callbacks
+    callback on-plugin-action(string);
+    
     // Other callbacks
     callback on-toggle-command-bar();
     callback on-show-keybindings();
     callback on-show-soul-settings();
+    callback on-open-url(string);
+    callback on-menu-action(string);
     
-    height: 72px;
+    height: 68px;
     background: Theme.ribbon-background;
+    
+    // Bottom edge separator
+    Rectangle {
+        y: parent.height - 1px;
+        width: 100%;
+        height: 1px;
+        background: Theme.border-color;
+    }
     
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
         
-        // Menu bar row
+        // ── Menu bar row ──
         Rectangle {
-            height: 28px;
+            height: 24px;
             background: Theme.ribbon-background;
             
-            HorizontalBox {
+            HorizontalLayout {
                 padding-left: 4px;
                 padding-right: 4px;
                 spacing: 0px;
+                alignment: start;
                 
-                // File menu
-                menu-file := Rectangle {
-                    width: 40px;
+                // ── FILE ──
+                Rectangle {
+                    width: self.preferred-width;
+                    preferred-width: file-label.preferred-width + 12px;
                     background: file-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    file-touch := TouchArea {
-                        clicked => {
-                            // Toggle file menu popup
-                        }
-                    }
+                    file-touch := TouchArea { clicked => { file-popup.show(); } }
+                    file-label := Text { text: "File"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "File";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    file-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownItem { label: "New Scene"; shortcut: "Ctrl+N"; clicked => { root.on-new-scene(); } }
+                                DropdownItem { label: "Open Scene..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
+                                DropdownItem { label: "Save Scene"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
+                                DropdownItem { label: "Save As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Publish..."; shortcut: "Ctrl+P"; clicked => { root.on-publish(); } }
+                                DropdownItem { label: "Publish As..."; clicked => { root.on-publish-as(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Keyboard Shortcuts..."; clicked => { root.on-show-keybindings(); } }
+                                DropdownItem { label: "Soul Settings..."; clicked => { root.on-show-soul-settings(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Exit"; clicked => { root.on-exit(); } }
+                            }
+                        }
                     }
                 }
                 
-                // Edit menu
+                // ── EDIT ──
                 Rectangle {
-                    width: 40px;
+                    width: self.preferred-width;
+                    preferred-width: edit-label.preferred-width + 12px;
                     background: edit-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    edit-touch := TouchArea {}
+                    edit-touch := TouchArea { clicked => { edit-popup.show(); } }
+                    edit-label := Text { text: "Edit"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Edit";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    edit-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownItem { label: "Undo"; shortcut: "Ctrl+Z"; clicked => { root.on-undo(); } }
+                                DropdownItem { label: "Redo"; shortcut: "Ctrl+Y"; clicked => { root.on-redo(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Copy"; shortcut: "Ctrl+C"; clicked => { root.on-copy(); } }
+                                DropdownItem { label: "Cut"; shortcut: "Ctrl+X"; clicked => { root.on-cut(); } }
+                                DropdownItem { label: "Paste"; shortcut: "Ctrl+V"; clicked => { root.on-paste(); } }
+                                DropdownItem { label: "Duplicate"; shortcut: "Ctrl+D"; clicked => { root.on-duplicate(); } }
+                                DropdownItem { label: "Delete"; shortcut: "Del"; clicked => { root.on-delete(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Select All"; shortcut: "Ctrl+A"; clicked => { root.on-select-all(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Group"; shortcut: "Ctrl+G"; clicked => { root.on-group(); } }
+                                DropdownItem { label: "Ungroup"; shortcut: "Ctrl+U"; clicked => { root.on-ungroup(); } }
+                            }
+                        }
                     }
                 }
                 
-                // View menu
+                // ── VIEW ──
                 Rectangle {
-                    width: 45px;
+                    width: self.preferred-width;
+                    preferred-width: view-label.preferred-width + 12px;
                     background: view-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    view-touch := TouchArea {}
+                    view-touch := TouchArea { clicked => { view-popup.show(); } }
+                    view-label := Text { text: "View"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "View";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    view-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "PANELS"; }
+                                DropdownItem { label: root.show-explorer ? "Explorer  [on]" : "Explorer  [off]"; shortcut: "Ctrl+1"; clicked => { root.show-explorer = !root.show-explorer; } }
+                                DropdownItem { label: root.show-properties ? "Properties  [on]" : "Properties  [off]"; shortcut: "Ctrl+2"; clicked => { root.show-properties = !root.show-properties; } }
+                                DropdownItem { label: root.show-output ? "Output  [on]" : "Output  [off]"; shortcut: "Ctrl+3"; clicked => { root.show-output = !root.show-output; } }
+                                DropdownItem { label: root.show-assets ? "Assets  [on]" : "Assets  [off]"; shortcut: "Ctrl+4"; clicked => { root.show-assets = !root.show-assets; } }
+                                DropdownItem { label: root.show-collaboration ? "Collaborate  [on]" : "Collaborate  [off]"; shortcut: "Ctrl+5"; clicked => { root.show-collaboration = !root.show-collaboration; } }
+                                DropdownItem { label: root.show-command-bar ? "Command Bar  [on]" : "Command Bar  [off]"; shortcut: "Ctrl+K"; clicked => { root.show-command-bar = !root.show-command-bar; } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "CAMERA"; }
+                                DropdownItem { label: "Focus Selection"; shortcut: "F"; clicked => { root.on-focus-selection(); } }
+                            }
+                        }
                     }
                 }
                 
-                // Insert menu
+                // ── INSERT ──
                 Rectangle {
-                    width: 50px;
+                    width: self.preferred-width;
+                    preferred-width: insert-label.preferred-width + 12px;
                     background: insert-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    insert-touch := TouchArea {}
+                    insert-touch := TouchArea { clicked => { insert-popup.show(); } }
+                    insert-label := Text { text: "Insert"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Insert";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    insert-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "PRIMITIVES"; }
+                                DropdownItem { label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
+                                DropdownItem { label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
+                                DropdownItem { label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
+                                DropdownItem { label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "OBJECTS"; }
+                                DropdownItem { label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
+                                DropdownItem { label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
+                                DropdownItem { label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
+                                DropdownItem { label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
+                                DropdownItem { label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "LIGHTING"; }
+                                DropdownItem { label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
+                                DropdownItem { label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
+                                DropdownItem { label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "UI"; }
+                                DropdownItem { label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
+                                DropdownItem { label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
+                                DropdownItem { label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
+                                DropdownItem { label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
+                            }
+                        }
                     }
                 }
                 
-                // Model menu
+                // ── MODEL ──
                 Rectangle {
-                    width: 50px;
+                    width: self.preferred-width;
+                    preferred-width: model-label.preferred-width + 12px;
                     background: model-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    model-touch := TouchArea {}
+                    model-touch := TouchArea { clicked => { model-popup.show(); } }
+                    model-label := Text { text: "Model"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Model";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    model-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownItem { label: "Group"; shortcut: "Ctrl+G"; clicked => { root.on-group(); } }
+                                DropdownItem { label: "Ungroup"; shortcut: "Ctrl+U"; clicked => { root.on-ungroup(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Union"; clicked => { root.on-menu-action("model:union"); } }
+                                DropdownItem { label: "Negate"; clicked => { root.on-menu-action("model:negate"); } }
+                                DropdownItem { label: "Separate"; clicked => { root.on-menu-action("model:separate"); } }
+                            }
+                        }
                     }
                 }
                 
-                // Test menu
+                // ── TEST ──
                 Rectangle {
-                    width: 40px;
+                    width: self.preferred-width;
+                    preferred-width: test-label.preferred-width + 12px;
                     background: test-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    test-touch := TouchArea {}
+                    test-touch := TouchArea { clicked => { test-popup.show(); } }
+                    test-label := Text { text: "Test"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Test";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    test-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownItem { label: "Run"; shortcut: "F7"; clicked => { root.on-play-solo(); } }
+                                DropdownItem { label: "Play"; shortcut: "F5"; clicked => { root.on-play-with-character(); } }
+                                DropdownItem { label: "Pause"; shortcut: "F6"; clicked => { root.on-pause(); } }
+                                DropdownItem { label: "Stop"; shortcut: "F8"; clicked => { root.on-stop(); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Stress Test..."; clicked => { root.on-show-stress-test(); } }
+                            }
+                        }
                     }
                 }
                 
-                // Plugins menu
+                // ── PLUGINS ──
                 Rectangle {
-                    width: 55px;
+                    width: self.preferred-width;
+                    preferred-width: plugins-label.preferred-width + 12px;
                     background: plugins-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    plugins-touch := TouchArea {}
+                    plugins-touch := TouchArea { clicked => { plugins-popup.show(); } }
+                    plugins-label := Text { text: "Plugins"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Plugins";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    plugins-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownItem { label: "View Plugins Folder"; clicked => { root.on-plugin-action("system:open-plugins-folder"); } }
+                                DropdownItem { label: "Reload Plugins"; clicked => { root.on-plugin-action("system:reload-plugins"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "INSTALLED"; }
+                                DropdownItem { label: "MindSpace"; clicked => { root.on-plugin-action("mindspace:toggle-panel"); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Plugin Marketplace..."; clicked => { root.on-plugin-action("system:marketplace"); } }
+                            }
+                        }
                     }
                 }
                 
-                // Network menu
+                // ── NETWORK ──
                 Rectangle {
-                    width: 60px;
+                    width: self.preferred-width;
+                    preferred-width: network-label.preferred-width + 12px;
                     background: network-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    network-touch := TouchArea {}
+                    network-touch := TouchArea { clicked => { network-popup.show(); } }
+                    network-label := Text { text: "Network"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Network";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    network-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "SERVER"; }
+                                DropdownItem { label: "Start Local Server"; shortcut: "F9"; clicked => { root.on-start-server(); } }
+                                DropdownItem { label: "Stop Server"; clicked => { root.on-stop-server(); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "FORGE CLOUD"; }
+                                DropdownItem { label: "Connect to Forge..."; clicked => { root.on-show-forge-connect(); } }
+                                DropdownItem { label: "Allocate Server"; clicked => { root.on-plugin-action("network:forge-allocate"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "BENCHMARK"; }
+                                DropdownItem { label: "Network Panel"; clicked => { root.on-show-network-panel(); } }
+                                DropdownItem { label: "Start Stress Test..."; clicked => { root.on-show-stress-test(); } }
+                            }
+                        }
                     }
                 }
                 
-                // Data menu
+                // ── DATA ──
                 Rectangle {
-                    width: 40px;
+                    width: self.preferred-width;
+                    preferred-width: data-label.preferred-width + 12px;
                     background: data-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    data-touch := TouchArea {}
+                    data-touch := TouchArea { clicked => { data-popup.show(); } }
+                    data-label := Text { text: "Data"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Data";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    data-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "CONFIGURATION"; }
+                                DropdownItem { label: "Manage Global Sources..."; clicked => { root.on-show-global-sources(); } }
+                                DropdownItem { label: "Manage Domains..."; clicked => { root.on-show-domains(); } }
+                                DropdownItem { label: "Global Variables..."; clicked => { root.on-show-global-variables(); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "SYNC"; }
+                                DropdownItem { label: "Sync Domain to Object Type..."; clicked => { root.on-show-sync-domain(); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "QUICK ADD SOURCE"; }
+                                DropdownItem { label: "HTTP / REST API"; clicked => { root.on-add-data-source("REST"); } }
+                                DropdownItem { label: "GraphQL"; clicked => { root.on-add-data-source("GraphQL"); } }
+                                DropdownItem { label: "PostgreSQL"; clicked => { root.on-add-data-source("PostgreSQL"); } }
+                                DropdownItem { label: "CSV / Excel File"; clicked => { root.on-add-data-source("CSV"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "CLOUD PROVIDERS"; }
+                                DropdownItem { label: "Firebase"; clicked => { root.on-add-data-source("Firebase"); } }
+                                DropdownItem { label: "Supabase"; clicked => { root.on-add-data-source("Supabase"); } }
+                                DropdownItem { label: "AWS S3"; clicked => { root.on-add-data-source("S3"); } }
+                                DropdownItem { label: "Azure Blob"; clicked => { root.on-add-data-source("AzureBlob"); } }
+                                DropdownItem { label: "Oracle Cloud"; clicked => { root.on-add-data-source("Oracle"); } }
+                            }
+                        }
                     }
                 }
                 
-                // Terrain menu
+                // ── TERRAIN ──
                 Rectangle {
-                    width: 55px;
+                    width: self.preferred-width;
+                    preferred-width: terrain-label.preferred-width + 12px;
                     background: terrain-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    terrain-touch := TouchArea {}
+                    terrain-touch := TouchArea { clicked => { terrain-popup.show(); } }
+                    terrain-label := Text { text: "Terrain"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Terrain";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    terrain-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "GENERATE"; }
+                                DropdownItem { label: "Small (128m)"; clicked => { root.on-spawn-terrain("small"); } }
+                                DropdownItem { label: "Medium (512m)"; clicked => { root.on-spawn-terrain("medium"); } }
+                                DropdownItem { label: "Large (2km)"; clicked => { root.on-spawn-terrain("large"); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "Toggle Edit Mode"; shortcut: "T"; clicked => { root.on-toggle-terrain-edit(); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "BRUSH TOOLS"; }
+                                DropdownItem { label: "Raise"; shortcut: "1"; clicked => { root.on-set-terrain-brush("raise"); } }
+                                DropdownItem { label: "Lower"; shortcut: "2"; clicked => { root.on-set-terrain-brush("lower"); } }
+                                DropdownItem { label: "Smooth"; shortcut: "3"; clicked => { root.on-set-terrain-brush("smooth"); } }
+                                DropdownItem { label: "Flatten"; shortcut: "4"; clicked => { root.on-set-terrain-brush("flatten"); } }
+                                DropdownItem { label: "Paint"; shortcut: "5"; clicked => { root.on-set-terrain-brush("paint"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "ASSETS"; }
+                                DropdownItem { label: "Import Heightmap..."; clicked => { root.on-import-heightmap(); } }
+                                DropdownItem { label: "Export Heightmap..."; clicked => { root.on-export-heightmap(); } }
+                            }
+                        }
                     }
                 }
                 
-                // MindSpace menu
+                // ── MINDSPACE ──
                 Rectangle {
-                    width: 75px;
+                    width: self.preferred-width;
+                    preferred-width: mindspace-label.preferred-width + 12px;
                     background: mindspace-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    mindspace-touch := TouchArea {}
+                    mindspace-touch := TouchArea { clicked => { mindspace-popup.show(); } }
+                    mindspace-label := Text { text: "MindSpace"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "MindSpace";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    mindspace-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "PANEL"; }
+                                DropdownItem { label: "Toggle Panel"; shortcut: "Ctrl+M"; clicked => { root.on-plugin-action("mindspace:toggle-panel"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "LABELS"; }
+                                DropdownItem { label: "Add Label"; shortcut: "Ctrl+L"; clicked => { root.on-plugin-action("mindspace:add-label"); } }
+                                DropdownItem { label: "Remove Label"; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "CONNECTIONS"; }
+                                DropdownItem { label: "Connect Nodes"; shortcut: "Ctrl+K"; clicked => { root.on-plugin-action("mindspace:connect"); } }
+                                DropdownItem { label: "Search"; shortcut: "Ctrl+F"; clicked => { root.on-plugin-action("mindspace:search"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "FILE"; }
+                                DropdownItem { label: "New Mind Map"; clicked => { root.on-plugin-action("mindspace:new"); } }
+                                DropdownItem { label: "Export..."; clicked => { root.on-plugin-action("mindspace:export"); } }
+                                DropdownItem { label: "Import..."; clicked => { root.on-plugin-action("mindspace:import"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "AI TOOLS"; }
+                                DropdownItem { label: "AI Suggestions"; clicked => { root.on-plugin-action("mindspace:ai-suggest"); } }
+                                DropdownItem { label: "Auto Layout"; clicked => { root.on-plugin-action("mindspace:ai-layout"); } }
+                                DropdownItem { label: "Generate Summary"; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
+                            }
+                        }
                     }
                 }
                 
-                // Help menu
+                // ── HELP ──
                 Rectangle {
-                    width: 40px;
+                    width: self.preferred-width;
+                    preferred-width: help-label.preferred-width + 12px;
                     background: help-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
                     
-                    help-touch := TouchArea {}
+                    help-touch := TouchArea { clicked => { help-popup.show(); } }
+                    help-label := Text { text: "Help"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                     
-                    Text {
-                        text: "Help";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    help-popup := PopupWindow {
+                        x: 0px;
+                        y: parent.height;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+                            
+                            VerticalLayout {
+                                padding-top: 4px;
+                                padding-bottom: 4px;
+                                
+                                DropdownHeader { label: "DOCUMENTATION"; }
+                                DropdownItem { label: "Documentation"; clicked => { root.on-open-url("https://docs.eustress.dev"); } }
+                                DropdownItem { label: "API Reference"; clicked => { root.on-open-url("https://docs.eustress.dev/api"); } }
+                                DropdownItem { label: "Tutorials"; clicked => { root.on-open-url("https://docs.eustress.dev/tutorials"); } }
+                                DropdownItem { label: "Soul Scripting Guide"; clicked => { root.on-open-url("https://docs.eustress.dev/soul"); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "COMMUNITY"; }
+                                DropdownItem { label: "Website"; clicked => { root.on-open-url("https://eustress.dev"); } }
+                                DropdownItem { label: "Discord"; clicked => { root.on-open-url("https://discord.gg/eustress"); } }
+                                DropdownItem { label: "GitHub"; clicked => { root.on-open-url("https://github.com/eustressengine/eustress"); } }
+                                DropdownSeparator {}
+                                DropdownItem { label: "About Eustress Engine"; clicked => { root.on-menu-action("help:about"); } }
+                            }
+                        }
                     }
                 }
                 
@@ -273,12 +771,12 @@ export component Ribbon inherits Rectangle {
                 
                 // Unsaved indicator
                 if root.has-unsaved-changes: Rectangle {
-                    width: 80px;
+                    width: 70px;
                     
                     Text {
-                        text: "● Unsaved";
+                        text: "Unsaved";
                         color: Theme.text-warning;
-                        font-size: 11px;
+                        font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -286,272 +784,285 @@ export component Ribbon inherits Rectangle {
             }
         }
         
-        // Toolbar row
+        // ── Toolbar row — grouped sections with labels ──
         Rectangle {
             height: 44px;
             background: Theme.ribbon-background;
             
-            HorizontalBox {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 4px;
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
                 alignment: start;
                 
-                // File operations
-                IconButton {
-                    icon: "📄";
-                    tooltip: "New Scene (Ctrl+N)";
-                    clicked => { root.on-new-scene(); }
-                }
-                
-                IconButton {
-                    icon: "📂";
-                    tooltip: "Open Scene (Ctrl+O)";
-                    clicked => { root.on-open-scene(); }
-                }
-                
-                IconButton {
-                    icon: "💾";
-                    tooltip: "Save Scene (Ctrl+S)";
-                    clicked => { root.on-save-scene(); }
-                }
-                
-                ToolbarSeparator {}
-                
-                // Edit operations
-                IconButton {
-                    icon: "↩";
-                    tooltip: "Undo (Ctrl+Z)";
-                    clicked => { root.on-undo(); }
-                }
-                
-                IconButton {
-                    icon: "↪";
-                    tooltip: "Redo (Ctrl+Y)";
-                    clicked => { root.on-redo(); }
-                }
-                
-                ToolbarSeparator {}
-                
-                // Clipboard
-                IconButton {
-                    icon: "📋";
-                    tooltip: "Copy (Ctrl+C)";
-                    clicked => { root.on-copy(); }
-                }
-                
-                IconButton {
-                    icon: "✂";
-                    tooltip: "Cut (Ctrl+X)";
-                    clicked => { root.on-cut(); }
-                }
-                
-                IconButton {
-                    icon: "📎";
-                    tooltip: "Paste (Ctrl+V)";
-                    clicked => { root.on-paste(); }
-                }
-                
-                IconButton {
-                    icon: "🗑";
-                    tooltip: "Delete (Del)";
-                    clicked => { root.on-delete(); }
-                }
-                
-                IconButton {
-                    icon: "⧉";
-                    tooltip: "Duplicate (Ctrl+D)";
-                    clicked => { root.on-duplicate(); }
-                }
-                
-                ToolbarSeparator {}
-                
-                // Transform tools
-                IconButton {
-                    icon: "🖱";
-                    tooltip: "Select Tool (Q)";
-                    selected: root.current-tool == "select";
-                    clicked => { root.on-select-tool("select"); }
-                }
-                
-                IconButton {
-                    icon: "↔";
-                    tooltip: "Move Tool (W)";
-                    selected: root.current-tool == "move";
-                    clicked => { root.on-select-tool("move"); }
-                }
-                
-                IconButton {
-                    icon: "🔄";
-                    tooltip: "Rotate Tool (E)";
-                    selected: root.current-tool == "rotate";
-                    clicked => { root.on-select-tool("rotate"); }
-                }
-                
-                IconButton {
-                    icon: "⤢";
-                    tooltip: "Scale Tool (R)";
-                    selected: root.current-tool == "scale";
-                    clicked => { root.on-select-tool("scale"); }
-                }
-                
-                ToolbarSeparator {}
-                
-                // Transform space
-                Rectangle {
-                    width: 80px;
-                    height: 24px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
+                // ── FILE group ──
+                ToolGroup {
+                    label: "File";
                     
-                    HorizontalBox {
-                        padding: 4px;
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/new-file.svg");
+                        tooltip: "New Scene (Ctrl+N)";
+                        clicked => { root.on-new-scene(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/import.svg");
+                        tooltip: "Open Scene (Ctrl+O)";
+                        clicked => { root.on-open-scene(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/save.svg");
+                        tooltip: "Save Scene (Ctrl+S)";
+                        clicked => { root.on-save-scene(); }
+                    }
+                }
+                
+                GroupDivider {}
+                
+                // ── HISTORY group ──
+                ToolGroup {
+                    label: "History";
+                    
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/undo.svg");
+                        tooltip: "Undo (Ctrl+Z)";
+                        clicked => { root.on-undo(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/redo.svg");
+                        tooltip: "Redo (Ctrl+Y)";
+                        clicked => { root.on-redo(); }
+                    }
+                }
+                
+                GroupDivider {}
+                
+                // ── CLIPBOARD group ──
+                ToolGroup {
+                    label: "Clipboard";
+                    
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cut.svg");
+                        tooltip: "Cut (Ctrl+X)";
+                        clicked => { root.on-cut(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/copy.svg");
+                        tooltip: "Copy (Ctrl+C)";
+                        clicked => { root.on-copy(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/paste.svg");
+                        tooltip: "Paste (Ctrl+V)";
+                        clicked => { root.on-paste(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/duplicate.svg");
+                        tooltip: "Duplicate (Ctrl+D)";
+                        clicked => { root.on-duplicate(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/delete.svg");
+                        tooltip: "Delete (Del)";
+                        clicked => { root.on-delete(); }
+                    }
+                }
+                
+                GroupDivider {}
+                
+                // ── TOOLS group ──
+                ToolGroup {
+                    label: "Tools";
+                    
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/cursor.svg");
+                        tooltip: "Select (Q)";
+                        selected: root.current-tool == "select";
+                        clicked => { root.on-select-tool("select"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/move.svg");
+                        tooltip: "Move (W)";
+                        selected: root.current-tool == "move";
+                        clicked => { root.on-select-tool("move"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/rotate.svg");
+                        tooltip: "Rotate (E)";
+                        selected: root.current-tool == "rotate";
+                        clicked => { root.on-select-tool("rotate"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/scale.svg");
+                        tooltip: "Scale (R)";
+                        selected: root.current-tool == "scale";
+                        clicked => { root.on-select-tool("scale"); }
+                    }
+                }
+                
+                GroupDivider {}
+                
+                // ── SPACE group — World/Local toggle ──
+                ToolGroup {
+                    label: "Space";
+                    
+                    Rectangle {
+                        width: 72px;
+                        height: 24px;
+                        background: Theme.input-background;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
                         
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            background: root.transform-mode == "world" ? Theme.selection-background : transparent;
-                            border-radius: 2px;
+                        HorizontalLayout {
+                            padding: 2px;
+                            spacing: 1px;
                             
-                            TouchArea {
-                                clicked => { root.on-set-transform-mode("world"); }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.transform-mode == "world" ? Theme.selection-background : transparent;
+                                border-radius: 2px;
+                                
+                                TouchArea {
+                                    clicked => { root.on-set-transform-mode("world"); }
+                                }
+                                
+                                Text {
+                                    text: "World";
+                                    color: root.transform-mode == "world" ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
                             
-                            Text {
-                                text: "World";
-                                color: Theme.text-primary;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                        
-                        Rectangle {
-                            horizontal-stretch: 1;
-                            background: root.transform-mode == "local" ? Theme.selection-background : transparent;
-                            border-radius: 2px;
-                            
-                            TouchArea {
-                                clicked => { root.on-set-transform-mode("local"); }
-                            }
-                            
-                            Text {
-                                text: "Local";
-                                color: Theme.text-primary;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.transform-mode == "local" ? Theme.selection-background : transparent;
+                                border-radius: 2px;
+                                
+                                TouchArea {
+                                    clicked => { root.on-set-transform-mode("local"); }
+                                }
+                                
+                                Text {
+                                    text: "Local";
+                                    color: root.transform-mode == "local" ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }
                 }
                 
+                // ── Center spacer ──
                 Rectangle { horizontal-stretch: 1; }
                 
-                // Play controls (centered)
-                Rectangle {
-                    width: 160px;
+                // ── PLAY group — centered play controls ──
+                ToolGroup {
+                    label: "Simulate";
                     
-                    HorizontalBox {
-                        spacing: 4px;
-                        alignment: center;
+                    // Play
+                    Rectangle {
+                        width: 30px;
+                        height: 26px;
+                        background: root.play-state == "playing" ? Theme.accent-green : 
+                                    play-solo-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                        border-radius: 3px;
                         
-                        // Play Solo
-                        Rectangle {
-                            width: 36px;
-                            height: 36px;
-                            background: root.play-state == "playing" ? Theme.accent-green : 
-                                        play-solo-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                            border-radius: 4px;
-                            
-                            play-solo-touch := TouchArea {
-                                clicked => {
-                                    if root.play-state == "stopped" {
-                                        root.on-play-solo();
-                                    }
+                        play-solo-touch := TouchArea {
+                            clicked => {
+                                if root.play-state == "stopped" {
+                                    root.on-play-solo();
                                 }
-                            }
-                            
-                            Text {
-                                text: "▶";
-                                color: Theme.text-primary;
-                                font-size: 18px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
                             }
                         }
                         
-                        // Pause
-                        Rectangle {
-                            width: 36px;
-                            height: 36px;
-                            background: root.play-state == "paused" ? Theme.accent-yellow :
-                                        pause-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                            border-radius: 4px;
-                            
-                            pause-touch := TouchArea {
-                                clicked => {
-                                    if root.play-state == "playing" {
-                                        root.on-pause();
-                                    }
+                        Image {
+                            x: 7px;
+                            y: 5px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/play.svg");
+                            image-fit: contain;
+                        }
+                    }
+                    
+                    // Pause
+                    Rectangle {
+                        width: 30px;
+                        height: 26px;
+                        background: root.play-state == "paused" ? Theme.accent-yellow :
+                                    pause-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                        border-radius: 3px;
+                        
+                        pause-touch := TouchArea {
+                            clicked => {
+                                if root.play-state == "playing" {
+                                    root.on-pause();
                                 }
-                            }
-                            
-                            Text {
-                                text: "⏸";
-                                color: Theme.text-primary;
-                                font-size: 18px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
                             }
                         }
                         
-                        // Stop
-                        Rectangle {
-                            width: 36px;
-                            height: 36px;
-                            background: stop-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                            border-radius: 4px;
-                            
-                            stop-touch := TouchArea {
-                                clicked => {
-                                    if root.play-state != "stopped" {
-                                        root.on-stop();
-                                    }
+                        Image {
+                            x: 7px;
+                            y: 5px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/pause.svg");
+                            image-fit: contain;
+                        }
+                    }
+                    
+                    // Stop
+                    Rectangle {
+                        width: 30px;
+                        height: 26px;
+                        background: stop-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                        border-radius: 3px;
+                        
+                        stop-touch := TouchArea {
+                            clicked => {
+                                if root.play-state != "stopped" {
+                                    root.on-stop();
                                 }
                             }
-                            
-                            Text {
-                                text: "⏹";
-                                color: Theme.text-primary;
-                                font-size: 18px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                        }
+                        
+                        Image {
+                            x: 7px;
+                            y: 5px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/stop.svg");
+                            image-fit: contain;
                         }
                     }
                 }
                 
+                // ── Right spacer ──
                 Rectangle { horizontal-stretch: 1; }
                 
-                // Right side tools
-                IconButton {
-                    icon: "⌨";
-                    tooltip: "Keyboard Shortcuts";
-                    clicked => { root.on-show-keybindings(); }
-                }
-                
-                IconButton {
-                    icon: "@";
-                    tooltip: "Soul Settings";
-                    clicked => { root.on-show-soul-settings(); }
-                }
-                
-                IconButton {
-                    icon: ">";
-                    tooltip: "Command Palette (Ctrl+Shift+P)";
-                    clicked => { root.on-toggle-command-bar(); }
+                // ── UTILS group — right-aligned ──
+                ToolGroup {
+                    label: "Utils";
+                    
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/keyboard.svg");
+                        tooltip: "Keyboard Shortcuts";
+                        clicked => { root.on-show-keybindings(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/soulservice.svg");
+                        tooltip: "Soul Settings";
+                        clicked => { root.on-show-soul-settings(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/terminal.svg");
+                        tooltip: "Command Palette (Ctrl+Shift+P)";
+                        clicked => { root.on-toggle-command-bar(); }
+                    }
                 }
             }
         }

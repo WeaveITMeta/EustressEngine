@@ -332,9 +332,26 @@ fn spawn_scene_entity(
                 shape: PartType::from_string(&part_data.shape),
             };
             
-            // DISABLED for Bevy 0.19 - Mesh3d Bundle API changed
-            // TODO: Fix Mesh3d Bundle usage for Bevy 0.19
+            // Create mesh based on shape type
+            let mesh_handle = match part.shape {
+                PartType::Block => meshes.add(Cuboid::new(size.x, size.y, size.z)),
+                PartType::Ball => meshes.add(Sphere::new(size.x.min(size.y).min(size.z) * 0.5)),
+                PartType::Cylinder => meshes.add(Cylinder::new(size.x * 0.5, size.y)),
+                PartType::Wedge => meshes.add(Cuboid::new(size.x, size.y, size.z)),
+                _ => meshes.add(Cuboid::new(size.x, size.y, size.z)),
+            };
+            
+            let material_handle = materials.add(StandardMaterial {
+                base_color: color,
+                perceptual_roughness: 0.8,
+                metallic: 0.0,
+                reflectance: part_data.reflectance,
+                ..default()
+            });
+            
             commands.spawn((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(material_handle),
                 transform,
                 instance,
                 base_part,

@@ -66,7 +66,7 @@ export component DataSourcesDialog inherits Rectangle {
                     padding: 16px;
                     
                     Text {
-                        text: "🌐 Global Data Sources";
+                        text: "Global Data Sources";
                         color: Theme.text-primary;
                         font-size: 18px;
                         font-weight: 600;
@@ -85,10 +85,11 @@ export component DataSourcesDialog inherits Rectangle {
                             clicked => { root.on-close(); }
                         }
                         
-                        Text {
-                            text: "✕";
-                            color: Theme.text-secondary;
-                            font-size: 16px;
+                        Image {
+                            width: 12px;
+                            height: 12px;
+                            source: @image-url("../../assets/icons/ui/close.svg");
+                            image-fit: contain;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -235,10 +236,11 @@ export component DataSourcesDialog inherits Rectangle {
                 VerticalBox {
                     alignment: center;
                     
-                    Text {
-                        text: "🌐";
-                        color: Theme.text-secondary;
-                        font-size: 48px;
+                    Image {
+                        width: 48px;
+                        height: 48px;
+                        source: @image-url("../../assets/icons/ui/globe.svg");
+                        image-fit: contain;
                         horizontal-alignment: center;
                     }
                     
@@ -356,9 +358,11 @@ export component DataSourcesDialog inherits Rectangle {
                                     clicked => { root.on-remove-source(source.id); }
                                 }
                                 
-                                Text {
-                                    text: "✕";
-                                    color: del-touch.has-hover ? white : Theme.text-secondary;
+                                Image {
+                                    width: 10px;
+                                    height: 10px;
+                                    source: @image-url("../../assets/icons/ui/close.svg");
+                                    image-fit: contain;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }

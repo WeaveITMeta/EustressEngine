@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- SoulService - spirit/diamond -->
+  <path d="M8 2L13 7L8 14L3 7L8 2z" fill="#B0B0B0" stroke="#808080" stroke-width="0.5"/>
+  <path d="M3 7L8 5L13 7" fill="none" stroke="#808080" stroke-width="0.5"/>
+  <line x1="8" y1="5" x2="8" y2="14" stroke="#808080" stroke-width="0.5"/>
+</svg>

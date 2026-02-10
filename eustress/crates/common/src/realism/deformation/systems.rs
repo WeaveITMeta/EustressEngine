@@ -188,14 +188,50 @@ pub fn update_thermal_deformation(
 // Impact Deformation
 // ============================================================================
 
-/// Apply deformation from impact events - DISABLED for Bevy 0.19
+/// Apply deformation from impact events
 pub fn apply_impact_deformation(
-    // _events: EventReader<ImpactDeformEvent>,
-    // _query: Query<(&BasePart, &mut DeformationState, &mut DeformableMesh)>,
-    // _meshes: Res<Assets<Mesh>>,
-    // _config: Res<DeformationConfig>,
+    mut events: MessageReader<ImpactDeformEvent>,
+    mut query: Query<(&BasePart, &mut DeformationState, &mut DeformableMesh)>,
+    meshes: Res<Assets<Mesh>>,
+    config: Res<DeformationConfig>,
 ) {
-    // Disabled - EventReader API changed in Bevy 0.19
+    for event in events.read() {
+        let Ok((_base_part, mut deform_state, mut deform_mesh)) = query.get_mut(event.entity) else {
+            continue;
+        };
+        
+        let Some(mesh) = meshes.get(&deform_mesh.original_mesh) else {
+            continue;
+        };
+        
+        let Some(VertexAttributeValues::Float32x3(positions)) = 
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+            continue;
+        };
+        
+        // Apply radial deformation from impact point
+        for (i, pos) in positions.iter().enumerate() {
+            let vertex_pos = Vec3::new(pos[0], pos[1], pos[2]);
+            let dist = (vertex_pos - event.point).length();
+            
+            if dist < event.radius {
+                let falloff = 1.0 - (dist / event.radius);
+                let displacement = event.force.normalize() * falloff * event.force.length() * config.scale;
+                
+                if event.permanent {
+                    // Directly add to plastic displacement
+                    if i < deform_state.plastic_displacement.len() {
+                        deform_state.plastic_displacement[i] += displacement;
+                    }
+                } else {
+                    deform_state.apply_elastic(i, displacement);
+                }
+            }
+        }
+        
+        deform_state.update_total();
+        deform_mesh.dirty = true;
+    }
 }
 
 // ============================================================================
@@ -258,14 +294,19 @@ pub fn update_mesh_vertices(
 // Fracture Mesh
 // ============================================================================
 
-/// Handle mesh fracture events - DISABLED for Bevy 0.19
+/// Handle mesh fracture events
 pub fn handle_fracture_mesh(
-    // _events: EventReader<FractureMeshEvent>,
-    // _commands: Commands,
-    // _query: Query<(&BasePart, &DeformableMesh, &Transform)>,
-    // _meshes: ResMut<Assets<Mesh>>,
+    mut events: MessageReader<FractureMeshEvent>,
+    _commands: Commands,
+    _query: Query<(&BasePart, &DeformableMesh, &Transform)>,
+    _meshes: ResMut<Assets<Mesh>>,
 ) {
-    // Disabled - EventReader API changed in Bevy 0.19
+    for event in events.read() {
+        // TODO: Implement mesh splitting along fracture plane
+        // For now, log the fracture event
+        tracing::info!("Fracture event on entity {:?} at {:?} along {:?}", 
+            event.entity, event.origin, event.direction);
+    }
 }
 
 // ============================================================================

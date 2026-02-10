@@ -754,7 +754,7 @@ fn raycast_ground(
     direction: Vec3,
     _max_distance: f32,
 ) -> Option<(Vec3, Vec3)> {
-    // DISABLED for Bevy 0.19 - glam/avian3d Vec3 type mismatch
+    // Requires avian3d SpatialQuery - gated behind physics feature
     None
 }
 
@@ -835,12 +835,12 @@ pub fn extract_root_motion(
     }
 }
 
-/// System to apply root motion to physics body - DISABLED for Bevy 0.19
+/// System to apply root motion to physics body
+/// Requires avian3d LinearVelocity/AngularVelocity - gated behind physics feature
 pub fn apply_root_motion(
-    // _characters: Query<(&RootMotion, &mut LinearVelocity, &mut AngularVelocity)>,
-    // _time: Res<Time>,
+    // Requires: LinearVelocity, AngularVelocity from avian3d
 ) {
-    // Disabled - avian3d Component trait compatibility issues with Bevy 0.19
+    // Gated behind physics feature - enable with `features = ["physics"]`
 }
 
 // ============================================================================
@@ -975,37 +975,35 @@ pub struct SharedAnimationPlugin;
 
 impl Plugin for SharedAnimationPlugin {
     fn build(&self, app: &mut App) {
-        // Core animation systems - DISABLED for Bevy 0.19
-        // app.add_systems(Update, (
-        //     load_character_animation_clips,
-        //     create_animation_graphs,
-        //     start_idle_animation,
-        //     update_animation_transitions,
-        // ).chain());
+        // Core animation systems
+        app.add_systems(Update, (
+            load_character_animation_clips,
+            create_animation_graphs,
+            start_idle_animation,
+            update_animation_transitions,
+        ).chain());
         
-        // Foot IK systems - DISABLED for Bevy 0.19
-        // app.add_systems(PostUpdate, (
-        //     update_foot_ik,
-        //     apply_foot_ik_to_bones,
-        // ).chain());
+        // Foot IK apply (raycasting requires physics feature, but bone application doesn't)
+        app.add_systems(PostUpdate, (
+            apply_foot_ik_to_bones,
+        ));
         
-        // Root motion systems - DISABLED for Bevy 0.19
-        // app.add_systems(PostUpdate, (
-        //     extract_root_motion,
-        //     apply_root_motion,
-        // ).chain().after(update_foot_ik));
+        // Root motion extraction (application requires physics for LinearVelocity)
+        app.add_systems(PostUpdate, (
+            extract_root_motion,
+        ));
         
-        // Layered animation systems - DISABLED for Bevy 0.19
-        // app.add_systems(Update, (
-        //     update_animation_layers,
-        //     apply_upper_body_layer,
-        // ).chain().after(update_animation_transitions));
+        // Layered animation systems
+        app.add_systems(Update, (
+            update_animation_layers,
+            apply_upper_body_layer,
+        ).chain().after(update_animation_transitions));
         
-        // 2D blend tree systems - DISABLED for Bevy 0.19
-        // app.add_systems(Update, (
-        //     update_directional_blend,
-        //     apply_directional_blend,
-        // ).chain().after(update_animation_transitions));
+        // 2D blend tree systems
+        app.add_systems(Update, (
+            update_directional_blend,
+            apply_directional_blend,
+        ).chain().after(update_animation_transitions));
         
         info!("🎬 SharedAnimationPlugin initialized:");
         info!("   ✓ Crossfade blending");

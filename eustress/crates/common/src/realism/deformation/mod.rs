@@ -39,9 +39,8 @@ pub struct DeformationPlugin;
 
 impl Plugin for DeformationPlugin {
     fn build(&self, app: &mut App) {
-        // Event registration DISABLED for Bevy 0.19
-        // TODO: Fix event registration for Bevy 0.19
         app
+            .init_resource::<components::DeformationConfig>()
             .register_type::<components::DeformableMesh>()
             .register_type::<components::DeformationState>()
             .add_systems(Update, (

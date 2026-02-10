@@ -5,7 +5,7 @@ edition = "2021"
 description = "Shared types and utilities for Eustress Engine"
 
 [dependencies]
-bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "bevy_render", "bevy_asset", "bevy_animation", "bevy_gltf"] }
+bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "bevy_render", "bevy_asset", "bevy_animation", "bevy_gltf", "bevy_gizmos"] }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }

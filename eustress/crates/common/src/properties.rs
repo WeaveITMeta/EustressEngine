@@ -1458,7 +1458,7 @@ impl PropertyAccess for Seat {
         match name {
             "Disabled" => Some(PropertyValue::Bool(self.disabled)),
             "SeatOffset" => Some(PropertyValue::Vector3(self.seat_offset)),
-            "Occupant" => Some(PropertyValue::Int(-1)), // DISABLED for Bevy 0.19
+            "Occupant" => Some(PropertyValue::Int(-1)), // TODO: Track occupant entity when CharacterBody is set up
             _ => None
         }
     }
@@ -1491,7 +1491,7 @@ impl PropertyAccess for VehicleSeat {
             "Gear" => Some(PropertyValue::Int(self.gear)),
             "RPM" => Some(PropertyValue::Float(self.rpm)),
             "SeatOffset" => Some(PropertyValue::Vector3(self.seat_offset)),
-            "Occupant" => Some(PropertyValue::Int(-1)), // DISABLED for Bevy 0.19
+            "Occupant" => Some(PropertyValue::Int(-1)), // TODO: Track occupant entity when CharacterBody is set up
             _ => None
         }
     }

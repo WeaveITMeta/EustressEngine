@@ -75,10 +75,11 @@ export component ServiceProperties inherits Rectangle {
             VerticalBox {
                 alignment: center;
                 
-                Text {
-                    text: "⚙";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/ui/settings.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 
@@ -432,10 +433,11 @@ export component ServiceProperties inherits Rectangle {
                 padding: 16px;
                 alignment: center;
                 
-                Text {
-                    text: "👥";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/players.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 
@@ -462,10 +464,11 @@ export component ServiceProperties inherits Rectangle {
                 padding: 16px;
                 alignment: center;
                 
-                Text {
-                    text: "📦";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/ui/package.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 

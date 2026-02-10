@@ -45,10 +45,11 @@ export component TerrainEditor inherits Rectangle {
                 spacing: 12px;
                 alignment: center;
                 
-                Text {
-                    text: "🏔";
-                    color: Theme.text-secondary;
-                    font-size: 48px;
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/ui/terrain.svg");
+                    image-fit: contain;
                     horizontal-alignment: center;
                 }
                 
@@ -171,10 +172,19 @@ export component TerrainEditor inherits Rectangle {
                         padding: 8px;
                         spacing: 8px;
                         
-                        Text {
-                            text: root.edit-mode ? "✓" : "○";
-                            color: root.edit-mode ? white : Theme.text-secondary;
+                        if root.edit-mode: Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/check.svg");
+                            image-fit: contain;
                             vertical-alignment: center;
+                        }
+                        if !root.edit-mode: Rectangle {
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            border-width: 1.5px;
+                            border-color: Theme.text-secondary;
                         }
                         
                         Text {
@@ -202,7 +212,7 @@ export component TerrainEditor inherits Rectangle {
                         { id: "lower", icon: "▼", label: "Lower" },
                         { id: "smooth", icon: "~", label: "Smooth" },
                         { id: "flatten", icon: "═", label: "Flatten" },
-                        { id: "paint", icon: "🎨", label: "Paint" },
+                        { id: "paint", icon: "P", label: "Paint" },
                     ]: Rectangle {
                         horizontal-stretch: 1;
                         height: 48px;

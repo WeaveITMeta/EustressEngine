@@ -59,13 +59,32 @@ impl Default for VectorFieldSettings {
 // Systems
 // ============================================================================
 
-/// Draw vector field for particles - DISABLED for Bevy 0.19
+/// Draw vector field for particles
 pub fn draw_vector_field(
-    _query: Query<(&Transform, &KineticState), With<Particle>>,
-    // mut gizmos: Gizmos,
-    _settings: Res<VectorFieldSettings>,
+    query: Query<(&Transform, &KineticState), With<Particle>>,
+    mut gizmos: Gizmos,
+    settings: Res<VectorFieldSettings>,
 ) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+    for (transform, kinetic) in query.iter() {
+        let pos = transform.translation;
+        let vel = kinetic.velocity;
+        let speed = vel.length();
+        
+        if speed < settings.min_speed {
+            continue;
+        }
+        
+        let color = velocity_to_color(speed, settings.max_speed);
+        let scaled = vel * settings.scale;
+        let clamped = if scaled.length() > settings.max_length {
+            scaled.normalize() * settings.max_length
+        } else {
+            scaled
+        };
+        
+        let tip = pos + clamped;
+        gizmos.line(pos, tip, color);
+    }
 }
 
 /// Color mapping for velocity magnitude
@@ -155,17 +174,39 @@ pub fn sample_velocity_grid(
     velocities
 }
 
-/// Draw grid-based vector field - DISABLED for Bevy 0.19
+/// Draw grid-based vector field
 pub fn draw_velocity_grid(
-    _gizmos: &mut (),
-    _velocities: &[Vec3],
-    _grid_origin: Vec3,
-    _grid_size: UVec3,
-    _cell_size: f32,
-    _scale: f32,
-    _max_speed: f32,
+    gizmos: &mut Gizmos,
+    velocities: &[Vec3],
+    grid_origin: Vec3,
+    grid_size: UVec3,
+    cell_size: f32,
+    scale: f32,
+    max_speed: f32,
 ) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+    for z in 0..grid_size.z {
+        for y in 0..grid_size.y {
+            for x in 0..grid_size.x {
+                let idx = (x + y * grid_size.x + z * grid_size.x * grid_size.y) as usize;
+                let vel = velocities[idx];
+                let speed = vel.length();
+                
+                if speed < 0.01 {
+                    continue;
+                }
+                
+                let pos = grid_origin + Vec3::new(
+                    (x as f32 + 0.5) * cell_size,
+                    (y as f32 + 0.5) * cell_size,
+                    (z as f32 + 0.5) * cell_size,
+                );
+                
+                let color = velocity_to_color(speed, max_speed);
+                let tip = pos + vel * scale;
+                gizmos.line(pos, tip, color);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -213,7 +254,9 @@ pub fn generate_streamline(
     points
 }
 
-/// Draw streamline - DISABLED for Bevy 0.19
-pub fn draw_streamline(_gizmos: &mut (), _points: &[Vec3], _color: Color) {
-    // Disabled - Gizmos API changed in Bevy 0.19
+/// Draw streamline
+pub fn draw_streamline(gizmos: &mut Gizmos, points: &[Vec3], color: Color) {
+    for window in points.windows(2) {
+        gizmos.line(window[0], window[1], color);
+    }
 }

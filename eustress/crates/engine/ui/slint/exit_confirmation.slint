@@ -43,10 +43,11 @@ export component ExitConfirmationDialog inherits Rectangle {
             HorizontalBox {
                 spacing: 16px;
                 
-                Text {
-                    text: "⚠";
-                    color: Theme.accent-yellow;
-                    font-size: 32px;
+                Image {
+                    width: 32px;
+                    height: 32px;
+                    source: @image-url("../../assets/icons/ui/warning.svg");
+                    image-fit: contain;
                 }
                 
                 VerticalBox {

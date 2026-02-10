@@ -3,7 +3,7 @@
 // Log viewer with filtering and search
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ScrollView, Button, CheckBox } from "std-widgets.slint";
+import { LineEdit, ScrollView, CheckBox } from "std-widgets.slint";
 import { Theme, LogEntry } from "theme.slint";
 
 // Log entry data
@@ -18,135 +18,243 @@ export struct LogData {
 export component OutputConsole inherits Rectangle {
     // Properties
     in property <[LogData]> logs: [];
-    in property <bool> show-info: true;
-    in property <bool> show-warnings: true;
-    in property <bool> show-errors: true;
-    in property <bool> show-debug: false;
+    in-out property <bool> show-info: true;
+    in-out property <bool> show-warnings: true;
+    in-out property <bool> show-errors: true;
+    in-out property <bool> show-debug: false;
     in-out property <string> filter-text: "";
-    in property <bool> auto-scroll: true;
+    in-out property <bool> auto-scroll: true;
     
     // Callbacks
     callback on-clear();
     callback on-filter-changed(string);
     callback on-toggle-level(string);
     callback on-copy-log(int);
+    callback on-close();
     
     background: Theme.panel-background;
     
-    VerticalBox {
+    VerticalLayout {
         padding: 0px;
         spacing: 0px;
         
-        // Toolbar
+        // Single integrated toolbar
+        // Layout: [icon Output] | [info][warn][err][dbg] [Clear] | [Filter...] | --- | [checkbox Auto-scroll] [X]
         Rectangle {
-            height: 28px;
+            height: 30px;
             background: Theme.header-background;
             
-            HorizontalBox {
+            HorizontalLayout {
                 padding-left: 8px;
-                padding-right: 8px;
-                spacing: 8px;
+                padding-right: 4px;
+                spacing: 0px;
+                alignment: stretch;
                 
-                // Filter buttons
+                // "Output" label with SVG icon
                 Rectangle {
-                    width: 24px;
-                    height: 20px;
-                    background: root.show-info ? Theme.output-info : transparent;
-                    border-radius: 2px;
+                    width: 70px;
                     
-                    TouchArea {
-                        clicked => { root.on-toggle-level("info"); }
+                    Image {
+                        x: 0px;
+                        y: 7px;
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/output.svg");
+                        image-fit: contain;
                     }
                     
                     Text {
-                        text: "ℹ";
-                        color: root.show-info ? white : Theme.text-secondary;
+                        x: 20px;
+                        text: "Output";
+                        color: Theme.text-primary;
                         font-size: 12px;
-                        horizontal-alignment: center;
+                        font-weight: 500;
                         vertical-alignment: center;
                     }
                 }
                 
+                // Separator
                 Rectangle {
-                    width: 24px;
-                    height: 20px;
-                    background: root.show-warnings ? Theme.output-warning : transparent;
-                    border-radius: 2px;
-                    
-                    TouchArea {
-                        clicked => { root.on-toggle-level("warning"); }
-                    }
-                    
-                    Text {
-                        text: "⚠";
-                        color: root.show-warnings ? white : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    width: 9px;
+                    Rectangle {
+                        x: 4px;
+                        y: 6px;
+                        width: 1px;
+                        height: 18px;
+                        background: Theme.border-color;
                     }
                 }
                 
+                // Info filter
                 Rectangle {
-                    width: 24px;
-                    height: 20px;
-                    background: root.show-errors ? Theme.output-error : transparent;
-                    border-radius: 2px;
+                    width: 28px;
                     
-                    TouchArea {
-                        clicked => { root.on-toggle-level("error"); }
-                    }
-                    
-                    Text {
-                        text: "❌";
-                        color: root.show-errors ? white : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                Rectangle {
-                    width: 24px;
-                    height: 20px;
-                    background: root.show-debug ? Theme.output-debug : transparent;
-                    border-radius: 2px;
-                    
-                    TouchArea {
-                        clicked => { root.on-toggle-level("debug"); }
-                    }
-                    
-                    Text {
-                        text: "🔍";
-                        color: root.show-debug ? white : Theme.text-secondary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                // Search
-                Rectangle {
-                    horizontal-stretch: 1;
-                    max-width: 200px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    
-                    HorizontalBox {
-                        padding-left: 6px;
-                        padding-right: 6px;
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 26px;
+                        height: 22px;
+                        background: info-touch.has-hover ? Theme.button-hover : 
+                                    (root.show-info ? #333333 : transparent);
+                        border-radius: 3px;
                         
-                        Text {
-                            width: 14px;
-                            text: "🔍";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            vertical-alignment: center;
+                        info-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-info = !root.show-info; root.on-toggle-level("info"); }
                         }
                         
+                        Image {
+                            x: 5px;
+                            y: 3px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/info.svg");
+                            image-fit: contain;
+                        }
+                    }
+                }
+                
+                // Warning filter
+                Rectangle {
+                    width: 28px;
+                    
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 26px;
+                        height: 22px;
+                        background: warn-touch.has-hover ? Theme.button-hover :
+                                    (root.show-warnings ? #333333 : transparent);
+                        border-radius: 3px;
+                        
+                        warn-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-warnings = !root.show-warnings; root.on-toggle-level("warning"); }
+                        }
+                        
+                        Image {
+                            x: 5px;
+                            y: 3px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/warning.svg");
+                            image-fit: contain;
+                        }
+                    }
+                }
+                
+                // Error filter
+                Rectangle {
+                    width: 28px;
+                    
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 26px;
+                        height: 22px;
+                        background: err-touch.has-hover ? Theme.button-hover :
+                                    (root.show-errors ? #333333 : transparent);
+                        border-radius: 3px;
+                        
+                        err-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-errors = !root.show-errors; root.on-toggle-level("error"); }
+                        }
+                        
+                        Image {
+                            x: 5px;
+                            y: 3px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/error.svg");
+                            image-fit: contain;
+                        }
+                    }
+                }
+                
+                // Debug filter
+                Rectangle {
+                    width: 28px;
+                    
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 26px;
+                        height: 22px;
+                        background: dbg-touch.has-hover ? Theme.button-hover :
+                                    (root.show-debug ? #333333 : transparent);
+                        border-radius: 3px;
+                        
+                        dbg-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-debug = !root.show-debug; root.on-toggle-level("debug"); }
+                        }
+                        
+                        Image {
+                            x: 5px;
+                            y: 3px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/debug.svg");
+                            image-fit: contain;
+                        }
+                    }
+                }
+                
+                // Clear button (next to filters)
+                Rectangle {
+                    width: 54px;
+                    
+                    Rectangle {
+                        x: 4px;
+                        y: 4px;
+                        width: 46px;
+                        height: 22px;
+                        background: clear-touch.has-hover ? Theme.button-hover : Theme.button-background;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+                        
+                        clear-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-clear(); }
+                        }
+                        
+                        Text {
+                            text: "Clear";
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                
+                // Separator
+                Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        x: 4px;
+                        y: 6px;
+                        width: 1px;
+                        height: 18px;
+                        background: Theme.border-color;
+                    }
+                }
+                
+                // Filter input
+                Rectangle {
+                    horizontal-stretch: 1;
+                    max-width: 180px;
+                    min-width: 80px;
+                    
+                    Rectangle {
+                        y: 3px;
+                        height: 24px;
+                        
                         LineEdit {
-                            horizontal-stretch: 1;
+                            width: 100%;
+                            height: 100%;
                             placeholder-text: "Filter...";
                             text <=> root.filter-text;
                             edited(text) => { root.on-filter-changed(text); }
@@ -154,18 +262,84 @@ export component OutputConsole inherits Rectangle {
                     }
                 }
                 
-                Rectangle { horizontal-stretch: 1; }
+                // Spacer
+                Rectangle { horizontal-stretch: 2; }
                 
                 // Auto-scroll toggle
-                CheckBox {
-                    text: "Auto-scroll";
-                    checked: root.auto-scroll;
+                Rectangle {
+                    width: 90px;
+                    
+                    Rectangle {
+                        x: 0px;
+                        y: 4px;
+                        width: 90px;
+                        height: 22px;
+                        background: autoscroll-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                        border-radius: 3px;
+                        
+                        autoscroll-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.auto-scroll = !root.auto-scroll; }
+                        }
+                        
+                        // Checkbox square
+                        Rectangle {
+                            x: 6px;
+                            y: 4px;
+                            width: 14px;
+                            height: 14px;
+                            border-width: 1px;
+                            border-color: root.auto-scroll ? Theme.accent-blue : Theme.text-secondary;
+                            border-radius: 3px;
+                            background: root.auto-scroll ? Theme.accent-blue : transparent;
+                            
+                            if root.auto-scroll: Rectangle {
+                                x: 3px;
+                                y: 3px;
+                                width: 8px;
+                                height: 8px;
+                                background: white;
+                                border-radius: 1px;
+                            }
+                        }
+                        
+                        // Label
+                        Text {
+                            x: 24px;
+                            text: "Auto-scroll";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
                 
-                // Clear button
-                Button {
-                    text: "Clear";
-                    clicked => { root.on-clear(); }
+                // Close (X) button — hides the output panel
+                Rectangle {
+                    width: 28px;
+                    
+                    Rectangle {
+                        x: 2px;
+                        y: 4px;
+                        width: 22px;
+                        height: 22px;
+                        background: close-touch.has-hover ? #c42b1c : transparent;
+                        border-radius: 3px;
+                        
+                        close-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-close(); }
+                        }
+                        
+                        Image {
+                            x: 3px;
+                            y: 3px;
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/close.svg");
+                            image-fit: contain;
+                        }
+                    }
                 }
             }
         }
@@ -174,9 +348,10 @@ export component OutputConsole inherits Rectangle {
         ScrollView {
             vertical-stretch: 1;
             
-            VerticalBox {
+            VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
+                alignment: start;
                 
                 for log in root.logs: LogEntry {
                     level: log.level;
@@ -191,6 +366,7 @@ export component OutputConsole inherits Rectangle {
                     Text {
                         text: "No log entries";
                         color: Theme.text-secondary;
+                        font-size: 12px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }

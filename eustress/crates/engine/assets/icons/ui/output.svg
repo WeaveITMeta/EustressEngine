@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Output/console icon -->
+  <rect x="1" y="2" width="14" height="12" rx="2" fill="none" stroke="#d4d4d4" stroke-width="1.2"/>
+  <line x1="4" y1="6" x2="8" y2="6" stroke="#d4d4d4" stroke-width="1" stroke-linecap="round"/>
+  <line x1="4" y1="8.5" x2="10" y2="8.5" stroke="#d4d4d4" stroke-width="1" stroke-linecap="round"/>
+  <line x1="4" y1="11" x2="7" y2="11" stroke="#d4d4d4" stroke-width="1" stroke-linecap="round"/>
+</svg>

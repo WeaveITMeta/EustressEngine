@@ -48,17 +48,18 @@ component HistoryItem inherits Rectangle {
         }
         
         // Icon
-        Text {
-            width: 20px;
-            text: root.action == "create" ? "+" :
-                  root.action == "delete" ? "-" :
-                  root.action == "move" ? "↔" :
-                  root.action == "rotate" ? "🔄" :
-                  root.action == "scale" ? "⤢" :
-                  root.action == "property" ? "⚙" :
-                  root.action == "paste" ? "📋" : "•";
-            color: root.is-current ? Theme.accent-blue : Theme.text-secondary;
-            font-size: 14px;
+        Image {
+            width: 16px;
+            height: 16px;
+            source: root.action == "create" ? @image-url("../../assets/icons/ui/plus.svg") :
+                    root.action == "delete" ? @image-url("../../assets/icons/ui/delete.svg") :
+                    root.action == "move" ? @image-url("../../assets/icons/ui/move.svg") :
+                    root.action == "rotate" ? @image-url("../../assets/icons/ui/rotate.svg") :
+                    root.action == "scale" ? @image-url("../../assets/icons/ui/scale.svg") :
+                    root.action == "property" ? @image-url("../../assets/icons/ui/settings.svg") :
+                    root.action == "paste" ? @image-url("../../assets/icons/ui/paste.svg") :
+                    @image-url("../../assets/icons/ui/settings.svg");
+            image-fit: contain;
             vertical-alignment: center;
         }
         
@@ -126,10 +127,11 @@ export component HistoryPanel inherits Rectangle {
                         spacing: 4px;
                         alignment: center;
                         
-                        Text {
-                            text: "↩";
-                            color: Theme.text-primary;
-                            font-size: 14px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/undo.svg");
+                            image-fit: contain;
                             vertical-alignment: center;
                         }
                         
@@ -158,10 +160,11 @@ export component HistoryPanel inherits Rectangle {
                         spacing: 4px;
                         alignment: center;
                         
-                        Text {
-                            text: "↪";
-                            color: Theme.text-primary;
-                            font-size: 14px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/redo.svg");
+                            image-fit: contain;
                             vertical-alignment: center;
                         }
                         
@@ -202,22 +205,23 @@ export component HistoryPanel inherits Rectangle {
         if root.history.length == 0: Rectangle {
             vertical-stretch: 1;
             
-            VerticalBox {
-                alignment: center;
-                
-                Text {
-                    text: "📜";
-                    color: Theme.text-secondary;
-                    font-size: 32px;
-                    horizontal-alignment: center;
-                }
-                
-                Text {
-                    text: "No history";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - 52px) / 2;
+                width: 32px;
+                height: 32px;
+                source: @image-url("../../assets/icons/ui/new-file.svg");
+                image-fit: contain;
+            }
+            
+            Text {
+                x: 0px;
+                y: (parent.height - 52px) / 2 + 36px;
+                width: 100%;
+                text: "No history";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
             }
         }
         

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <ellipse cx="8" cy="4" rx="5" ry="2" fill="none" stroke="#d4d4d4" stroke-width="1.2"/>
+  <line x1="3" y1="4" x2="3" y2="12" stroke="#d4d4d4" stroke-width="1.2"/>
+  <line x1="13" y1="4" x2="13" y2="12" stroke="#d4d4d4" stroke-width="1.2"/>
+  <ellipse cx="8" cy="12" rx="5" ry="2" fill="none" stroke="#d4d4d4" stroke-width="1.2"/>
+</svg>

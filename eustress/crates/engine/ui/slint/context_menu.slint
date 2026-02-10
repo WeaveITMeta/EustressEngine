@@ -11,7 +11,7 @@ export struct MenuItem {
     id: string,
     label: string,
     shortcut: string,
-    icon: string,
+    icon: image,
     enabled: bool,
     separator-after: bool,
 }
@@ -19,7 +19,7 @@ export struct MenuItem {
 component MenuItemRow inherits Rectangle {
     in property <string> label: "";
     in property <string> shortcut: "";
-    in property <string> icon: "";
+    in property <image> icon;
     in property <bool> enabled: true;
     
     callback clicked();
@@ -39,12 +39,16 @@ component MenuItemRow inherits Rectangle {
         spacing: 8px;
         
         // Icon
-        Text {
+        Rectangle {
             width: 20px;
-            text: root.icon;
-            color: Theme.text-secondary;
-            font-size: 14px;
-            vertical-alignment: center;
+            Image {
+                x: 2px;
+                y: 6px;
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+                image-fit: contain;
+            }
         }
         
         // Label
@@ -94,28 +98,28 @@ export component ContextMenu inherits Rectangle {
         // Default items if none provided
         if root.items.length == 0: VerticalBox {
             MenuItemRow {
-                icon: "✂";
+                icon: @image-url("../../assets/icons/ui/cut.svg");
                 label: "Cut";
                 shortcut: "Ctrl+X";
                 clicked => { root.on-action("cut"); }
             }
             
             MenuItemRow {
-                icon: "📋";
+                icon: @image-url("../../assets/icons/ui/copy.svg");
                 label: "Copy";
                 shortcut: "Ctrl+C";
                 clicked => { root.on-action("copy"); }
             }
             
             MenuItemRow {
-                icon: "📎";
+                icon: @image-url("../../assets/icons/ui/paste.svg");
                 label: "Paste";
                 shortcut: "Ctrl+V";
                 clicked => { root.on-action("paste"); }
             }
             
             MenuItemRow {
-                icon: "⧉";
+                icon: @image-url("../../assets/icons/ui/duplicate.svg");
                 label: "Duplicate";
                 shortcut: "Ctrl+D";
                 clicked => { root.on-action("duplicate"); }
@@ -127,7 +131,7 @@ export component ContextMenu inherits Rectangle {
             }
             
             MenuItemRow {
-                icon: "🗑";
+                icon: @image-url("../../assets/icons/ui/delete.svg");
                 label: "Delete";
                 shortcut: "Del";
                 clicked => { root.on-action("delete"); }
@@ -139,21 +143,21 @@ export component ContextMenu inherits Rectangle {
             }
             
             MenuItemRow {
-                icon: "✏";
+                icon: @image-url("../../assets/icons/ui/rename.svg");
                 label: "Rename";
                 shortcut: "F2";
                 clicked => { root.on-action("rename"); }
             }
             
             MenuItemRow {
-                icon: "📁";
+                icon: @image-url("../../assets/icons/ui/group.svg");
                 label: "Group";
                 shortcut: "Ctrl+G";
                 clicked => { root.on-action("group"); }
             }
             
             MenuItemRow {
-                icon: "📂";
+                icon: @image-url("../../assets/icons/ui/ungroup.svg");
                 label: "Ungroup";
                 shortcut: "Ctrl+Shift+G";
                 clicked => { root.on-action("ungroup"); }
@@ -165,7 +169,7 @@ export component ContextMenu inherits Rectangle {
             }
             
             MenuItemRow {
-                icon: "➕";
+                icon: @image-url("../../assets/icons/ui/plus.svg");
                 label: "Insert Object...";
                 clicked => { root.on-action("insert"); }
             }

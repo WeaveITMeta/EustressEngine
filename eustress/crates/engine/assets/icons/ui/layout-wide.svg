@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Wide panels layout -->
+  <rect x="1" y="1" width="14" height="14" rx="1" fill="none" stroke="#d4d4d4" stroke-width="1"/>
+  <line x1="6" y1="1" x2="6" y2="15" stroke="#d4d4d4" stroke-width="0.8"/>
+  <line x1="10" y1="1" x2="10" y2="15" stroke="#d4d4d4" stroke-width="0.8"/>
+  <line x1="6" y1="11" x2="10" y2="11" stroke="#d4d4d4" stroke-width="0.8"/>
+</svg>

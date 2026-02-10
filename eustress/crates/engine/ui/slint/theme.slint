@@ -8,19 +8,19 @@ import { HorizontalBox, VerticalBox, LineEdit, ScrollView, Button, CheckBox, Com
 // Global theme colors - dark mode by default
 export global Theme {
     // Primary colors — ultra-dark for AAA professional look
-    out property <color> background-primary: #141414;
-    out property <color> background-secondary: #1a1a1a;
-    out property <color> background-tertiary: #222222;
+    out property <color> background-primary: #0e0e0e;
+    out property <color> background-secondary: #121212;
+    out property <color> background-tertiary: #1a1a1a;
     
     // Panel colors
-    out property <color> panel-background: #1a1a1a;
-    out property <color> header-background: #242424;
-    out property <color> viewport-background: #111111;
+    out property <color> panel-background: #121212;
+    out property <color> header-background: #1a1a1a;
+    out property <color> viewport-background: #0a0a0a;
     
     // Tab colors
-    out property <color> tab-active: #1a1a1a;
-    out property <color> tab-inactive: #222222;
-    out property <color> tab-hover: #2a2a2a;
+    out property <color> tab-active: #121212;
+    out property <color> tab-inactive: #181818;
+    out property <color> tab-hover: #222222;
     
     // Text colors — high contrast for readability
     out property <color> text-primary: #d4d4d4;
@@ -32,29 +32,29 @@ export global Theme {
     out property <color> text-success: #4ec9b0;
     
     // Border colors — subtle, not distracting
-    out property <color> border-color: #2a2a2a;
+    out property <color> border-color: #222222;
     out property <color> border-focus: #0078d4;
     out property <color> border-error: #f14c4c;
     
     // Button colors
-    out property <color> button-background: #2d2d2d;
-    out property <color> button-hover: #383838;
-    out property <color> button-pressed: #1f1f1f;
+    out property <color> button-background: #252525;
+    out property <color> button-hover: #303030;
+    out property <color> button-pressed: #1a1a1a;
     out property <color> button-primary: #0078d4;
     out property <color> button-primary-hover: #1a8ae8;
     
     // Input colors
-    out property <color> input-background: #1e1e1e;
-    out property <color> input-border: #333333;
+    out property <color> input-background: #161616;
+    out property <color> input-border: #2a2a2a;
     out property <color> input-focus: #0078d4;
     
     // Selection colors
-    out property <color> selection-background: #1a3a5c;
+    out property <color> selection-background: #14304a;
     out property <color> selection-border: #0078d4;
     
     // Overlay colors
-    out property <color> overlay-background: #1a1a1ae8;
-    out property <color> dialog-background: #222222;
+    out property <color> overlay-background: #121212e8;
+    out property <color> dialog-background: #1a1a1a;
     out property <color> modal-backdrop: #000000a0;
     
     // Accent colors — vibrant against dark backgrounds
@@ -66,14 +66,14 @@ export global Theme {
     out property <color> accent-yellow: #f9c74f;
     
     // Ribbon colors
-    out property <color> ribbon-background: #181818;
-    out property <color> ribbon-tab-active: #1a1a1a;
-    out property <color> ribbon-tab-inactive: #222222;
-    out property <color> ribbon-separator: #2a2a2a;
+    out property <color> ribbon-background: #101010;
+    out property <color> ribbon-tab-active: #121212;
+    out property <color> ribbon-tab-inactive: #1a1a1a;
+    out property <color> ribbon-separator: #222222;
     
     // Explorer colors
-    out property <color> explorer-item-hover: #222222;
-    out property <color> explorer-item-selected: #0d3a58;
+    out property <color> explorer-item-hover: #1a1a1a;
+    out property <color> explorer-item-selected: #0a2e48;
     out property <color> explorer-folder: #e8b84a;
     out property <color> explorer-file: #c8c8c8;
     
@@ -113,9 +113,9 @@ export global Theme {
     out property <length> font-xxl: 24px;
 }
 
-// Icon button component for consistent styling
+// Icon button component for consistent styling with hover tooltip
 export component IconButton inherits Rectangle {
-    in property <string> icon: "";
+    in property <image> icon;
     in property <string> tooltip: "";
     in property <bool> selected: false;
     in property <bool> enabled: true;
@@ -129,19 +129,54 @@ export component IconButton inherits Rectangle {
                 touch.has-hover ? Theme.button-hover : transparent;
     
     opacity: self.enabled ? 1.0 : 0.5;
+    clip: false;
     
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
+        moved => {
+            if root.tooltip != "" {
+                tooltip-popup.show();
+            }
+        }
     }
     
-    Text {
-        text: root.icon;
-        color: root.selected ? Theme.text-accent : Theme.text-primary;
-        font-size: 16px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    Image {
+        x: 6px;
+        y: 6px;
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        image-fit: contain;
+    }
+    
+    // Tooltip popup — uses PopupWindow for correct z-ordering above all panels
+    tooltip-popup := PopupWindow {
+        x: 0px;
+        y: root.height + 4px;
+        
+        Rectangle {
+            background: #1e1e1e;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000060;
+            
+            HorizontalBox {
+                padding-left: 6px;
+                padding-right: 6px;
+                padding-top: 3px;
+                padding-bottom: 3px;
+                
+                Text {
+                    text: root.tooltip;
+                    color: #d4d4d4;
+                    font-size: 11px;
+                }
+            }
+        }
     }
 }
 
@@ -175,11 +210,12 @@ export component PanelHeader inherits Rectangle {
                 root.toggle-collapsed();
             }
             
-            Text {
-                text: root.collapsed ? "▶" : "▼";
-                color: Theme.text-secondary;
-                font-size: 10px;
-                horizontal-alignment: center;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: root.collapsed ? @image-url("../../assets/icons/ui/chevron-right.svg") :
+                        @image-url("../../assets/icons/ui/chevron-down.svg");
+                image-fit: contain;
                 vertical-alignment: center;
             }
         }
@@ -237,22 +273,25 @@ export component PropertyRow inherits Rectangle {
 // Tree item component for explorer
 export component TreeItem inherits Rectangle {
     in property <int> depth: 0;
-    in property <string> icon: "";
+    in property <image> icon;
     in property <string> label: "";
     in property <bool> expandable: false;
     in property <bool> expanded: false;
     in property <bool> selected: false;
+    in property <bool> show: true;
     
     callback clicked();
     callback double-clicked();
     callback toggle-expanded();
     callback context-menu(length, length);
     
-    height: 22px;
+    height: root.show ? 22px : 0px;
+    visible: root.show;
     background: self.selected ? Theme.explorer-item-selected : 
-                touch.has-hover ? Theme.explorer-item-hover : transparent;
+                row-touch.has-hover ? Theme.explorer-item-hover : transparent;
     
-    touch := TouchArea {
+    // Full-row touch area for selection and context menu
+    row-touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
         pointer-event(event) => {
@@ -262,46 +301,47 @@ export component TreeItem inherits Rectangle {
         }
     }
     
-    HorizontalBox {
-        padding-left: 4px + root.depth * 16px;
-        padding-right: 4px;
-        spacing: 4px;
-        
-        // Expand/collapse arrow
-        if root.expandable: TouchArea {
-            width: 16px;
-            clicked => { root.toggle-expanded(); }
-            
-            Text {
-                text: root.expanded ? "▼" : "▶";
-                color: Theme.text-secondary;
-                font-size: 10px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-        
-        if !root.expandable: Rectangle {
-            width: 16px;
-        }
-        
-        // Icon
-        Text {
-            width: 18px;
-            text: root.icon;
-            font-size: 14px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        
-        // Label
-        Text {
-            horizontal-stretch: 1;
-            text: root.label;
-            color: root.selected ? Theme.text-primary : Theme.text-primary;
-            vertical-alignment: center;
-            overflow: elide;
-        }
+    // Expand/collapse arrow
+    if root.expandable: TouchArea {
+        x: 4px + root.depth * 16px;
+        y: 0px;
+        width: 16px;
+        height: 22px;
+        mouse-cursor: pointer;
+        clicked => { root.toggle-expanded(); }
+    }
+    
+    if root.expandable: Image {
+        x: 4px + root.depth * 16px;
+        y: 3px;
+        width: 16px;
+        height: 16px;
+        source: root.expanded ? @image-url("../../assets/icons/ui/chevron-down.svg") :
+                @image-url("../../assets/icons/ui/chevron-right.svg");
+        image-fit: contain;
+    }
+    
+    // SVG icon — pixel-perfect centered
+    Image {
+        x: 4px + root.depth * 16px + 16px;
+        y: 3px;
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        image-fit: contain;
+    }
+    
+    // Label
+    Text {
+        x: 4px + root.depth * 16px + 16px + 20px;
+        y: 0px;
+        width: root.width - (4px + root.depth * 16px + 16px + 20px + 4px);
+        height: 22px;
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -314,39 +354,43 @@ export component LogEntry inherits Rectangle {
     height: 20px;
     background: transparent;
     
-    HorizontalBox {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
-        
-        // Level indicator
-        Text {
-            width: 16px;
-            text: root.level == "error" ? "❌" :
-                  root.level == "warning" ? "⚠" :
-                  root.level == "debug" ? "🔍" : "ℹ";
-            font-size: 12px;
-            vertical-alignment: center;
-        }
-        
-        // Timestamp
-        Text {
-            width: 80px;
-            text: root.timestamp;
-            color: Theme.text-secondary;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
-        
-        // Message
-        Text {
-            horizontal-stretch: 1;
-            text: root.message;
-            color: root.level == "error" ? Theme.output-error :
-                   root.level == "warning" ? Theme.output-warning :
-                   root.level == "debug" ? Theme.output-debug : Theme.output-info;
-            vertical-alignment: center;
-            overflow: elide;
-        }
+    // Level indicator SVG icon
+    Image {
+        x: 8px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        source: root.level == "error" ? @image-url("../../assets/icons/ui/error.svg") :
+                root.level == "warning" ? @image-url("../../assets/icons/ui/warning.svg") :
+                root.level == "debug" ? @image-url("../../assets/icons/ui/debug.svg") :
+                @image-url("../../assets/icons/ui/info.svg");
+        image-fit: contain;
+    }
+    
+    // Timestamp
+    Text {
+        x: 28px;
+        y: 0px;
+        width: 70px;
+        height: 20px;
+        text: root.timestamp;
+        color: Theme.text-secondary;
+        font-size: 10px;
+        vertical-alignment: center;
+    }
+    
+    // Message
+    Text {
+        x: 102px;
+        y: 0px;
+        width: root.width - 110px;
+        height: 20px;
+        text: root.message;
+        color: root.level == "error" ? Theme.output-error :
+               root.level == "warning" ? Theme.output-warning :
+               root.level == "debug" ? Theme.output-debug : Theme.output-info;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
     }
 }
