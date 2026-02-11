@@ -21,8 +21,26 @@
 11. [Persistence](#persistence)
 12. [Bevy Integration](#bevy-integration)
 13. [Visualization Phases](#visualization-phases)
-14. [Dependencies](#dependencies)
-15. [Implementation Checklist](#implementation-checklist)
+14. [Real-Case Investigative Features](#real-case-investigative-features)
+    - 14.1 [Temporal Decay & Evidence Freshness](#temporal-decay--evidence-freshness)
+    - 14.2 [Contradictory Evidence Handling](#contradictory-evidence-handling)
+    - 14.3 [Chain of Custody / Evidence Provenance](#chain-of-custody--evidence-provenance)
+    - 14.4 [Cognitive Bias Detection](#cognitive-bias-detection)
+    - 14.5 [Witness Reliability Scoring](#witness-reliability-scoring)
+    - 14.6 [Geographic Profiling](#geographic-profiling)
+    - 14.7 [Timeline Gap Analysis](#timeline-gap-analysis)
+    - 14.8 [Multi-Analyst Collaboration](#multi-analyst-collaboration)
+    - 14.9 [Victimology Profiling](#victimology-profiling)
+    - 14.10 [Scenario Comparison / Diff Tool](#scenario-comparison--diff-tool)
+15. [SOTA Intelligence Features](#sota-intelligence-features)
+    - 15.1 [NLP Entity Extraction Pipeline](#nlp-entity-extraction-pipeline)
+    - 15.2 [Link Analysis / Social Network Graph](#link-analysis--social-network-graph)
+    - 15.3 [ML Predictive Modeling](#ml-predictive-modeling)
+    - 15.4 [Digital Forensics Adapters](#digital-forensics-adapters)
+    - 15.5 [Immutable Audit Trail](#immutable-audit-trail)
+    - 15.6 [Devil's Advocate / Red Team Mode](#devils-advocate--red-team-mode)
+16. [Dependencies](#dependencies)
+17. [Implementation Checklist](#implementation-checklist)
 
 ---
 
@@ -439,9 +457,759 @@ impl Plugin for ScenariosPlugin {
 
 ---
 
+## Real-Case Investigative Features
+
+These 10 features are derived from patterns observed in real criminal investigations, intelligence analysis, and disaster response. Each addresses a specific failure mode or capability gap that has impacted real cases.
+
+### Temporal Decay & Evidence Freshness
+
+**Problem:** In real cases (e.g., missing persons, cold cases), evidence degrades over time. A witness statement from hour 1 is more reliable than one from week 3. Static confidence scores don't capture this.
+
+**Solution:** A `FreshnessDecay` function on Evidence — confidence auto-decreases based on `(now - timestamp)` with configurable decay curves.
+
+```rust
+enum DecayCurve {
+    Linear { half_life: Duration },        // Steady decline
+    Exponential { lambda: f64 },           // Rapid initial drop, long tail
+    Step { thresholds: Vec<(Duration, f64)> }, // Discrete drops at time boundaries
+    None,                                  // No decay (physical evidence, DNA)
+}
+
+struct TemporalDecay {
+    curve: DecayCurve,
+    base_confidence: f64,                  // Original confidence at collection time
+    collected_at: DateTime<Utc>,
+}
+
+// Evidence.effective_confidence(now) = base_confidence * decay_factor(now - collected_at)
+```
+
+**Real-case reference:** Delphi murders — witness descriptions became less reliable over months. Madeleine McCann — early witness sightings weighted higher than later ones.
+
+### Contradictory Evidence Handling
+
+**Problem:** Real cases almost always have conflicting data. Physical evidence may point in multiple directions simultaneously. The base model doesn't explicitly handle contradictions.
+
+**Solution:** An `EvidenceConflict` struct that links contradicting evidence items with resolution strategies.
+
+```rust
+struct EvidenceConflict {
+    id: Uuid,
+    evidence_a: Uuid,
+    evidence_b: Uuid,
+    conflict_type: ConflictType,
+    resolution: ConflictResolution,
+    notes: String,
+}
+
+enum ConflictType {
+    DirectContradiction,    // A says X, B says not-X
+    TemporalImpossibility,  // A and B can't both be true given timeline
+    PhysicalIncompatibility, // Forensic evidence conflicts
+    TestimonialDisagreement, // Witnesses disagree
+}
+
+enum ConflictResolution {
+    WeightedAverage,        // Split probability mass proportionally
+    PreferA { reason: String },
+    PreferB { reason: String },
+    HoldBoth,               // Maintain both as valid, split branches
+    Unresolved,             // Flag for analyst review
+}
+```
+
+**Real-case reference:** JonBenét Ramsey — physical evidence pointed in multiple directions. Steven Avery / Making a Murderer — contested forensic evidence.
+
+### Chain of Custody / Evidence Provenance
+
+**Problem:** In legal contexts, evidence without provenance is inadmissible. Tainted evidence chains can corrupt entire scenario trees.
+
+**Solution:** A `ProvenanceChain` on each Evidence — who collected it, when, how it was stored, chain of transfers. Generates an admissibility score separate from confidence.
+
+```rust
+struct ProvenanceChain {
+    entries: Vec<ProvenanceEntry>,
+    admissibility_score: f64,  // 0.0–1.0, computed from chain integrity
+}
+
+struct ProvenanceEntry {
+    timestamp: DateTime<Utc>,
+    custodian: String,          // Person/agency responsible
+    action: CustodyAction,
+    location: Option<String>,
+    notes: String,
+    verified: bool,             // Independently confirmed
+}
+
+enum CustodyAction {
+    Collected,
+    Transferred,
+    Stored,
+    Analyzed,
+    Duplicated,
+    Sealed,
+    Unsealed,
+    Contaminated,  // Flags a break in chain
+    Destroyed,
+}
+```
+
+Admissibility auto-degrades if:
+- Gaps exist in the chain (missing entries between actions)
+- `Contaminated` action appears
+- `verified: false` on critical entries
+- Chain crosses jurisdictions without transfer documentation
+
+**Real-case reference:** Whitey Bulger — FBI evidence handling corruption. O.J. Simpson — chain of custody challenges on blood evidence.
+
+### Cognitive Bias Detection
+
+**Problem:** Tunnel vision is the #1 cause of wrongful convictions (Innocence Project data). Investigators fixate on one scenario and unconsciously discount contradicting evidence.
+
+**Solution:** A **bias detector** system that runs as a Bevy system, analyzing the current scenario state and emitting `BiasWarning` events.
+
+```rust
+struct BiasWarning {
+    bias_type: BiasType,
+    severity: f64,           // 0.0–1.0
+    description: String,
+    affected_branches: Vec<Uuid>,
+    suggested_action: String,
+}
+
+enum BiasType {
+    ConfirmationBias,   // >80% of evidence manually attached to leading branch
+    NeglectBias,        // Contradicting evidence exists but isn't attached to any branch
+    TunnelVision,       // User hasn't explored branches below threshold in N sessions
+    AnchoringBias,      // First-entered scenario has disproportionate evidence
+    AvailabilityBias,   // Recent evidence weighted higher than warranted
+}
+```
+
+Detection rules:
+- **Confirmation bias:** Leading branch has >80% of all manually-attached evidence
+- **Neglect bias:** Evidence items exist in the pool that contradict the leading hypothesis but aren't linked to any branch
+- **Tunnel vision:** User hasn't expanded or interacted with branches below 20% probability in the last N sessions
+- **Anchoring:** The first-created scenario branch has >2x the evidence of the second
+- **Availability:** Evidence attached in the last 24h has >3x the average relevance score
+
+**Real-case reference:** Cameron Todd Willingham — arson investigators fixated on "pour patterns" that were later debunked. Central Park Five — tunnel vision on initial suspects despite contradicting DNA.
+
+### Witness Reliability Scoring
+
+**Problem:** Not all testimonial evidence is equal. Eyewitness descriptions can be wildly inaccurate. Real investigators use structured reliability assessments.
+
+**Solution:** A `WitnessReliability` component on testimonial evidence that auto-adjusts the evidence's likelihood ratio.
+
+```rust
+struct WitnessReliability {
+    // Environmental factors (0.0–1.0 each)
+    proximity: f64,            // How close was the witness
+    lighting_conditions: f64,  // Visibility at the time
+    duration_of_observation: f64, // How long they observed
+    
+    // Cognitive factors
+    stress_level: f64,         // High stress = lower reliability (weapon focus effect)
+    time_elapsed: Duration,    // Since observation to statement
+    prior_relationship: bool,  // Knew the subject = higher reliability for ID
+    
+    // Consistency
+    statement_count: usize,    // Number of interviews
+    consistency_score: f64,    // Cross-interview consistency (0.0–1.0)
+    detail_specificity: f64,   // Vague vs. specific descriptions
+    
+    // Computed
+    composite_reliability: f64, // Weighted aggregate
+}
+
+impl WitnessReliability {
+    fn compute_composite(&self) -> f64 {
+        // Weighted formula based on empirical research
+        // (Loftus, Wells & Olson, etc.)
+        let env = (self.proximity * 0.3 + self.lighting_conditions * 0.3 
+                   + self.duration_of_observation * 0.4);
+        let cog = (1.0 - self.stress_level * 0.4) 
+                  * (1.0 - (self.time_elapsed.as_secs_f64() / 86400.0).min(1.0) * 0.3)
+                  * if self.prior_relationship { 1.3 } else { 1.0 };
+        let con = self.consistency_score * 0.6 + self.detail_specificity * 0.4;
+        (env * 0.3 + cog.min(1.0) * 0.4 + con * 0.3).clamp(0.0, 1.0)
+    }
+}
+```
+
+Auto-adjusts the parent Evidence's `likelihood_ratio` by multiplying with `composite_reliability`.
+
+**Real-case reference:** Elizabeth Smart — initial eyewitness descriptions were inaccurate. Ronald Cotton case — witness misidentification despite high confidence.
+
+### Geographic Profiling
+
+**Problem:** Serial cases are often cracked through geographic profiling — offenders operate in a "comfort zone." Passive heatmaps don't actively compute anchor points.
+
+**Solution:** An **active geographic profiler** that computes a probability surface for the offender's anchor point (home/work) given a set of linked crime/evidence locations.
+
+```rust
+struct GeographicProfile {
+    crime_sites: Vec<GeoPoint>,
+    anchor_probability_surface: Vec<(GeoPoint, f64)>, // Grid of probabilities
+    peak_anchor: Option<GeoPoint>,                     // Most likely anchor point
+    buffer_zone_radius: f64,                           // Estimated comfort zone (meters)
+    algorithm: GeoProfileAlgorithm,
+}
+
+enum GeoProfileAlgorithm {
+    Rossmo {                    // Rossmo's CGT formula
+        f: f64,                 // Empirical exponent (typically 1.2)
+        g: f64,                 // Empirical exponent (typically 1.2)
+        buffer: f64,            // Buffer zone radius
+    },
+    BayesianDistanceDecay {     // Bayesian approach with distance decay
+        prior: DistanceDecayPrior,
+        kernel_bandwidth: f64,
+    },
+    CenterOfMinimumDistance,    // Simple centroid-based
+}
+
+struct GeoPoint {
+    lat: f64,   // WGS84
+    lon: f64,
+    alt: Option<f64>,
+}
+```
+
+Integrates with Viz Phase 2 (Geospatial Heatmap) — the anchor probability surface renders as a colored overlay on the terrain.
+
+**Real-case reference:** BTK killer — geographic profiling narrowed search area. Golden State Killer — geographic patterns across decades of crimes.
+
+### Timeline Gap Analysis
+
+**Problem:** Unaccounted time windows are critical in investigations. The current model has timestamps but doesn't actively identify gaps.
+
+**Solution:** A **timeline gap detector** that analyzes all entity timelines and flags unaccounted periods.
+
+```rust
+struct TimelineGap {
+    entity_id: Uuid,
+    gap_start: DateTime<Utc>,
+    gap_end: DateTime<Utc>,
+    duration: Duration,
+    severity: GapSeverity,
+    last_known_location: Option<GeoPoint>,
+    next_known_location: Option<GeoPoint>,
+    possible_activities: Vec<GapHypothesis>,
+}
+
+enum GapSeverity {
+    Critical,   // Gap during key event window
+    Significant, // >1 hour gap with no coverage
+    Minor,      // <1 hour or outside event window
+}
+
+struct GapHypothesis {
+    description: String,
+    probability: f64,
+    supporting_evidence: Vec<Uuid>,
+}
+```
+
+The system:
+1. Collects all timestamped evidence per entity
+2. Sorts chronologically
+3. Identifies gaps exceeding a configurable threshold
+4. Cross-references gaps with the scenario's event window
+5. Generates hypotheses for what could have occurred during gaps (based on branch logic)
+
+**Real-case reference:** Madeleine McCann — the "missing 45 minutes" was central to the investigation. Maura Murray — timeline gaps in the hours before disappearance.
+
+### Multi-Analyst Collaboration
+
+**Problem:** Major cases involve multiple agencies with different data, hypotheses, and jurisdictional friction. No single analyst has the full picture.
+
+**Solution:** **Analyst roles** — each analyst maintains independent branch weightings and evidence attachments. A merge view shows agreement/disagreement with consensus probability.
+
+```rust
+struct Analyst {
+    id: Uuid,
+    name: String,
+    agency: String,
+    role: AnalystRole,
+    created: DateTime<Utc>,
+}
+
+enum AnalystRole {
+    Lead,           // Full read/write, can merge
+    Contributor,    // Can add evidence, adjust own weightings
+    Reviewer,       // Read-only with annotation capability
+    Observer,       // Read-only
+}
+
+struct AnalystView {
+    analyst_id: Uuid,
+    scenario_id: Uuid,
+    branch_overrides: HashMap<Uuid, f64>,    // Branch ID → analyst's probability override
+    evidence_annotations: HashMap<Uuid, String>, // Evidence ID → analyst's notes
+    private_branches: Vec<BranchNode>,       // Branches only this analyst sees
+}
+
+struct ConsensusView {
+    branch_consensus: HashMap<Uuid, ConsensusEntry>,
+}
+
+struct ConsensusEntry {
+    branch_id: Uuid,
+    mean_probability: f64,
+    std_deviation: f64,
+    analyst_count: usize,
+    agreement_level: AgreementLevel,  // High (σ<0.1), Medium, Low (σ>0.3), Conflict
+}
+```
+
+Features:
+- Each analyst can fork their own view without affecting others
+- **Merge view** highlights where analysts agree (green) and disagree (red)
+- **Consensus probability** = weighted average across analysts (Lead weighted higher)
+- **Conflict alerts** when analysts diverge by >30% on the same branch
+- Git-like history: who changed what, when
+
+**Real-case reference:** Zodiac killer — multiple agencies with fragmented data. DC Sniper — multi-jurisdictional coordination challenges.
+
+### Victimology Profiling
+
+**Problem:** FBI behavioral analysis always starts with the victim. Generic entity attributes don't capture structured victimology.
+
+**Solution:** A `VictimologyProfile` struct with structured fields that auto-generates "opportunity windows" for the scenario timeline.
+
+```rust
+struct VictimologyProfile {
+    entity_id: Uuid,
+    
+    // Risk assessment
+    risk_level: VictimRiskLevel,
+    risk_factors: Vec<String>,
+    
+    // Routine activities
+    daily_routine: Vec<RoutineActivity>,
+    known_locations: Vec<(GeoPoint, String)>,  // Location + description
+    transportation: Vec<String>,
+    
+    // Social network
+    relationships: Vec<Relationship>,
+    social_media_presence: SocialMediaLevel,
+    community_visibility: f64,  // 0.0 (reclusive) – 1.0 (public figure)
+    
+    // Digital footprint
+    last_digital_activity: Option<DateTime<Utc>>,
+    device_locations: Vec<(DateTime<Utc>, GeoPoint)>,
+    
+    // Computed
+    opportunity_windows: Vec<OpportunityWindow>,
+}
+
+enum VictimRiskLevel {
+    Low,     // Stable routine, low exposure
+    Medium,  // Some risk factors
+    High,    // High exposure, risky behavior patterns
+}
+
+struct RoutineActivity {
+    description: String,
+    time_range: (NaiveTime, NaiveTime),
+    days: Vec<Weekday>,
+    location: Option<GeoPoint>,
+}
+
+struct Relationship {
+    entity_id: Uuid,
+    relationship_type: String,  // "spouse", "coworker", "neighbor", etc.
+    closeness: f64,             // 0.0–1.0
+    conflict_history: bool,
+    last_contact: Option<DateTime<Utc>>,
+}
+
+struct OpportunityWindow {
+    time_range: (DateTime<Utc>, DateTime<Utc>),
+    location: GeoPoint,
+    vulnerability_score: f64,   // How exposed the victim was
+    routine_deviation: bool,    // Was this outside normal routine?
+}
+```
+
+Auto-generates opportunity windows by:
+1. Mapping the victim's routine onto the scenario timeline
+2. Identifying deviations from routine (higher risk)
+3. Cross-referencing with suspect entity timelines for overlap
+4. Feeding windows into branch probability calculations
+
+**Real-case reference:** FBI's Behavioral Analysis Unit methodology. Ted Bundy cases — victimology patterns revealed targeting criteria. Israel Keyes — victim selection based on opportunity windows.
+
+### Scenario Comparison / Diff Tool
+
+**Problem:** Investigators often maintain parallel theories. The current model supports multiple scenarios per Space but lacks structured comparison.
+
+**Solution:** A **scenario diff** tool — side-by-side comparison showing divergent branches, shared evidence, and probability deltas.
+
+```rust
+struct ScenarioDiff {
+    scenario_a: Uuid,
+    scenario_b: Uuid,
+    shared_evidence: Vec<Uuid>,
+    unique_to_a: Vec<Uuid>,
+    unique_to_b: Vec<Uuid>,
+    branch_comparisons: Vec<BranchComparison>,
+    overall_divergence: f64,  // 0.0 (identical) – 1.0 (completely different)
+}
+
+struct BranchComparison {
+    label: String,
+    prob_a: Option<f64>,       // None if branch doesn't exist in A
+    prob_b: Option<f64>,
+    delta: f64,                // |prob_a - prob_b|
+    shared_evidence_count: usize,
+    divergence_reason: String,
+}
+```
+
+Features:
+- **Side-by-side view** in the Slint dashboard
+- **Shared evidence highlighting** — evidence used by both scenarios shown in blue
+- **Exclusive evidence** — evidence unique to each scenario shown in orange/purple
+- **Probability delta bars** — visual bars showing where scenarios agree/disagree
+- **Merge tool** — combine the best branches from two scenarios into a new one
+- **A/B simulation** — run Monte Carlo on both simultaneously, compare outcome distributions
+
+**Real-case reference:** Zodiac killer — one killer vs. copycat theories. Jack the Ripper — dozens of competing suspect theories maintained in parallel.
+
+---
+
+## SOTA Intelligence Features
+
+These 6 features close the gap between Eustress Scenarios and the state of the art in intelligence analysis platforms (Palantir Gotham, i2 Analyst's Notebook, Babel Street). Together with the Real-Case Investigative Features, they make the system genuinely revolutionary — no existing tool combines all of these in a unified real-time 3D environment.
+
+### NLP Entity Extraction Pipeline
+
+**Problem:** Real investigations generate massive volumes of unstructured text — police reports, witness statements, news articles, social media posts, court documents. Manual data entry is the bottleneck.
+
+**Solution:** An NLP pipeline that ingests raw text and auto-extracts structured data into the scenario model.
+
+```rust
+struct ExtractionResult {
+    source_text: String,
+    source_metadata: DataSourceRef,
+    extracted_entities: Vec<ExtractedEntity>,
+    extracted_relationships: Vec<ExtractedRelationship>,
+    extracted_events: Vec<ExtractedEvent>,
+    confidence: f64,
+}
+
+struct ExtractedEntity {
+    name: String,
+    entity_type: EntityRole,        // Person, Location, Vehicle, etc.
+    attributes: HashMap<String, String>,
+    text_span: (usize, usize),      // Character offsets in source
+    confidence: f64,
+}
+
+struct ExtractedRelationship {
+    entity_a: String,
+    entity_b: String,
+    relationship_type: String,       // "knows", "employed_by", "located_at", etc.
+    confidence: f64,
+}
+
+struct ExtractedEvent {
+    description: String,
+    timestamp: Option<DateTime<Utc>>,
+    location: Option<GeoPoint>,
+    participants: Vec<String>,       // Entity names
+    event_type: String,              // "sighting", "transaction", "communication", etc.
+    confidence: f64,
+}
+```
+
+Pipeline stages:
+1. **Ingest** — Accept raw text from files, clipboard, or REST API responses
+2. **NER (Named Entity Recognition)** — Extract persons, locations, organizations, dates, amounts
+3. **Relation Extraction** — Identify relationships between entities
+4. **Temporal Parsing** — Normalize date/time expressions ("last Tuesday", "around 10 PM")
+5. **Geocoding** — Resolve location names to WGS84 coordinates
+6. **Deduplication** — Match extracted entities against existing scenario entities
+7. **Review** — Present extractions to analyst for confirmation before committing
+
+**Implementation note:** Can use local models (e.g., ONNX-exported NER models via `ort` crate) or API-based (OpenAI, local LLM via Ollama). Configurable per deployment.
+
+### Link Analysis / Social Network Graph
+
+**Problem:** Relationships between entities are often the key to solving cases. Who knows who, who communicated with whom, who was where when. Flat entity lists miss these patterns.
+
+**Solution:** A graph analysis engine operating on the scenario's entity relationship data.
+
+```rust
+struct EntityGraph {
+    nodes: HashMap<Uuid, GraphNode>,
+    edges: Vec<GraphEdge>,
+}
+
+struct GraphNode {
+    entity_id: Uuid,
+    centrality_score: f64,          // How connected this entity is
+    community_id: Option<usize>,    // Cluster membership
+    betweenness: f64,               // Bridge between communities
+}
+
+struct GraphEdge {
+    source: Uuid,
+    target: Uuid,
+    edge_type: EdgeType,
+    weight: f64,                    // Strength of connection
+    evidence_ids: Vec<Uuid>,        // Evidence supporting this link
+    timestamps: Vec<DateTime<Utc>>, // When interactions occurred
+}
+
+enum EdgeType {
+    Social,         // Personal relationship
+    Communication,  // Phone, email, message
+    Financial,      // Money transfer, shared accounts
+    Proximity,      // Co-located at same time
+    Organizational, // Same employer, group membership
+    Familial,       // Family relationship
+    Digital,        // Shared IP, device, account
+    Custom(String),
+}
+```
+
+Analysis capabilities:
+- **Degree centrality** — Who has the most connections (potential organizer)
+- **Betweenness centrality** — Who bridges separate groups (potential intermediary)
+- **Community detection** — Identify clusters/cells within the network
+- **Shortest path** — How are two entities connected (degrees of separation)
+- **Temporal patterns** — Communication frequency changes over time (spike before event?)
+- **Financial flow** — Follow the money through the network
+
+Visualization: Renders as a force-directed 3D graph in the Bevy viewport, integrated with the decision tree and geospatial views.
+
+### ML Predictive Modeling
+
+**Problem:** Monte Carlo simulations are powerful but purely generative — they don't learn from historical data. Real SOTA systems use resolved cases to improve predictions.
+
+**Solution:** An optional ML layer that trains on historical case outcomes to provide informed priors and pattern-based predictions.
+
+```rust
+struct PredictiveModel {
+    model_id: Uuid,
+    name: String,
+    training_cases: usize,
+    feature_set: Vec<String>,       // Which evidence/entity features the model uses
+    accuracy: f64,                  // Cross-validated accuracy
+    last_trained: DateTime<Utc>,
+}
+
+struct Prediction {
+    model_id: Uuid,
+    scenario_id: Uuid,
+    predicted_outcome: String,
+    confidence: f64,
+    feature_importance: HashMap<String, f64>,  // Which features drove the prediction
+    similar_cases: Vec<SimilarCase>,
+}
+
+struct SimilarCase {
+    case_id: String,
+    similarity_score: f64,
+    outcome: String,
+    key_differences: Vec<String>,
+}
+```
+
+Capabilities:
+- **Prior improvement** — "Cases with these evidence patterns resolved as kidnapping-for-ransom 73% of the time"
+- **Pattern matching** — Find historically similar cases and their outcomes
+- **Feature importance** — Which evidence features are most predictive for this scenario type
+- **Anomaly detection** — Flag when current case deviates significantly from historical patterns
+
+**Implementation note:** Use `ort` crate for ONNX model inference (runs locally, no API dependency). Training can happen offline on anonymized case databases. Models are optional — system works fully without them.
+
+### Digital Forensics Adapters
+
+**Problem:** Modern investigations are heavily digital — phone records, GPS logs, financial transactions, social media metadata. These come in specialized formats that need parsing.
+
+**Solution:** Source adapters for common digital forensics export formats.
+
+```rust
+enum ForensicsFormat {
+    // Mobile forensics
+    CellebriteUFED,     // .ufed / .xml exports
+    GrayKeyReport,      // PDF/CSV exports
+    
+    // Communications
+    CallDetailRecords,  // CDR CSV (tower, duration, parties)
+    SMSExport,          // Message logs
+    EmailHeaders,       // MIME header analysis
+    
+    // Financial
+    BankStatement,      // CSV/OFX transaction logs
+    CryptoLedger,       // Blockchain transaction exports
+    
+    // Location
+    GoogleTimeline,     // Google Takeout location history JSON
+    AppleLocationData,  // Apple device location exports
+    CellTowerDump,      // Tower dump CSV (all devices at tower)
+    
+    // Social media
+    FacebookExport,     // Facebook data download
+    TwitterArchive,     // Twitter/X data export
+    InstagramExport,    // Instagram data download
+    
+    // Generic
+    CustomCSV { mapping: ColumnMapping },
+}
+
+struct ColumnMapping {
+    timestamp_col: Option<String>,
+    entity_col: Option<String>,
+    location_lat_col: Option<String>,
+    location_lon_col: Option<String>,
+    value_col: Option<String>,
+    description_col: Option<String>,
+}
+```
+
+Each adapter:
+1. Parses the format-specific structure
+2. Normalizes to `Evidence` and `ScenarioEntity` objects
+3. Auto-generates timeline entries
+4. Geocodes locations to WGS84
+5. Links to existing entities via name/phone/email matching
+
+### Immutable Audit Trail
+
+**Problem:** For courtroom use, every analytical step must be reproducible and explainable. "How did you arrive at this conclusion?" needs a documented answer.
+
+**Solution:** An append-only audit log that records every action taken in the scenario workspace.
+
+```rust
+struct AuditLog {
+    scenario_id: Uuid,
+    entries: Vec<AuditEntry>,       // Append-only, never modified
+    hash_chain: Vec<[u8; 32]>,      // Blake3 hash chain for tamper detection
+}
+
+struct AuditEntry {
+    id: Uuid,
+    timestamp: DateTime<Utc>,
+    analyst_id: Uuid,
+    action: AuditAction,
+    previous_state: Option<String>, // JSON snapshot of affected data before change
+    new_state: Option<String>,      // JSON snapshot after change
+    rationale: Option<String>,      // Analyst's stated reason (optional but encouraged)
+    hash: [u8; 32],                 // Blake3 hash of this entry + previous hash
+}
+
+enum AuditAction {
+    // Scenario lifecycle
+    ScenarioCreated,
+    ScenarioModified { field: String },
+    
+    // Evidence
+    EvidenceAdded { evidence_id: Uuid },
+    EvidenceAttached { evidence_id: Uuid, branch_id: Uuid, mode: AttachmentMode },
+    EvidenceDetached { evidence_id: Uuid, branch_id: Uuid },
+    EvidenceConfidenceChanged { evidence_id: Uuid, old: f64, new: f64 },
+    
+    // Branches
+    BranchCreated { branch_id: Uuid, parent_id: Option<Uuid> },
+    BranchProbabilityOverridden { branch_id: Uuid, old: f64, new: f64 },
+    BranchCollapsed { branch_id: Uuid },
+    BranchExpanded { branch_id: Uuid },
+    
+    // Simulation
+    SimulationRun { config: SimulationConfig, duration_ms: u64 },
+    BayesianUpdateApplied { branch_id: Uuid, evidence_id: Uuid },
+    
+    // Analyst
+    AnalystJoined { analyst_id: Uuid },
+    AnalystAnnotation { target_id: Uuid, note: String },
+    
+    // Bias
+    BiasWarningGenerated { warning: BiasWarning },
+    BiasWarningAcknowledged { warning_id: Uuid, response: String },
+    
+    // Devil's Advocate
+    CounterArgumentGenerated { branch_id: Uuid },
+    CounterArgumentAddressed { branch_id: Uuid, response: String },
+}
+```
+
+Properties:
+- **Append-only** — entries are never modified or deleted
+- **Hash-chained** — each entry includes a Blake3 hash of itself + the previous entry's hash (tamper detection)
+- **Exportable** — full audit trail exports to JSON/PDF for court submission
+- **Queryable** — "Show me all actions by Analyst X on Branch Y between dates A and B"
+- **Rationale capture** — system prompts analyst to explain significant changes (probability overrides, evidence detachments)
+
+Uses `blake3` crate (already in Cargo.toml) for hash chain integrity.
+
+### Devil's Advocate / Red Team Mode
+
+**Problem:** CIA tradecraft and intelligence analysis best practices (per Richards Heuer's "Psychology of Intelligence Analysis") require structured techniques to counter cognitive biases. Simply detecting bias isn't enough — the system must actively challenge the analyst.
+
+**Solution:** A "Devil's Advocate" mode that auto-generates counter-arguments to the leading hypothesis and forces the analyst to engage with them.
+
+```rust
+struct DevilsAdvocateSession {
+    id: Uuid,
+    scenario_id: Uuid,
+    target_branch: Uuid,            // The leading hypothesis being challenged
+    counter_arguments: Vec<CounterArgument>,
+    status: DASessionStatus,
+    started: DateTime<Utc>,
+    completed: Option<DateTime<Utc>>,
+}
+
+struct CounterArgument {
+    id: Uuid,
+    argument: String,
+    argument_type: CounterArgumentType,
+    supporting_evidence: Vec<Uuid>,  // Evidence that supports the counter-argument
+    neglected_evidence: Vec<Uuid>,   // Evidence not considered by leading hypothesis
+    alternative_branch: Option<Uuid>, // Which alternative branch this supports
+    analyst_response: Option<String>, // How the analyst addressed this
+    addressed: bool,
+}
+
+enum CounterArgumentType {
+    AlternativeExplanation,   // "This evidence could also mean..."
+    NeglectedEvidence,        // "You haven't considered this evidence..."
+    AssumptionChallenge,      // "Your scenario assumes X, but what if..."
+    HistoricalPrecedent,      // "In similar cases, the outcome was different..."
+    LogicalFlaw,              // "The reasoning from A to B has a gap..."
+    MissingData,              // "There's no evidence for this critical link..."
+}
+
+enum DASessionStatus {
+    Active,                   // Counter-arguments being generated/presented
+    PendingResponse,          // Waiting for analyst to address arguments
+    Completed,                // All arguments addressed
+    Dismissed { reason: String }, // Analyst dismissed session with reason (logged)
+}
+```
+
+Activation modes:
+- **Manual** — Analyst triggers Devil's Advocate on any branch
+- **Automatic** — System triggers when a branch exceeds 70% probability without the analyst having explored alternatives
+- **Pre-finalization** — Required before marking any scenario as "concluded" (configurable policy)
+
+Generation logic:
+1. Identify the leading branch (highest posterior probability)
+2. Find all evidence NOT attached to this branch
+3. Find all alternative branches with evidence that contradicts the leading hypothesis
+4. Generate counter-arguments from: neglected evidence, alternative explanations, assumption challenges
+5. Present to analyst as a structured checklist — each must be addressed (responded to or explicitly dismissed with rationale)
+6. All responses logged to the immutable audit trail
+
+---
+
 ## Dependencies
 
-All already present in `Cargo.toml`:
+### Already in `Cargo.toml`:
 
 | Crate | Use |
 |-------|-----|
@@ -455,7 +1223,17 @@ All already present in `Cargo.toml`:
 | `uuid` | Unique IDs for all scenario entities |
 | `chrono` | Temporal parameters and timestamps |
 | `rune = "0.14"` | User-scriptable branch logic |
+| `blake3 = "1"` | Hash chain for immutable audit trail |
 | `bevy` | Plugin/Resource/Event/System integration |
+
+### New dependencies needed for Phase 6:
+
+| Crate | Use | Phase |
+|-------|-----|-------|
+| `ort` | ONNX Runtime — local ML inference for NLP extraction and predictive modeling | 401, 403 |
+| `petgraph` | Graph data structures and algorithms for link analysis (centrality, shortest path, community detection) | 402 |
+| `csv` | CSV parsing for digital forensics adapters (CDR, financial, tower dumps) | 404 |
+| `calamine` | Excel/ODS parsing for forensics exports | 404 |
 
 ---
 
@@ -490,3 +1268,23 @@ All already present in `Cargo.toml`:
 
 ### Phase 4: Slint Dashboard
 - [ ] **213** Scenario tree, per-node stats, outcome table, param editor, progress bar, export
+
+### Phase 5: Real-Case Investigative Features
+- [ ] **301** Temporal decay & evidence freshness — configurable decay curves (linear, exponential, step) on Evidence confidence
+- [ ] **302** Contradictory evidence handling — EvidenceConflict struct, ConflictType enum, resolution strategies (weighted avg, prefer A/B, hold both, unresolved)
+- [ ] **303** Chain of custody / evidence provenance — ProvenanceChain with CustodyAction log, auto-computed admissibility score
+- [ ] **304** Cognitive bias detection — Bevy system emitting BiasWarning events (confirmation, neglect, tunnel vision, anchoring, availability)
+- [ ] **305** Witness reliability scoring — WitnessReliability struct (proximity, stress, consistency), composite score auto-adjusts likelihood ratio
+- [ ] **306** Geographic profiling — Rossmo's formula / Bayesian distance decay, anchor point probability surface, buffer zone estimation
+- [ ] **307** Timeline gap analysis — per-entity gap detection, GapSeverity classification, auto-generated GapHypothesis with probability estimates
+- [ ] **308** Multi-analyst collaboration — Analyst roles (Lead/Contributor/Reviewer/Observer), independent AnalystViews, ConsensusView with agreement levels, conflict alerts
+- [ ] **309** Victimology profiling — VictimologyProfile (routine activities, risk level, social graph, digital footprint), auto-generated OpportunityWindows
+- [ ] **310** Scenario comparison / diff tool — ScenarioDiff (shared/unique evidence, BranchComparison, divergence score), side-by-side view, merge tool, A/B simulation
+
+### Phase 6: SOTA Intelligence Features
+- [ ] **401** NLP entity extraction pipeline — raw text (police reports, news, social media) → auto-extract entities, relationships, timestamps, locations → create Evidence/Entity objects
+- [ ] **402** Link analysis / social network graph — centrality scoring, community detection, shortest path between entities, communication pattern analysis, financial flow mapping
+- [ ] **403** ML predictive modeling — train on resolved cases to improve priors, pattern-based outcome prediction ("cases with these evidence patterns resolved as X 73% of the time")
+- [ ] **404** Digital forensics adapters — Cellebrite exports, CDR (call detail records), financial transaction CSVs, GPS logs, social media metadata, phone tower triangulation
+- [ ] **405** Immutable audit trail — every parameter change, evidence attachment, probability update, analyst action logged with timestamps for court-admissible reproducibility
+- [ ] **406** Devil's Advocate / Red Team mode — auto-generate counter-arguments to leading hypothesis, surface neglected evidence, force analyst to address counter-evidence before finalizing
