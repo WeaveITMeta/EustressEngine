@@ -6,7 +6,22 @@
 import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-// Open script tab
+// Center tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
+// Tab data model for the center tabbed viewer
+export struct CenterTab {
+    entity-id: int,      // Entity ID for script tabs (-1 for web/scene)
+    name: string,        // Display name / page title
+    tab-type: string,    // "scene", "script", "web"
+    dirty: bool,         // Unsaved changes indicator
+    content: string,     // Script content or HTML
+    url: string,         // URL for web tabs
+    loading: bool,       // Loading state for web tabs
+    favicon: image,      // Favicon for web tabs
+    can-go-back: bool,   // Browser navigation state
+    can-go-forward: bool,
+}
+
+// Backward-compatible alias
 export struct ScriptTab {
     entity-id: int,
     name: string,
@@ -80,11 +95,12 @@ component EditorTab inherits Rectangle {
 
 export component ScriptEditor inherits Rectangle {
     // Properties
-    in property <[ScriptTab]> tabs: [];
+    in property <[CenterTab]> tabs: [];
     in property <int> active-tab: 0;
     in-out property <string> current-content: "";
     in property <int> cursor-line: 1;
     in property <int> cursor-column: 1;
+    in property <bool> show-tab-bar: true; // Set false when embedded with external tab bar
     
     // Callbacks
     callback on-tab-selected(int);
@@ -99,8 +115,8 @@ export component ScriptEditor inherits Rectangle {
         padding: 0px;
         spacing: 0px;
         
-        // Tab bar
-        Rectangle {
+        // Tab bar (hidden when external tab bar is used)
+        if root.show-tab-bar: Rectangle {
             height: 32px;
             background: Theme.background-secondary;
             

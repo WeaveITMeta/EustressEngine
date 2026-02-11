@@ -13,7 +13,8 @@ import { Toolbox } from "toolbox.slint";
 import { AssetManager } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
 import { SoulPanel } from "soul_panel.slint";
-import { ScriptEditor } from "script_editor.slint";
+import { ScriptEditor, ScriptTab, CenterTab } from "script_editor.slint";
+import { WebBrowser } from "web_browser.slint";
 import { Notifications } from "notifications.slint";
 import { ViewSelector } from "view_selector.slint";
 import { AIGeneration } from "ai_generation.slint";
@@ -70,6 +71,15 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-history: false;
     in-out property <bool> show-ai-generation: false;
     
+    // HUD visibility (toggle all Eustress Engine UI, keep Bevy UI)
+    in-out property <bool> show-hud: true;
+    
+    // Tab context menu state
+    in-out property <bool> show-tab-context-menu: false;
+    in-out property <int> tab-context-menu-index: -1;
+    in-out property <length> tab-context-menu-x: 0px;
+    in-out property <length> tab-context-menu-y: 0px;
+    
     // Command bar
     in-out property <bool> show-command-bar: false;
     in-out property <string> command-text: "";
@@ -122,6 +132,12 @@ export component StudioWindow inherits Window {
     // Transform mode
     in-out property <string> transform-mode: "world";
     
+    // Grid/Snap state (synced from Bevy EditorSettings)
+    in-out property <bool> snap-enabled: true;
+    in-out property <float> snap-size: 1.96;
+    in-out property <bool> grid-visible: true;
+    in-out property <float> grid-size: 9.81;
+    
     // View mode
     in-out property <string> view-mode: "perspective";
     
@@ -140,6 +156,8 @@ export component StudioWindow inherits Window {
     
     // Explorer entity tree data (pushed from Bevy)
     in-out property <[EntityNode]> explorer-entities: [];
+    in-out property <[EntityNode]> workspace-entities: [];
+    in-out property <[EntityNode]> lighting-entities: [];
     
     // Properties panel data (pushed from Bevy for selected entity)
     in-out property <[PropertyData]> entity-properties: [];
@@ -177,13 +195,36 @@ export component StudioWindow inherits Window {
     in-out property <DockZone> active-dock-zone: DockZone.center;
     
     // Viewport dimensions (reported to Bevy for render target sizing)
-    out property <float> viewport-width: viewport-area.width / 1px;
-    out property <float> viewport-height: viewport-area.height / 1px;
-    out property <float> viewport-x: viewport-area.x / 1px;
-    out property <float> viewport-y: viewport-area.y / 1px;
+    out property <float> viewport-width: center-content.width / 1px;
+    out property <float> viewport-height: center-content.height / 1px;
+    out property <float> viewport-x: center-content.x / 1px;
+    out property <float> viewport-y: center-content.y / 1px;
     
     // Viewport image (set by Bevy with rendered 3D scene)
     in-out property <image> viewport-image;
+    
+    // Center viewport tab bar (VS Code-style tabbed viewer)
+    // Tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
+    in-out property <[CenterTab]> center-tabs: [];
+    in-out property <int> center-active-tab: 0;
+    in-out property <string> script-editor-content: "";
+    
+    // Active tab type helper (set by Rust sync system)
+    in-out property <string> active-tab-type: "scene"; // "scene", "script", "web"
+    
+    // Web browser state for active web tab
+    in-out property <string> web-url-bar: "";
+    in-out property <image> web-content-image;  // Offscreen-rendered web page
+    in-out property <bool> web-secure: false;
+    in-out property <bool> web-has-url: false;
+    in-out property <bool> web-loading: false;
+    in-out property <bool> web-can-go-back: false;
+    in-out property <bool> web-can-go-forward: false;
+    
+    // Tab drag-and-drop reorder state
+    in-out property <int> tab-drag-source: -1;   // Index of tab being dragged (-1 = none)
+    in-out property <int> tab-drag-target: -1;    // Drop target index (-1 = none)
+    in-out property <bool> tab-dragging: false;
     
     // Left panel tab
     in-out property <int> left-tab-index: 0;
@@ -258,6 +299,26 @@ export component StudioWindow inherits Window {
     // Soul/Scripts
     callback build-script(int);
     callback open-script(int);
+    
+    // Center tab management
+    callback close-center-tab(int);
+    callback select-center-tab(int);
+    callback script-content-changed(string);
+    callback reorder-center-tab(int, int); // (from-index, to-index)
+    
+    // Tab context menu actions
+    callback close-other-tabs(int);         // Close all tabs except index
+    callback close-tabs-to-right(int);      // Close all tabs to the right of index
+    callback close-all-tabs();              // Close all closable tabs
+    callback copy-tab-path(int);            // Copy tab file path to clipboard
+    callback reveal-tab-in-explorer(int);   // Reveal tab's file in explorer panel
+    
+    // Web browser navigation
+    callback open-web-tab(string);          // Open URL in new tab
+    callback web-navigate(string);          // Navigate active web tab to URL
+    callback web-go-back();
+    callback web-go-forward();
+    callback web-refresh();
     
     // Auth
     callback login();
@@ -506,6 +567,8 @@ export component StudioWindow inherits Window {
                         
                         if root.left-tab-index == 0: ExplorerPanel {
                             entities: root.explorer-entities;
+                            workspace-entities: root.workspace-entities;
+                            lighting-entities: root.lighting-entities;
                             on-select-entity(id) => { root.select-entity(id); }
                             on-expand-entity(id) => { root.expand-entity(id); }
                             on-collapse-entity(id) => { root.collapse-entity(id); }
@@ -543,129 +606,620 @@ export component StudioWindow inherits Window {
             }
 
             // ================================================================
-            // Central Viewport (displays Bevy 3D rendered texture)
+            // Central Area: Tab Bar + Viewport / Script Editor
             // ================================================================
-            viewport-area := Rectangle {
+            center-content := Rectangle {
                 horizontal-stretch: 1;
-                background: transparent;  // Transparent so Bevy 3D scene shows through
-                border-width: 0px;
+                background: transparent;
                 
-                // Display Bevy-rendered 3D scene
-                Image {
-                    width: 100%;
-                    height: 100%;
-                    source: root.viewport-image;
-                    image-fit: fill;
-                }
+                VerticalLayout {
+                    spacing: 0px;
                 
-                // Layout Preset Selector (top-left, first item)
-                LayoutPresetSelector {
-                    x: 8px;
-                    y: 8px;
-                    current-preset-index: root.current-layout-preset;
+                // ---- VS Code-style Tab Bar ----
+                tab-bar := Rectangle {
+                    height: 35px;
+                    background: Theme.background-secondary;
                     
-                    preset-selected(preset) => {
-                        root.show-explorer = preset.show-explorer;
-                        root.show-properties = preset.show-properties;
-                        root.show-output = preset.show-output;
-                        root.show-toolbox = preset.show-toolbox;
-                        root.show-assets = preset.show-assets;
-                        root.show-history = preset.show-history;
-                        root.show-soul-panel = preset.show-soul-panel;
-                        root.left-panel-width = preset.left-panel-width * 1px;
-                        root.right-panel-width = preset.right-panel-width * 1px;
-                        root.output-height = preset.output-height * 1px;
-                        root.left-tab-index = preset.left-tab-index;
-                        root.right-tab-index = preset.right-tab-index;
-                        root.apply-layout-preset(root.current-layout-preset);
+                    // Bottom border
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border-color;
                     }
-                    save-current-layout => { root.save-layout-to-file(); }
-                    load-layout-from-file => { root.load-layout-from-file(); }
-                    reset-to-factory => { root.reset-layout-to-default(); }
-                }
-                
-                // View selector overlay (top-right)
-                ViewSelector {
-                    x: parent.width - self.width - 8px;
-                    y: 8px;
-                    view-mode: root.view-mode;
-                    on-set-view-mode(mode) => { root.set-view-mode(mode); }
-                }
-                
-                // Performance Overlay (top-right, below view selector)
-                if root.show-performance-overlay: PerformanceOverlay {
-                    x: parent.width - self.width - 8px;
-                    y: 48px;
-                    fps: root.current-fps;
-                    frame-time-ms: root.current-frame-time;
-                    memory-mb: root.current-memory-mb;
-                    entity-count: root.current-entity-count;
-                }
-                
-                // Theme Editor toggle button (top-right corner)
-                Rectangle {
-                    x: parent.width - 36px;
-                    y: parent.height - 36px;
-                    width: 28px;
-                    height: 28px;
-                    background: Theme.overlay-background;
-                    border-radius: 4px;
                     
-                    TouchArea {
-                        clicked => { root.show-theme-editor = !root.show-theme-editor; }
+                    // === Home button (left-aligned) ===
+                    Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: 36px;
+                        height: 35px;
+                        background: home-btn-touch.has-hover ? #ffffff0c : transparent;
+                        
+                        home-btn-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-web-tab("https://eustress.dev"); }
+                        }
                         
                         Image {
-                            x: 4px;
-                            y: 4px;
                             width: 16px;
                             height: 16px;
-                            source: @image-url("../../assets/icons/ui/palette.svg");
+                            source: @image-url("../../assets/icons/ui/globe.svg");
                             image-fit: contain;
-                        }
-                    }
-                }
-                
-                // Selection info overlay (bottom-left)
-                if root.selected-count > 0: Rectangle {
-                    x: 8px;
-                    y: parent.height - self.height - 8px;
-                    width: 200px;
-                    height: 28px;
-                    background: Theme.overlay-background;
-                    border-radius: 4px;
-                    
-                    HorizontalBox {
-                        padding: 6px;
-                        Text {
-                            text: root.selected-count == 1 ? 
-                                  "1 " + root.selected-class + " selected" :
-                                  root.selected-count + " objects selected";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                // Play mode indicator
-                if root.play-state != "stopped": Rectangle {
-                    x: (parent.width - self.width) / 2;
-                    y: 8px;
-                    width: 140px;
-                    height: 32px;
-                    background: root.play-state == "playing" ? #2d7d46 : #7d6d2d;
-                    border-radius: 4px;
-                    
-                    HorizontalBox {
-                        padding: 8px;
-                        alignment: center;
-                        Text {
-                            text: root.play-state == "playing" ? "▶ Playing" : "⏸ Paused";
-                            color: white;
-                            font-weight: 600;
-                            vertical-alignment: center;
+                            colorize: Theme.accent-blue;
                             horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        
+                        // Right separator
+                        Rectangle {
+                            x: parent.width - 1px;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.border-color;
                         }
                     }
+                    
+                    // === UI Toggle button (right-aligned) ===
+                    Rectangle {
+                        x: parent.width - 36px;
+                        y: 0px;
+                        width: 36px;
+                        height: 35px;
+                        background: hud-toggle-touch.has-hover ? #ffffff0c : transparent;
+                        
+                        hud-toggle-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-hud = !root.show-hud; }
+                        }
+                        
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/layout-default.svg");
+                            image-fit: contain;
+                            colorize: root.show-hud ? Theme.text-secondary : #ef5350;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        
+                        // Left separator
+                        Rectangle {
+                            x: 0px;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.border-color;
+                        }
+                    }
+                    
+                    // === Tab strip (between Home and UI toggle) ===
+                    HorizontalLayout {
+                        x: 36px;
+                        y: 0px;
+                        width: parent.width - 72px;
+                        height: 35px;
+                        spacing: 0px;
+                        alignment: start;
+                        
+                        // Pinned Space1 tab (always first, never closable)
+                        Rectangle {
+                            width: space1-label.preferred-width + 24px;
+                            height: 35px;
+                            background: root.center-active-tab == 0 ? Theme.panel-background : 
+                                        space1-touch.has-hover ? #ffffff08 : Theme.background-secondary;
+                            
+                            // Active tab indicator (blue top border — VS Code style)
+                            if root.center-active-tab == 0: Rectangle {
+                                y: 0px;
+                                height: 2px;
+                                background: Theme.accent-blue;
+                            }
+                            
+                            // Right separator
+                            Rectangle {
+                                x: parent.width - 1px;
+                                width: 1px;
+                                height: parent.height;
+                                background: Theme.border-color;
+                            }
+                            
+                            space1-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.center-active-tab = 0;
+                                    root.select-center-tab(0);
+                                }
+                                // Right-click context menu
+                                pointer-event(event) => {
+                                    if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                                        root.tab-context-menu-index = -1;
+                                        root.tab-context-menu-x = self.mouse-x;
+                                        root.tab-context-menu-y = 35px;
+                                        tab-ctx-menu.show();
+                                    }
+                                }
+                            }
+                            
+                            space1-label := Text {
+                                text: "Space1";
+                                color: root.center-active-tab == 0 ? Theme.text-primary : Theme.text-secondary;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        // Dynamic tabs (script + web) with drag-and-drop reorder
+                        for tab[index] in root.center-tabs: Rectangle {
+                            width: tab.tab-type == "web" ? 200px : 180px;
+                            height: 35px;
+                            background: root.center-active-tab == index + 1
+                                ? Theme.panel-background
+                                : (tab-hover.has-hover ? #ffffff08 : Theme.background-secondary);
+                            
+                            // Active tab indicator (blue top border — VS Code style)
+                            if root.center-active-tab == index + 1: Rectangle {
+                                y: 0px;
+                                height: 2px;
+                                background: Theme.accent-blue;
+                            }
+                            
+                            // Drop indicator line (left edge) when dragging over
+                            if root.tab-dragging && root.tab-drag-target == index && root.tab-drag-source != index: Rectangle {
+                                x: -1px;
+                                width: 2px;
+                                height: parent.height;
+                                background: Theme.accent-blue;
+                            }
+                            
+                            // Right separator
+                            Rectangle {
+                                x: parent.width - 1px;
+                                width: 1px;
+                                height: parent.height;
+                                background: Theme.border-color;
+                            }
+                            
+                            tab-hover := TouchArea {
+                                // Click to select
+                                clicked => {
+                                    if !root.tab-dragging {
+                                        root.center-active-tab = index + 1;
+                                        root.select-center-tab(index + 1);
+                                    }
+                                }
+                                
+                                // Right-click context menu
+                                pointer-event(event) => {
+                                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                        root.tab-drag-source = index;
+                                    }
+                                    if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                                        root.tab-context-menu-index = index;
+                                        root.tab-context-menu-x = self.mouse-x;
+                                        root.tab-context-menu-y = 35px;
+                                        tab-ctx-menu.show();
+                                    }
+                                    if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                                        if root.tab-dragging && root.tab-drag-target >= 0 && root.tab-drag-source != root.tab-drag-target {
+                                            root.reorder-center-tab(root.tab-drag-source, root.tab-drag-target);
+                                        }
+                                        root.tab-dragging = false;
+                                        root.tab-drag-source = -1;
+                                        root.tab-drag-target = -1;
+                                    }
+                                }
+                                
+                                moved => {
+                                    // Start drag after small movement
+                                    if root.tab-drag-source == index && !root.tab-dragging {
+                                        if abs(self.mouse-x - self.pressed-x) > 5px {
+                                            root.tab-dragging = true;
+                                        }
+                                    }
+                                    // Update drop target based on hover position
+                                    if root.tab-dragging {
+                                        root.tab-drag-target = index;
+                                    }
+                                }
+                            }
+                            
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 4px;
+                                spacing: 6px;
+                                
+                                // Tab icon (type-dependent)
+                                if tab.tab-type == "web" && tab.favicon.width > 0: Image {
+                                    width: 14px;
+                                    height: 14px;
+                                    source: tab.favicon;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                                if tab.tab-type == "web" && tab.favicon.width == 0: Image {
+                                    width: 14px;
+                                    height: 14px;
+                                    source: @image-url("../../assets/icons/ui/globe.svg");
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                                if tab.tab-type == "script": Image {
+                                    width: 14px;
+                                    height: 14px;
+                                    source: @image-url("../../assets/icons/script.svg");
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                                
+                                // Tab name
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: tab.name;
+                                    color: root.center-active-tab == index + 1 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                
+                                // Loading spinner
+                                if tab.loading: Text {
+                                    text: "◌";
+                                    color: Theme.accent-blue;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                }
+                                
+                                // Dirty indicator (unsaved dot)
+                                if tab.dirty && !tab.loading: Rectangle {
+                                    width: 8px;
+                                    height: 8px;
+                                    border-radius: 4px;
+                                    background: #e8e8e8;
+                                }
+                                
+                                // Close button (X) — VS Code style
+                                Rectangle {
+                                    width: 20px;
+                                    height: 20px;
+                                    background: close-area.has-hover ? #ffffff18 : transparent;
+                                    border-radius: 3px;
+                                    
+                                    close-area := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.close-center-tab(index); }
+                                    }
+                                    
+                                    Image {
+                                        width: 10px;
+                                        height: 10px;
+                                        source: @image-url("../../assets/icons/ui/close.svg");
+                                        image-fit: contain;
+                                        colorize: close-area.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Drop indicator at end (when dragging past last tab)
+                        if root.tab-dragging && root.tab-drag-target >= root.center-tabs.length: Rectangle {
+                            width: 2px;
+                            height: 35px;
+                            background: Theme.accent-blue;
+                        }
+                        
+                        // Fill remaining space (also acts as drop zone for end position)
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            
+                            TouchArea {
+                                moved => {
+                                    if root.tab-dragging {
+                                        root.tab-drag-target = root.center-tabs.length;
+                                    }
+                                }
+                                pointer-event(event) => {
+                                    if event.kind == PointerEventKind.up && root.tab-dragging {
+                                        if root.tab-drag-source != root.tab-drag-target {
+                                            root.reorder-center-tab(root.tab-drag-source, root.tab-drag-target);
+                                        }
+                                        root.tab-dragging = false;
+                                        root.tab-drag-source = -1;
+                                        root.tab-drag-target = -1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Tab context menu (PopupWindow positioned relative to tab-bar)
+                    tab-ctx-menu := PopupWindow {
+                        x: root.tab-context-menu-x;
+                        y: root.tab-context-menu-y;
+                        width: 220px;
+                        
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-color: #00000060;
+                            width: 220px;
+                            
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 0px;
+                                
+                                // Close
+                                if root.tab-context-menu-index >= 0: Rectangle {
+                                    height: 28px;
+                                    background: ctx-close-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-close-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.close-center-tab(root.tab-context-menu-index); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Close"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text { text: "Ctrl+W"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                                    }
+                                }
+                                
+                                // Close Others
+                                Rectangle {
+                                    height: 28px;
+                                    background: ctx-others-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-others-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.close-other-tabs(root.tab-context-menu-index); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Close Others"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+                                
+                                // Close All
+                                Rectangle {
+                                    height: 28px;
+                                    background: ctx-all-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-all-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.close-all-tabs(); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Close All"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+                                
+                                // Close to the Right
+                                if root.tab-context-menu-index >= 0: Rectangle {
+                                    height: 28px;
+                                    background: ctx-right-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-right-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.close-tabs-to-right(root.tab-context-menu-index); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Close to the Right"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+                                
+                                // Separator
+                                Rectangle { height: 1px; background: Theme.border-color; }
+                                
+                                // Copy Path
+                                if root.tab-context-menu-index >= 0: Rectangle {
+                                    height: 28px;
+                                    background: ctx-copy-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-copy-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.copy-tab-path(root.tab-context-menu-index); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Copy Path"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+                                
+                                // Reveal in Explorer
+                                if root.tab-context-menu-index >= 0: Rectangle {
+                                    height: 28px;
+                                    background: ctx-reveal-touch.has-hover ? #ffffff10 : transparent;
+                                    border-radius: 3px;
+                                    ctx-reveal-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.reveal-tab-in-explorer(root.tab-context-menu-index); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 10px;
+                                        Text { text: "Reveal in Explorer"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // ---- Content Area: 3D Viewport / Script Editor / Web Browser ----
+                // Keyboard shortcut handler (Ctrl+W to close active tab, Ctrl+T for new web tab)
+                tab-keys := FocusScope {
+                    vertical-stretch: 1;
+                    
+                    key-pressed(event) => {
+                        // Ctrl+W: close active tab (not Space1)
+                        if event.modifiers.control && event.text == "w" {
+                            if root.center-active-tab > 0 {
+                                root.close-center-tab(root.center-active-tab - 1);
+                                if root.center-active-tab >= root.center-tabs.length + 1 {
+                                    root.center-active-tab = root.center-tabs.length;
+                                }
+                            }
+                            return accept;
+                        }
+                        // Ctrl+T: open new web tab
+                        if event.modifiers.control && event.text == "t" {
+                            root.open-web-tab("about:blank");
+                            return accept;
+                        }
+                        // Ctrl+L: focus URL bar (when on web tab)
+                        if event.modifiers.control && event.text == "l" {
+                            if root.active-tab-type == "web" {
+                                // URL bar focus handled by Rust
+                                return accept;
+                            }
+                        }
+                        return reject;
+                    }
+                    
+                    // 3D Viewport (shown when Space1 / scene tab is active)
+                    if root.active-tab-type == "scene": viewport-area := Rectangle {
+                        background: transparent;
+                        
+                        // Display Bevy-rendered 3D scene
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: root.viewport-image;
+                            image-fit: fill;
+                        }
+                        
+                        // Layout Preset Selector (top-left)
+                        LayoutPresetSelector {
+                            x: 8px;
+                            y: 8px;
+                            current-preset-index: root.current-layout-preset;
+                            
+                            preset-selected(preset) => {
+                                root.show-explorer = preset.show-explorer;
+                                root.show-properties = preset.show-properties;
+                                root.show-output = preset.show-output;
+                                root.show-toolbox = preset.show-toolbox;
+                                root.show-assets = preset.show-assets;
+                                root.show-history = preset.show-history;
+                                root.show-soul-panel = preset.show-soul-panel;
+                                root.left-panel-width = preset.left-panel-width * 1px;
+                                root.right-panel-width = preset.right-panel-width * 1px;
+                                root.output-height = preset.output-height * 1px;
+                                root.left-tab-index = preset.left-tab-index;
+                                root.right-tab-index = preset.right-tab-index;
+                                root.apply-layout-preset(root.current-layout-preset);
+                            }
+                            save-current-layout => { root.save-layout-to-file(); }
+                            load-layout-from-file => { root.load-layout-from-file(); }
+                            reset-to-factory => { root.reset-layout-to-default(); }
+                        }
+                        
+                        // Performance Overlay (top-right)
+                        if root.show-performance-overlay: PerformanceOverlay {
+                            x: parent.width - self.width - 8px;
+                            y: 8px;
+                            fps: root.current-fps;
+                            frame-time-ms: root.current-frame-time;
+                            memory-mb: root.current-memory-mb;
+                            entity-count: root.current-entity-count;
+                        }
+                        
+                        // Snap status (bottom-center)
+                        Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height - self.height - 8px;
+                            width: snap-label.preferred-width + 24px;
+                            height: 24px;
+                            background: Theme.overlay-background;
+                            border-radius: 12px;
+                            
+                            snap-label := Text {
+                                text: root.snap-enabled ? "Snap: " + root.snap-size + " m" : "Snap: Off";
+                                color: root.snap-enabled ? Theme.text-primary : Theme.text-secondary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-snap(); }
+                            }
+                        }
+                        
+                        // Play mode indicator
+                        if root.play-state != "stopped": Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: 8px;
+                            width: 140px;
+                            height: 32px;
+                            background: root.play-state == "playing" ? #2d7d46 : #7d6d2d;
+                            border-radius: 4px;
+                            
+                            HorizontalBox {
+                                padding: 8px;
+                                alignment: center;
+                                Text {
+                                    text: root.play-state == "playing" ? "▶ Playing" : "⏸ Paused";
+                                    color: white;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Script Editor (shown when a script tab is active)
+                    if root.active-tab-type == "script": ScriptEditor {
+                        show-tab-bar: false;
+                        tabs: root.center-tabs;
+                        active-tab: root.center-active-tab - 1;
+                        current-content <=> root.script-editor-content;
+                        
+                        on-tab-selected(idx) => {
+                            root.center-active-tab = idx + 1;
+                            root.select-center-tab(idx + 1);
+                        }
+                        on-tab-closed(idx) => {
+                            root.close-center-tab(idx);
+                        }
+                        on-content-changed(text) => {
+                            root.script-content-changed(text);
+                        }
+                        on-save => {
+                            // Ctrl+S save handled by Rust
+                        }
+                        on-build => {
+                            if root.center-active-tab > 0 && root.center-active-tab <= root.center-tabs.length {
+                                root.build-script(root.center-tabs[root.center-active-tab - 1].entity-id);
+                            }
+                        }
+                    }
+                    
+                    // Web Browser (shown when a web tab is active)
+                    if root.active-tab-type == "web": WebBrowser {
+                        url: root.web-url-bar;
+                        loading: root.web-loading;
+                        can-go-back: root.web-can-go-back;
+                        can-go-forward: root.web-can-go-forward;
+                        secure: root.web-secure;
+                        has-url: root.web-has-url;
+                        page-image: root.web-content-image;
+                        url-bar-text <=> root.web-url-bar;
+                        
+                        navigate(url) => { root.web-navigate(url); }
+                        go-back => { root.web-go-back(); }
+                        go-forward => { root.web-go-forward(); }
+                        refresh => { root.web-refresh(); }
+                    }
+                }
                 }
             }
 
@@ -839,17 +1393,25 @@ export component StudioWindow inherits Window {
             }
         }
         
-        // Command bar (toggle with Ctrl+Shift+P)
-        if root.show-command-bar: CommandBar {
-            command-text <=> root.command-text;
-            on-execute(cmd) => { root.execute-command(cmd); }
-            on-close => { root.show-command-bar = false; }
-        }
     }
 
     // ========================================================================
     // Overlays and Dialogs
     // ========================================================================
+    
+    // Command bar (floating, bottom-center, VS Code style — Ctrl+Shift+P)
+    if root.show-command-bar: Rectangle {
+        x: (parent.width - 500px) / 2;
+        y: parent.height - 340px;
+        width: 500px;
+        
+        CommandBar {
+            width: 100%;
+            command-text <=> root.command-text;
+            on-execute(cmd) => { root.execute-command(cmd); }
+            on-close => { root.show-command-bar = false; }
+        }
+    }
     
     // Notifications (toast messages)
     Notifications {
@@ -857,15 +1419,27 @@ export component StudioWindow inherits Window {
         y: 80px;
     }
     
-    // Context menu
-    if root.show-context-menu: ContextMenu {
-        x: root.context-menu-x;
-        y: root.context-menu-y;
-        on-action(action) => {
-            root.context-action(action);
-            root.show-context-menu = false;
+    // Context menu backdrop (click anywhere outside to dismiss)
+    if root.show-context-menu: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        
+        TouchArea {
+            clicked => { root.show-context-menu = false; }
         }
-        on-close => { root.show-context-menu = false; }
+        
+        ContextMenu {
+            x: root.context-menu-x;
+            y: root.context-menu-y;
+            on-action(action) => {
+                root.context-action(action);
+                root.show-context-menu = false;
+            }
+            on-close => { root.show-context-menu = false; }
+        }
     }
     
     // Publish dialog

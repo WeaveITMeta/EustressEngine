@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView, CheckBox, Slider, ComboBox, SpinBox, GridBox } from "std-widgets.slint";
-import { Theme, PanelHeader, PropertyRow } from "theme.slint";
+import { Theme } from "theme.slint";
 
 // Property data structure
 export struct PropertyData {
@@ -14,104 +14,207 @@ export struct PropertyData {
     category: string,
     editable: bool,
     options: [string], // For enum types
+    // Section header flag: if true, this entry is a category header (not a property)
+    is-header: bool,
 }
 
-// Vec3 property component
-component Vec3Property inherits Rectangle {
-    in property <string> label: "";
-    in property <float> vec-x: 0;
-    in property <float> vec-y: 0;
-    in property <float> vec-z: 0;
+// Collapsible section header
+component SectionHeader inherits Rectangle {
+    in property <string> title: "";
+    in-out property <bool> expanded: true;
     
-    callback value-changed(float, float, float);
+    height: 28px;
+    background: Theme.header-background;
     
-    height: 24px;
+    TouchArea {
+        clicked => { root.expanded = !root.expanded; }
+    }
     
-    HorizontalBox {
+    HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
-        spacing: 4px;
+        spacing: 6px;
         
+        // Chevron
         Text {
-            width: 80px;
-            text: root.label;
+            width: 12px;
+            text: root.expanded ? "▾" : "▸";
             color: Theme.text-secondary;
+            font-size: 10px;
             vertical-alignment: center;
         }
         
-        // X
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Generic property row with label + value editor
+component PropRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    in property <string> prop-type: "string";
+    in property <bool> editable: true;
+    
+    callback value-changed(string);
+    
+    height: 26px;
+    background: touch.has-hover ? #ffffff06 : transparent;
+    
+    touch := TouchArea {}
+    
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
+        
+        // Label
+        Text {
+            width: 90px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        
+        // Value editor
+        if root.editable: LineEdit {
+            horizontal-stretch: 1;
+            text: root.value;
+            edited(text) => { root.value-changed(text); }
+        }
+        
+        if !root.editable: Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// Vec3 property row with colored X/Y/Z fields
+component Vec3Row inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: ""; // "x, y, z" format
+    in property <bool> editable: true;
+    
+    callback value-changed(string);
+    
+    height: 26px;
+    background: transparent;
+    
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 4px;
+        
+        // Label
+        Text {
+            width: 90px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        
+        // X field
         Rectangle {
             horizontal-stretch: 1;
             background: Theme.input-background;
             border-radius: 2px;
+            border-width: 1px;
+            border-color: Theme.input-border;
             
-            HorizontalBox {
-                padding: 2px;
+            HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "X";
                     color: Theme.gizmo-x;
-                    font-size: 10px;
+                    font-size: 9px;
+                    font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
                 
                 LineEdit {
                     horizontal-stretch: 1;
-                    text: root.vec-x;
+                    text: "0";
                     input-type: decimal;
                 }
             }
         }
         
-        // Y
+        // Y field
         Rectangle {
             horizontal-stretch: 1;
             background: Theme.input-background;
             border-radius: 2px;
+            border-width: 1px;
+            border-color: Theme.input-border;
             
-            HorizontalBox {
-                padding: 2px;
+            HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "Y";
                     color: Theme.gizmo-y;
-                    font-size: 10px;
+                    font-size: 9px;
+                    font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
                 
                 LineEdit {
                     horizontal-stretch: 1;
-                    text: root.vec-y;
+                    text: "0";
                     input-type: decimal;
                 }
             }
         }
         
-        // Z
+        // Z field
         Rectangle {
             horizontal-stretch: 1;
             background: Theme.input-background;
             border-radius: 2px;
+            border-width: 1px;
+            border-color: Theme.input-border;
             
-            HorizontalBox {
-                padding: 2px;
+            HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "Z";
                     color: Theme.gizmo-z;
-                    font-size: 10px;
+                    font-size: 9px;
+                    font-weight: 700;
                     vertical-alignment: center;
                     horizontal-alignment: center;
                 }
                 
                 LineEdit {
                     horizontal-stretch: 1;
-                    text: root.vec-z;
+                    text: "0";
                     input-type: decimal;
                 }
             }
@@ -119,47 +222,124 @@ component Vec3Property inherits Rectangle {
     }
 }
 
-// Color property component
-component ColorProperty inherits Rectangle {
+// Color property row with swatch + hex value
+component ColorRow inherits Rectangle {
     in property <string> label: "";
-    in property <color> value: white;
+    in property <string> value: "#808080";
+    in property <bool> editable: true;
     
-    callback value-changed(color);
+    callback value-changed(string);
     
-    height: 24px;
+    height: 26px;
+    background: transparent;
     
-    HorizontalBox {
-        padding-left: 8px;
+    HorizontalLayout {
+        padding-left: 12px;
         padding-right: 8px;
         spacing: 8px;
         
+        // Label
         Text {
-            width: 80px;
+            width: 90px;
             text: root.label;
             color: Theme.text-secondary;
+            font-size: 11px;
             vertical-alignment: center;
+            overflow: elide;
         }
         
-        // Color preview
+        // Color swatch
         Rectangle {
-            width: 24px;
+            width: 22px;
             height: 18px;
-            background: root.value;
-            border-radius: 2px;
+            // Checkerboard background for transparency
+            background: #808080;
+            border-radius: 3px;
             border-width: 1px;
             border-color: Theme.border-color;
             
             TouchArea {
                 clicked => {
-                    // Open color picker
+                    // TODO: Open color picker
                 }
             }
         }
         
         // Hex input
-        LineEdit {
+        if root.editable: LineEdit {
             horizontal-stretch: 1;
-            text: "#ffffff";
+            text: root.value;
+            edited(text) => { root.value-changed(text); }
+        }
+        
+        if !root.editable: Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Bool property row with true/false toggle
+component BoolRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "false";
+    in property <bool> editable: true;
+    
+    callback value-changed(string);
+    
+    height: 26px;
+    background: touch.has-hover ? #ffffff06 : transparent;
+    
+    touch := TouchArea {
+        clicked => {
+            if root.editable {
+                root.value-changed(root.value == "true" ? "false" : "true");
+            }
+        }
+    }
+    
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
+        
+        // Label
+        Text {
+            width: 90px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        
+        // Checkbox visual
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            background: root.value == "true" ? Theme.accent-blue : Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.value == "true" ? Theme.accent-blue : Theme.input-border;
+            
+            if root.value == "true": Text {
+                text: "✓";
+                color: white;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
         }
     }
 }
@@ -175,7 +355,7 @@ export component PropertiesPanel inherits Rectangle {
     
     background: Theme.panel-background;
     
-    VerticalBox {
+    VerticalLayout {
         padding: 0px;
         spacing: 0px;
         
@@ -184,7 +364,7 @@ export component PropertiesPanel inherits Rectangle {
             height: 32px;
             background: Theme.header-background;
             
-            HorizontalBox {
+            HorizontalLayout {
                 padding-left: 8px;
                 padding-right: 8px;
                 
@@ -194,128 +374,77 @@ export component PropertiesPanel inherits Rectangle {
                           root.selected-count + " objects selected";
                     color: Theme.text-primary;
                     font-weight: 500;
+                    font-size: 12px;
                     vertical-alignment: center;
                 }
             }
         }
         
+        // Empty state
         if root.selected-count == 0: Rectangle {
             vertical-stretch: 1;
             
-            VerticalBox {
+            VerticalLayout {
                 alignment: center;
                 
                 Text {
                     text: "Select an object to view its properties";
                     color: Theme.text-secondary;
+                    font-size: 11px;
                     horizontal-alignment: center;
                 }
             }
         }
         
+        // Dynamic property list — fully driven by Rust binding
         if root.selected-count > 0: ScrollView {
             vertical-stretch: 1;
             
-            VerticalBox {
+            VerticalLayout {
                 padding: 0px;
                 spacing: 0px;
+                alignment: start;
                 
-                // Transform section
-                PanelHeader {
-                    title: "Transform";
-                    collapsible: true;
-                }
-                
-                Vec3Property {
-                    label: "Position";
-                    vec-x: 0;
-                    vec-y: 0;
-                    vec-z: 0;
-                }
-                
-                Vec3Property {
-                    label: "Rotation";
-                    vec-x: 0;
-                    vec-y: 0;
-                    vec-z: 0;
-                }
-                
-                Vec3Property {
-                    label: "Scale";
-                    vec-x: 1;
-                    vec-y: 1;
-                    vec-z: 1;
-                }
-                
-                // Appearance section
-                PanelHeader {
-                    title: "Appearance";
-                    collapsible: true;
-                }
-                
-                ColorProperty {
-                    label: "Color";
-                    value: #808080;
-                }
-                
-                PropertyRow {
-                    label: "Material";
-                    value: "Plastic";
-                }
-                
-                PropertyRow {
-                    label: "Transparency";
-                    value: "0";
-                }
-                
-                PropertyRow {
-                    label: "Reflectance";
-                    value: "0";
-                }
-                
-                // Data section
-                PanelHeader {
-                    title: "Data";
-                    collapsible: true;
-                }
-                
-                PropertyRow {
-                    label: "Name";
-                    value: "Part";
-                }
-                
-                PropertyRow {
-                    label: "Archivable";
-                    value: "true";
-                }
-                
-                // Physics section
-                PanelHeader {
-                    title: "Physics";
-                    collapsible: true;
-                }
-                
-                PropertyRow {
-                    label: "Anchored";
-                    value: "true";
-                }
-                
-                PropertyRow {
-                    label: "CanCollide";
-                    value: "true";
-                }
-                
-                PropertyRow {
-                    label: "Massless";
-                    value: "false";
-                }
-                
-                // Dynamic properties from binding
-                for prop in root.properties: PropertyRow {
-                    label: prop.name;
-                    value: prop.value;
-                    editable: prop.editable;
-                    value-changed(val) => { root.on-property-changed(prop.name, val); }
+                for prop in root.properties: VerticalLayout {
+                    spacing: 0px;
+                    
+                    // Category header
+                    if prop.is-header: SectionHeader {
+                        title: prop.category;
+                    }
+                    
+                    // Vec3 property
+                    if !prop.is-header && prop.property-type == "vec3": Vec3Row {
+                        label: prop.name;
+                        value: prop.value;
+                        editable: prop.editable;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                    }
+                    
+                    // Color property
+                    if !prop.is-header && prop.property-type == "color": ColorRow {
+                        label: prop.name;
+                        value: prop.value;
+                        editable: prop.editable;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                    }
+                    
+                    // Bool property
+                    if !prop.is-header && prop.property-type == "bool": BoolRow {
+                        label: prop.name;
+                        value: prop.value;
+                        editable: prop.editable;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                    }
+                    
+                    // String / float / int / enum — generic row
+                    if !prop.is-header && prop.property-type != "vec3" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
+                        label: prop.name;
+                        value: prop.value;
+                        prop-type: prop.property-type;
+                        editable: prop.editable;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                    }
                 }
             }
         }

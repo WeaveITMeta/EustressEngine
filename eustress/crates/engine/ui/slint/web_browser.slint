@@ -1,0 +1,230 @@
+// ============================================================================
+// Eustress Engine Studio - Web Browser Component
+// Chromium-based browser tab rendered via wry offscreen
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Browser toolbar with URL bar and navigation buttons
+export component WebBrowser inherits Rectangle {
+    // Properties
+    in property <string> url: "";
+    in property <string> title: "";
+    in property <bool> loading: false;
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
+    in property <bool> secure: false;        // HTTPS connection (set by Rust)
+    in property <bool> has-url: false;       // Whether a real URL is loaded
+    in property <image> page-image;          // Offscreen-rendered page content
+    in-out property <string> url-bar-text: "";
+    
+    // Callbacks
+    callback navigate(string);    // Navigate to URL
+    callback go-back();
+    callback go-forward();
+    callback refresh();
+    
+    background: Theme.panel-background;
+    
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+        
+        // ---- Navigation Toolbar ----
+        Rectangle {
+            height: 36px;
+            background: Theme.header-background;
+            
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 4px;
+                alignment: center;
+                
+                // Back button
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: back-area.has-hover && root.can-go-back ? #ffffff10 : transparent;
+                    border-radius: 4px;
+                    opacity: root.can-go-back ? 1.0 : 0.35;
+                    
+                    back-area := TouchArea {
+                        clicked => {
+                            if root.can-go-back { root.go-back(); }
+                        }
+                    }
+                    
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/arrow-left.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                
+                // Forward button
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: fwd-area.has-hover && root.can-go-forward ? #ffffff10 : transparent;
+                    border-radius: 4px;
+                    opacity: root.can-go-forward ? 1.0 : 0.35;
+                    
+                    fwd-area := TouchArea {
+                        clicked => {
+                            if root.can-go-forward { root.go-forward(); }
+                        }
+                    }
+                    
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/arrow-right.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                
+                // Refresh / Stop button
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: refresh-area.has-hover ? #ffffff10 : transparent;
+                    border-radius: 4px;
+                    
+                    refresh-area := TouchArea {
+                        clicked => { root.refresh(); }
+                    }
+                    
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: root.loading
+                            ? @image-url("../../assets/icons/ui/close.svg")
+                            : @image-url("../../assets/icons/ui/refresh.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                    }
+                }
+                
+                // URL bar
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    background: #ffffff08;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: url-edit.has-focus ? Theme.accent-blue : Theme.border-color;
+                    
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 8px;
+                        spacing: 6px;
+                        
+                        // Security indicator (driven by Rust-side secure/has-url properties)
+                        if root.has-url: Image {
+                            width: 14px;
+                            height: 14px;
+                            source: root.secure
+                                ? @image-url("../../assets/icons/ui/lock.svg")
+                                : @image-url("../../assets/icons/ui/globe.svg");
+                            image-fit: contain;
+                            colorize: root.secure ? #4caf50 : Theme.text-secondary;
+                            vertical-alignment: center;
+                        }
+                        
+                        url-edit := TextInput {
+                            horizontal-stretch: 1;
+                            text <=> root.url-bar-text;
+                            font-size: 12px;
+                            color: Theme.text-primary;
+                            vertical-alignment: center;
+                            
+                            accepted => {
+                                root.navigate(root.url-bar-text);
+                            }
+                        }
+                    }
+                }
+                
+                // Menu button (placeholder)
+                Rectangle {
+                    width: 28px;
+                    height: 28px;
+                    background: menu-area.has-hover ? #ffffff10 : transparent;
+                    border-radius: 4px;
+                    
+                    menu-area := TouchArea { }
+                    
+                    Text {
+                        text: "⋮";
+                        color: Theme.text-secondary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // Loading indicator bar
+        if root.loading: Rectangle {
+            height: 2px;
+            background: transparent;
+            
+            // Animated loading bar
+            Rectangle {
+                width: parent.width * 0.3;
+                height: 2px;
+                background: Theme.accent-blue;
+                x: mod(animation-tick() / 8ms, parent.width / 1px + self.width / 1px) * 1px - self.width;
+            }
+        }
+        
+        // ---- Page Content Area ----
+        Rectangle {
+            vertical-stretch: 1;
+            background: #1e1e1e;
+            
+            // Rendered web page (offscreen Chromium output)
+            if root.page-image.width > 0: Image {
+                width: 100%;
+                height: 100%;
+                source: root.page-image;
+                image-fit: contain;
+            }
+            
+            // Placeholder when no content
+            if root.page-image.width == 0 && !root.loading: VerticalBox {
+                alignment: center;
+                
+                Image {
+                    width: 48px;
+                    height: 48px;
+                    source: @image-url("../../assets/icons/ui/globe.svg");
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    colorize: Theme.text-disabled;
+                }
+                
+                Text {
+                    text: root.url == "" || root.url == "about:blank"
+                        ? "Enter a URL to browse"
+                        : "Loading " + root.url + "...";
+                    color: Theme.text-secondary;
+                    horizontal-alignment: center;
+                    font-size: 13px;
+                }
+            }
+        }
+    }
+}

@@ -28,6 +28,7 @@ mod file_dialogs;
 mod spawn_events;
 mod menu_events;
 mod world_view;
+pub mod webview;
 
 // Re-exports
 pub use file_dialogs::{SceneFile, FileEvent, pick_open_file, pick_save_file};
@@ -189,6 +190,16 @@ pub struct ServiceOwner(pub ServiceType);
 // UI State Resources
 // ============================================================================
 
+/// Viewport bounds reported by Slint layout (in physical pixels from top-left)
+/// Used by camera controller to clip 3D rendering to the viewport area
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ViewportBounds {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 #[derive(Resource)]
 pub struct StudioState {
     pub show_explorer: bool,
@@ -237,6 +248,21 @@ pub struct StudioState {
     pub mindspace_editing_entity: Option<Entity>,
     pub mindspace_link_source: Option<Entity>,
     pub mindspace_last_selected: Option<String>,
+    
+    // Center tab management (Space1 + script/web tabs)
+    pub center_tabs: Vec<slint_ui::CenterTabData>,
+    pub active_center_tab: i32,
+    pub pending_open_script: Option<(i32, String)>,
+    pub pending_open_web: Option<String>,
+    pub pending_close_tab: Option<i32>,
+    pub pending_reorder: Option<(i32, i32)>,
+    pub script_editor_content: String,
+    
+    // Web browser state for active web tab
+    pub pending_web_navigate: Option<String>,
+    pub pending_web_back: bool,
+    pub pending_web_forward: bool,
+    pub pending_web_refresh: bool,
 }
 
 impl Default for StudioState {
@@ -294,6 +320,17 @@ impl Default for StudioState {
             mindspace_editing_entity: None,
             mindspace_link_source: None,
             mindspace_last_selected: None,
+            center_tabs: Vec::new(),
+            active_center_tab: 0,
+            pending_open_script: None,
+            pending_open_web: None,
+            pending_close_tab: None,
+            pending_reorder: None,
+            script_editor_content: String::new(),
+            pending_web_navigate: None,
+            pending_web_back: false,
+            pending_web_forward: false,
+            pending_web_refresh: false,
         }
     }
 }
@@ -798,13 +835,6 @@ pub mod explorer_search_ui {
     pub fn show_advanced_search_panel() {}
     pub fn show_search_results() {}
     pub fn show_syntax_help() {}
-}
-
-pub mod webview {
-    use bevy::prelude::*;
-    #[derive(Resource, Default)] pub struct WebViewManager { pub views: Vec<String> }
-    pub struct WebViewPlugin;
-    impl Plugin for WebViewPlugin { fn build(&self, _app: &mut App) {} }
 }
 
 pub mod cef_browser {

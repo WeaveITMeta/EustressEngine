@@ -101,6 +101,7 @@ export component OutputConsole inherits Rectangle {
                         info-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.show-info = !root.show-info; root.on-toggle-level("info"); }
+                            moved => { info-tooltip.show(); }
                         }
                         
                         Image {
@@ -110,6 +111,26 @@ export component OutputConsole inherits Rectangle {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/info.svg");
                             image-fit: contain;
+                        }
+                        
+                        info-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: info-tip-text.preferred-width + 12px;
+                                info-tip-text := Text {
+                                    text: "Toggle Info Messages";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -130,6 +151,7 @@ export component OutputConsole inherits Rectangle {
                         warn-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.show-warnings = !root.show-warnings; root.on-toggle-level("warning"); }
+                            moved => { warn-tooltip.show(); }
                         }
                         
                         Image {
@@ -139,6 +161,26 @@ export component OutputConsole inherits Rectangle {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/warning.svg");
                             image-fit: contain;
+                        }
+                        
+                        warn-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: warn-tip-text.preferred-width + 12px;
+                                warn-tip-text := Text {
+                                    text: "Toggle Warnings";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -159,6 +201,7 @@ export component OutputConsole inherits Rectangle {
                         err-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.show-errors = !root.show-errors; root.on-toggle-level("error"); }
+                            moved => { err-tooltip.show(); }
                         }
                         
                         Image {
@@ -168,6 +211,26 @@ export component OutputConsole inherits Rectangle {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/error.svg");
                             image-fit: contain;
+                        }
+                        
+                        err-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: err-tip-text.preferred-width + 12px;
+                                err-tip-text := Text {
+                                    text: "Toggle Errors";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -188,6 +251,7 @@ export component OutputConsole inherits Rectangle {
                         dbg-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.show-debug = !root.show-debug; root.on-toggle-level("debug"); }
+                            moved => { dbg-tooltip.show(); }
                         }
                         
                         Image {
@@ -197,6 +261,26 @@ export component OutputConsole inherits Rectangle {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/debug.svg");
                             image-fit: contain;
+                        }
+                        
+                        dbg-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: dbg-tip-text.preferred-width + 12px;
+                                dbg-tip-text := Text {
+                                    text: "Toggle Debug";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -218,6 +302,7 @@ export component OutputConsole inherits Rectangle {
                         clear-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.on-clear(); }
+                            moved => { clear-tooltip.show(); }
                         }
                         
                         Text {
@@ -226,6 +311,26 @@ export component OutputConsole inherits Rectangle {
                             font-size: 11px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                        
+                        clear-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: clear-tip-text.preferred-width + 12px;
+                                clear-tip-text := Text {
+                                    text: "Clear All Output";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }
@@ -280,6 +385,7 @@ export component OutputConsole inherits Rectangle {
                         autoscroll-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.auto-scroll = !root.auto-scroll; }
+                            moved => { autoscroll-tooltip.show(); }
                         }
                         
                         // Checkbox square
@@ -311,6 +417,26 @@ export component OutputConsole inherits Rectangle {
                             font-size: 11px;
                             vertical-alignment: center;
                         }
+                        
+                        autoscroll-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: autoscroll-tip-text.preferred-width + 12px;
+                                autoscroll-tip-text := Text {
+                                    text: "Toggle Auto-scroll";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                     }
                 }
                 
@@ -329,6 +455,7 @@ export component OutputConsole inherits Rectangle {
                         close-touch := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.on-close(); }
+                            moved => { close-tooltip.show(); }
                         }
                         
                         Image {
@@ -338,6 +465,26 @@ export component OutputConsole inherits Rectangle {
                             height: 16px;
                             source: @image-url("../../assets/icons/ui/close.svg");
                             image-fit: contain;
+                        }
+                        
+                        close-tooltip := PopupWindow {
+                            x: 0px;
+                            y: parent.height + 4px;
+                            Rectangle {
+                                background: #2d2d2d;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: #404040;
+                                height: 24px;
+                                width: close-tip-text.preferred-width + 12px;
+                                close-tip-text := Text {
+                                    text: "Close Output Panel";
+                                    color: #d4d4d4;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                 }

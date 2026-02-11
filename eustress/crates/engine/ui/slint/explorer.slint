@@ -22,6 +22,8 @@ export struct EntityNode {
 export component ExplorerPanel inherits Rectangle {
     // Properties
     in property <[EntityNode]> entities: [];
+    in property <[EntityNode]> workspace-entities: [];
+    in property <[EntityNode]> lighting-entities: [];
     in-out property <string> search-text: "";
     
     // Callbacks
@@ -79,6 +81,27 @@ export component ExplorerPanel inherits Rectangle {
                     context-menu(x, y) => { root.on-context-menu(x, y); }
                 }
                 
+                // Workspace children (Camera, Baseplate, Welcome Cube, etc.)
+                for entity in root.workspace-entities: TreeItem {
+                    depth: entity.depth;
+                    icon: entity.icon;
+                    label: entity.name;
+                    expandable: entity.expandable;
+                    expanded: entity.expanded;
+                    selected: entity.selected;
+                    show: entity.visible;
+                    
+                    clicked => { root.on-select-entity(entity.id); }
+                    toggle-expanded => {
+                        if entity.expanded {
+                            root.on-collapse-entity(entity.id);
+                        } else {
+                            root.on-expand-entity(entity.id);
+                        }
+                    }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
                 TreeItem {
                     depth: 0;
                     icon: @image-url("../../assets/icons/players.svg");
@@ -93,7 +116,29 @@ export component ExplorerPanel inherits Rectangle {
                     icon: @image-url("../../assets/icons/lighting.svg");
                     label: "Lighting";
                     expandable: true;
+                    expanded: true;
                     clicked => { root.on-select-entity(-3); }
+                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                }
+                
+                // Lighting children (Atmosphere, Sky, Sun, Moon)
+                for entity in root.lighting-entities: TreeItem {
+                    depth: entity.depth;
+                    icon: entity.icon;
+                    label: entity.name;
+                    expandable: entity.expandable;
+                    expanded: entity.expanded;
+                    selected: entity.selected;
+                    show: entity.visible;
+                    
+                    clicked => { root.on-select-entity(entity.id); }
+                    toggle-expanded => {
+                        if entity.expanded {
+                            root.on-collapse-entity(entity.id);
+                        } else {
+                            root.on-expand-entity(entity.id);
+                        }
+                    }
                     context-menu(x, y) => { root.on-context-menu(x, y); }
                 }
                 

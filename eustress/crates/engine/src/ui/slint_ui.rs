@@ -348,6 +348,19 @@ pub enum SlintAction {
     BuildScript(i32),
     OpenScript(i32),
     
+    // Center tab management
+    CloseCenterTab(i32),
+    SelectCenterTab(i32),
+    ScriptContentChanged(String),
+    ReorderCenterTab(i32, i32), // (from_index, to_index)
+    
+    // Web browser
+    OpenWebTab(String),         // URL
+    WebNavigate(String),        // Navigate active web tab
+    WebGoBack,
+    WebGoForward,
+    WebRefresh,
+    
     // Layout
     ApplyLayoutPreset(i32),
     SaveLayoutToFile,
@@ -466,6 +479,32 @@ pub struct StudioState {
     pub mindspace_edit_buffer: String,
     pub mindspace_font: eustress_common::classes::Font,
     pub mindspace_font_size: f32,
+    
+    // Center tab management (Space1 + script/web tabs)
+    pub center_tabs: Vec<CenterTabData>,
+    pub active_center_tab: i32,          // 0 = Space1, 1+ = tab index
+    pub pending_open_script: Option<(i32, String)>,
+    pub pending_open_web: Option<String>, // URL to open in new web tab
+    pub pending_close_tab: Option<i32>,
+    pub pending_reorder: Option<(i32, i32)>, // (from, to)
+    pub script_editor_content: String,
+    
+    // Web browser state for active web tab
+    pub pending_web_navigate: Option<String>,
+    pub pending_web_back: bool,
+    pub pending_web_forward: bool,
+    pub pending_web_refresh: bool,
+}
+
+/// Data for a single center tab (script or web)
+#[derive(Debug, Clone)]
+pub struct CenterTabData {
+    pub entity_id: i32,       // -1 for web tabs
+    pub name: String,
+    pub tab_type: String,     // "script" or "web"
+    pub url: String,          // URL for web tabs
+    pub dirty: bool,
+    pub loading: bool,
 }
 
 impl Default for StudioState {
@@ -520,6 +559,17 @@ impl Default for StudioState {
             mindspace_edit_buffer: String::new(),
             mindspace_font: eustress_common::classes::Font::default(),
             mindspace_font_size: 14.0,
+            center_tabs: Vec::new(),
+            active_center_tab: 0,
+            pending_open_script: None,
+            pending_open_web: None,
+            pending_close_tab: None,
+            pending_reorder: None,
+            script_editor_content: String::new(),
+            pending_web_navigate: None,
+            pending_web_back: false,
+            pending_web_forward: false,
+            pending_web_refresh: false,
         }
     }
 }
@@ -848,6 +898,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<crate::soul::SoulServiceSettings>()
             .init_resource::<crate::commands::CommandHistory>()
             .init_resource::<SlintCursorState>()
+            .init_resource::<super::ViewportBounds>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -857,6 +908,7 @@ impl Plugin for SlintUiPlugin {
             // Plugins
             .add_plugins(SpawnEventsPlugin)
             .add_plugins(WorldViewPlugin)
+            .add_plugins(super::webview::WebViewPlugin)
             // Slint software renderer overlay systems
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, (
@@ -874,6 +926,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_explorer_to_slint)
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint)
+            // Center tab sync (Space1 + script tabs)
+            .add_systems(Update, sync_center_tabs_to_slint)
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
@@ -1092,6 +1146,28 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_open_script(move |id| q.push(SlintAction::OpenScript(id)));
     
+    // Center tab management
+    let q = queue.clone();
+    ui.on_close_center_tab(move |idx| q.push(SlintAction::CloseCenterTab(idx)));
+    let q = queue.clone();
+    ui.on_select_center_tab(move |idx| q.push(SlintAction::SelectCenterTab(idx)));
+    let q = queue.clone();
+    ui.on_script_content_changed(move |text| q.push(SlintAction::ScriptContentChanged(text.to_string())));
+    let q = queue.clone();
+    ui.on_reorder_center_tab(move |from, to| q.push(SlintAction::ReorderCenterTab(from, to)));
+    
+    // Web browser
+    let q = queue.clone();
+    ui.on_open_web_tab(move |url| q.push(SlintAction::OpenWebTab(url.to_string())));
+    let q = queue.clone();
+    ui.on_web_navigate(move |url| q.push(SlintAction::WebNavigate(url.to_string())));
+    let q = queue.clone();
+    ui.on_web_go_back(move || q.push(SlintAction::WebGoBack));
+    let q = queue.clone();
+    ui.on_web_go_forward(move || q.push(SlintAction::WebGoForward));
+    let q = queue.clone();
+    ui.on_web_refresh(move || q.push(SlintAction::WebRefresh));
+    
     // Settings
     let q = queue.clone();
     ui.on_open_settings(move || q.push(SlintAction::ShowSettings));
@@ -1127,15 +1203,16 @@ fn setup_slint_overlay(world: &mut World) {
     
     info!("✅ Slint StudioWindow configured with {} callbacks wired", 50);
     
-    // Create Bevy texture for Slint to render into (matches official bevy-hosts-slint pattern).
-    // Uses Rgba8Unorm to match Slint's PremultipliedRgbaColor output format.
+    // Create Bevy texture for Slint to render into.
+    // Uses Rgba8UnormSrgb for correct sRGB gamma (prevents washed-out colors).
+    // Slint's SoftwareRenderer outputs PremultipliedRgbaColor in sRGB space.
     let size = Extent3d { width, height, depth_or_array_layers: 1 };
     let mut image = Image {
         texture_descriptor: TextureDescriptor {
             label: Some("SlintOverlay"),
             size,
             dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
+            format: TextureFormat::Rgba8UnormSrgb,
             mip_level_count: 1,
             sample_count: 1,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
@@ -1147,11 +1224,13 @@ fn setup_slint_overlay(world: &mut World) {
     
     let image_handle = world.resource_mut::<Assets<Image>>().add(image);
     
-    // Create unlit material with alpha blending (matches official example)
+    // Create unlit material with premultiplied alpha blending.
+    // Slint outputs premultiplied RGBA, so we must use PremultipliedAlpha
+    // (not Blend, which assumes straight alpha and causes double-blending/washout).
     let material_handle = world.resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial {
         base_color_texture: Some(image_handle.clone()),
         unlit: true,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::Premultiplied,
         cull_mode: None,
         ..default()
     });
@@ -1374,6 +1453,7 @@ struct DrainResources<'w> {
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
+    viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -1599,10 +1679,75 @@ fn drain_slint_actions(
                 // TODO: Trigger Soul script compilation for entity with this instance ID
             }
             SlintAction::OpenScript(id) => {
+                // Open a Soul Script in a new center tab (or focus existing)
+                let script_name = instances.iter()
+                    .find(|(_, inst)| inst.id as i32 == id)
+                    .map(|(_, inst)| inst.name.clone())
+                    .unwrap_or_else(|| format!("Script #{}", id));
                 if let Some(ref mut out) = res.output {
-                    out.info(format!("Opening script #{}", id));
+                    out.info(format!("Opening script: {}", script_name));
                 }
-                // TODO: Open script editor for entity with this instance ID
+                // Tab opening is handled by the Slint-side sync system
+                // We store the request in StudioState for the sync system to pick up
+                if let Some(ref mut s) = res.state {
+                    s.pending_open_script = Some((id, script_name));
+                }
+            }
+            
+            // Center tab management
+            SlintAction::CloseCenterTab(idx) => {
+                // Tab closing is handled directly in Slint UI state
+                // We just log it for now; the Slint model is updated by the sync system
+                if let Some(ref mut s) = res.state {
+                    s.pending_close_tab = Some(idx);
+                }
+            }
+            SlintAction::SelectCenterTab(idx) => {
+                // Tab selection is handled directly in Slint UI state
+                if let Some(ref mut s) = res.state {
+                    s.active_center_tab = idx;
+                }
+            }
+            SlintAction::ScriptContentChanged(text) => {
+                // Store updated script content for the active tab
+                if let Some(ref mut s) = res.state {
+                    s.script_editor_content = text;
+                }
+            }
+            SlintAction::ReorderCenterTab(from, to) => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_reorder = Some((from, to));
+                }
+            }
+            
+            // Web browser
+            SlintAction::OpenWebTab(url) => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_open_web = Some(url.clone());
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Opening web tab: {}", url));
+                }
+            }
+            SlintAction::WebNavigate(url) => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_web_navigate = Some(url);
+                }
+            }
+            SlintAction::WebGoBack => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_web_back = true;
+                }
+            }
+            SlintAction::WebGoForward => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_web_forward = true;
+                }
+            }
+            SlintAction::WebRefresh => {
+                if let Some(ref mut s) = res.state {
+                    s.pending_web_refresh = true;
+                }
             }
             
             // Terrain
@@ -1735,9 +1880,15 @@ fn drain_slint_actions(
                 // TODO: Detach panel to separate OS window
             }
             
-            // Viewport bounds changed — update Bevy camera/render target
-            SlintAction::ViewportBoundsChanged(_x, _y, _w, _h) => {
-                // Viewport bounds are read directly from Slint properties in the render system
+            // Viewport bounds changed — update Bevy camera viewport clipping
+            SlintAction::ViewportBoundsChanged(x, y, w, h) => {
+                // Store in ViewportBounds resource for camera controller to use
+                if let Some(ref mut vb) = res.viewport_bounds {
+                    vb.x = x;
+                    vb.y = y;
+                    vb.width = w;
+                    vb.height = h;
+                }
             }
             
             // Explorer actions — map instance ID (i32) back to Bevy Entity
@@ -1974,6 +2125,8 @@ fn sync_bevy_to_slint(
     state: Option<Res<StudioState>>,
     perf: Option<Res<UIPerformance>>,
     output: Option<Res<OutputConsole>>,
+    editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    mut viewport_bounds: Option<ResMut<super::ViewportBounds>>,
     time: Res<Time>,
 ) {
     let Some(slint_context) = slint_context else { return };
@@ -2011,6 +2164,28 @@ fn sync_bevy_to_slint(
         ui.set_show_network_panel(state.show_network_panel);
         ui.set_show_terrain_editor(state.show_terrain_editor);
         ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+    }
+    
+    // Sync EditorSettings → Slint (snap/grid state)
+    if let Some(ref es) = editor_settings {
+        ui.set_snap_enabled(es.snap_enabled);
+        ui.set_snap_size(es.snap_size);
+        ui.set_grid_visible(es.show_grid);
+        ui.set_grid_size(es.grid_size);
+    }
+    
+    // Read viewport bounds from Slint layout (Slint→Bevy direction for camera clipping)
+    if let Some(ref mut vb) = viewport_bounds {
+        let vw = ui.get_viewport_width();
+        let vh = ui.get_viewport_height();
+        let vx = ui.get_viewport_x();
+        let vy = ui.get_viewport_y();
+        if vw > 0.0 && vh > 0.0 {
+            vb.x = vx;
+            vb.y = vy;
+            vb.width = vw;
+            vb.height = vh;
+        }
     }
     
     // Sync performance metrics → Slint
@@ -2185,6 +2360,8 @@ fn sync_explorer_to_slint(
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
     
+    use eustress_common::classes::ClassName;
+    
     // Build set of all entities that have Instance components
     let instance_entities: std::collections::HashSet<Entity> = 
         instances.iter().map(|(e, _)| e).collect();
@@ -2213,64 +2390,94 @@ fn sync_explorer_to_slint(
         a_name.cmp(b_name)
     });
     
-    // Build flat tree via DFS
-    let mut flat_nodes: Vec<EntityNode> = Vec::new();
-    let mut stack: Vec<(Entity, i32)> = roots.into_iter().rev().map(|e| (e, 0)).collect();
+    // Classify root entities into service buckets
+    // Lighting children: Sky, Atmosphere, Sun, Moon, Clouds
+    // Workspace children: Camera, Part, MeshPart, Model, Folder, and other 3D objects
+    let is_lighting_child = |cn: &ClassName| matches!(cn,
+        ClassName::Sky | ClassName::Atmosphere | ClassName::Sun | ClassName::Moon | ClassName::Clouds
+    );
     
-    while let Some((entity, depth)) = stack.pop() {
-        let Ok((_, instance)) = instances.get(entity) else { continue };
-        
-        // Check if this entity has Instance children
-        let has_children = children_query.get(entity)
-            .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
-            .unwrap_or(false);
-        
-        let entity_id = instance.id as i32;
-        let is_expanded = explorer_expanded.expanded.contains(&entity);
-        let is_selected = explorer_state.selected == Some(entity);
-        
-        // Map class name to icon character
-        let icon = class_name_to_icon(&instance.class_name);
-        
-        flat_nodes.push(EntityNode {
-            id: entity_id,
-            name: instance.name.clone().into(),
-            class_name: format!("{:?}", instance.class_name).into(),
-            icon: icon.into(),
-            depth,
-            expandable: has_children,
-            expanded: is_expanded,
-            selected: is_selected,
-            visible: true,
-        });
-        
-        // If expanded, push children onto stack (reversed for correct order)
-        if is_expanded && has_children {
-            if let Ok(children) = children_query.get(entity) {
-                let mut child_instances: Vec<Entity> = children.iter()
-                    .filter(|c| instance_entities.contains(c))
-                    .collect();
-                // Sort children by name
-                child_instances.sort_by(|a, b| {
-                    let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                    let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                    a_name.cmp(b_name)
-                });
-                // Push in reverse so first child is processed first
-                for child in child_instances.into_iter().rev() {
-                    stack.push((child, depth + 1));
-                }
+    let mut workspace_roots: Vec<Entity> = Vec::new();
+    let mut lighting_roots: Vec<Entity> = Vec::new();
+    let mut other_roots: Vec<Entity> = Vec::new();
+    
+    for entity in &roots {
+        if let Ok((_, instance)) = instances.get(*entity) {
+            if is_lighting_child(&instance.class_name) {
+                lighting_roots.push(*entity);
+            } else {
+                // Default: workspace children (Camera, Part, Model, etc.)
+                workspace_roots.push(*entity);
             }
         }
     }
     
+    // Helper: build flat node list from a set of roots via DFS, starting at given base depth
+    let build_flat_nodes = |root_list: &[Entity], base_depth: i32| -> Vec<EntityNode> {
+        let mut nodes: Vec<EntityNode> = Vec::new();
+        let mut stack: Vec<(Entity, i32)> = root_list.iter().rev().map(|e| (*e, base_depth)).collect();
+        
+        while let Some((entity, depth)) = stack.pop() {
+            let Ok((_, instance)) = instances.get(entity) else { continue };
+            
+            let has_children = children_query.get(entity)
+                .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
+                .unwrap_or(false);
+            
+            let entity_id = instance.id as i32;
+            let is_expanded = explorer_expanded.expanded.contains(&entity);
+            let is_selected = explorer_state.selected == Some(entity);
+            let icon = load_class_icon(&instance.class_name);
+            
+            nodes.push(EntityNode {
+                id: entity_id,
+                name: instance.name.clone().into(),
+                class_name: format!("{:?}", instance.class_name).into(),
+                icon,
+                depth,
+                expandable: has_children,
+                expanded: is_expanded,
+                selected: is_selected,
+                visible: true,
+            });
+            
+            if is_expanded && has_children {
+                if let Ok(children) = children_query.get(entity) {
+                    let mut child_instances: Vec<Entity> = children.iter()
+                        .filter(|c| instance_entities.contains(c))
+                        .collect();
+                    child_instances.sort_by(|a, b| {
+                        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+                        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+                        a_name.cmp(b_name)
+                    });
+                    for child in child_instances.into_iter().rev() {
+                        stack.push((child, depth + 1));
+                    }
+                }
+            }
+        }
+        nodes
+    };
+    
+    // Build per-service lists at depth 1 (children of hardcoded service TreeItems)
+    let workspace_nodes = build_flat_nodes(&workspace_roots, 1);
+    let lighting_nodes = build_flat_nodes(&lighting_roots, 1);
+    let other_nodes = build_flat_nodes(&other_roots, 0);
+    
     // Push to Slint
-    let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_nodes));
-    ui.set_explorer_entities(slint::ModelRc::from(model_rc));
+    let ws_rc = std::rc::Rc::new(slint::VecModel::from(workspace_nodes));
+    ui.set_workspace_entities(slint::ModelRc::from(ws_rc));
+    
+    let lt_rc = std::rc::Rc::new(slint::VecModel::from(lighting_nodes));
+    ui.set_lighting_entities(slint::ModelRc::from(lt_rc));
+    
+    let other_rc = std::rc::Rc::new(slint::VecModel::from(other_nodes));
+    ui.set_explorer_entities(slint::ModelRc::from(other_rc));
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
-/// Reads Instance, BasePart, Transform, and other component properties via PropertyAccess.
+/// Builds a flat list with category headers interleaved for section grouping.
 /// Throttled to run every 15 frames.
 fn sync_properties_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
@@ -2302,84 +2509,95 @@ fn sync_properties_to_slint(
     ui.set_selected_count(1);
     ui.set_selected_class(format!("{:?}", instance.class_name).into());
     
-    let mut props: Vec<PropertyData> = Vec::new();
-    
-    // Data properties from Instance
     use eustress_common::classes::PropertyAccess;
     
-    props.push(PropertyData {
-        name: "Name".into(),
-        value: instance.name.clone().into(),
-        property_type: "string".into(),
-        category: "Data".into(),
-        editable: true,
-        options: slint::ModelRc::default(),
-    });
-    props.push(PropertyData {
-        name: "ClassName".into(),
-        value: format!("{:?}", instance.class_name).into(),
-        property_type: "string".into(),
-        category: "Data".into(),
-        editable: false,
-        options: slint::ModelRc::default(),
-    });
-    props.push(PropertyData {
-        name: "Archivable".into(),
-        value: instance.archivable.to_string().into(),
-        property_type: "bool".into(),
-        category: "Data".into(),
-        editable: true,
-        options: slint::ModelRc::default(),
-    });
+    // Collect raw properties with categories into buckets
+    // category -> Vec<(name, value, type, editable)>
+    let mut categorized: std::collections::BTreeMap<String, Vec<(String, String, String, bool)>> = std::collections::BTreeMap::new();
     
-    // Transform properties
+    // Helper to add a property to a category bucket
+    let mut add_prop = |cat: &str, name: &str, value: String, prop_type: &str, editable: bool| {
+        categorized.entry(cat.to_string())
+            .or_default()
+            .push((name.to_string(), value, prop_type.to_string(), editable));
+    };
+    
+    // -- Data properties from Instance --
+    add_prop("Data", "Name", instance.name.clone(), "string", true);
+    add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
+    add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
+    
+    // -- Transform properties from Bevy Transform --
     if let Ok(transform) = transforms.get(selected_entity) {
         let (rx, ry, rz) = transform.rotation.to_euler(bevy::math::EulerRot::XYZ);
-        props.push(PropertyData {
-            name: "Position".into(),
-            value: format!("{:.2}, {:.2}, {:.2}", transform.translation.x, transform.translation.y, transform.translation.z).into(),
-            property_type: "vec3".into(),
-            category: "Transform".into(),
-            editable: true,
-            options: slint::ModelRc::default(),
-        });
-        props.push(PropertyData {
-            name: "Rotation".into(),
-            value: format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()).into(),
-            property_type: "vec3".into(),
-            category: "Transform".into(),
-            editable: true,
-            options: slint::ModelRc::default(),
-        });
-        props.push(PropertyData {
-            name: "Scale".into(),
-            value: format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z).into(),
-            property_type: "vec3".into(),
-            category: "Transform".into(),
-            editable: true,
-            options: slint::ModelRc::default(),
-        });
+        add_prop("Transform", "Position",
+            format!("{:.2}, {:.2}, {:.2}", transform.translation.x, transform.translation.y, transform.translation.z),
+            "vec3", true);
+        add_prop("Transform", "Rotation",
+            format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
+            "vec3", true);
+        add_prop("Transform", "Scale",
+            format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
+            "vec3", true);
     }
     
-    // BasePart properties (Size, Anchored, CanCollide, Transparency, etc.)
+    // -- BasePart properties with proper categories from PropertyDescriptor --
     if let Ok(base_part) = base_parts.get(selected_entity) {
         for prop_desc in base_part.list_properties() {
             if let Some(value) = base_part.get_property(&prop_desc.name) {
                 let (val_str, prop_type) = property_value_to_display(&value);
-                props.push(PropertyData {
-                    name: prop_desc.name.clone().into(),
-                    value: val_str.into(),
-                    property_type: prop_type.into(),
-                    category: "Appearance".into(),
-                    editable: true,
+                add_prop(&prop_desc.category, &prop_desc.name, val_str, prop_type, !prop_desc.read_only);
+            }
+        }
+    }
+    
+    // Build flat list with category headers interleaved
+    // Category display order: Transform, Appearance, Data, Physics, then any others
+    let category_order = ["Transform", "Appearance", "Data", "Physics"];
+    let mut ordered_categories: Vec<String> = Vec::new();
+    for cat in &category_order {
+        if categorized.contains_key(*cat) {
+            ordered_categories.push(cat.to_string());
+        }
+    }
+    // Append any remaining categories not in the predefined order
+    for cat in categorized.keys() {
+        if !ordered_categories.contains(cat) {
+            ordered_categories.push(cat.clone());
+        }
+    }
+    
+    let mut flat_props: Vec<PropertyData> = Vec::new();
+    for cat in &ordered_categories {
+        // Insert category header
+        flat_props.push(PropertyData {
+            name: slint::SharedString::default(),
+            value: slint::SharedString::default(),
+            property_type: slint::SharedString::default(),
+            category: cat.as_str().into(),
+            editable: false,
+            options: slint::ModelRc::default(),
+            is_header: true,
+        });
+        
+        // Insert properties in this category
+        if let Some(entries) = categorized.get(cat.as_str()) {
+            for (name, value, prop_type, editable) in entries {
+                flat_props.push(PropertyData {
+                    name: name.as_str().into(),
+                    value: value.as_str().into(),
+                    property_type: prop_type.as_str().into(),
+                    category: cat.as_str().into(),
+                    editable: *editable,
                     options: slint::ModelRc::default(),
+                    is_header: false,
                 });
             }
         }
     }
     
     // Push to Slint
-    let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_props));
     ui.set_entity_properties(slint::ModelRc::from(model_rc));
 }
 
@@ -2404,32 +2622,173 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
     }
 }
 
-/// Maps a ClassName enum to a single-character icon for the explorer tree
-fn class_name_to_icon(class_name: &eustress_common::classes::ClassName) -> &'static str {
+/// Syncs center tab state (Space1 + script/web tabs) from StudioState to Slint.
+/// Processes pending open/close/reorder tab requests each frame.
+fn sync_center_tabs_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut state: Option<ResMut<StudioState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(ref mut state) = state else { return };
+    let ui = &slint_context.window;
+    
+    let mut tabs_changed = false;
+    
+    // Process pending open script request
+    if let Some((entity_id, name)) = state.pending_open_script.take() {
+        if let Some(idx) = state.center_tabs.iter().position(|t| t.entity_id == entity_id && t.tab_type == "script") {
+            state.active_center_tab = (idx as i32) + 1;
+        } else {
+            state.center_tabs.push(CenterTabData {
+                entity_id,
+                name,
+                tab_type: "script".to_string(),
+                url: String::new(),
+                dirty: false,
+                loading: false,
+            });
+            state.active_center_tab = state.center_tabs.len() as i32;
+        }
+        tabs_changed = true;
+    }
+    
+    // Process pending open web tab request
+    if let Some(url) = state.pending_open_web.take() {
+        let title = if url == "about:blank" { "New Tab".to_string() } else { url.clone() };
+        state.center_tabs.push(CenterTabData {
+            entity_id: -1,
+            name: title,
+            tab_type: "web".to_string(),
+            url: url.clone(),
+            dirty: false,
+            loading: url != "about:blank",
+        });
+        state.active_center_tab = state.center_tabs.len() as i32;
+        tabs_changed = true;
+    }
+    
+    // Process pending close tab request
+    if let Some(idx) = state.pending_close_tab.take() {
+        let tab_idx = idx as usize;
+        if tab_idx < state.center_tabs.len() {
+            state.center_tabs.remove(tab_idx);
+            if state.active_center_tab > state.center_tabs.len() as i32 {
+                state.active_center_tab = state.center_tabs.len() as i32;
+            }
+            if state.active_center_tab < 0 {
+                state.active_center_tab = 0;
+            }
+            tabs_changed = true;
+        }
+    }
+    
+    // Process pending tab reorder
+    if let Some((from, to)) = state.pending_reorder.take() {
+        let from_idx = from as usize;
+        let to_idx = to as usize;
+        let len = state.center_tabs.len();
+        if from_idx < len && to_idx <= len && from_idx != to_idx {
+            let tab = state.center_tabs.remove(from_idx);
+            let insert_at = if to_idx > from_idx { to_idx - 1 } else { to_idx };
+            let insert_at = insert_at.min(state.center_tabs.len());
+            state.center_tabs.insert(insert_at, tab);
+            // Update active tab to follow the moved tab if it was active
+            if state.active_center_tab == (from as i32) + 1 {
+                state.active_center_tab = (insert_at as i32) + 1;
+            }
+            tabs_changed = true;
+        }
+    }
+    
+    // Update active-tab-type property
+    let tab_type = if state.active_center_tab <= 0 {
+        "scene"
+    } else {
+        let idx = (state.active_center_tab - 1) as usize;
+        state.center_tabs.get(idx).map(|t| t.tab_type.as_str()).unwrap_or("scene")
+    };
+    ui.set_active_tab_type(tab_type.into());
+    
+    // Push tab data to Slint when changed
+    if tabs_changed {
+        let slint_tabs: Vec<CenterTab> = state.center_tabs.iter().map(|t| {
+            CenterTab {
+                entity_id: t.entity_id,
+                name: t.name.as_str().into(),
+                tab_type: t.tab_type.as_str().into(),
+                dirty: t.dirty,
+                content: slint::SharedString::default(),
+                url: t.url.as_str().into(),
+                loading: t.loading,
+                favicon: slint::Image::default(),
+                can_go_back: false,
+                can_go_forward: false,
+            }
+        }).collect();
+        
+        let model_rc = std::rc::Rc::new(slint::VecModel::from(slint_tabs));
+        ui.set_center_tabs(slint::ModelRc::from(model_rc));
+        ui.set_center_active_tab(state.active_center_tab);
+        
+        // Update web browser properties if active tab is a web tab
+        if tab_type == "web" {
+            let idx = (state.active_center_tab - 1) as usize;
+            if let Some(tab) = state.center_tabs.get(idx) {
+                ui.set_web_url_bar(tab.url.as_str().into());
+                ui.set_web_loading(tab.loading);
+                ui.set_web_has_url(tab.url != "about:blank" && !tab.url.is_empty());
+                ui.set_web_secure(tab.url.starts_with("https://"));
+            }
+        }
+    }
+}
+
+/// Maps a ClassName enum to an SVG icon filename for the explorer tree
+fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName) -> &'static str {
     use eustress_common::classes::ClassName;
     match class_name {
-        ClassName::Part | ClassName::BasePart | ClassName::MeshPart => "■",
-        ClassName::Model | ClassName::PVInstance => "▣",
-        ClassName::Folder => "📁",
-        ClassName::Humanoid => "🧑",
-        ClassName::Camera => "📷",
-        ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight | ClassName::DirectionalLight => "💡",
-        ClassName::Sound => "🔊",
-        ClassName::ParticleEmitter => "✨",
-        ClassName::Beam => "⚡",
-        ClassName::Terrain => "🏔",
-        ClassName::Sky => "☁",
-        ClassName::SoulScript => "📜",
-        ClassName::Decal => "🖼",
-        ClassName::Attachment => "📌",
-        ClassName::WeldConstraint | ClassName::Motor6D => "🔗",
-        ClassName::UnionOperation => "⊕",
-        ClassName::BillboardGui | ClassName::SurfaceGui | ClassName::ScreenGui => "🖥",
-        ClassName::TextLabel | ClassName::TextButton => "T",
-        ClassName::Frame | ClassName::ScrollingFrame => "□",
-        ClassName::ImageLabel | ClassName::ImageButton => "🖼",
-        ClassName::Animator | ClassName::KeyframeSequence => "🎬",
-        ClassName::SpecialMesh => "△",
-        _ => "●",
+        ClassName::Part | ClassName::BasePart => "part",
+        ClassName::MeshPart => "meshpart",
+        ClassName::Model | ClassName::PVInstance => "model",
+        ClassName::Folder => "folder",
+        ClassName::Humanoid => "humanoid",
+        ClassName::Camera => "camera",
+        ClassName::PointLight => "pointlight",
+        ClassName::SpotLight => "spotlight",
+        ClassName::SurfaceLight => "surfacelight",
+        ClassName::DirectionalLight => "directionallight",
+        ClassName::Sound => "sound",
+        ClassName::ParticleEmitter => "particleemitter",
+        ClassName::Beam => "beam",
+        ClassName::Terrain => "terrain",
+        ClassName::Sky => "sky",
+        ClassName::Atmosphere => "atmosphere",
+        ClassName::Sun => "sun",
+        ClassName::Moon => "moon",
+        ClassName::Clouds => "sky",
+        ClassName::SoulScript => "soulservice",
+        ClassName::Decal => "decal",
+        ClassName::Attachment => "attachment",
+        ClassName::WeldConstraint => "weldconstraint",
+        ClassName::Motor6D => "motor6d",
+        ClassName::UnionOperation => "unionoperation",
+        ClassName::BillboardGui | ClassName::SurfaceGui | ClassName::ScreenGui => "startergui",
+        ClassName::TextLabel | ClassName::TextButton => "textlabel",
+        ClassName::Frame | ClassName::ScrollingFrame => "startergui",
+        ClassName::ImageLabel | ClassName::ImageButton => "decal",
+        ClassName::Animator => "animator",
+        ClassName::KeyframeSequence => "keyframesequence",
+        ClassName::SpecialMesh => "specialmesh",
+        _ => "instance",
     }
+}
+
+/// Load an SVG icon as a slint::Image from the assets/icons directory
+fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::Image {
+    let filename = class_name_to_icon_filename(class_name);
+    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("icons")
+        .join(format!("{}.svg", filename));
+    slint::Image::load_from_path(&icon_path).unwrap_or_default()
 }

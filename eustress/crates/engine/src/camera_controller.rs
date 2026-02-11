@@ -231,8 +231,7 @@ impl Plugin for CameraControllerPlugin {
             .add_message::<FrameSelectionEvent>()
             .add_systems(Update, (
                 ensure_camera_exists,
-                // NOTE: Viewport constraint disabled - camera now renders to texture for Slint
-                // update_camera_viewport_for_ui,
+                update_camera_viewport_for_ui,
                 camera_view_input_system,
                 handle_snap_to_view,
                 handle_toggle_projection,
@@ -244,40 +243,25 @@ impl Plugin for CameraControllerPlugin {
     }
 }
 
-/// Update the 3D camera viewport to fit within the UI panel layout
-/// This constrains the 3D render to the center frame, leaving space for:
-/// - Left panel (Explorer/Toolbox): ~280px
-/// - Right panel (Properties): ~280px  
-/// - Top ribbon: ~100px
-/// - Bottom output: ~150px
+/// Update the 3D camera viewport to fit within the Slint UI layout.
+/// Reads actual viewport bounds from the ViewportBounds resource (populated by Slint each frame).
+/// This constrains 3D rendering to only the visible viewport area, avoiding wasted GPU work
+/// behind opaque UI panels (ribbon, explorer, properties, output).
 fn update_camera_viewport_for_ui(
     mut camera_query: Query<&mut Camera, With<Camera3d>>,
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    studio_state: Option<Res<crate::ui::StudioState>>,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
-    let Some(window) = windows.iter().next() else { return };
+    let Some(vb) = viewport_bounds else { return };
     let Some(mut camera) = camera_query.iter_mut().next() else { return };
     
-    let window_width = window.width();
-    let window_height = window.height();
+    // Only clip if Slint has reported valid viewport dimensions
+    if vb.width < 10.0 || vb.height < 10.0 {
+        return;
+    }
     
-    // UI panel sizes (matching Slint layout)
-    // These should eventually come from StudioState for dynamic resizing
-    let left_panel_width = if studio_state.as_ref().map_or(true, |s| s.show_explorer) { 280.0 } else { 0.0 };
-    let right_panel_width = if studio_state.as_ref().map_or(true, |s| s.show_properties) { 280.0 } else { 0.0 };
-    let top_ribbon_height = 100.0; // Ribbon + toolbar
-    let bottom_output_height = if studio_state.as_ref().map_or(true, |s| s.show_output) { 150.0 } else { 0.0 };
-    
-    // Calculate viewport bounds (in pixels from top-left)
-    let viewport_x = left_panel_width;
-    let viewport_y = top_ribbon_height;
-    let viewport_width = (window_width - left_panel_width - right_panel_width).max(100.0);
-    let viewport_height = (window_height - top_ribbon_height - bottom_output_height).max(100.0);
-    
-    // Set the camera viewport using Bevy 0.17 API
     camera.viewport = Some(bevy::camera::Viewport {
-        physical_position: UVec2::new(viewport_x as u32, viewport_y as u32),
-        physical_size: UVec2::new(viewport_width as u32, viewport_height as u32),
+        physical_position: UVec2::new(vb.x.max(0.0) as u32, vb.y.max(0.0) as u32),
+        physical_size: UVec2::new(vb.width as u32, vb.height as u32),
         ..default()
     });
 }

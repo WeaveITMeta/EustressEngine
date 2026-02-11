@@ -113,17 +113,26 @@ export global Theme {
     out property <length> font-xxl: 24px;
 }
 
-// Icon button component for consistent styling with hover tooltip
+// Icon button component for consistent styling with hover tooltip and label
 export component IconButton inherits Rectangle {
     in property <image> icon;
+    in property <string> label: "";
     in property <string> tooltip: "";
     in property <bool> selected: false;
     in property <bool> enabled: true;
+    in property <color> tint: #d4d4d4; // Tint color for SVG icon (default matches base icon grey)
     
     callback clicked();
     
-    width: 28px;
-    height: 28px;
+    width: root.label != "" ? (label-measure.preferred-width > 34px ? label-measure.preferred-width + 10px : 44px) : 36px;
+    height: root.label != "" ? 52px : 36px;
+    
+    // Hidden text for width measurement
+    label-measure := Text {
+        visible: false;
+        text: root.label;
+        font-size: 10px;
+    }
     border-radius: Theme.radius-md;
     background: self.selected ? Theme.selection-background : 
                 touch.has-hover ? Theme.button-hover : transparent;
@@ -142,13 +151,28 @@ export component IconButton inherits Rectangle {
         }
     }
     
-    Image {
-        x: 6px;
-        y: 6px;
-        width: 16px;
-        height: 16px;
-        source: root.icon;
-        image-fit: contain;
+    VerticalLayout {
+        padding-top: root.label != "" ? 3px : 7px;
+        padding-bottom: root.label != "" ? 2px : 0px;
+        spacing: 2px;
+        alignment: center;
+        
+        Image {
+            width: 22px;
+            height: 22px;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.tint != transparent ? root.tint : transparent;
+            horizontal-alignment: center;
+        }
+        
+        if root.label != "": btn-label := Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
     }
     
     // Tooltip popup — uses PopupWindow for correct z-ordering above all panels

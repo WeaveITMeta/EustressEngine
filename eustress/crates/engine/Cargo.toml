@@ -46,13 +46,12 @@ bevy = { workspace = true, default-features = false, features = [
     "tonemapping_luts",
     "zstd_rust",
 ] }
-# Slint UI (GPU renderer with wgpu 27)
+# Slint UI (software renderer + Skia GPU renderer with wgpu 28, matching Bevy 0.18)
 slint = { workspace = true }
-# Slint FemtoVG GPU renderer - disabled due to wgpu version conflicts
-# i-slint-renderer-femtovg = { version = "1.14", features = ["wgpu"] }
-# femtovg = { version = "0.20", features = ["image-loading"] }
 # CEF webview for browser tabs (macOS only currently)
 bevy_cef = { git = "https://github.com/not-elm/bevy_cef", branch = "main", optional = true }
+# Wry webview for browser tabs (Windows WebView2 / macOS WebKit / Linux WebKitGTK)
+wry = { version = "0.53", optional = true }
 # leafwing-input-manager = { workspace = true }  # DISABLED until Bevy 0.19 support
 avian3d = { workspace = true }
 serde = { workspace = true }
@@ -113,3 +112,5 @@ hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]
+# Wry webview support (Windows/macOS/Linux)
+webview = ["wry"]

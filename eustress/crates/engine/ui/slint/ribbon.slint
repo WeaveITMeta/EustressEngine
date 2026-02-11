@@ -3,14 +3,14 @@
 // Top toolbar with menus, tools, and play controls
 // ============================================================================
 
-import { HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, ScrollView } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
 
 // Grouped toolbar section with icon row + compact category label
 component ToolGroup inherits Rectangle {
     in property <string> label: "";
     
-    height: 42px;
+    height: 70px;
     background: transparent;
     
     VerticalLayout {
@@ -19,10 +19,10 @@ component ToolGroup inherits Rectangle {
         
         // Icon row
         HorizontalLayout {
-            height: 28px;
+            height: 56px;
             padding-left: 4px;
             padding-right: 4px;
-            spacing: 2px;
+            spacing: 4px;
             alignment: center;
             
             @children
@@ -43,7 +43,7 @@ component ToolGroup inherits Rectangle {
 // Vertical group divider with subtle line
 component GroupDivider inherits Rectangle {
     width: 1px;
-    height: 36px;
+    height: 64px;
     background: Theme.border-color;
 }
 
@@ -200,7 +200,10 @@ export component Ribbon inherits Rectangle {
     callback on-open-url(string);
     callback on-menu-action(string);
     
-    height: 68px;
+    // Active ribbon tab: "home", "model", "ui", "terrain", "test", "mindspace"
+    in-out property <string> ribbon-tab: "home";
+    
+    height: 118px;
     background: Theme.ribbon-background;
     
     // Bottom edge separator
@@ -239,6 +242,7 @@ export component Ribbon inherits Rectangle {
                     file-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 240px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -247,7 +251,7 @@ export component Ribbon inherits Rectangle {
                             border-color: #3a3a3a;
                             drop-shadow-blur: 8px;
                             drop-shadow-color: #00000080;
-                            width: 220px;
+                            width: 240px;
                             
                             VerticalLayout {
                                 padding-top: 4px;
@@ -283,6 +287,7 @@ export component Ribbon inherits Rectangle {
                     edit-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 220px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -328,6 +333,7 @@ export component Ribbon inherits Rectangle {
                     view-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 220px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -370,6 +376,8 @@ export component Ribbon inherits Rectangle {
                     insert-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 260px;
+                        height: 600px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -378,35 +386,74 @@ export component Ribbon inherits Rectangle {
                             border-color: #3a3a3a;
                             drop-shadow-blur: 8px;
                             drop-shadow-color: #00000080;
-                            width: 200px;
+                            width: 260px;
+                            height: 600px;
                             
-                            VerticalLayout {
-                                padding-top: 4px;
-                                padding-bottom: 4px;
+                            ScrollView {
+                                width: 100%;
+                                height: 100%;
                                 
-                                DropdownHeader { label: "PRIMITIVES"; }
-                                DropdownItem { label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
-                                DropdownItem { label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
-                                DropdownItem { label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
-                                DropdownItem { label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "OBJECTS"; }
-                                DropdownItem { label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
-                                DropdownItem { label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
-                                DropdownItem { label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
-                                DropdownItem { label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
-                                DropdownItem { label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "LIGHTING"; }
-                                DropdownItem { label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
-                                DropdownItem { label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
-                                DropdownItem { label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "UI"; }
-                                DropdownItem { label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
-                                DropdownItem { label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
-                                DropdownItem { label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
-                                DropdownItem { label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
+                                VerticalLayout {
+                                    padding-top: 4px;
+                                    padding-bottom: 4px;
+                                    width: 240px;
+                                    
+                                    DropdownHeader { label: "PRIMITIVES"; }
+                                    DropdownItem { label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
+                                    DropdownItem { label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
+                                    DropdownItem { label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
+                                    DropdownItem { label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
+                                    DropdownItem { label: "MeshPart"; clicked => { root.on-menu-action("insert:meshpart"); } }
+                                    DropdownItem { label: "UnionOperation"; clicked => { root.on-menu-action("insert:unionoperation"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "STRUCTURE"; }
+                                    DropdownItem { label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
+                                    DropdownItem { label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
+                                    DropdownItem { label: "SpawnLocation"; clicked => { root.on-menu-action("insert:spawnlocation"); } }
+                                    DropdownItem { label: "Seat"; clicked => { root.on-menu-action("insert:seat"); } }
+                                    DropdownItem { label: "VehicleSeat"; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "SCRIPTING"; }
+                                    DropdownItem { label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
+                                    DropdownItem { label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
+                                    DropdownItem { label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "CONSTRAINTS"; }
+                                    DropdownItem { label: "Attachment"; clicked => { root.on-menu-action("insert:attachment"); } }
+                                    DropdownItem { label: "WeldConstraint"; clicked => { root.on-menu-action("insert:weldconstraint"); } }
+                                    DropdownItem { label: "Motor6D"; clicked => { root.on-menu-action("insert:motor6d"); } }
+                                    DropdownItem { label: "Beam"; clicked => { root.on-menu-action("insert:beam"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "EFFECTS"; }
+                                    DropdownItem { label: "ParticleEmitter"; clicked => { root.on-menu-action("insert:particleemitter"); } }
+                                    DropdownItem { label: "Decal"; clicked => { root.on-menu-action("insert:decal"); } }
+                                    DropdownItem { label: "Sound"; clicked => { root.on-menu-action("insert:sound"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "LIGHTING"; }
+                                    DropdownItem { label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
+                                    DropdownItem { label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
+                                    DropdownItem { label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "UI - CONTAINERS"; }
+                                    DropdownItem { label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
+                                    DropdownItem { label: "BillboardGui"; clicked => { root.on-menu-action("insert:billboardgui"); } }
+                                    DropdownItem { label: "SurfaceGui"; clicked => { root.on-menu-action("insert:surfacegui"); } }
+                                    DropdownItem { label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
+                                    DropdownItem { label: "ScrollingFrame"; clicked => { root.on-menu-action("insert:scrollingframe"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "UI - DISPLAY"; }
+                                    DropdownItem { label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
+                                    DropdownItem { label: "ImageLabel"; clicked => { root.on-menu-action("insert:imagelabel"); } }
+                                    DropdownSeparator {}
+                                    DropdownHeader { label: "UI - INTERACTIVE"; }
+                                    DropdownItem { label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
+                                    DropdownItem { label: "ImageButton"; clicked => { root.on-menu-action("insert:imagebutton"); } }
+                                    DropdownItem { label: "TextBox"; clicked => { root.on-menu-action("insert:textbox"); } }
+                                    DropdownItem { label: "ViewportFrame"; clicked => { root.on-menu-action("insert:viewportframe"); } }
+                                    DropdownItem { label: "VideoFrame"; clicked => { root.on-menu-action("insert:videoframe"); } }
+                                    DropdownItem { label: "DocumentFrame"; clicked => { root.on-menu-action("insert:documentframe"); } }
+                                    DropdownItem { label: "WebFrame"; clicked => { root.on-menu-action("insert:webframe"); } }
+                                }
                             }
                         }
                     }
@@ -425,6 +472,7 @@ export component Ribbon inherits Rectangle {
                     model-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 200px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -463,6 +511,7 @@ export component Ribbon inherits Rectangle {
                     test-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 200px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -501,6 +550,7 @@ export component Ribbon inherits Rectangle {
                     plugins-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 200px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -540,6 +590,7 @@ export component Ribbon inherits Rectangle {
                     network-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 220px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -583,6 +634,7 @@ export component Ribbon inherits Rectangle {
                     data-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 220px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -635,6 +687,7 @@ export component Ribbon inherits Rectangle {
                     terrain-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 200px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -684,6 +737,7 @@ export component Ribbon inherits Rectangle {
                     mindspace-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 220px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -736,6 +790,7 @@ export component Ribbon inherits Rectangle {
                     help-popup := PopupWindow {
                         x: 0px;
                         y: parent.height;
+                        width: 200px;
                         
                         Rectangle {
                             background: #1e1e1e;
@@ -784,12 +839,139 @@ export component Ribbon inherits Rectangle {
             }
         }
         
-        // ── Toolbar row — grouped sections with labels ──
+        // ── Ribbon tab selector row ──
         Rectangle {
-            height: 44px;
+            height: 22px;
             background: Theme.ribbon-background;
             
+            // Simulation controls — absolute left
             HorizontalLayout {
+                x: 6px;
+                y: 1px;
+                width: 112px;
+                height: 20px;
+                spacing: 2px;
+                
+                // Play (Run solo)
+                Rectangle {
+                    width: 26px;
+                    height: 20px;
+                    background: root.play-state == "playing" ? Theme.accent-green : 
+                                play-solo-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 3px;
+                    
+                    play-solo-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { if root.play-state == "stopped" { root.on-play-solo(); } }
+                    }
+                    Image {
+                        x: 5px; y: 2px; width: 16px; height: 16px;
+                        source: @image-url("../../assets/icons/ui/play.svg");
+                        image-fit: contain; colorize: #66bb6a;
+                    }
+                }
+                // Play Here with Character
+                Rectangle {
+                    width: 26px;
+                    height: 20px;
+                    background: play-char-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 3px;
+                    
+                    play-char-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { if root.play-state == "stopped" { root.on-play-with-character(); } }
+                    }
+                    Image {
+                        x: 5px; y: 2px; width: 16px; height: 16px;
+                        source: @image-url("../../assets/icons/ui/gamepad.svg");
+                        image-fit: contain; colorize: #66bb6a;
+                    }
+                }
+                // Pause
+                Rectangle {
+                    width: 26px;
+                    height: 20px;
+                    background: root.play-state == "paused" ? Theme.accent-yellow :
+                                pause-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 3px;
+                    
+                    pause-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { if root.play-state == "playing" { root.on-pause(); } }
+                    }
+                    Image {
+                        x: 5px; y: 2px; width: 16px; height: 16px;
+                        source: @image-url("../../assets/icons/ui/pause.svg");
+                        image-fit: contain; colorize: #ffb74d;
+                    }
+                }
+                // Stop
+                Rectangle {
+                    width: 26px;
+                    height: 20px;
+                    background: stop-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 3px;
+                    
+                    stop-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { if root.play-state != "stopped" { root.on-stop(); } }
+                    }
+                    Image {
+                        x: 5px; y: 2px; width: 16px; height: 16px;
+                        source: @image-url("../../assets/icons/ui/stop.svg");
+                        image-fit: contain; colorize: #ef5350;
+                    }
+                }
+            }
+            
+            // Tab pills — absolute centered in full row width
+            tabs-row := HorizontalLayout {
+                x: (parent.width - self.preferred-width) / 2;
+                y: 1px;
+                width: self.preferred-width;
+                height: 20px;
+                spacing: 6px;
+                
+                for tab-item in [
+                    { name: "Home",      id: "home",      color: #4686b4 },
+                    { name: "Model",     id: "model",     color: #6495ed },
+                    { name: "UI",        id: "ui",        color: #9370db },
+                    { name: "Terrain",   id: "terrain",   color: #3cb371 },
+                    { name: "Test",      id: "test",      color: #ff8c00 },
+                    { name: "MindSpace", id: "mindspace", color: #7b68ee },
+                ] : Rectangle {
+                    width: tab-text.preferred-width + 16px;
+                    height: 20px;
+                    border-radius: 4px;
+                    background: root.ribbon-tab == tab-item.id ? tab-item.color : 
+                                tab-touch.has-hover ? Theme.button-hover : transparent;
+                    
+                    tab-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.ribbon-tab = tab-item.id; }
+                    }
+                    
+                    tab-text := Text {
+                        text: tab-item.name;
+                        color: root.ribbon-tab == tab-item.id ? #ffffff : Theme.text-secondary;
+                        font-size: 11px;
+                        font-weight: root.ribbon-tab == tab-item.id ? 600 : 400;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        
+        // ── Toolbar content area — switches based on active ribbon tab ──
+        Rectangle {
+            height: 72px;
+            background: Theme.ribbon-background;
+            
+            // ════════════════════════════════════════════════════════════
+            // HOME TAB — File, History, Clipboard, Tools, Space, Utils
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "home": HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
@@ -798,271 +980,339 @@ export component Ribbon inherits Rectangle {
                 // ── FILE group ──
                 ToolGroup {
                     label: "File";
-                    
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/new-file.svg");
-                        tooltip: "New Scene (Ctrl+N)";
-                        clicked => { root.on-new-scene(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/import.svg");
-                        tooltip: "Open Scene (Ctrl+O)";
-                        clicked => { root.on-open-scene(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/save.svg");
-                        tooltip: "Save Scene (Ctrl+S)";
-                        clicked => { root.on-save-scene(); }
-                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; tooltip: "New Scene (Ctrl+N)"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open Scene (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; tooltip: "Save Scene (Ctrl+S)"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
                 }
-                
                 GroupDivider {}
                 
                 // ── HISTORY group ──
                 ToolGroup {
                     label: "History";
-                    
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/undo.svg");
-                        tooltip: "Undo (Ctrl+Z)";
-                        clicked => { root.on-undo(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/redo.svg");
-                        tooltip: "Redo (Ctrl+Y)";
-                        clicked => { root.on-redo(); }
-                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/undo.svg"); label: "Undo"; tooltip: "Undo (Ctrl+Z)"; tint: #ffb74d; clicked => { root.on-undo(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/redo.svg"); label: "Redo"; tooltip: "Redo (Ctrl+Y)"; tint: #ffb74d; clicked => { root.on-redo(); } }
                 }
-                
                 GroupDivider {}
                 
                 // ── CLIPBOARD group ──
                 ToolGroup {
                     label: "Clipboard";
-                    
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/cut.svg");
-                        tooltip: "Cut (Ctrl+X)";
-                        clicked => { root.on-cut(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/copy.svg");
-                        tooltip: "Copy (Ctrl+C)";
-                        clicked => { root.on-copy(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/paste.svg");
-                        tooltip: "Paste (Ctrl+V)";
-                        clicked => { root.on-paste(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/duplicate.svg");
-                        tooltip: "Duplicate (Ctrl+D)";
-                        clicked => { root.on-duplicate(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/delete.svg");
-                        tooltip: "Delete (Del)";
-                        clicked => { root.on-delete(); }
-                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cut.svg"); label: "Cut"; tooltip: "Cut (Ctrl+X)"; tint: #4dd0e1; clicked => { root.on-cut(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/copy.svg"); label: "Copy"; tooltip: "Copy (Ctrl+C)"; tint: #4dd0e1; clicked => { root.on-copy(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/paste.svg"); label: "Paste"; tooltip: "Paste (Ctrl+V)"; tint: #4dd0e1; clicked => { root.on-paste(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/duplicate.svg"); label: "Duplicate"; tooltip: "Duplicate (Ctrl+D)"; tint: #81c784; clicked => { root.on-duplicate(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Delete"; tooltip: "Delete (Del)"; tint: #ef5350; clicked => { root.on-delete(); } }
                 }
-                
                 GroupDivider {}
                 
                 // ── TOOLS group ──
                 ToolGroup {
                     label: "Tools";
-                    
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/cursor.svg");
-                        tooltip: "Select (Q)";
-                        selected: root.current-tool == "select";
-                        clicked => { root.on-select-tool("select"); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/move.svg");
-                        tooltip: "Move (W)";
-                        selected: root.current-tool == "move";
-                        clicked => { root.on-select-tool("move"); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/rotate.svg");
-                        tooltip: "Rotate (E)";
-                        selected: root.current-tool == "rotate";
-                        clicked => { root.on-select-tool("rotate"); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/scale.svg");
-                        tooltip: "Scale (R)";
-                        selected: root.current-tool == "scale";
-                        clicked => { root.on-select-tool("scale"); }
-                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; tooltip: "Select (Q)"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; tooltip: "Move (W)"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; tooltip: "Scale (E)"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; tooltip: "Rotate (R)"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
                 }
-                
                 GroupDivider {}
                 
                 // ── SPACE group — World/Local toggle ──
                 ToolGroup {
                     label: "Space";
-                    
                     Rectangle {
-                        width: 72px;
-                        height: 24px;
-                        background: Theme.input-background;
-                        border-radius: 3px;
-                        border-width: 1px;
-                        border-color: Theme.input-border;
-                        
+                        width: 72px; height: 24px;
+                        background: Theme.input-background; border-radius: 3px; border-width: 1px; border-color: Theme.input-border;
                         HorizontalLayout {
-                            padding: 2px;
-                            spacing: 1px;
-                            
+                            padding: 2px; spacing: 1px;
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.transform-mode == "world" ? Theme.selection-background : transparent;
                                 border-radius: 2px;
-                                
-                                TouchArea {
-                                    clicked => { root.on-set-transform-mode("world"); }
-                                }
-                                
-                                Text {
-                                    text: "World";
-                                    color: root.transform-mode == "world" ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                                TouchArea { clicked => { root.on-set-transform-mode("world"); } }
+                                Text { text: "World"; color: root.transform-mode == "world" ? Theme.text-primary : Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                             }
-                            
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.transform-mode == "local" ? Theme.selection-background : transparent;
                                 border-radius: 2px;
-                                
-                                TouchArea {
-                                    clicked => { root.on-set-transform-mode("local"); }
-                                }
-                                
-                                Text {
-                                    text: "Local";
-                                    color: root.transform-mode == "local" ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 10px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
+                                TouchArea { clicked => { root.on-set-transform-mode("local"); } }
+                                Text { text: "Local"; color: root.transform-mode == "local" ? Theme.text-primary : Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                             }
                         }
                     }
                 }
+                GroupDivider {}
                 
-                // ── Center spacer ──
-                Rectangle { horizontal-stretch: 1; }
-                
-                // ── PLAY group — centered play controls ──
+                // ── EDIT group ──
                 ToolGroup {
-                    label: "Simulate";
-                    
-                    // Play
-                    Rectangle {
-                        width: 30px;
-                        height: 26px;
-                        background: root.play-state == "playing" ? Theme.accent-green : 
-                                    play-solo-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-radius: 3px;
-                        
-                        play-solo-touch := TouchArea {
-                            clicked => {
-                                if root.play-state == "stopped" {
-                                    root.on-play-solo();
-                                }
-                            }
-                        }
-                        
-                        Image {
-                            x: 7px;
-                            y: 5px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/play.svg");
-                            image-fit: contain;
-                        }
-                    }
-                    
-                    // Pause
-                    Rectangle {
-                        width: 30px;
-                        height: 26px;
-                        background: root.play-state == "paused" ? Theme.accent-yellow :
-                                    pause-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-radius: 3px;
-                        
-                        pause-touch := TouchArea {
-                            clicked => {
-                                if root.play-state == "playing" {
-                                    root.on-pause();
-                                }
-                            }
-                        }
-                        
-                        Image {
-                            x: 7px;
-                            y: 5px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/pause.svg");
-                            image-fit: contain;
-                        }
-                    }
-                    
-                    // Stop
-                    Rectangle {
-                        width: 30px;
-                        height: 26px;
-                        background: stop-touch.has-hover ? Theme.button-hover : Theme.button-background;
-                        border-radius: 3px;
-                        
-                        stop-touch := TouchArea {
-                            clicked => {
-                                if root.play-state != "stopped" {
-                                    root.on-stop();
-                                }
-                            }
-                        }
-                        
-                        Image {
-                            x: 7px;
-                            y: 5px;
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/stop.svg");
-                            image-fit: contain;
-                        }
-                    }
+                    label: "Edit";
+                    IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; tooltip: "Group (Ctrl+G)"; tint: #90caf9; clicked => { root.on-group(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; tooltip: "Ungroup (Ctrl+U)"; tint: #90caf9; clicked => { root.on-ungroup(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock"; tooltip: "Unlock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
-                // ── Right spacer ──
                 Rectangle { horizontal-stretch: 1; }
                 
                 // ── UTILS group — right-aligned ──
                 ToolGroup {
                     label: "Utils";
-                    
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/keyboard.svg");
-                        tooltip: "Keyboard Shortcuts";
-                        clicked => { root.on-show-keybindings(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/soulservice.svg");
-                        tooltip: "Soul Settings";
-                        clicked => { root.on-show-soul-settings(); }
-                    }
-                    IconButton {
-                        icon: @image-url("../../assets/icons/ui/terminal.svg");
-                        tooltip: "Command Palette (Ctrl+Shift+P)";
-                        clicked => { root.on-toggle-command-bar(); }
-                    }
+                    IconButton { icon: @image-url("../../assets/icons/ui/keyboard.svg"); label: "Keys"; tooltip: "Keyboard Shortcuts"; tint: #b39ddb; clicked => { root.on-show-keybindings(); } }
+                    IconButton { icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; tooltip: "Soul Settings"; tint: #b39ddb; clicked => { root.on-show-soul-settings(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Console"; tooltip: "Command Palette (Ctrl+Shift+P)"; tint: #b39ddb; clicked => { root.on-toggle-command-bar(); } }
+                }
+            }
+            
+            // ════════════════════════════════════════════════════════════
+            // MODEL TAB — Parts, Structure, Constraints, Effects, CSG, Assets
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "model": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: start;
+                
+                ToolGroup {
+                    label: "Parts";
+                    IconButton { icon: @image-url("../../assets/icons/part.svg"); label: "Part"; tooltip: "Insert Part"; tint: #64b5f6; clicked => { root.on-menu-action("insert:part"); } }
+                    IconButton { icon: @image-url("../../assets/icons/meshpart.svg"); label: "Mesh"; tooltip: "Insert MeshPart"; tint: #64b5f6; clicked => { root.on-menu-action("insert:meshpart"); } }
+                    IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: #64b5f6; clicked => { root.on-menu-action("insert:unionoperation"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:seat"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Structure";
+                    IconButton { icon: @image-url("../../assets/icons/model.svg"); label: "Model"; tooltip: "Insert Model"; tint: #81c784; clicked => { root.on-menu-action("insert:model"); } }
+                    IconButton { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; tooltip: "Insert Folder"; tint: #81c784; clicked => { root.on-menu-action("insert:folder"); } }
+                    IconButton { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "Spawn"; tooltip: "Insert SpawnLocation"; tint: #81c784; clicked => { root.on-menu-action("insert:spawnlocation"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Constraints";
+                    IconButton { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attach"; tooltip: "Insert Attachment"; tint: #ffb74d; clicked => { root.on-menu-action("insert:attachment"); } }
+                    IconButton { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "Weld"; tooltip: "Insert Weld"; tint: #ffb74d; clicked => { root.on-menu-action("insert:weldconstraint"); } }
+                    IconButton { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor"; tooltip: "Insert Motor6D"; tint: #ffb74d; clicked => { root.on-menu-action("insert:motor6d"); } }
+                    IconButton { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; tooltip: "Insert Beam"; tint: #ffb74d; clicked => { root.on-menu-action("insert:beam"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Effects";
+                    IconButton { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "Particles"; tooltip: "Insert Particles"; tint: #f48fb1; clicked => { root.on-menu-action("insert:particleemitter"); } }
+                    IconButton { icon: @image-url("../../assets/icons/pointlight.svg"); label: "Point"; tooltip: "Insert PointLight"; tint: #fff176; clicked => { root.on-menu-action("insert:pointlight"); } }
+                    IconButton { icon: @image-url("../../assets/icons/spotlight.svg"); label: "Spot"; tooltip: "Insert SpotLight"; tint: #fff176; clicked => { root.on-menu-action("insert:spotlight"); } }
+                    IconButton { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; tooltip: "Insert Sound"; tint: #80deea; clicked => { root.on-menu-action("insert:sound"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "CSG";
+                    IconButton { icon: @image-url("../../assets/icons/ui/negate.svg"); label: "Negate"; tooltip: "Negate (CSG Subtract)"; tint: #ef9a9a; clicked => { root.on-menu-action("model:negate"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/intersect.svg"); label: "Intersect"; tooltip: "Intersect (CSG)"; tint: #a5d6a7; clicked => { root.on-menu-action("model:intersect"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/separate.svg"); label: "Separate"; tooltip: "Separate Union"; tint: #90caf9; clicked => { root.on-menu-action("model:separate"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Assets";
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Model (OBJ/FBX/GLTF)"; tint: #4dd0e1; clicked => { root.on-menu-action("model:import"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Selection"; tint: #4dd0e1; clicked => { root.on-menu-action("model:export"); } }
+                }
+            }
+            
+            // ════════════════════════════════════════════════════════════
+            // UI TAB — Containers, Display, Interactive, Layout
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "ui": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: start;
+                
+                ToolGroup {
+                    label: "Containers";
+                    IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:screengui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "BillboardGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:billboardgui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/surface.svg"); label: "Surface"; tooltip: "SurfaceGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:surfacegui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Frame"; tooltip: "Frame"; tint: #9575cd; clicked => { root.on-menu-action("insert:frame"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scroll.svg"); label: "Scroll"; tooltip: "ScrollingFrame"; tint: #9575cd; clicked => { root.on-menu-action("insert:scrollingframe"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Display";
+                    IconButton { icon: @image-url("../../assets/icons/ui/text.svg"); label: "Text"; tooltip: "TextLabel"; tint: #80cbc4; clicked => { root.on-menu-action("insert:textlabel"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "Image"; tooltip: "ImageLabel"; tint: #80cbc4; clicked => { root.on-menu-action("insert:imagelabel"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Interactive";
+                    IconButton { icon: @image-url("../../assets/icons/ui/button.svg"); label: "Button"; tooltip: "TextButton"; tint: #ffab91; clicked => { root.on-menu-action("insert:textbutton"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/image.svg"); label: "ImgBtn"; tooltip: "ImageButton"; tint: #ffab91; clicked => { root.on-menu-action("insert:imagebutton"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/textbox.svg"); label: "TextBox"; tooltip: "TextBox"; tint: #ffab91; clicked => { root.on-menu-action("insert:textbox"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/viewport.svg"); label: "Viewport"; tooltip: "ViewportFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:viewportframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/video.svg"); label: "Video"; tooltip: "VideoFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:videoframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/document.svg"); label: "Doc"; tooltip: "DocumentFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:documentframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/web.svg"); label: "Web"; tooltip: "WebFrame"; tint: #a5d6a7; clicked => { root.on-menu-action("insert:webframe"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Layout";
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-left.svg"); label: "Left"; tooltip: "Align Left"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-left"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-center.svg"); label: "Center"; tooltip: "Align Center"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-center"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/align-right.svg"); label: "Right"; tooltip: "Align Right"; tint: #b0bec5; clicked => { root.on-menu-action("ui:align-right"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/distribute.svg"); label: "Distribute"; tooltip: "Distribute Evenly"; tint: #b0bec5; clicked => { root.on-menu-action("ui:distribute"); } }
+                }
+            }
+            
+            // ════════════════════════════════════════════════════════════
+            // TERRAIN TAB — Generate, Edit, Brushes, Water, Assets
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "terrain": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: start;
+                
+                ToolGroup {
+                    label: "Generate";
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Small"; tooltip: "Small Terrain (128m)"; tint: #66bb6a; clicked => { root.on-spawn-terrain("small"); } }
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Medium"; tooltip: "Medium Terrain (512m)"; tint: #43a047; clicked => { root.on-spawn-terrain("medium"); } }
+                    IconButton { icon: @image-url("../../assets/icons/terrain.svg"); label: "Large"; tooltip: "Large Terrain (2km)"; tint: #2e7d32; clicked => { root.on-spawn-terrain("large"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Edit";
+                    IconButton { icon: @image-url("../../assets/icons/ui/check.svg"); label: "Edit"; tooltip: "Toggle Edit Mode (T)"; tint: #fdd835; clicked => { root.on-toggle-terrain-edit(); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Brushes";
+                    IconButton { icon: @image-url("../../assets/icons/ui/chevron-up.svg"); label: "Raise"; tooltip: "Raise (1)"; tint: #81c784; clicked => { root.on-set-terrain-brush("raise"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/chevron-down.svg"); label: "Lower"; tooltip: "Lower (2)"; tint: #e57373; clicked => { root.on-set-terrain-brush("lower"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/filter.svg"); label: "Smooth"; tooltip: "Smooth (3)"; tint: #64b5f6; clicked => { root.on-set-terrain-brush("smooth"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/reset.svg"); label: "Flatten"; tooltip: "Flatten (4)"; tint: #ffb74d; clicked => { root.on-set-terrain-brush("flatten"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Paint"; tooltip: "Paint (5)"; tint: #ce93d8; clicked => { root.on-set-terrain-brush("paint"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Region"; tooltip: "Region"; tint: #90caf9; clicked => { root.on-set-terrain-brush("region"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Fill"; tooltip: "Fill"; tint: #a5d6a7; clicked => { root.on-set-terrain-brush("fill"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Water";
+                    IconButton { icon: @image-url("../../assets/icons/ui/water.svg"); label: "Water"; tooltip: "Set Sea Level"; tint: #4fc3f7; clicked => { root.on-menu-action("terrain:water"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Assets";
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Heightmap"; tint: #4dd0e1; clicked => { root.on-import-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Heightmap"; tint: #4dd0e1; clicked => { root.on-export-heightmap(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Clear"; tooltip: "Clear Terrain"; tint: #ef5350; clicked => { root.on-menu-action("terrain:clear"); } }
+                }
+            }
+            
+            // ════════════════════════════════════════════════════════════
+            // TEST TAB — Server, Clients, Play, Network, Benchmark, Debug
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "test": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: start;
+                
+                ToolGroup {
+                    label: "Server";
+                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Start"; tooltip: "Start Server (F9)"; tint: #66bb6a; clicked => { root.on-start-server(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Stop"; tooltip: "Stop Server"; tint: #ef5350; clicked => { root.on-stop-server(); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Clients";
+                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Spawn"; tooltip: "Spawn Synthetic Clients"; tint: #64b5f6; clicked => { root.on-plugin-action("network:spawn-clients"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Disconnect"; tooltip: "Disconnect All"; tint: #ef9a9a; clicked => { root.on-plugin-action("network:disconnect-all"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Play";
+                    IconButton { icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Play"; tooltip: "Play Here"; tint: #66bb6a; clicked => { root.on-play-with-character(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/pause.svg"); label: "Pause"; tooltip: "Pause"; tint: #ffb74d; clicked => { root.on-pause(); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Network";
+                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Server"; tooltip: "Dedicated Server"; tint: #90caf9; clicked => { root.on-start-server(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Client"; tooltip: "Join as Client"; tint: #90caf9; clicked => { root.on-menu-action("test:join-client"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Local"; tooltip: "Local Server + Client"; tint: #90caf9; clicked => { root.on-menu-action("test:local"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Benchmark";
+                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Network"; tooltip: "Network Panel"; tint: #ffcc80; clicked => { root.on-show-network-panel(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/stress.svg"); label: "Stress"; tooltip: "Stress Test"; tint: #ffcc80; clicked => { root.on-show-stress-test(); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Debug";
+                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Output"; tooltip: "Output Console"; tint: #b0bec5; clicked => { root.on-menu-action("test:console"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/debug.svg"); label: "Debug"; tooltip: "Debug Mode"; tint: #b0bec5; clicked => { root.on-menu-action("test:debug"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cleanup.svg"); label: "Reset"; tooltip: "Reset Simulation"; tint: #ef5350; clicked => { root.on-stop(); } }
+                }
+            }
+            
+            // ════════════════════════════════════════════════════════════
+            // MINDSPACE TAB — Panel, Labels, Connect, File, AI Tools
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "mindspace": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: start;
+                
+                ToolGroup {
+                    label: "Panel";
+                    IconButton { icon: @image-url("../../assets/icons/ui/brain.svg"); label: "Mind"; tooltip: "Toggle MindSpace (Ctrl+M)"; tint: #b39ddb; clicked => { root.on-plugin-action("mindspace:toggle-panel"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Labels";
+                    IconButton { icon: @image-url("../../assets/icons/ui/label.svg"); label: "Add"; tooltip: "Add Label (Ctrl+L)"; tint: #9575cd; clicked => { root.on-plugin-action("mindspace:add-label"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Remove"; tooltip: "Remove Label"; tint: #ef9a9a; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "Connect";
+                    IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: #66bb6a; clicked => { root.on-plugin-action("mindspace:connect"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/search.svg"); label: "Search"; tooltip: "Search Nodes (Ctrl+F)"; tint: #64b5f6; clicked => { root.on-plugin-action("mindspace:search"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "File";
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import Mind Map"; tint: #4dd0e1; clicked => { root.on-plugin-action("mindspace:import"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/export.svg"); label: "Export"; tooltip: "Export Mind Map"; tint: #ef9a9a; clicked => { root.on-plugin-action("mindspace:export"); } }
+                }
+                GroupDivider {}
+                
+                ToolGroup {
+                    label: "AI Tools";
+                    IconButton { icon: @image-url("../../assets/icons/ui/suggest.svg"); label: "Suggest"; tooltip: "AI Suggestions"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-suggest"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/auto-layout.svg"); label: "Layout"; tooltip: "Auto Layout"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-layout"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Summary"; tooltip: "Generate Summary"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
                 }
             }
         }

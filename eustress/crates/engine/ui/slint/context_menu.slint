@@ -70,15 +70,71 @@ component MenuItemRow inherits Rectangle {
     }
 }
 
+// Section header for insert submenu
+component InsertHeader inherits Rectangle {
+    in property <string> label: "";
+    height: 20px;
+    
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 9px;
+            font-weight: 700;
+            vertical-alignment: center;
+            letter-spacing: 0.5px;
+        }
+    }
+}
+
+// Insert submenu item
+component InsertItem inherits Rectangle {
+    in property <string> label: "";
+    callback clicked();
+    
+    height: 24px;
+    background: item-touch.has-hover ? Theme.explorer-item-hover : transparent;
+    
+    item-touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Thin separator for insert submenu
+component InsertSeparator inherits Rectangle {
+    height: 1px;
+    background: Theme.border-color;
+}
+
 export component ContextMenu inherits Rectangle {
     // Properties
     in property <[MenuItem]> items: [];
+    
+    // State: whether insert submenu is shown
+    property <bool> show-insert-submenu: false;
     
     // Callbacks
     callback on-action(string);
     callback on-close();
     
-    width: 200px;
+    // Size to fit content — 10 items × 28px + 3 separators × 1px + 8px padding
+    width: 220px;
+    height: self.preferred-height;
     background: Theme.dialog-background;
     border-radius: 4px;
     border-width: 1px;
@@ -86,17 +142,15 @@ export component ContextMenu inherits Rectangle {
     drop-shadow-blur: 8px;
     drop-shadow-color: Theme.shadow-color;
     
-    // Click outside to close
-    init => {
-        // Would set up global click handler in Rust
-    }
-    
-    VerticalBox {
-        padding: 4px;
+    VerticalLayout {
+        padding-top: 4px;
+        padding-bottom: 4px;
         spacing: 0px;
         
         // Default items if none provided
-        if root.items.length == 0: VerticalBox {
+        if root.items.length == 0 && !root.show-insert-submenu: VerticalLayout {
+            spacing: 0px;
+            
             MenuItemRow {
                 icon: @image-url("../../assets/icons/ui/cut.svg");
                 label: "Cut";
@@ -171,23 +225,99 @@ export component ContextMenu inherits Rectangle {
             MenuItemRow {
                 icon: @image-url("../../assets/icons/ui/plus.svg");
                 label: "Insert Object...";
-                clicked => { root.on-action("insert"); }
+                clicked => { root.show-insert-submenu = true; }
             }
         }
         
-        // Dynamic items
-        for item in root.items: VerticalBox {
+        // Insert Object submenu (replaces main menu when active)
+        if root.items.length == 0 && root.show-insert-submenu: VerticalLayout {
+            spacing: 0px;
+            
+            // Back button
             MenuItemRow {
-                icon: item.icon;
-                label: item.label;
-                shortcut: item.shortcut;
-                enabled: item.enabled;
-                clicked => { root.on-action(item.id); }
+                icon: @image-url("../../assets/icons/ui/close.svg");
+                label: "← Back";
+                clicked => { root.show-insert-submenu = false; }
             }
             
-            if item.separator-after: Rectangle {
-                height: 1px;
-                background: Theme.border-color;
+            Rectangle { height: 1px; background: Theme.border-color; }
+            
+            InsertHeader { label: "PRIMITIVES"; }
+            InsertItem { label: "Part (Block)"; clicked => { root.on-action("insert:part"); } }
+            InsertItem { label: "Sphere"; clicked => { root.on-action("insert:sphere"); } }
+            InsertItem { label: "Cylinder"; clicked => { root.on-action("insert:cylinder"); } }
+            InsertItem { label: "Wedge"; clicked => { root.on-action("insert:wedge"); } }
+            InsertItem { label: "MeshPart"; clicked => { root.on-action("insert:meshpart"); } }
+            InsertItem { label: "UnionOperation"; clicked => { root.on-action("insert:unionoperation"); } }
+            InsertSeparator {}
+            InsertHeader { label: "STRUCTURE"; }
+            InsertItem { label: "Model"; clicked => { root.on-action("insert:model"); } }
+            InsertItem { label: "Folder"; clicked => { root.on-action("insert:folder"); } }
+            InsertItem { label: "SpawnLocation"; clicked => { root.on-action("insert:spawnlocation"); } }
+            InsertItem { label: "Seat"; clicked => { root.on-action("insert:seat"); } }
+            InsertItem { label: "VehicleSeat"; clicked => { root.on-action("insert:vehicleseat"); } }
+            InsertSeparator {}
+            InsertHeader { label: "SCRIPTING"; }
+            InsertItem { label: "Script"; clicked => { root.on-action("insert:script"); } }
+            InsertItem { label: "LocalScript"; clicked => { root.on-action("insert:localscript"); } }
+            InsertItem { label: "ModuleScript"; clicked => { root.on-action("insert:modulescript"); } }
+            InsertSeparator {}
+            InsertHeader { label: "CONSTRAINTS"; }
+            InsertItem { label: "Attachment"; clicked => { root.on-action("insert:attachment"); } }
+            InsertItem { label: "WeldConstraint"; clicked => { root.on-action("insert:weldconstraint"); } }
+            InsertItem { label: "Motor6D"; clicked => { root.on-action("insert:motor6d"); } }
+            InsertItem { label: "Beam"; clicked => { root.on-action("insert:beam"); } }
+            InsertSeparator {}
+            InsertHeader { label: "EFFECTS"; }
+            InsertItem { label: "ParticleEmitter"; clicked => { root.on-action("insert:particleemitter"); } }
+            InsertItem { label: "Decal"; clicked => { root.on-action("insert:decal"); } }
+            InsertItem { label: "Sound"; clicked => { root.on-action("insert:sound"); } }
+            InsertSeparator {}
+            InsertHeader { label: "LIGHTING"; }
+            InsertItem { label: "PointLight"; clicked => { root.on-action("insert:pointlight"); } }
+            InsertItem { label: "SpotLight"; clicked => { root.on-action("insert:spotlight"); } }
+            InsertItem { label: "SurfaceLight"; clicked => { root.on-action("insert:surfacelight"); } }
+            InsertSeparator {}
+            InsertHeader { label: "UI - CONTAINERS"; }
+            InsertItem { label: "ScreenGui"; clicked => { root.on-action("insert:screengui"); } }
+            InsertItem { label: "BillboardGui"; clicked => { root.on-action("insert:billboardgui"); } }
+            InsertItem { label: "SurfaceGui"; clicked => { root.on-action("insert:surfacegui"); } }
+            InsertItem { label: "Frame"; clicked => { root.on-action("insert:frame"); } }
+            InsertItem { label: "ScrollingFrame"; clicked => { root.on-action("insert:scrollingframe"); } }
+            InsertSeparator {}
+            InsertHeader { label: "UI - DISPLAY"; }
+            InsertItem { label: "TextLabel"; clicked => { root.on-action("insert:textlabel"); } }
+            InsertItem { label: "ImageLabel"; clicked => { root.on-action("insert:imagelabel"); } }
+            InsertSeparator {}
+            InsertHeader { label: "UI - INTERACTIVE"; }
+            InsertItem { label: "TextButton"; clicked => { root.on-action("insert:textbutton"); } }
+            InsertItem { label: "ImageButton"; clicked => { root.on-action("insert:imagebutton"); } }
+            InsertItem { label: "TextBox"; clicked => { root.on-action("insert:textbox"); } }
+            InsertItem { label: "ViewportFrame"; clicked => { root.on-action("insert:viewportframe"); } }
+            InsertItem { label: "VideoFrame"; clicked => { root.on-action("insert:videoframe"); } }
+            InsertItem { label: "DocumentFrame"; clicked => { root.on-action("insert:documentframe"); } }
+            InsertItem { label: "WebFrame"; clicked => { root.on-action("insert:webframe"); } }
+        }
+        
+        // Dynamic items
+        if root.items.length > 0: VerticalLayout {
+            spacing: 0px;
+            
+            for item in root.items: VerticalLayout {
+                spacing: 0px;
+                
+                MenuItemRow {
+                    icon: item.icon;
+                    label: item.label;
+                    shortcut: item.shortcut;
+                    enabled: item.enabled;
+                    clicked => { root.on-action(item.id); }
+                }
+                
+                if item.separator-after: Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
             }
         }
     }

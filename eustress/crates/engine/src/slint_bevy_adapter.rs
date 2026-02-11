@@ -8,8 +8,8 @@
 //! bevy [`App`] in a thread separate from the main thread and supply textures of the rendered
 //! scenes via channels.
 
-use slint::wgpu_26::wgpu;
-use slint::wgpu_26::WGPUConfiguration;
+use slint::wgpu_28::wgpu;
+use slint::wgpu_28::WGPUConfiguration;
 
 use bevy::{
     prelude::*,
@@ -65,7 +65,7 @@ pub async fn run_bevy_app_with_slint(
     .await;
 
     let selector =
-        slint::BackendSelector::new().require_wgpu_26(WGPUConfiguration::Manual {
+        slint::BackendSelector::new().require_wgpu_28(WGPUConfiguration::Manual {
             instance: (**instance.0).clone(),
             adapter: (**adapter.0).clone(),
             device: render_device.wgpu_device().clone(),

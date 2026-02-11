@@ -4,7 +4,7 @@
 
 //! This module provides GPU-accelerated Slint UI rendering integrated with Bevy.
 //!
-//! The integration uses Slint's wgpu_26 renderer to render UI directly to a wgpu texture
+//! The integration uses Slint's wgpu_28 renderer to render UI directly to a wgpu texture
 //! that is shared with Bevy's render pipeline.
 
 use bevy::{
@@ -17,7 +17,7 @@ use bevy::{
 };
 use bevy::log::{info, warn, error};
 
-use slint::wgpu_27::{
+use slint::wgpu_28::{
     wgpu::{self, TextureFormat, TextureUsages},
     WGPUConfiguration,
 };

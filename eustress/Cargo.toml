@@ -24,8 +24,8 @@ resolver = "2"
 # Core Bevy 0.18 (uses wgpu 28 for Slint GPU renderer compatibility)
 bevy = { version = "0.18", default-features = false }
 
-# UI - Slint from git with software renderer (renders to pixel buffer, uploaded to Bevy texture)
-slint = { git = "https://github.com/slint-ui/slint", branch = "master", features = ["std", "compat-1-2", "renderer-software"] }
+# UI - Slint from git with software renderer + wgpu 28 GPU support (shared device with Bevy 0.18)
+slint = { git = "https://github.com/slint-ui/slint", branch = "master", features = ["std", "compat-1-2", "renderer-software", "renderer-skia"] }
 # egui REMOVED - using Slint exclusively
 
 # Input - DISABLED until leafwing-input-manager supports Bevy 0.19
