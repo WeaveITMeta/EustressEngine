@@ -39,6 +39,7 @@
     - 15.4 [Digital Forensics Adapters](#digital-forensics-adapters)
     - 15.5 [Immutable Audit Trail](#immutable-audit-trail)
     - 15.6 [Devil's Advocate / Red Team Mode](#devils-advocate--red-team-mode)
+    - 15.7 [Retail / Product Purchase Tracking](#retail--product-purchase-tracking)
 16. [Dependencies](#dependencies)
 17. [Implementation Checklist](#implementation-checklist)
 
@@ -46,7 +47,11 @@
 
 ## Overview
 
-Eustress Scenarios is a probabilistic scenario simulation engine embedded in the Eustress Engine. It provides a rigorous, iterative framework for modeling branching outcomes with Monte Carlo simulations, Bayesian updates, and 4D visualization (X/Y/Z spatial + T time/probability).
+> **Think of Eustress Scenarios as something the FBI would use.**  
+> Think of Eustress Circumstances as something Costco would use.  
+> Same engine. Different questions. One platform.
+
+Eustress Scenarios is a probabilistic scenario simulation engine embedded in the Eustress Engine. It provides a rigorous, iterative framework for modeling branching outcomes with Monte Carlo simulations, Bayesian updates, and 4D visualization (X/Y/Z spatial + T time/probability). It is designed for **investigative, backward-looking analysis** — law enforcement, intelligence agencies, forensic analysts, and anyone asking **"What happened?"**
 
 The system supports both **micro** (tactical, single-event) and **macro** (strategic, trend-level) scenarios in a **composable hierarchy** — macros contain micros as sub-scenarios. Multiple scenarios can coexist in the same Space.
 
@@ -1205,6 +1210,183 @@ Generation logic:
 5. Present to analyst as a structured checklist — each must be addressed (responded to or explicitly dismissed with rationale)
 6. All responses logged to the immutable audit trail
 
+### Retail / Product Purchase Tracking
+
+**Problem:** Investigators frequently need to trace a specific product (by SKU, model number, or serial number) back to the person who purchased it. This is a **multi-source join problem** — no single data source links product to person. The FBI, ATF, or local PD goes to a retailer and asks for cooperation; the store provides fragmented data that must be correlated across systems.
+
+**Solution:** A dedicated Item entity type, Transaction evidence type, and retail-specific source adapters that perform the multi-source join automatically.
+
+```rust
+// === Item Tracking ===
+
+struct ItemEntity {
+    id: Uuid,
+    sku: Option<String>,              // Store SKU (e.g., "WMT-4521-RADIO-T800")
+    upc: Option<String>,              // Universal Product Code / barcode
+    serial_number: Option<String>,    // Manufacturer serial (unique per unit)
+    model_number: Option<String>,     // Manufacturer model (e.g., "T800")
+    product_name: String,             // Human-readable name
+    manufacturer: Option<String>,
+    category: Option<String>,         // "Electronics", "Firearms", "Chemicals", etc.
+    purchase_history: Vec<Uuid>,      // Transaction evidence IDs
+}
+
+// === Transaction Evidence ===
+
+struct TransactionEvidence {
+    id: Uuid,
+    transaction_type: TransactionType,
+    timestamp: DateTime<Utc>,
+    store: StoreInfo,
+    items: Vec<TransactionItem>,
+    payment: PaymentInfo,
+    customer: CustomerIdentification,
+    register_id: Option<String>,
+    receipt_number: Option<String>,
+    surveillance_window: Option<(DateTime<Utc>, DateTime<Utc>)>, // Footage time range
+}
+
+enum TransactionType {
+    InStorePurchase,
+    OnlineOrder,
+    OnlinePickup,       // Buy online, pick up in store
+    Return,
+    Exchange,
+    WarrantyRegistration,
+    LayawayPayment,
+}
+
+struct StoreInfo {
+    name: String,               // "Walmart #4521"
+    address: String,
+    location: Option<GeoPoint>, // WGS84
+    chain: Option<String>,      // "Walmart", "Home Depot", etc.
+}
+
+struct TransactionItem {
+    sku: Option<String>,
+    serial_number: Option<String>,
+    product_name: String,
+    quantity: u32,
+    unit_price: f64,
+}
+
+struct PaymentInfo {
+    method: PaymentMethod,
+    amount: f64,
+    card_last_four: Option<String>,
+    card_type: Option<String>,      // "Visa", "Mastercard", etc.
+    gift_card_number: Option<String>,
+}
+
+enum PaymentMethod {
+    CreditCard,
+    DebitCard,
+    Cash,                           // Weakest link to identity
+    GiftCard,                       // Weak — unless purchased with card
+    MobilePayment,                  // Apple Pay, Google Pay — linked to device
+    Check,                          // Name on check
+    StoreCredit,                    // Linked to loyalty account
+    Financing,                      // Store credit application — full identity
+    Online { account_email: String }, // Direct identity
+}
+
+enum CustomerIdentification {
+    /// Direct identification — high confidence
+    Direct {
+        name: String,
+        method: DirectIdMethod,
+    },
+    /// Indirect — requires correlation with other sources
+    Indirect {
+        clues: Vec<IndirectClue>,
+    },
+    /// Unknown — cash, no loyalty, no ID
+    Unknown,
+}
+
+enum DirectIdMethod {
+    LoyaltyCard { member_id: String },
+    CreditCard { last_four: String, bank_subpoena_needed: bool },
+    OnlineAccount { email: String },
+    WarrantyRegistration { name: String, address: String },
+    Financing { application_id: String },
+    CheckPayment { name_on_check: String },
+    ReturnWithId { id_type: String },  // Driver's license for returns
+}
+
+enum IndirectClue {
+    SurveillanceFootage { camera_id: String, timestamp: DateTime<Utc> },
+    CellTowerPresence { tower_id: String, timestamp: DateTime<Utc>, device_id: Option<String> },
+    StoreWifiLog { mac_address: String, timestamp: DateTime<Utc> },
+    ParkingLotCamera { plate_number: Option<String>, vehicle_description: Option<String> },
+    CompanionIdentified { entity_id: Uuid }, // Person they were with was ID'd
+    ReceiptFound { location_found: String }, // Physical receipt recovered elsewhere
+}
+```
+
+#### Retail Data Sources & Adapters
+
+| Source | Format | Identity Strength | Adapter |
+|--------|--------|-------------------|---------|
+| **POS Transaction Logs** | CSV/XML export from store's system | Weak (timestamp + payment only) | `RetailPosAdapter` |
+| **Loyalty/Rewards DB** | CSV/JSON export or API query | **Strong** (name, email, phone, full history) | `LoyaltyDbAdapter` |
+| **Credit Card Records** | Bank CSV (via subpoena) | **Strong** (card holder) | `FinancialAdapter` (404) |
+| **Online Order Records** | E-commerce DB export | **Strong** (full identity + shipping address) | `EcommerceAdapter` |
+| **Warranty Registrations** | Manufacturer DB query | **Strong** (name, address, serial) | `WarrantyAdapter` |
+| **Surveillance Footage** | Timestamps + camera IDs | Visual only (needs facial match or witness) | Manual + Timeline (307) |
+| **Cell Tower Dumps** | Carrier CSV (via subpoena) | **Medium** (device owner at location) | `CellTowerAdapter` (404) |
+| **Store WiFi Logs** | Router logs | **Weak** (MAC → device, not person) | `WifiLogAdapter` |
+| **Parking Lot Cameras** | ALPR (Automatic License Plate Reader) | **Medium** (plate → registered owner) | `AlprAdapter` |
+| **Return Records** | Store DB (often requires ID scan) | **Strong** (driver's license captured) | `RetailPosAdapter` |
+
+#### Multi-Source Join Logic
+
+The system performs a **probabilistic join** across data sources to link Item → Transaction → Person:
+
+```
+Step 1: Item Lookup
+  Input: SKU "WMT-RADIO-T800" OR Serial "SN-789012"
+  → Query POS logs for all transactions containing this item
+  → Result: N transactions with timestamps, register IDs, payment methods
+
+Step 2: Payment Resolution (per transaction)
+  IF card payment → card_last_four → bank subpoena → card holder identity (95% confidence)
+  IF loyalty card used → loyalty DB → member identity (99% confidence)
+  IF online order → order DB → account holder (99% confidence)
+  IF cash + no loyalty → fall through to Step 3
+
+Step 3: Indirect Correlation (for cash/anonymous purchases)
+  Timestamp + Register → surveillance footage window
+  Timestamp + Store location → cell tower dump → devices present
+  Timestamp + Store → WiFi logs → MAC addresses
+  Parking lot cameras → license plates during window
+  → Each source adds probabilistic weight to candidate identities
+
+Step 4: Candidate Ranking
+  Aggregate all evidence per candidate person
+  Compute posterior probability: P(person | all evidence)
+  Rank candidates by confidence
+  Flag if multiple strong candidates (possible accomplice scenario)
+```
+
+This join logic runs as a **Rune-scriptable template scenario** — analysts can customize the join steps, add/remove data sources, and adjust confidence weights per source type.
+
+#### Real-World Applicability
+
+| Retail Chain | Cooperation Level (typical) | Data Available |
+|---|---|---|
+| **Walmart** | Cooperative with LE subpoena | POS, loyalty (Walmart+), surveillance (extensive), online orders |
+| **Home Depot** | Cooperative | POS, Pro Xtra loyalty, surveillance, online orders |
+| **Amazon** | Subpoena required | Full order history, payment, shipping, device data |
+| **Target** | Cooperative | POS, Circle loyalty, RedCard (direct ID), surveillance |
+| **Best Buy** | Cooperative | POS, My Best Buy loyalty, Geek Squad records (serial numbers) |
+| **Gun stores (FFL)** | ATF Form 4473 required | **Full identity** — federal requirement for firearms |
+| **Pharmacies** | HIPAA constraints | Prescription records require specific warrant |
+| **Gas stations** | Limited | Card transactions, some surveillance, no loyalty for most |
+
+**Real-case reference:** Unabomber — traced via specific hardware store purchases. Boston Marathon bombing — traced pressure cooker purchase via store records. BTK — traced floppy disk purchase to specific store. Many serial cases broken by tracing unusual product purchases (duct tape, zip ties, chemicals) back to buyers.
+
 ---
 
 ## Dependencies
@@ -1288,3 +1470,4 @@ Generation logic:
 - [ ] **404** Digital forensics adapters — Cellebrite exports, CDR (call detail records), financial transaction CSVs, GPS logs, social media metadata, phone tower triangulation
 - [ ] **405** Immutable audit trail — every parameter change, evidence attachment, probability update, analyst action logged with timestamps for court-admissible reproducibility
 - [ ] **406** Devil's Advocate / Red Team mode — auto-generate counter-arguments to leading hypothesis, surface neglected evidence, force analyst to address counter-evidence before finalizing
+- [ ] **407** Retail / Product purchase tracking — Item entity type (SKU, UPC, serial, model), Transaction evidence type, retail source adapters (POS, loyalty, e-commerce, warranty, ALPR), multi-source probabilistic join (Item → Transaction → Person), Rune-scriptable template scenario
