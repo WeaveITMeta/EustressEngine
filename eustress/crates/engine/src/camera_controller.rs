@@ -248,7 +248,7 @@ impl Plugin for CameraControllerPlugin {
 /// This constrains 3D rendering to only the visible viewport area, avoiding wasted GPU work
 /// behind opaque UI panels (ribbon, explorer, properties, output).
 fn update_camera_viewport_for_ui(
-    mut camera_query: Query<&mut Camera, With<Camera3d>>,
+    mut camera_query: Query<&mut Camera, (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
     let Some(vb) = viewport_bounds else { return };
@@ -269,7 +269,7 @@ fn update_camera_viewport_for_ui(
 /// Ensure at least one camera exists - auto-spawn if all cameras are deleted
 fn ensure_camera_exists(
     mut commands: Commands,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
 ) {
     // If no cameras exist, spawn a new one at the origin
     if camera_query.is_empty() {
@@ -776,10 +776,13 @@ fn update_eustress_camera_transform(
 /// Add EustressCamera component to the main camera - empowering your creative vision
 pub fn setup_camera_controller(
     mut commands: Commands,
-    camera_query: Query<Entity, (With<Camera3d>, Without<EustressCamera>)>,
+    camera_query: Query<Entity, (With<Camera3d>, Without<EustressCamera>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
 ) {
+    let count = camera_query.iter().count();
+    println!("🔍 Found {} Camera3d entities without EustressCamera", count);
+    
     for entity in camera_query.iter() {
         commands.entity(entity).insert(EustressCamera::default());
-        println!("✅ Eustress Camera: Empowering focus and flow enabled");
+        println!("✅ Eustress Camera: Empowering focus and flow enabled on entity {:?}", entity);
     }
 }

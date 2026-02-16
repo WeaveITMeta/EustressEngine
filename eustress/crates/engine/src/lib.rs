@@ -73,6 +73,8 @@ pub mod usd_loader;
 pub mod physics_proxy;
 pub mod generative_pipeline;
 pub mod viga;
+pub mod scenarios;
+pub mod circumstances;
 
 // Re-exports for convenience
 pub use rendering::{PartRenderingPlugin, PartChanged};

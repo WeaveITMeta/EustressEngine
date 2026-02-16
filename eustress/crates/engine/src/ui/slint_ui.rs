@@ -74,7 +74,10 @@ impl BevyWindowAdapter {
             size: Cell::new(slint::PhysicalSize::new(1600, 900)),
             scale_factor: Cell::new(1.0),
             slint_window: slint::Window::new(self_weak.clone()),
-            software_renderer: Default::default(),
+            // ReusedBuffer: only repaint dirty regions instead of full buffer each frame
+            software_renderer: slint::platform::software_renderer::SoftwareRenderer::new_with_repaint_buffer_type(
+                slint::platform::software_renderer::RepaintBufferType::ReusedBuffer,
+            ),
         })
     }
 
@@ -899,6 +902,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<crate::commands::CommandHistory>()
             .init_resource::<SlintCursorState>()
             .init_resource::<super::ViewportBounds>()
+            .init_resource::<LastWindowSize>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -938,13 +942,13 @@ impl Plugin for SlintUiPlugin {
 
 /// Initialize Slint software renderer and create overlay (exclusive startup system)
 fn setup_slint_overlay(world: &mut World) {
-    // Get window dimensions
+    // Get window dimensions in PHYSICAL pixels (must match framebuffer size)
     let (width, height, scale_factor) = {
         let mut windows = world.query_filtered::<&Window, With<PrimaryWindow>>();
         match windows.iter(world).next() {
             Some(w) => {
-                let width = w.width() as u32;
-                let height = w.height() as u32;
+                let width = w.physical_width();
+                let height = w.physical_height();
                 if width == 0 || height == 0 {
                     warn!("Window has zero size, skipping Slint setup");
                     return;
@@ -1247,6 +1251,8 @@ fn setup_slint_overlay(world: &mut World) {
     // Spawn overlay camera: orthographic Camera3d (NOT Camera2d — Camera2d uses a separate
     // 2D pipeline that doesn't render Mesh3d/MeshMaterial3d entities).
     // Camera3d with orthographic projection renders on top of the main scene.
+    // SkyboxAttached prevents SharedLightingPlugin from attaching a skybox to this camera,
+    // which would paint over the entire 3D scene since this camera renders at order=100.
     world.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -1266,6 +1272,7 @@ fn setup_slint_overlay(world: &mut World) {
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         overlay_layer.clone(),
         SlintOverlayCamera,
+        eustress_common::plugins::lighting_plugin::SkyboxAttached,
         Name::new("Slint Overlay Camera"),
     ));
     
@@ -1344,30 +1351,21 @@ fn render_slint_to_texture(
     }
     
     // Render Slint UI directly into the Bevy texture's CPU-side storage
+    // With ReusedBuffer, Slint only repaints dirty regions — returns the dirty region list
     if let Some(data) = image.data.as_mut() {
-        adapter.software_renderer.render(
+        let dirty_regions = adapter.software_renderer.render(
             bytemuck::cast_slice_mut::<u8, PremultipliedRgbaColor>(data),
             image.texture_descriptor.size.width as usize,
         );
         
-        // Debug: log at specific frames
-        if frame < 3 || frame == 10 || frame == 100 {
-            let non_zero_count = data.iter().filter(|&&b| b != 0).count();
-            info!("🎨 render_slint frame {}: {}x{} non_zero={} has_content={}",
-                frame,
-                image.texture_descriptor.size.width,
-                image.texture_descriptor.size.height,
-                non_zero_count,
-                non_zero_count > 0,
-            );
+        // Only force GPU re-upload if Slint actually repainted something
+        let has_dirty = dirty_regions.into_iter().next().is_some();
+        if has_dirty {
+            // WORKAROUND: Force GPU texture re-upload by touching the material mutably.
+            // See: https://github.com/bevyengine/bevy/issues/17350
+            materials.get_mut(&scene.material);
         }
-    } else if frame < 3 || frame == 10 || frame == 100 {
-        warn!("render_slint frame {}: image.data is None!", frame);
     }
-    
-    // WORKAROUND: Force GPU texture re-upload by touching the material mutably.
-    // See: https://github.com/bevyengine/bevy/issues/17350
-    materials.get_mut(&scene.material);
 }
 
 /// Forwards Bevy mouse/keyboard input to Slint (from official bevy-hosts-slint)
@@ -2175,11 +2173,13 @@ fn sync_bevy_to_slint(
     }
     
     // Read viewport bounds from Slint layout (Slint→Bevy direction for camera clipping)
+    // Slint reports logical pixels; convert to physical pixels for Bevy's Viewport
     if let Some(ref mut vb) = viewport_bounds {
-        let vw = ui.get_viewport_width();
-        let vh = ui.get_viewport_height();
-        let vx = ui.get_viewport_x();
-        let vy = ui.get_viewport_y();
+        let scale = slint_context.adapter.scale_factor.get();
+        let vw = ui.get_viewport_width() * scale;
+        let vh = ui.get_viewport_height() * scale;
+        let vx = ui.get_viewport_x() * scale;
+        let vy = ui.get_viewport_y() * scale;
         if vw > 0.0 && vh > 0.0 {
             vb.x = vx;
             vb.y = vy;
@@ -2218,9 +2218,20 @@ fn sync_bevy_to_slint(
     }
 }
 
-/// Handles window resize: updates Slint texture, overlay quad, and overlay camera
+/// Tracks last known window size to detect resize (Changed<Window> is unreliable)
+#[derive(Resource, Default)]
+struct LastWindowSize {
+    width: u32,
+    height: u32,
+    scale_factor: f32,
+}
+
+/// Handles window resize: updates Slint texture, overlay quad, and overlay camera.
+/// All dimensions use PHYSICAL pixels to match the actual framebuffer size.
+/// Runs every frame and compares against last known size (Changed<Window> is unreliable).
 fn handle_window_resize(
-    windows: Query<&Window, (With<PrimaryWindow>, Changed<Window>)>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut last_size: ResMut<LastWindowSize>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     slint_context: Option<NonSend<SlintUiState>>,
@@ -2231,19 +2242,27 @@ fn handle_window_resize(
     let Some(window) = windows.iter().next() else { return };
     let Some(slint_context) = slint_context else { return };
     
-    let new_width = window.width() as u32;
-    let new_height = window.height() as u32;
+    // Use PHYSICAL pixels — must match framebuffer, texture, and Slint PhysicalSize
+    let new_width = window.physical_width();
+    let new_height = window.physical_height();
+    let scale_factor = window.scale_factor();
     if new_width == 0 || new_height == 0 { return; }
     
-    let scale_factor = window.scale_factor();
+    // Skip if nothing changed
+    if new_width == last_size.width && new_height == last_size.height && scale_factor == last_size.scale_factor {
+        return;
+    }
+    last_size.width = new_width;
+    last_size.height = new_height;
+    last_size.scale_factor = scale_factor;
     
-    // Resize Slint adapter
+    // Resize Slint adapter (PhysicalSize = physical pixels)
     slint_context.adapter.resize(
         slint::PhysicalSize::new(new_width, new_height),
         scale_factor,
     );
     
-    // Resize the Slint texture
+    // Resize the Slint texture to match physical framebuffer
     if let Some(scene) = slint_scenes.iter().next() {
         if let Some(image) = images.get_mut(&scene.image) {
             let new_size = Extent3d {
@@ -2256,13 +2275,13 @@ fn handle_window_resize(
         }
     }
     
-    // Resize the overlay quad mesh
+    // Resize the overlay quad mesh (physical pixels for orthographic projection)
     for mut mesh3d in overlay_quads.iter_mut() {
         let new_quad = Rectangle::new(new_width as f32, new_height as f32);
         mesh3d.0 = meshes.add(new_quad);
     }
     
-    // Update overlay camera projection
+    // Update overlay camera projection (physical pixels to match quad and texture)
     for (mut _camera, mut projection) in overlay_cameras.iter_mut() {
         *projection = Projection::from(OrthographicProjection {
             near: -1.0,
@@ -2275,7 +2294,7 @@ fn handle_window_resize(
         });
     }
     
-    info!("🔄 Window resized to {}x{} (scale={})", new_width, new_height, scale_factor);
+    info!("🔄 Window resized to {}x{} physical (scale={})", new_width, new_height, scale_factor);
 }
 
 /// Forwards Bevy keyboard events to Slint for text input and key handling

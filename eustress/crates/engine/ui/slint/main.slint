@@ -45,8 +45,10 @@ import { SyncDomainDialog } from "sync_domain.slint";
 
 export component StudioWindow inherits Window {
     // Window properties
-    width: 1600px;
-    height: 900px;
+    // NOTE: Do NOT set width/height here — the size comes from the BevyWindowAdapter
+    // via WindowEvent::Resized. Hardcoding dimensions prevents resize from working.
+    preferred-width: 1600px;
+    preferred-height: 900px;
     title: "Eustress Engine";
     background: transparent;  // Transparent so 3D scene shows through viewport; panels have own opaque backgrounds
     default-font-family: "Segoe UI";
@@ -194,11 +196,13 @@ export component StudioWindow inherits Window {
     in-out property <bool> is-dragging-panel: false;
     in-out property <DockZone> active-dock-zone: DockZone.center;
     
-    // Viewport dimensions (reported to Bevy for render target sizing)
-    out property <float> viewport-width: center-content.width / 1px;
-    out property <float> viewport-height: center-content.height / 1px;
-    out property <float> viewport-x: center-content.x / 1px;
-    out property <float> viewport-y: center-content.y / 1px;
+    // Viewport dimensions (reported to Bevy for camera viewport clipping)
+    // Bound to viewport-sizer which always exists inside center-content's VerticalLayout.
+    // Uses absolute-position for correct window-absolute coordinates.
+    out property <float> viewport-width: viewport-sizer.width / 1px;
+    out property <float> viewport-height: viewport-sizer.height / 1px;
+    out property <float> viewport-x: viewport-sizer.absolute-position.x / 1px;
+    out property <float> viewport-y: viewport-sizer.absolute-position.y / 1px;
     
     // Viewport image (set by Bevy with rendered 3D scene)
     in-out property <image> viewport-image;
@@ -1052,9 +1056,14 @@ export component StudioWindow inherits Window {
                 }
                 
                 // ---- Content Area: 3D Viewport / Script Editor / Web Browser ----
+                // Persistent viewport sizer — always exists, reports absolute position to Bevy
+                // via property bindings on root.viewport-width/height/x/y
+                viewport-sizer := Rectangle {
+                    vertical-stretch: 1;
+                    background: transparent;
+                
                 // Keyboard shortcut handler (Ctrl+W to close active tab, Ctrl+T for new web tab)
                 tab-keys := FocusScope {
-                    vertical-stretch: 1;
                     
                     key-pressed(event) => {
                         // Ctrl+W: close active tab (not Space1)
@@ -1083,16 +1092,10 @@ export component StudioWindow inherits Window {
                     }
                     
                     // 3D Viewport (shown when Space1 / scene tab is active)
+                    // The Bevy 3D camera renders directly to the window; this area is transparent
+                    // so the 3D scene shows through. The Slint overlay composites UI on top.
                     if root.active-tab-type == "scene": viewport-area := Rectangle {
                         background: transparent;
-                        
-                        // Display Bevy-rendered 3D scene
-                        Image {
-                            width: 100%;
-                            height: 100%;
-                            source: root.viewport-image;
-                            image-fit: fill;
-                        }
                         
                         // Layout Preset Selector (top-left)
                         LayoutPresetSelector {
@@ -1220,6 +1223,7 @@ export component StudioWindow inherits Window {
                         refresh => { root.web-refresh(); }
                     }
                 }
+                } // close viewport-sizer
                 }
             }
 

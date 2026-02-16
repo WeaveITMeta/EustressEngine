@@ -46,7 +46,7 @@ bevy = { workspace = true, default-features = false, features = [
     "tonemapping_luts",
     "zstd_rust",
 ] }
-# Slint UI (software renderer + Skia GPU renderer with wgpu 28, matching Bevy 0.18)
+# Slint UI (software renderer + FemtoVG OpenGL GPU renderer)
 slint = { workspace = true }
 # CEF webview for browser tabs (macOS only currently)
 bevy_cef = { git = "https://github.com/not-elm/bevy_cef", branch = "main", optional = true }
@@ -75,6 +75,8 @@ rune = "0.14"
 rand = "0.8"
 rayon = "1.10"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
+csv = "1.3"
+crossbeam-channel = "0.5"
 sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 # Window icon (must match bevy's versions)
 image = "0.25"

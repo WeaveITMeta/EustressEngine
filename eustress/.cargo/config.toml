@@ -6,7 +6,7 @@ incremental = true
 jobs = 8
 
 [target.x86_64-pc-windows-msvc]
-# Use standard MSVC linker - rust-lld has issues with Skia ICU duplicate symbols
+# Use standard MSVC linker
 # linker = "rust-lld.exe"
 
 [profile.dev]

@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn test_ssim_identical() {
         let img = ImageBuffer::from_fn(64, 64, |x, y| {
-            Luma([(x + y) as u8 % 256])
+            Luma([(x + y) as u8])
         });
         let ssim = calculate_ssim(&img, &img);
         assert!((ssim - 1.0).abs() < 0.001, "SSIM of identical images should be ~1.0");
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn test_mse_identical() {
         let img = ImageBuffer::from_fn(64, 64, |x, y| {
-            Luma([(x + y) as u8 % 256])
+            Luma([(x + y) as u8])
         });
         let mse = calculate_mse(&img, &img);
         assert!(mse < 0.001, "MSE of identical images should be ~0");

@@ -153,23 +153,25 @@ export component IconButton inherits Rectangle {
     
     VerticalLayout {
         padding-top: root.label != "" ? 3px : 7px;
-        padding-bottom: root.label != "" ? 2px : 0px;
-        spacing: 2px;
+        padding-bottom: root.label != "" ? 3px : 7px;
+        spacing: 1px;
         alignment: center;
         
-        Image {
-            width: 22px;
-            height: 22px;
-            source: root.icon;
-            image-fit: contain;
-            colorize: root.tint != transparent ? root.tint : transparent;
-            horizontal-alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                width: 20px;
+                height: 20px;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.tint != transparent ? root.tint : transparent;
+            }
         }
         
         if root.label != "": btn-label := Text {
             text: root.label;
             color: Theme.text-secondary;
-            font-size: 10px;
+            font-size: 9px;
             horizontal-alignment: center;
             overflow: elide;
         }

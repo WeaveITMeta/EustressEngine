@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::ui::IsDefaultUiCamera;
 use eustress_common::plugins::lighting_plugin::SkyboxHandle;
 use eustress_common::classes::{Instance, ClassName, Sky, Atmosphere};
 use crate::startup::StartupArgs;
@@ -12,7 +11,29 @@ pub struct DefaultScenePlugin;
 impl Plugin for DefaultScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_default_scene);
+        app.add_systems(Update, diagnose_scene_once.run_if(bevy::time::common_conditions::once_after_real_delay(std::time::Duration::from_secs(3))));
     }
+}
+
+/// One-shot diagnostic: dump all Camera3d and Mesh3d entities after 3 seconds
+fn diagnose_scene_once(
+    cameras: Query<(Entity, &Transform, &Camera), With<Camera3d>>,
+    meshes: Query<(Entity, &Transform, &Name), With<Mesh3d>>,
+    all_entities: Query<(Entity, Option<&Name>)>,
+) {
+    info!("=== SCENE DIAGNOSTIC (3s after startup) ===");
+    info!("Total entities: {}", all_entities.iter().count());
+    info!("Camera3d entities: {}", cameras.iter().count());
+    for (entity, transform, camera) in cameras.iter() {
+        info!("  Camera {:?}: pos={} order={} viewport={:?}",
+            entity, transform.translation, camera.order, camera.viewport);
+    }
+    info!("Mesh3d entities: {}", meshes.iter().count());
+    for (entity, transform, name) in meshes.iter() {
+        info!("  Mesh {:?} '{}': pos={}",
+            entity, name, transform.translation);
+    }
+    info!("=== END SCENE DIAGNOSTIC ===");
 }
 
 pub fn setup_default_scene(
@@ -32,68 +53,32 @@ pub fn setup_default_scene(
     }
     
     // =========================================================================
-    // CAMERA - Editor camera with skybox from shared lighting plugin
+    // CAMERA - Editor camera (dark background like egui era)
     // Always spawn the camera regardless of scene file
     // =========================================================================
     
-    // Get skybox handle from shared lighting plugin
-    if let Some(ref skybox_image) = skybox_handle.handle {
-        commands.spawn((
-            Camera3d::default(),
-            Tonemapping::Reinhard,
-            Transform::from_xyz(10.0, 8.0, 10.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
-            Projection::Perspective(PerspectiveProjection {
-                fov: 70.0_f32.to_radians(),
-                ..default()
-            }),
-            bevy::core_pipeline::Skybox {
-                image: skybox_image.clone(),
-                brightness: 1000.0,
-                ..default()
-            },
-            EnvironmentMapLight {
-                diffuse_map: skybox_image.clone(),
-                specular_map: skybox_image.clone(),
-                intensity: 400.0,
-                ..default()
-            },
-            // NOTE: Do NOT add IsDefaultUiCamera here - the Slint UI has its own
-            // dedicated Camera2d with IsDefaultUiCamera that renders the UI overlay.
-            // Instance component so Camera appears in Explorer under Workspace
-            Instance {
-                name: "Camera".to_string(),
-                class_name: ClassName::Camera,
-                archivable: true,
-                id: 0,
-                ..Default::default()
-            },
-            Name::new("Camera"),
-        ));
-    } else {
-        // Fallback camera without skybox
-        commands.spawn((
-            Camera3d::default(),
-            Tonemapping::Reinhard,
-            Transform::from_xyz(10.0, 8.0, 10.0)
-                .looking_at(Vec3::ZERO, Vec3::Y),
-            Projection::Perspective(PerspectiveProjection {
-                fov: 70.0_f32.to_radians(),
-                ..default()
-            }),
-            // NOTE: Do NOT add IsDefaultUiCamera here - the Slint UI has its own
-            // dedicated Camera2d with IsDefaultUiCamera that renders the UI overlay.
-            // Instance component so Camera appears in Explorer under Workspace
-            Instance {
-                name: "Camera".to_string(),
-                class_name: ClassName::Camera,
-                archivable: true,
-                id: 0,
-                ..Default::default()
-            },
-            Name::new("Camera"),
-        ));
-    }
+    // Spawn camera — skybox will be auto-attached by SharedLightingPlugin's
+    // attach_skybox_to_cameras system (same as egui era)
+    commands.spawn((
+        Camera3d::default(),
+        Tonemapping::Reinhard,
+        Transform::from_xyz(10.0, 8.0, 10.0)
+            .looking_at(Vec3::ZERO, Vec3::Y),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 70.0_f32.to_radians(),
+            near: 0.1,
+            far: 10000.0,
+            ..default()
+        }),
+        Instance {
+            name: "Camera".to_string(),
+            class_name: ClassName::Camera,
+            archivable: true,
+            id: 0,
+            ..Default::default()
+        },
+        Name::new("Camera"),
+    ));
     
     // =========================================================================
     // SPAWN DEFAULT SCENE - Only if NOT loading a scene file
@@ -101,12 +86,16 @@ pub fn setup_default_scene(
     
     if !loading_scene_file {
         // Spawn baseplate (512x1x512 dark gray) - shared with client
-        eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
+        let baseplate_entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
+        println!("🟫 Spawned Baseplate entity: {:?}", baseplate_entity);
         
         // Spawn welcome cube (2x2x2 green) - shared with client
-        eustress_common::spawn_welcome_cube(&mut commands, &mut meshes, &mut materials);
+        let cube_entity = eustress_common::spawn_welcome_cube(&mut commands, &mut meshes, &mut materials);
+        println!("🟩 Spawned Welcome Cube entity: {:?}", cube_entity);
         
         println!("✅ Default scene ready (shared with Client: Baseplate + Welcome Cube)!");
+    } else {
+        println!("⏭️ Skipping default scene content (loading scene file)");
     }
     
     // =========================================================================
