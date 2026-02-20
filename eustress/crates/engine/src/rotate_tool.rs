@@ -1,57 +1,56 @@
+// ============================================================================
+// Eustress Engine - Rotate Tool
+// ============================================================================
+// ## Table of Contents
+// 1. State & types
+// 2. Plugin registration
+// 3. Gizmo drawing (camera-scaled arc rings at group center)
+// 4. Mouse interaction (arc drag, angle snapping)
+// 5. Public helpers
+// ============================================================================
+
 #![allow(dead_code)]
+#![allow(unused_variables)]
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-#[allow(unused_imports)]
-use bevy::gizmos::config::{GizmoConfigStore, GizmoConfigGroup, DefaultGizmoConfigGroup};
-
 use crate::selection_box::SelectionBox;
 use crate::gizmo_tools::TransformGizmoGroup;
-use crate::math_utils::ray_plane_intersection;
+use crate::math_utils::{ray_plane_intersection, calculate_rotated_aabb};
+use crate::move_tool::Axis3d;
 
-/// Resource tracking the rotate tool state
+// ============================================================================
+// 1. State & Types
+// ============================================================================
+
 #[derive(Resource, Default)]
 pub struct RotateToolState {
     pub active: bool,
+    /// Which ring axis is being dragged
     pub dragged_axis: Option<Axis3d>,
-    pub initial_rotation: Quat,  // For single entity (backward compat)
+    /// Angle (radians) at drag start
     pub drag_start_angle: f32,
+    /// Screen-space cursor at drag start
     pub drag_start_pos: Vec2,
-    pub initial_rotations: std::collections::HashMap<Entity, Quat>,  // For multi-select
+    /// Initial rotation of the primary entity
+    pub initial_rotation: Quat,
+    /// Initial rotations of ALL selected entities
+    pub initial_rotations: std::collections::HashMap<Entity, Quat>,
+    /// Initial positions of ALL selected entities (for pivot rotation)
+    pub initial_positions: std::collections::HashMap<Entity, Vec3>,
+    /// Group center at drag start (pivot point)
+    pub group_center: Vec3,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum Axis3d {
-    X,
-    Y,
-    Z,
-}
+// ============================================================================
+// 2. Plugin Registration
+// ============================================================================
 
-impl Axis3d {
-    fn to_vec3(&self) -> Vec3 {
-        match self {
-            Axis3d::X => Vec3::X,
-            Axis3d::Y => Vec3::Y,
-            Axis3d::Z => Vec3::Z,
-        }
-    }
-    
-    fn color(&self) -> Color {
-        match self {
-            Axis3d::X => Color::srgb(1.0, 0.0, 0.0), // Red
-            Axis3d::Y => Color::srgb(0.0, 1.0, 0.0), // Green
-            Axis3d::Z => Color::srgb(0.0, 0.0, 1.0), // Blue
-        }
-    }
-}
-
-/// Plugin for the rotate tool functionality
 pub struct RotateToolPlugin;
 
 impl Plugin for RotateToolPlugin {
     fn build(&self, app: &mut App) {
-        app
-            .init_resource::<RotateToolState>()
+        app.init_resource::<RotateToolState>()
             .add_systems(Update, (
                 draw_rotate_gizmos,
                 handle_rotate_interaction,
@@ -59,339 +58,316 @@ impl Plugin for RotateToolPlugin {
     }
 }
 
-/// System to draw rotation circle gizmos for selected entities
+// ============================================================================
+// 3. Gizmo Drawing
+// ============================================================================
+
 fn draw_rotate_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<RotateToolState>,
-    query: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    children_query: Query<&Children>,
+    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+    cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
-    if !state.active {
-        return;
+    if !state.active || query.is_empty() { return; }
+
+    // Compute group center
+    let center = compute_group_center(&query, &children_query, &child_transforms);
+
+    // Camera-distance-scaled radius
+    let Ok((_, cam_gt, projection)) = cameras.single() else { return };
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => std::f32::consts::FRAC_PI_4,
+    };
+    let dist = (center - cam_gt.translation()).length().max(0.1);
+    let radius = dist * (fov * 0.5).tan() * 0.55;
+
+    let yellow = Color::srgba(1.0, 1.0, 0.0, 1.0);
+    const SEGS: usize = 64;
+
+    for axis in [Axis3d::X, Axis3d::Y, Axis3d::Z] {
+        let highlighted = state.dragged_axis == Some(axis);
+        let base_color = axis_ring_color(axis);
+        let color = if highlighted { yellow } else { base_color };
+        let ring_radius = if highlighted { radius * 1.04 } else { radius };
+
+        draw_rotation_ring(&mut gizmos, center, axis.to_vec3(), ring_radius, SEGS, color);
     }
-    
-    // Don't draw if no parts are selected
-    if query.is_empty() {
-        return;
-    }
-    
-    for (global_transform, base_part) in &query {
-        let transform = global_transform.compute_transform();
-        let pos = transform.translation;
-        
-        // Scale radius based on part size (use BasePart.size if available)
-        let part_size = if let Some(bp) = base_part {
-            bp.size.max_element()
-        } else {
-            transform.scale.max_element()
-        };
-        
-        // IMPROVED SCALING: Better proportional scaling for small objects
-        let radius = if part_size < 1.0 {
-            // Small objects: scale more aggressively, minimum 0.5 instead of 2.0
-            (part_size * 1.5).max(0.5).min(50.0)
-        } else {
-            // Large objects: normal scaling, minimum 2.0
-            (part_size * 0.6).max(2.0).min(50.0)
-        };
-        let segments = 64;
-        
-        // X axis rotation circle (Red - YZ plane)
-        draw_rotation_circle(&mut gizmos, pos, Vec3::X, radius, segments, Color::srgb(1.0, 0.0, 0.0),
-            state.dragged_axis == Some(Axis3d::X));
-        
-        // Y axis rotation circle (Green - XZ plane)
-        draw_rotation_circle(&mut gizmos, pos, Vec3::Y, radius, segments, Color::srgb(0.0, 1.0, 0.0),
-            state.dragged_axis == Some(Axis3d::Y));
-        
-        // Z axis rotation circle (Blue - XY plane)
-        draw_rotation_circle(&mut gizmos, pos, Vec3::Z, radius, segments, Color::srgb(0.0, 0.0, 1.0),
-            state.dragged_axis == Some(Axis3d::Z));
+
+    // Outer "free rotation" ring (white, slightly larger)
+    // Gives a Roblox-style outer handle for free rotation
+    let white = Color::srgba(0.9, 0.9, 0.9, 0.35);
+    draw_rotation_ring(&mut gizmos, center, Vec3::ZERO, radius * 1.18, SEGS, white);
+}
+
+fn axis_ring_color(axis: Axis3d) -> Color {
+    match axis {
+        Axis3d::X => Color::srgba(0.95, 0.15, 0.15, 0.85),
+        Axis3d::Y => Color::srgba(0.15, 0.95, 0.15, 0.85),
+        Axis3d::Z => Color::srgba(0.15, 0.15, 0.95, 0.85),
     }
 }
 
-/// Helper to draw a rotation circle around an axis
-fn draw_rotation_circle(
+/// Draw a ring around `center` perpendicular to `axis`.
+/// If `axis` is Vec3::ZERO, draws a billboard ring facing the camera (not yet implemented,
+/// falls back to Y-axis ring).
+fn draw_rotation_ring(
     gizmos: &mut Gizmos<TransformGizmoGroup>,
     center: Vec3,
     axis: Vec3,
     radius: f32,
     segments: usize,
     color: Color,
-    highlight: bool,
 ) {
-    // Add transparency to circles for better visibility (50% alpha, full when highlighted)
-    let color = if highlight {
-        Color::srgba(1.0, 1.0, 0.0, 1.0) // Yellow when dragging (full opacity)
-    } else {
-        // Extract RGB and add alpha
-        let rgba = color.to_srgba();
-        Color::srgba(rgba.red, rgba.green, rgba.blue, 0.6) // 60% opacity
-    };
-    
-    // Create perpendicular vectors for the circle plane
-    let up = if axis == Vec3::Y || axis == -Vec3::Y {
-        Vec3::X
-    } else {
-        Vec3::Y
-    };
-    
-    let tangent1 = axis.cross(up).normalize();
-    let tangent2 = axis.cross(tangent1).normalize();
-    
-    // Draw multiple circles for thickness (easier to see and click)
-    let thickness_offsets = [0.0, 0.02, -0.02]; // Main + inner/outer for visual thickness
-    
-    for offset_factor in thickness_offsets {
-        let r = radius * (1.0 + offset_factor);
-        
-        for i in 0..segments {
-            let angle1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let angle2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            
-            let p1 = center + tangent1 * angle1.cos() * r + tangent2 * angle1.sin() * r;
-            let p2 = center + tangent1 * angle2.cos() * r + tangent2 * angle2.sin() * r;
-            
-            gizmos.line(p1, p2, color);
-        }
+    let axis_norm = if axis.length_squared() < 0.001 { Vec3::Y } else { axis.normalize() };
+
+    // Build two tangent vectors perpendicular to the axis
+    let up = if axis_norm.abs().dot(Vec3::Y) > 0.9 { Vec3::X } else { Vec3::Y };
+    let t1 = axis_norm.cross(up).normalize();
+    let t2 = axis_norm.cross(t1).normalize();
+
+    for i in 0..segments {
+        let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+        let p0 = center + t1 * a0.cos() * radius + t2 * a0.sin() * radius;
+        let p1 = center + t1 * a1.cos() * radius + t2 * a1.sin() * radius;
+        gizmos.line(p0, p1, color);
     }
 }
 
-/// System to handle mouse interaction with rotate gizmos
+// ============================================================================
+// 4. Mouse Interaction
+// ============================================================================
+
 fn handle_rotate_interaction(
     mut state: ResMut<RotateToolState>,
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<SelectionBox>>,
-    // Query for parents to check hierarchy relationships (ChildOf in Bevy 0.17)
     parent_query: Query<&ChildOf>,
-    // Undo stack for recording transform changes
     mut undo_stack: ResMut<crate::undo::UndoStack>,
+    editor_settings: Res<crate::editor_settings::EditorSettings>,
 ) {
-    if !state.active {
-        return;
-    }
-    
-    // TODO: Check Slint UI focus state to block input when UI has focus
-    
-    let Ok(window) = windows.single() else { return; };
-    let Some(cursor_pos) = window.cursor_position() else { return; };
-    
-    let Ok((camera, camera_transform)) = cameras.single() else { return; };
-    
-    // Get ray from cursor
-    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return; };
-    
+    if !state.active { return; }
+
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform, projection)) = cameras.single() else { return };
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return };
+
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => std::f32::consts::FRAC_PI_4,
+    };
+
     if mouse.just_pressed(MouseButton::Left) {
-        // Check if clicking on any rotation circle
-        for (entity, global_transform, transform, base_part) in query.iter_mut() {
-            let t = global_transform.compute_transform();
-            let pos = t.translation;
-            
-            // Scale radius based on part size (same as draw function)
-            let part_size = if let Some(bp) = base_part {
-                bp.size.max_element()
-            } else {
-                t.scale.max_element()
-            };
-            
-            // IMPROVED SCALING: Use same logic as draw function
-            let radius = if part_size < 1.0 {
-                // Small objects: scale more aggressively, minimum 0.5
-                (part_size * 1.5).max(0.5).min(50.0)
-            } else {
-                // Large objects: normal scaling, minimum 2.0
-                (part_size * 0.6).max(2.0).min(50.0)
-            };
-            
-            if let Some(axis) = detect_circle_hit(&ray, pos, radius, camera_transform) {
-                // Start rotation - store initial rotations for ALL selected entities
-                state.dragged_axis = Some(axis);
-                state.initial_rotation = transform.rotation;
-                state.drag_start_angle = calculate_rotation_angle(&ray, pos, axis);
-                state.drag_start_pos = cursor_pos;
-                
-                // Store initial rotations of ALL selected parts
-                state.initial_rotations.clear();
-                for (ent, _, trans, _) in query.iter() {
-                    state.initial_rotations.insert(ent, trans.rotation);
-                }
-                break;
+        if query.is_empty() { return; }
+
+        // Collect snapshot before mutating
+        let snapshot: Vec<(Entity, Vec3, Quat, Vec3)> = query.iter()
+            .map(|(e, gt, t, _)| {
+                let tr = gt.compute_transform();
+                (e, tr.translation, t.rotation, tr.scale)
+            })
+            .collect();
+
+        // Compute group center
+        let mut bmin = Vec3::splat(f32::MAX);
+        let mut bmax = Vec3::splat(f32::MIN);
+        for (_, pos, rot, scale) in &snapshot {
+            let (mn, mx) = calculate_rotated_aabb(*pos, *scale * 0.5, *rot);
+            bmin = bmin.min(mn); bmax = bmax.max(mx);
+        }
+        let center = (bmin + bmax) * 0.5;
+        let dist = (center - camera_transform.translation()).length().max(0.1);
+        let radius = dist * (fov * 0.5).tan() * 0.55;
+
+        if let Some(axis) = detect_ring_hit(&ray, center, radius) {
+            state.dragged_axis = Some(axis);
+            state.group_center = center;
+            state.drag_start_angle = angle_on_ring(&ray, center, axis);
+            state.drag_start_pos = cursor_pos;
+
+            state.initial_rotations.clear();
+            state.initial_positions.clear();
+            for (entity, pos, rot, _) in &snapshot {
+                state.initial_rotations.insert(*entity, *rot);
+                state.initial_positions.insert(*entity, *pos);
             }
         }
     } else if mouse.pressed(MouseButton::Left) {
         if let Some(axis) = state.dragged_axis {
-            // Get first entity position for angle calculation
-            let first_pos = query.iter().next().map(|(_, gt, _, _)| gt.translation());
-            
-            if let Some(pos) = first_pos {
-                // Calculate current angle
-                let current_angle = calculate_rotation_angle(&ray, pos, axis);
-                let delta_angle = current_angle - state.drag_start_angle;
-                
-                // Apply snapping (15 degree increments)
-                let snapped_delta = snap_angle(delta_angle, 15.0_f32.to_radians());
-                
-                // Create rotation quaternion around the world axis
-                let rotation_delta = Quat::from_axis_angle(axis.to_vec3(), snapped_delta);
-                
-                // Collect selected entities set for hierarchy check
-                let selected_entities: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
+            let center = state.group_center;
+            let current_angle = angle_on_ring(&ray, center, axis);
+            let raw_delta = current_angle - state.drag_start_angle;
 
-                // Apply rotation to ALL selected entities
-                for (entity, _, mut transform, basepart_opt) in query.iter_mut() {
-                    // Check if any ancestor is also selected
-                    let mut is_descendant = false;
-                    let mut current = entity;
-                    while let Ok(child_of) = parent_query.get(current) {
-                        let parent_entity = child_of.0;
-                        if selected_entities.contains(&parent_entity) {
-                            is_descendant = true;
-                            break;
-                        }
-                        current = parent_entity;
-                    }
-                    if is_descendant { continue; }
+            // Snap: 15° by default, 1° with Shift held
+            let snap_deg = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+                1.0_f32
+            } else {
+                15.0_f32
+            };
+            let snap_rad = snap_deg.to_radians();
+            let snapped_delta = (raw_delta / snap_rad).round() * snap_rad;
 
-                    if let Some(initial_rotation) = state.initial_rotations.get(&entity) {
-                        // Apply the rotation delta to each entity's initial rotation
-                        transform.rotation = rotation_delta * *initial_rotation;
-                        
-                        // Update BasePart.cframe.rotation to match Transform.rotation
-                        if let Some(mut basepart) = basepart_opt {
-                            basepart.cframe.rotation = transform.rotation;
-                        }
+            let rotation_delta = Quat::from_axis_angle(axis.to_vec3(), snapped_delta);
+
+            let selected_set: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
+
+            for (entity, _, mut transform, basepart_opt) in query.iter_mut() {
+                if is_descendant(entity, &selected_set, &parent_query) { continue; }
+
+                if let (Some(init_rot), Some(init_pos)) = (
+                    state.initial_rotations.get(&entity),
+                    state.initial_positions.get(&entity),
+                ) {
+                    let rel = *init_pos - center;
+                    let new_pos = center + rotation_delta * rel;
+                    let new_rot = rotation_delta * *init_rot;
+
+                    transform.translation = new_pos;
+                    transform.rotation = new_rot;
+
+                    if let Some(mut bp) = basepart_opt {
+                        bp.cframe.translation = new_pos;
+                        bp.cframe.rotation = new_rot;
                     }
                 }
             }
         }
     } else if mouse.just_released(MouseButton::Left) {
-        // Record undo action if we were dragging
         if state.dragged_axis.is_some() && !state.initial_rotations.is_empty() {
-            let mut old_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
-            let mut new_transforms: Vec<(u64, [f32; 3], [f32; 4])> = Vec::new();
-            
-            for (entity, global_transform, transform, _) in query.iter() {
-                if let Some(initial_rot) = state.initial_rotations.get(&entity) {
-                    // Only record if rotation actually changed
-                    let rot_changed = initial_rot.angle_between(transform.rotation) > 0.001;
-                    
-                    if rot_changed {
-                        let pos = global_transform.translation();
-                        old_transforms.push((
-                            entity.to_bits(),
-                            pos.to_array(),
-                            initial_rot.to_array(),
-                        ));
-                        new_transforms.push((
-                            entity.to_bits(),
-                            pos.to_array(),
-                            transform.rotation.to_array(),
-                        ));
+            let mut old_transforms = Vec::new();
+            let mut new_transforms = Vec::new();
+
+            for (entity, _, transform, _) in query.iter() {
+                if let (Some(init_rot), Some(init_pos)) = (
+                    state.initial_rotations.get(&entity),
+                    state.initial_positions.get(&entity),
+                ) {
+                    let rot_changed = init_rot.angle_between(transform.rotation) > 0.001;
+                    let pos_changed = (*init_pos - transform.translation).length() > 0.001;
+                    if rot_changed || pos_changed {
+                        old_transforms.push((entity.to_bits(), init_pos.to_array(), init_rot.to_array()));
+                        new_transforms.push((entity.to_bits(), transform.translation.to_array(), transform.rotation.to_array()));
                     }
                 }
             }
-            
-            // Push to undo stack if there were actual changes
+
             if !old_transforms.is_empty() {
-                undo_stack.push(crate::undo::Action::TransformEntities {
-                    old_transforms,
-                    new_transforms,
-                });
+                undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
             }
         }
-        
+
         state.dragged_axis = None;
         state.initial_rotations.clear();
+        state.initial_positions.clear();
     }
 }
 
-/// Public function to check if ray hits any rotation handle (for selection system)
-pub fn is_clicking_rotate_handle(
-    ray: &Ray3d,
-    pos: Vec3,
-    radius: f32,
-    camera_transform: &GlobalTransform,
-) -> bool {
-    detect_circle_hit(ray, pos, radius, camera_transform).is_some()
-}
+// ============================================================================
+// 5. Public Helpers
+// ============================================================================
 
-/// Detect if ray hits a rotation circle - finds the BEST matching axis
-/// Uses EXTREMELY generous hit detection - if you're anywhere near a ring, it works
-fn detect_circle_hit(
+/// Check if the ray hits any rotation ring. Used by part_selection to avoid
+/// deselecting when clicking a ring handle.
+pub fn is_clicking_rotate_handle(
     ray: &Ray3d,
     center: Vec3,
     radius: f32,
     _camera_transform: &GlobalTransform,
-) -> Option<Axis3d> {
-    // EXTREMELY generous threshold - the entire ring area is clickable
-    // Inner edge: radius * 0.3, Outer edge: radius * 1.7
-    // This means clicking anywhere from 30% to 170% of the ring radius will work
-    let inner_radius = radius * 0.3;
-    let outer_radius = radius * 1.7;
-    
-    // Find the BEST axis match (closest to the ring radius)
-    let mut best_axis: Option<Axis3d> = None;
-    let mut best_score = f32::MAX;
-    
+) -> bool {
+    detect_ring_hit(ray, center, radius).is_some()
+}
+
+// ============================================================================
+// Private Helpers
+// ============================================================================
+
+/// Detect which ring axis the ray hits. Returns the closest axis whose ring
+/// plane intersection falls within [inner_r, outer_r] of the ring.
+fn detect_ring_hit(ray: &Ray3d, center: Vec3, radius: f32) -> Option<Axis3d> {
+    let inner = radius * 0.75;
+    let outer = radius * 1.25;
+
+    let mut best: Option<(Axis3d, f32)> = None;
+
     for axis in [Axis3d::X, Axis3d::Y, Axis3d::Z] {
         let axis_vec = axis.to_vec3();
-        
-        // Find intersection with plane perpendicular to axis
         if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec) {
-            let plane_hit = ray.origin + *ray.direction * t;
-            let to_hit = plane_hit - center;
-            let distance_to_center = to_hit.length();
-            
-            // Check if within the generous ring zone
-            if distance_to_center >= inner_radius && distance_to_center <= outer_radius {
-                // Score based on how close to the actual ring radius
-                let ring_error = (distance_to_center - radius).abs();
-                
-                if ring_error < best_score {
-                    best_score = ring_error;
-                    best_axis = Some(axis);
+            let hit = ray.origin + *ray.direction * t;
+            let dist = (hit - center).length();
+            if dist >= inner && dist <= outer {
+                let ring_err = (dist - radius).abs();
+                if best.is_none() || ring_err < best.unwrap().1 {
+                    best = Some((axis, ring_err));
                 }
             }
         }
     }
-    
-    best_axis
+
+    best.map(|(a, _)| a)
 }
 
-/// Calculate rotation angle from ray intersection with rotation plane
-fn calculate_rotation_angle(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
+/// Calculate the angle of the ray's intersection with the ring plane around `axis`.
+fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
     let axis_vec = axis.to_vec3();
-    
-    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec) {
-        let plane_hit = ray.origin + *ray.direction * t;
-        let to_hit = plane_hit - center;
-        
-        // Get reference vector perpendicular to axis
-        let up = if axis_vec == Vec3::Y || axis_vec == -Vec3::Y {
-            Vec3::X
-        } else {
-            Vec3::Y
-        };
-        
-        let tangent1 = axis_vec.cross(up).normalize();
-        
-        // Calculate angle from reference
-        let x = to_hit.dot(tangent1);
-        let tangent2 = axis_vec.cross(tangent1).normalize();
-        let y = to_hit.dot(tangent2);
-        
-        y.atan2(x)
-    } else {
-        0.0
-    }
+    let t = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec).unwrap_or(0.0);
+    let hit = ray.origin + *ray.direction * t;
+    let to_hit = hit - center;
+
+    let up = if axis_vec.abs().dot(Vec3::Y) > 0.9 { Vec3::X } else { Vec3::Y };
+    let t1 = axis_vec.cross(up).normalize();
+    let t2 = axis_vec.cross(t1).normalize();
+
+    to_hit.dot(t2).atan2(to_hit.dot(t1))
 }
 
-/// Snap angle to increments
-fn snap_angle(angle: f32, increment: f32) -> f32 {
-    if increment <= 0.0 {
-        return angle;
+/// Compute the world-space center of the combined AABB of all selected entities.
+fn compute_group_center(
+    query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    children_query: &Query<&Children>,
+    child_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+) -> Vec3 {
+    let mut bmin = Vec3::splat(f32::MAX);
+    let mut bmax = Vec3::splat(f32::MIN);
+    let mut cnt = 0;
+
+    for (entity, gt, bp) in query.iter() {
+        let t = gt.compute_transform();
+        let s = bp.map(|b| b.size).unwrap_or(t.scale);
+        let (mn, mx) = calculate_rotated_aabb(t.translation, s * 0.5, t.rotation);
+        bmin = bmin.min(mn); bmax = bmax.max(mx); cnt += 1;
+
+        if let Ok(children) = children_query.get(entity) {
+            for child in children.iter() {
+                if let Ok((cg, cbp)) = child_transforms.get(child) {
+                    let ct = cg.compute_transform();
+                    let cs = cbp.map(|b| b.size).unwrap_or(ct.scale);
+                    let (cn, cx) = calculate_rotated_aabb(ct.translation, cs * 0.5, ct.rotation);
+                    bmin = bmin.min(cn); bmax = bmax.max(cx); cnt += 1;
+                }
+            }
+        }
     }
-    
-    (angle / increment).round() * increment
+
+    if cnt == 0 { Vec3::ZERO } else { (bmin + bmax) * 0.5 }
+}
+
+fn is_descendant(
+    entity: Entity,
+    selected_set: &std::collections::HashSet<Entity>,
+    parent_query: &Query<&ChildOf>,
+) -> bool {
+    let mut current = entity;
+    while let Ok(child_of) = parent_query.get(current) {
+        let parent = child_of.parent();
+        if selected_set.contains(&parent) { return true; }
+        current = parent;
+    }
+    false
 }

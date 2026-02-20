@@ -69,10 +69,16 @@ impl Default for WebViewInstance {
 impl WebViewManager {
     /// Create a new WebView for a tab
     pub fn create_webview(&mut self, tab_index: usize, url: &str) {
+        // Without the webview feature, there is no real browser — never show loading state
+        #[cfg(not(feature = "webview"))]
+        let is_loading = false;
+        #[cfg(feature = "webview")]
+        let is_loading = url != "about:blank";
+
         let instance = WebViewInstance {
             url: url.to_string(),
             title: if url == "about:blank" { "New Tab".to_string() } else { url.to_string() },
-            loading: url != "about:blank",
+            loading: is_loading,
             ..Default::default()
         };
         self.views.insert(tab_index, instance);
@@ -92,10 +98,17 @@ impl WebViewManager {
     pub fn navigate(&mut self, tab_index: usize, url: &str) {
         if let Some(view) = self.views.get_mut(&tab_index) {
             view.url = url.to_string();
-            view.loading = true;
+            // Only show loading state when a real webview can actually load the page
             #[cfg(feature = "webview")]
-            if let Some(ref webview) = view.webview {
-                let _ = webview.load_url(url);
+            {
+                view.loading = true;
+                if let Some(ref webview) = view.webview {
+                    let _ = webview.load_url(url);
+                }
+            }
+            #[cfg(not(feature = "webview"))]
+            {
+                view.loading = false;
             }
         }
     }

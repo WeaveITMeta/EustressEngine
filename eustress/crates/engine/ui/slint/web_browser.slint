@@ -129,6 +129,7 @@ export component WebBrowser inherits Rectangle {
                         padding-left: 12px;
                         padding-right: 8px;
                         spacing: 6px;
+                        alignment: center;
                         
                         // Security indicator (driven by Rust-side secure/has-url properties)
                         if root.has-url: Image {
@@ -176,15 +177,16 @@ export component WebBrowser inherits Rectangle {
             }
         }
         
-        // Loading indicator bar
+        // Loading indicator bar — clipped to its own width so it never overflows panels
         if root.loading: Rectangle {
-            height: 2px;
+            height: 3px;
             background: transparent;
+            clip: true;
             
             // Animated loading bar
             Rectangle {
                 width: parent.width * 0.3;
-                height: 2px;
+                height: 3px;
                 background: Theme.accent-blue;
                 x: mod(animation-tick() / 8ms, parent.width / 1px + self.width / 1px) * 1px - self.width;
             }

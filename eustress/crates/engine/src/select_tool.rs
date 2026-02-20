@@ -21,7 +21,11 @@ use crate::classes::{BasePart, Instance};
 use crate::ui::{StudioState, Tool, BevySelectionManager};
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
-    align_to_surface, ray_intersects_part,
+    align_to_surface, ray_intersects_part, ray_intersects_part_rotated,
+    find_surface_with_physics as math_find_surface_with_physics,
+    find_surface_under_cursor_with_normal as math_find_surface_with_normal,
+    calculate_surface_offset as math_calculate_surface_offset,
+    snap_to_grid as math_snap_to_grid,
 };
 
 /// Drag threshold in pixels - must move this far to start dragging
@@ -240,7 +244,7 @@ fn handle_select_drag(
                 let handle_length = base_handle_length + 0.5;
                 
                 // Check if clicking on move handle - let move_tool handle it
-                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::splat(avg_size), handle_length, camera_transform) {
+                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::splat(avg_size), handle_length, &camera_transform) {
                     return;
                 }
                 
@@ -248,7 +252,7 @@ fn handle_select_drag(
                 for (_entity, _, global_transform, _, _, basepart_opt) in selected_query.iter() {
                     let t = global_transform.compute_transform();
                     let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-                    if ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
+                    if crate::math_utils::ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
                         // Clicking on selected part - move_tool handles free drag
                         return;
                     }
@@ -278,7 +282,7 @@ fn handle_select_drag(
                 let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
                 // MUST match rotate_tool.rs radius calculation exactly!
                 let rotate_radius = (size.max_element() * 0.6).max(2.0).min(50.0);
-                if crate::rotate_tool::is_clicking_rotate_handle(&ray, t.translation, rotate_radius, camera_transform) {
+                if crate::rotate_tool::is_clicking_rotate_handle(&ray, t.translation, rotate_radius, &camera_transform) {
                     // Clicking on rotate handle - don't start drag, let rotate tool handle it
                     return;
                 }
@@ -290,7 +294,7 @@ fn handle_select_drag(
             let t = global_transform.compute_transform();
             let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
             // Use precise OBB intersection with rotation for accurate click detection
-            if ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
+            if crate::math_utils::ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
                 state.dragging = true;
                 state.drag_started = false; // Not started until threshold exceeded
                 state.dragged_entity = Some(entity);
@@ -372,9 +376,9 @@ fn handle_select_drag(
                 };
                 
                 // 1. Find Surface
-                let surface_hit = find_surface_with_physics(&spatial_query, &ray, &excluded_entities)
+                let surface_hit = math_find_surface_with_physics(&spatial_query, &ray, &excluded_entities)
                     .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
-                    .or_else(|| find_surface_under_cursor_with_normal(&ray, &all_parts_query, &excluded_entities).map(|(pt, norm)| (pt, norm, None)));
+                    .or_else(|| math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities).map(|(pt, norm)| (pt, norm, None)));
 
                 // 2. Calculate Target Position (NO rotation change - keep original orientation)
                 // This provides predictable drag behavior without auto-alignment
@@ -386,7 +390,7 @@ fn handle_select_drag(
                     state.debug_hit_normal = Some(hit_normal);
 
                     // Calculate offset using the ORIGINAL rotation (not aligned)
-                    let offset = calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
+                    let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
                     
                     // Target position for the Leader's center - sit on surface
                     hit_point + hit_normal * (offset + 0.01)
@@ -398,7 +402,7 @@ fn handle_select_drag(
                     if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y) {
                          let ground_pos = ray.origin + *ray.direction * t;
                          // Calculate offset using original rotation
-                         let offset = calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
+                         let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
                          ground_pos + Vec3::new(0.0, offset + 0.01, 0.0)
                     } else {
                         // Fallback: Use intersection with horizontal plane at leader's initial height
@@ -415,7 +419,7 @@ fn handle_select_drag(
 
                 // Apply grid snapping if enabled (to position)
                 let final_target_pos = if editor_settings.snap_enabled {
-                    snap_to_grid(target_pos, editor_settings.snap_size)
+                    math_snap_to_grid(target_pos, editor_settings.snap_size)
                 } else {
                     target_pos
                 };
@@ -437,7 +441,7 @@ fn handle_select_drag(
                     let mut is_descendant = false;
                     let mut current = entity;
                     while let Ok(child_of) = parent_query.get(current) {
-                        let parent_entity = child_of.0;
+                        let parent_entity = child_of.parent();
                         if selected_entities.contains(&parent_entity) {
                             is_descendant = true;
                             break;
@@ -534,96 +538,46 @@ fn handle_select_drag(
         let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
         
         if rotate_pressed {
-            // Calculate group center for rotation pivot (including children)
             let mut group_center = Vec3::ZERO;
             let mut count = 0;
-            
-            // Collect all entities to rotate (selected + their children)
-            // But we only want to collect POSITIONS for center calc
-            // The actual rotation should only be applied to TOP-LEVEL selected entities
-            
-            for (entity, transform, _, _, _, _) in selected_query.iter() {
+            for (_, transform, _, _, _, _) in selected_query.iter() {
                 group_center += transform.translation;
                 count += 1;
-                
-                // Also include children in center calculation
-                if let Ok(children) = children_query.get(entity) {
-                    for child in children.iter() {
-                        if let Ok((_, child_global, _, _, _, _)) = all_parts_query.get(child) {
-                            group_center += child_global.translation();
-                            count += 1;
-                        }
-                    }
-                }
             }
-            
-            if count > 0 {
-                group_center /= count as f32;
-            }
+            if count > 0 { group_center /= count as f32; }
             
             let rotation = Quat::from_rotation_y(90.0_f32.to_radians());
-            
-            // Collect selected entities set for hierarchy check
             let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
             
-            // Rotate selected entities around group center
             for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                // Check if any ancestor is also selected
                 let mut is_descendant = false;
                 let mut current = entity;
                 while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.0;
-                    if selected_entities.contains(&parent_entity) {
-                        is_descendant = true;
-                        break;
-                    }
+                    let parent_entity = child_of.parent();
+                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
                     current = parent_entity;
                 }
                 if is_descendant { continue; }
-
-                // Rotate position around group center
                 let relative_pos = transform.translation - group_center;
-                let rotated_pos = rotation * relative_pos;
-                transform.translation = group_center + rotated_pos;
-                // Also rotate the entity itself
+                transform.translation = group_center + rotation * relative_pos;
                 transform.rotate_y(90.0_f32.to_radians());
             }
-            
-            // NO NEED TO MANUALLY ROTATE CHILDREN - they move with parents!
-            // I removed the child iteration loop here.
-            
-            // Rotated 90° (Y axis)
         }
         
-        // Check for T key
         let tilt_pressed = keys.just_pressed(KeyCode::KeyT);
-        
         if tilt_pressed {
-            // Tilt 90° on Z axis
-            
-            // Collect selected entities set for hierarchy check
             let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-
             for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                // Check if any ancestor is also selected
                 let mut is_descendant = false;
                 let mut current = entity;
                 while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.0;
-                    if selected_entities.contains(&parent_entity) {
-                        is_descendant = true;
-                        break;
-                    }
+                    let parent_entity = child_of.parent();
+                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
                     current = parent_entity;
                 }
                 if is_descendant { continue; }
-
                 transform.rotate_z(90.0_f32.to_radians());
             }
-            
-            // NO NEED TO MANUALLY ROTATE CHILDREN
-            
-            // Tilted 90° (Z axis)
         }
     }
     
@@ -641,45 +595,30 @@ fn handle_select_drag(
                         keys.pressed(KeyCode::NumpadAdd);
         
         if move_up {
-            // Collect selected entities set for hierarchy check
             let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-
             for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                // Check if any ancestor is also selected
                 let mut is_descendant = false;
                 let mut current = entity;
                 while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.0;
-                    if selected_entities.contains(&parent_entity) {
-                        is_descendant = true;
-                        break;
-                    }
+                    let parent_entity = child_of.parent();
+                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
                     current = parent_entity;
                 }
                 if is_descendant { continue; }
-
                 transform.translation.y += snap_size;
             }
             // Moved up by snap_size
         }
         
         if move_down {
-            // + key: SNAP TO SURFACE
-            
-            // Collect selected entities set for hierarchy check
             let selected_entities_set: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-            
-            // Collect entities to process (top-level only)
             let entities_data: Vec<(Entity, Vec3, Vec3)> = selected_query.iter()
                 .filter(|(e, ..)| {
                     let mut is_descendant = false;
                     let mut current = *e;
                     while let Ok(child_of) = parent_query.get(current) {
-                        let parent_entity = child_of.0;
-                        if selected_entities_set.contains(&parent_entity) {
-                            is_descendant = true;
-                            break;
-                        }
+                        let parent_entity = child_of.parent();
+                        if selected_entities_set.contains(&parent_entity) { is_descendant = true; break; }
                         current = parent_entity;
                     }
                     !is_descendant
@@ -736,235 +675,10 @@ fn handle_select_drag(
     }
 }
 
-/// Calculate the vertical extent (half-height) of a part considering its rotation
-/// This accounts for the fact that a rotated box's vertical footprint changes
-fn calculate_vertical_extent(size: &Vec3, rotation: &Quat) -> f32 {
-    // Transform each corner of the box by the rotation to find actual vertical extent
-    // We only care about the vertical (Y) component
-    let half_size = *size * 0.5;
-    
-    // The 8 corners of the box (in local space)
-    let corners = [
-        Vec3::new(half_size.x, half_size.y, half_size.z),
-        Vec3::new(half_size.x, half_size.y, -half_size.z),
-        Vec3::new(half_size.x, -half_size.y, half_size.z),
-        Vec3::new(half_size.x, -half_size.y, -half_size.z),
-        Vec3::new(-half_size.x, half_size.y, half_size.z),
-        Vec3::new(-half_size.x, half_size.y, -half_size.z),
-        Vec3::new(-half_size.x, -half_size.y, half_size.z),
-        Vec3::new(-half_size.x, -half_size.y, -half_size.z),
-    ];
-    
-    // Transform corners by rotation and find the max Y value
-    let max_y = corners.iter()
-        .map(|corner| rotation.mul_vec3(*corner).y)
-        .max_by(|a, b| a.partial_cmp(b).unwrap())
-        .unwrap_or(half_size.y);
-    
-    max_y.abs() // Return the positive vertical extent
-}
-
-/// Calculate the offset distance along a surface normal for proper surface snapping
-/// This handles top, bottom, and side surfaces correctly, accounting for part rotation
-fn calculate_surface_offset(size: &Vec3, rotation: &Quat, normal: &Vec3) -> f32 {
-    let half_size = *size * 0.5;
-    
-    // Get the part's local axes in world space
-    let local_x = rotation.mul_vec3(Vec3::X);
-    let local_y = rotation.mul_vec3(Vec3::Y);
-    let local_z = rotation.mul_vec3(Vec3::Z);
-    
-    // Calculate how far the part extends along the surface normal direction
-    // by projecting each local axis onto the normal and multiplying by the half-extent
-    let extent = (local_x.dot(*normal)).abs() * half_size.x
-               + (local_y.dot(*normal)).abs() * half_size.y
-               + (local_z.dot(*normal)).abs() * half_size.z;
-    
-    extent
-}
-
-/// Calculate the offset distance for a GROUP bounding box along a surface normal
-/// The group bounding box is axis-aligned, so we just need the half-extent along the normal
-fn calculate_group_surface_offset(group_size: &Vec3, normal: &Vec3) -> f32 {
-    let half_size = *group_size * 0.5;
-    
-    // For an axis-aligned bounding box, the extent along a direction is simply
-    // the sum of absolute dot products with each axis
-    let extent = normal.x.abs() * half_size.x
-               + normal.y.abs() * half_size.y
-               + normal.z.abs() * half_size.z;
-    
-    extent
-}
-
-/// Check if ray intersects with part using precise OBB intersection (with rotation)
-pub fn ray_intersects_part_rotated(ray: &Ray3d, position: Vec3, rotation: Quat, size: Vec3) -> bool {
-    ray_obb_intersection(ray.origin, *ray.direction, position, size, rotation).is_some()
-}
-
 /// Ray-OBB intersection returning distance (for paste raycasting)
 /// Works on ALL parts regardless of can_collide setting
 pub fn ray_intersects_part_rotated_distance(ray: &Ray3d, position: Vec3, rotation: Quat, size: Vec3) -> Option<f32> {
     ray_obb_intersection(ray.origin, *ray.direction, position, size, rotation)
-}
-
-/// Find the surface under the cursor using Avian3D physics raycasting
-/// 
-/// This provides accurate collision detection against all physics colliders,
-/// returning the exact hit point on the surface and the surface normal.
-/// Excludes selected entities so dragging works properly.
-/// Returns (hit_point, surface_normal, hit_entity)
-fn find_surface_with_physics(
-    spatial_query: &SpatialQuery,
-    ray: &Ray3d,
-    excluded_entities: &[Entity],
-) -> Option<(Vec3, Vec3, Entity)> {
-    let direction = Dir3::new(*ray.direction).unwrap_or(Dir3::NEG_Y);
-    
-    // Use filter to exclude dragged entities directly (more efficient)
-    let filter = SpatialQueryFilter::default().with_excluded_entities(excluded_entities.to_vec());
-    
-    // Use ray_hits to get all intersections sorted by distance
-    let hits = spatial_query.ray_hits(
-        ray.origin,
-        direction,
-        MAX_RAYCAST_DISTANCE,
-        20, // Max hits to check
-        true, // solid
-        &filter,
-    );
-    
-    // Return the closest hit (already filtered and sorted)
-    if let Some(hit) = hits.first() {
-        let hit_point = ray.origin + *ray.direction * hit.distance;
-        // The normal points OUTWARD from the surface we hit
-        let hit_normal = hit.normal;
-        
-        // Ensure normal is valid (non-zero)
-        if hit_normal.length_squared() > 0.001 {
-            return Some((hit_point, hit_normal.normalize(), hit.entity));
-        }
-    }
-    
-    None
-}
-
-/// Find the surface under the cursor by raycasting against all other parts
-/// Falls back to simple sphere intersection if no physics colliders are present
-/// Uses entity list for reliable exclusion of dragged parts
-#[allow(dead_code)]
-fn find_surface_under_cursor(
-    ray: &Ray3d,
-    all_parts: &Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<SelectionBox>>,
-    excluded_entities: &[Entity],
-) -> Option<Vec3> {
-    let mut closest_hit: Option<(Vec3, f32)> = None;
-    
-    for (entity, transform, _mesh_handle, _part_entity, _instance, basepart) in all_parts.iter() {
-        // Skip excluded entities (the parts being dragged)
-        if excluded_entities.contains(&entity) {
-            continue;
-        }
-        
-        // Note: We DO NOT skip locked parts - we want to be able to drag onto locked surfaces
-        // like the baseplate. Locked only prevents the part itself from being moved.
-        
-        // Get part transform and size
-        let part_transform = transform.compute_transform();
-        let part_pos = part_transform.translation;
-        let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
-        
-        // Use OBB intersection for precise surface detection
-        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_pos, part_size, part_transform.rotation) {
-            let _hit_point = ray.origin + *ray.direction * distance;
-            
-            // Calculate the top surface considering rotation
-            // Use the same vertical extent calculation as dragging
-            let vertical_extent = calculate_vertical_extent(&part_size, &part_transform.rotation);
-            let top_surface = part_pos + Vec3::new(0.0, vertical_extent, 0.0);
-            
-            // Keep track of closest hit
-            if closest_hit.is_none() || distance < closest_hit.unwrap().1 {
-                closest_hit = Some((top_surface, distance));
-            }
-        }
-    }
-    
-    closest_hit.map(|(pos, _)| pos)
-}
-
-/// Find the surface under the cursor with surface normal calculation
-/// Returns (hit_point, surface_normal) for proper positioning
-/// Uses entity list for reliable exclusion of dragged parts
-fn find_surface_under_cursor_with_normal(
-    ray: &Ray3d,
-    all_parts: &Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<SelectionBox>>,
-    excluded_entities: &[Entity],
-) -> Option<(Vec3, Vec3)> {
-    let mut closest_hit: Option<(Vec3, Vec3, f32)> = None; // (hit_point, normal, distance)
-    
-    for (entity, transform, _mesh_handle, _part_entity, _instance, basepart) in all_parts.iter() {
-        // Skip excluded entities (the parts being dragged)
-        if excluded_entities.contains(&entity) {
-            continue;
-        }
-        
-        // Get part transform and size
-        let part_transform = transform.compute_transform();
-        let part_pos = part_transform.translation;
-        let part_rot = part_transform.rotation;
-        let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
-        
-        // Use OBB intersection for precise surface detection
-        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_pos, part_size, part_rot) {
-            let hit_point = ray.origin + *ray.direction * distance;
-            
-            // Calculate which face was hit based on the hit point relative to the box center
-            // Transform hit point to local space
-            let local_hit = part_rot.inverse() * (hit_point - part_pos);
-            let half_size = part_size * 0.5;
-            
-            // Determine which face is closest (the one the ray hit)
-            let mut best_face_normal = Vec3::Y; // Default to top
-            let mut best_face_dist = f32::MAX;
-            
-            // Check each face
-            let faces = [
-                (Vec3::X, half_size.x - local_hit.x),    // +X face
-                (Vec3::NEG_X, half_size.x + local_hit.x), // -X face
-                (Vec3::Y, half_size.y - local_hit.y),    // +Y face (top)
-                (Vec3::NEG_Y, half_size.y + local_hit.y), // -Y face (bottom)
-                (Vec3::Z, half_size.z - local_hit.z),    // +Z face
-                (Vec3::NEG_Z, half_size.z + local_hit.z), // -Z face
-            ];
-            
-            for (normal, dist) in faces {
-                if dist.abs() < best_face_dist {
-                    best_face_dist = dist.abs();
-                    best_face_normal = normal;
-                }
-            }
-            
-            // Transform normal back to world space
-            let world_normal = (part_rot * best_face_normal).normalize();
-            
-            // Keep track of closest hit
-            if closest_hit.is_none() || distance < closest_hit.unwrap().2 {
-                closest_hit = Some((hit_point, world_normal, distance));
-            }
-        }
-    }
-    
-    closest_hit.map(|(pos, normal, _)| (pos, normal))
-}
-
-/// Snap a position to the nearest grid point
-fn snap_to_grid(position: Vec3, grid_size: f32) -> Vec3 {
-    Vec3::new(
-        (position.x / grid_size).round() * grid_size,
-        (position.y / grid_size).round() * grid_size,
-        (position.z / grid_size).round() * grid_size,
-    )
 }
 
 // ============================================================================

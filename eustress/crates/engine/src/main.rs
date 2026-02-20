@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
-// Window icon is embedded via winres in build.rs
+// Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
@@ -107,9 +107,10 @@ fn main() {
     
     let mut app = App::new();
     
-    // Set custom error handler that warns instead of panicking for missing resources
-    // This is a temporary workaround for systems that require resources without Option wrappers
-    app.set_error_handler(bevy::ecs::error::warn);
+    // Silently ignore missing-resource errors instead of spamming WARN logs every frame.
+    // Systems that access Res<T> without Option wrappers will simply skip execution.
+    // The default `warn` handler was emitting hundreds of log lines per frame, tanking FPS.
+    app.set_error_handler(bevy::ecs::error::ignore);
     
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
@@ -117,13 +118,25 @@ fn main() {
                 primary_window: Some(Window {
                     title: window_title,
                     resolution: bevy::window::WindowResolution::new(1600, 900),
-                    present_mode: bevy::window::PresentMode::Fifo,
+                    present_mode: bevy::window::PresentMode::AutoNoVsync,
                     mode: bevy::window::WindowMode::Windowed,
                     decorations: true,
                     resizable: true,
                     ..default()
                 }),
                 close_when_requested: false,
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                    bevy::render::settings::WgpuSettings {
+                        // Request discrete GPU (NVIDIA/AMD) over integrated
+                        power_preference: bevy::render::settings::PowerPreference::HighPerformance,
+                        // Use all available backends (Vulkan/DX12/Metal)
+                        backends: Some(bevy::render::settings::Backends::all()),
+                        ..default()
+                    }
+                ),
                 ..default()
             })
             .set(AssetPlugin {
@@ -229,10 +242,8 @@ fn main() {
         app.add_systems(Update, part_selection::part_selection_system);
     }
     
-    // Window icon is embedded in the exe via winres (build.rs)
-    // Windows uses the embedded icon for taskbar, title bar, and Alt+Tab
-    
     app.run();
     
     println!("✅ Eustress Engine closed gracefully");
 }
+

@@ -88,7 +88,7 @@ pub fn part_selection_system(
                 // Use calculated AABB for accurate center (matches MoveTool logic)
                 let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
                 let half_size = size * 0.5;
-                let (part_min, part_max) = crate::move_tool::calculate_rotated_aabb(t.translation, half_size, t.rotation);
+                let (part_min, part_max) = crate::math_utils::calculate_rotated_aabb(t.translation, half_size, t.rotation);
                 
                 bounds_min = bounds_min.min(part_min);
                 bounds_max = bounds_max.max(part_max);
@@ -101,7 +101,7 @@ pub fn part_selection_system(
                             let child_t = child_global.compute_transform();
                             let child_size = child_bp.map(|bp| bp.size).unwrap_or(child_t.scale);
                             let child_half = child_size * 0.5;
-                            let (c_min, c_max) = crate::move_tool::calculate_rotated_aabb(child_t.translation, child_half, child_t.rotation);
+                            let (c_min, c_max) = crate::math_utils::calculate_rotated_aabb(child_t.translation, child_half, child_t.rotation);
                             
                             bounds_min = bounds_min.min(c_min);
                             bounds_max = bounds_max.max(c_max);
@@ -203,7 +203,7 @@ pub fn part_selection_system(
         if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_position, part_size, part_rotation) {
             // Check if this entity has a parent that is a Model
             let parent_model = child_of.and_then(|c| {
-                let parent_entity = c.0;
+                let parent_entity = c.parent();
                 // Check if parent is a Model
                 if let Ok(parent_instance) = parent_query.get(parent_entity) {
                     if parent_instance.class_name == crate::classes::ClassName::Model {

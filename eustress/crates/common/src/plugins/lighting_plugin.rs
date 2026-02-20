@@ -57,6 +57,8 @@ impl Plugin for SharedLightingPlugin {
                 update_ambient_light,
                 update_exposure_compensation,
                 update_fog_settings,
+                // Regenerate skybox after sun position updates so the sun disk tracks time of day
+                regenerate_skybox_on_sun_change.after(update_sun_position),
                 attach_skybox_to_cameras,
                 apply_atmosphere_to_cameras,
                 update_atmosphere_effects,
@@ -379,7 +381,18 @@ fn update_fog_settings(
 /// Each face pixel is mapped to a 3D direction, then colored by elevation angle.
 pub fn create_procedural_skybox(
     images: &mut Assets<Image>,
-    _lighting: &LightingService,
+    lighting: &LightingService,
+) -> Handle<Image> {
+    create_procedural_skybox_with_sun(images, lighting, None)
+}
+
+/// Inner skybox builder — accepts an optional explicit sun direction.
+/// When `sun_dir_override` is `Some`, it is used instead of `lighting.sun_direction()`
+/// so the live `SunClass::direction()` can be passed in for accurate tracking.
+pub fn create_procedural_skybox_with_sun(
+    images: &mut Assets<Image>,
+    lighting: &LightingService,
+    sun_dir_override: Option<Vec3>,
 ) -> Handle<Image> {
     const SIZE: u32 = 256;
     
@@ -388,6 +401,14 @@ pub fn create_procedural_skybox(
     let mid_sky: [f32; 3] = [0.40, 0.60, 0.92];      // Mid-sky blue
     let horizon: [f32; 3] = [0.75, 0.82, 0.90];      // Pale horizon haze
     let ground: [f32; 3] = [0.22, 0.22, 0.20];        // Dark ground
+    
+    // Use the override direction when provided (live SunClass position),
+    // otherwise fall back to the LightingService simple formula
+    let sun_dir = sun_dir_override.unwrap_or_else(|| lighting.sun_direction());
+    let sun_angular_radius = lighting.sun_angular_radius.to_radians().max(0.005); // degrees → radians
+    let sun_color: [f32; 3] = [lighting.sun_color[0], lighting.sun_color[1], lighting.sun_color[2]];
+    // Corona extends 4x the sun disc radius for a soft glow
+    let corona_radius = sun_angular_radius * 4.0;
     
     let mut data = Vec::with_capacity((SIZE * SIZE * 6 * 4) as usize);
     
@@ -411,10 +432,12 @@ pub fn create_procedural_skybox(
                 
                 // Normalize direction and get elevation
                 let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                let nx = dx / len;
                 let ny = dy / len; // -1 (nadir) to +1 (zenith)
+                let nz = dz / len;
                 
                 // Sky gradient based on elevation
-                let (r, g, b) = if ny > 0.15 {
+                let (mut r, mut g, mut b) = if ny > 0.15 {
                     // Above horizon: blend mid_sky → zenith
                     let t = ((ny - 0.15) / 0.85).min(1.0);
                     let t = t * t; // Ease-in for deeper blue at top
@@ -441,6 +464,35 @@ pub fn create_procedural_skybox(
                         horizon[2] + (ground[2] - horizon[2]) * t,
                     )
                 };
+                
+                // Sun disc + corona glow (only above horizon)
+                if ny > -0.1 {
+                    // Angle between this pixel direction and sun direction (dot product of unit vectors)
+                    let dot = nx * sun_dir.x + ny * sun_dir.y + nz * sun_dir.z;
+                    let angle = dot.clamp(-1.0, 1.0).acos(); // radians from sun center
+                    
+                    if angle < sun_angular_radius {
+                        // Inside sun disc — bright white-yellow core
+                        let core_t = 1.0 - (angle / sun_angular_radius);
+                        let core_t = core_t * core_t; // Brighter center
+                        r = sun_color[0] * 0.95 + 0.05 * core_t;
+                        g = sun_color[1] * 0.95 + 0.05 * core_t;
+                        b = sun_color[2] * 0.90 + 0.10 * core_t;
+                        // Clamp to near-white for the disc
+                        r = r.max(0.98);
+                        g = g.max(0.95);
+                        b = b.max(0.85);
+                    } else if angle < corona_radius {
+                        // Corona glow — soft falloff around the sun
+                        let corona_t = 1.0 - ((angle - sun_angular_radius) / (corona_radius - sun_angular_radius));
+                        let corona_t = corona_t * corona_t * corona_t; // Cubic falloff for soft glow
+                        let glow_strength = corona_t * 0.6;
+                        // Warm glow blended over sky
+                        r = r + (sun_color[0] - r) * glow_strength;
+                        g = g + (sun_color[1] * 0.9 - g) * glow_strength;
+                        b = b + (sun_color[2] * 0.7 - b) * glow_strength * 0.5;
+                    }
+                }
                 
                 data.push((r.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push((g.clamp(0.0, 1.0) * 255.0) as u8);
@@ -632,6 +684,46 @@ impl SceneAtmosphere {
 // ============================================================================
 // Sun/Moon Class Property Sync Systems
 // ============================================================================
+
+/// Regenerate the procedural skybox cubemap whenever the sun position changes.
+/// This ensures the sun disk in the skybox tracks the time-of-day cycle.
+fn regenerate_skybox_on_sun_change(
+    lighting: Res<LightingService>,
+    sun_query: Query<&SunClass, With<SunMarker>>,
+    changed_sun_query: Query<&SunClass, (With<SunMarker>, Changed<SunClass>)>,
+    mut images: ResMut<Assets<Image>>,
+    mut skybox_handle: ResMut<SkyboxHandle>,
+    mut camera_query: Query<&mut Skybox, With<Camera3d>>,
+) {
+    // Rebuild when SunClass changes (time of day, latitude, etc.) or LightingService changes
+    if changed_sun_query.is_empty() && !lighting.is_changed() {
+        return;
+    }
+    
+    // Get the live sun direction from SunClass (uses proper latitude/time_of_day solar math)
+    // and the current sun color for accurate disc rendering
+    let (sun_dir_override, sun_color_override) = if let Some(sun) = sun_query.iter().next() {
+        let dir = sun.direction();
+        let color = sun.current_color();
+        (Some(dir), Some(color))
+    } else {
+        (None, None)
+    };
+    
+    // Build snapshot with overridden sun color if available
+    let mut lighting_snapshot = lighting.clone();
+    if let Some(color) = sun_color_override {
+        lighting_snapshot.sun_color = color;
+    }
+    
+    let new_handle = create_procedural_skybox_with_sun(&mut images, &lighting_snapshot, sun_dir_override);
+    skybox_handle.handle = Some(new_handle.clone());
+    
+    // Update all cameras that already have a Skybox component
+    for mut skybox in camera_query.iter_mut() {
+        skybox.image = new_handle.clone();
+    }
+}
 
 /// Sync Sun class angular_size property
 /// Note: SunDisk component was removed from Bevy; angular size is tracked in SunClass only

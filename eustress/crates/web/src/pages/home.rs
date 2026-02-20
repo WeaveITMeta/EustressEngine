@@ -236,7 +236,7 @@ pub fn HomePage() -> impl IntoView {
                             <tr>
                                 <td class="feature-name">"Web Export"</td>
                                 <td class="eustress"><span class="check">"✓"</span>" Native WASM"</td>
-                                <td class="roblox"><span class="check">"✓"</span>" Web Player"</td>
+                                <td class="roblox"><span class="cross">"✗"</span>" None"</td>
                                 <td class="unity"><span class="warn">"~"</span>" WebGL"</td>
                                 <td class="unreal"><span class="cross">"✗"</span>" Limited"</td>
                             </tr>
@@ -269,6 +269,34 @@ pub fn HomePage() -> impl IntoView {
                                 <td class="unreal"><span class="check">"✓"</span>" 1M+"</td>
                             </tr>
                             <tr>
+                                <td class="feature-name">"Studio Editor"</td>
+                                <td class="eustress"><span class="warn">"~"</span>" Maturing"</td>
+                                <td class="roblox"><span class="check">"✓"</span>" Polished"</td>
+                                <td class="unity"><span class="check">"✓"</span>" Polished"</td>
+                                <td class="unreal"><span class="check">"✓"</span>" AAA"</td>
+                            </tr>
+                            <tr>
+                                <td class="feature-name">"Script Editor"</td>
+                                <td class="eustress"><span class="warn">"~"</span>" Soul + Rune"</td>
+                                <td class="roblox"><span class="check">"✓"</span>" Full IDE"</td>
+                                <td class="unity"><span class="check">"✓"</span>" Full IDE"</td>
+                                <td class="unreal"><span class="check">"✓"</span>" Full IDE"</td>
+                            </tr>
+                            <tr>
+                                <td class="feature-name">"XR / VR"</td>
+                                <td class="eustress"><span class="check">"✓"</span>" OpenXR Native"</td>
+                                <td class="roblox"><span class="cross">"✗"</span>" None"</td>
+                                <td class="unity"><span class="warn">"~"</span>" Plugin"</td>
+                                <td class="unreal"><span class="check">"✓"</span>" Built-in"</td>
+                            </tr>
+                            <tr>
+                                <td class="feature-name">"AI Integration"</td>
+                                <td class="eustress"><span class="check">"✓"</span>" Soul Language"</td>
+                                <td class="roblox"><span class="cross">"✗"</span>" None"</td>
+                                <td class="unity"><span class="warn">"~"</span>" Third-party"</td>
+                                <td class="unreal"><span class="warn">"~"</span>" Third-party"</td>
+                            </tr>
+                            <tr>
                                 <td class="feature-name">"Pro Workflows"</td>
                                 <td class="eustress"><span class="check">"✓"</span>" Full Suite"</td>
                                 <td class="roblox"><span class="cross">"✗"</span>" Basic"</td>
@@ -284,10 +312,10 @@ pub fn HomePage() -> impl IntoView {
                             </tr>
                             <tr class="highlight-row">
                                 <td class="feature-name">"Overall Score"</td>
-                                <td class="eustress score"><span class="score-badge best">"9.5/10"</span></td>
-                                <td class="roblox score"><span class="score-badge good">"7.5/10"</span></td>
+                                <td class="eustress score"><span class="score-badge best">"8.5/10"</span></td>
+                                <td class="roblox score"><span class="score-badge okay">"7.0/10"</span></td>
                                 <td class="unity score"><span class="score-badge okay">"7.0/10"</span></td>
-                                <td class="unreal score"><span class="score-badge good">"8.0/10"</span></td>
+                                <td class="unreal score"><span class="score-badge good">"8.5/10"</span></td>
                             </tr>
                         </tbody>
                     </table>
@@ -296,7 +324,7 @@ pub fn HomePage() -> impl IntoView {
                 <div class="comparison-verdict">
                     <div class="verdict-card">
                         <h3>"🎯 Best For Beginners"</h3>
-                        <p>"If you're new to game dev, Eustress gives you Roblox-level ease with Unreal Engine level power."</p>
+                        <p>"If you're new to game dev, Eustress gives you Roblox-level ease with better than Unreal Engine level power."</p>
                     </div>
                     <div class="verdict-card">
                         <h3>"🚀 Best For Performance"</h3>

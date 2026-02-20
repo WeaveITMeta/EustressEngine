@@ -292,6 +292,112 @@ impl Plugin for KeyBindingsPlugin {
     fn build(&self, app: &mut App) {
         // Try to load saved bindings, otherwise use defaults
         let bindings = KeyBindings::load().unwrap_or_default();
-        app.insert_resource(bindings);
+        app.insert_resource(bindings)
+            .add_systems(Update, (
+                dispatch_keyboard_shortcuts,
+                handle_menu_action_events,
+            ).chain());
+    }
+}
+
+// ============================================================================
+// Keyboard Shortcut Dispatch System
+// ============================================================================
+
+/// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents
+fn dispatch_keyboard_shortcuts(
+    keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<KeyBindings>,
+    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
+) {
+    // Tool switching — directly update StudioState for instant response
+    if bindings.check(Action::SelectTool, &keys) {
+        studio_state.current_tool = crate::ui::Tool::Select;
+        return; // Only one action per frame
+    }
+    if bindings.check(Action::MoveTool, &keys) {
+        studio_state.current_tool = crate::ui::Tool::Move;
+        return;
+    }
+    if bindings.check(Action::ScaleTool, &keys) {
+        studio_state.current_tool = crate::ui::Tool::Scale;
+        return;
+    }
+    if bindings.check(Action::RotateTool, &keys) {
+        studio_state.current_tool = crate::ui::Tool::Rotate;
+        return;
+    }
+
+    // All other actions → dispatch as MenuActionEvent
+    let actions = [
+        Action::Undo, Action::Redo,
+        Action::Copy, Action::Paste, Action::Duplicate, Action::Delete,
+        Action::SelectAll, Action::Group, Action::Ungroup,
+        Action::LockSelection, Action::UnlockSelection, Action::ToggleAnchor,
+        Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
+        Action::ToggleCommandBar, Action::ToggleAssets, Action::ToggleCollaboration,
+        Action::ToggleTransformSpace,
+        Action::FocusSelection,
+        Action::ViewPerspectiveToggle, Action::ViewTop, Action::ViewFront,
+        Action::ViewSideLeft, Action::ViewSideRight,
+        Action::SnapMode1, Action::SnapMode2, Action::SnapModeOff,
+        Action::RotateY90, Action::TiltZ90,
+        Action::StartServer, Action::ToggleNetworkPanel,
+        Action::CSGNegate, Action::CSGUnion, Action::CSGIntersect, Action::CSGSeparate,
+    ];
+
+    for action in actions {
+        if bindings.check(action, &keys) {
+            menu_events.write(crate::ui::MenuActionEvent::new(action));
+            return; // One action per frame to avoid conflicts
+        }
+    }
+}
+
+// ============================================================================
+// MenuActionEvent Handler System
+// ============================================================================
+
+/// Processes MenuActionEvents dispatched by keyboard shortcuts or Slint UI.
+/// Handles actions that modify StudioState or trigger editor behavior.
+fn handle_menu_action_events(
+    mut events: MessageReader<crate::ui::MenuActionEvent>,
+    mut studio_state: ResMut<crate::ui::StudioState>,
+    mut undo_events: MessageWriter<crate::commands::UndoCommandEvent>,
+    mut redo_events: MessageWriter<crate::commands::RedoCommandEvent>,
+) {
+    for event in events.read() {
+        match event.action {
+            // Tool switching (also reachable via MenuActionEvent from Slint)
+            Action::SelectTool => { studio_state.current_tool = crate::ui::Tool::Select; }
+            Action::MoveTool   => { studio_state.current_tool = crate::ui::Tool::Move; }
+            Action::ScaleTool  => { studio_state.current_tool = crate::ui::Tool::Scale; }
+            Action::RotateTool => { studio_state.current_tool = crate::ui::Tool::Rotate; }
+
+            // Undo/Redo
+            Action::Undo => { undo_events.write(crate::commands::UndoCommandEvent); }
+            Action::Redo => { redo_events.write(crate::commands::RedoCommandEvent); }
+
+            // View panel toggles
+            Action::ToggleExplorer   => { studio_state.show_explorer = !studio_state.show_explorer; }
+            Action::ToggleProperties => { studio_state.show_properties = !studio_state.show_properties; }
+            Action::ToggleOutput     => { studio_state.show_output = !studio_state.show_output; }
+
+            // Paste
+            Action::Paste => { studio_state.pending_paste = true; }
+
+            // Command bar
+            Action::ToggleCommandBar => { /* Handled by Slint UI directly */ }
+
+            // Snapping
+            Action::SnapMode1 | Action::SnapMode2 | Action::SnapModeOff => {
+                // Snapping is handled by editor_settings; these events are consumed
+                // by the editor_settings system if it listens for them.
+            }
+
+            // Other actions are consumed by their respective systems
+            _ => {}
+        }
     }
 }

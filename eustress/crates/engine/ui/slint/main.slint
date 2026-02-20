@@ -831,6 +831,7 @@ export component StudioWindow inherits Window {
                                 padding-left: 10px;
                                 padding-right: 4px;
                                 spacing: 6px;
+                                alignment: center;
                                 
                                 // Tab icon (type-dependent)
                                 if tab.tab-type == "web" && tab.favicon.width > 0: Image {
@@ -845,6 +846,7 @@ export component StudioWindow inherits Window {
                                     height: 14px;
                                     source: @image-url("../../assets/icons/ui/globe.svg");
                                     image-fit: contain;
+                                    colorize: Theme.text-secondary;
                                     vertical-alignment: center;
                                 }
                                 if tab.tab-type == "script": Image {
@@ -881,12 +883,12 @@ export component StudioWindow inherits Window {
                                     background: #e8e8e8;
                                 }
                                 
-                                // Close button (X) — VS Code style
+                                // Close button (X) — VS Code style, vertically centered
                                 Rectangle {
-                                    width: 20px;
-                                    height: 20px;
+                                    width: 22px;
+                                    height: 22px;
                                     background: close-area.has-hover ? #ffffff18 : transparent;
-                                    border-radius: 3px;
+                                    border-radius: 4px;
                                     
                                     close-area := TouchArea {
                                         mouse-cursor: pointer;
@@ -894,8 +896,8 @@ export component StudioWindow inherits Window {
                                     }
                                     
                                     Image {
-                                        width: 10px;
-                                        height: 10px;
+                                        width: 12px;
+                                        height: 12px;
                                         source: @image-url("../../assets/icons/ui/close.svg");
                                         image-fit: contain;
                                         colorize: close-area.has-hover ? Theme.text-primary : Theme.text-secondary;
