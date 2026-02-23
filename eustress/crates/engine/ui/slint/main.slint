@@ -5,7 +5,7 @@
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
 import { Ribbon } from "ribbon.slint";
-import { ExplorerPanel, EntityNode } from "explorer.slint";
+import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData } from "properties.slint";
 import { OutputConsole, LogData } from "output.slint";
 import { CommandBar } from "command_bar.slint";
@@ -156,10 +156,8 @@ export component StudioWindow inherits Window {
     // Output console log data (pushed from Bevy each frame)
     in-out property <[LogData]> output-logs: [];
     
-    // Explorer entity tree data (pushed from Bevy)
-    in-out property <[EntityNode]> explorer-entities: [];
-    in-out property <[EntityNode]> workspace-entities: [];
-    in-out property <[EntityNode]> lighting-entities: [];
+    // Unified explorer tree data: ECS entities + filesystem (pushed from Bevy)
+    in-out property <[TreeNode]> tree-nodes: [];
     
     // Properties panel data (pushed from Bevy for selected entity)
     in-out property <[PropertyData]> entity-properties: [];
@@ -281,12 +279,12 @@ export component StudioWindow inherits Window {
     callback pause();
     callback stop();
     
-    // Explorer
-    callback select-entity(int);
-    callback expand-entity(int);
-    callback collapse-entity(int);
-    callback rename-entity(int, string);
-    callback reparent-entity(int, int);
+    // Explorer (unified: entities + files)
+    callback select-node(int, string);
+    callback expand-node(int, string);
+    callback collapse-node(int, string);
+    callback open-node(int, string);
+    callback rename-node(int, string, string);
     
     // Properties
     callback property-changed(string, string);
@@ -570,12 +568,11 @@ export component StudioWindow inherits Window {
                         background: Theme.panel-background;
                         
                         if root.left-tab-index == 0: ExplorerPanel {
-                            entities: root.explorer-entities;
-                            workspace-entities: root.workspace-entities;
-                            lighting-entities: root.lighting-entities;
-                            on-select-entity(id) => { root.select-entity(id); }
-                            on-expand-entity(id) => { root.expand-entity(id); }
-                            on-collapse-entity(id) => { root.collapse-entity(id); }
+                            tree-nodes: root.tree-nodes;
+                            on-select-node(id, node-type) => { root.select-node(id, node-type); }
+                            on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
+                            on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
+                            on-open-node(id, node-type) => { root.open-node(id, node-type); }
                             on-context-menu(x, y) => {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;
@@ -1223,6 +1220,102 @@ export component StudioWindow inherits Window {
                         go-back => { root.web-go-back(); }
                         go-forward => { root.web-go-forward(); }
                         refresh => { root.web-refresh(); }
+                    }
+                    
+                    // Code Editor via Monaco WebView (shown for "code" tab type)
+                    // The Wry WebView renders directly into this transparent area
+                    if root.active-tab-type == "code": Rectangle {
+                        background: #1e1e2e;
+                        
+                        // Placeholder: Monaco WebView is positioned over this area by Rust
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Monaco Editor";
+                                color: #6c7086;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "WebView loading...";
+                                color: #45475a;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    
+                    // Image Viewer (shown for "image" tab type)
+                    if root.active-tab-type == "image": Rectangle {
+                        background: #181825;
+                        
+                        VerticalLayout {
+                            alignment: center;
+                            Image {
+                                width: 48px;
+                                height: 48px;
+                                source: @image-url("../../assets/icons/ui/image.svg");
+                                image-fit: contain;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Image Viewer";
+                                color: Theme.text-secondary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    
+                    // Video Player (shown for "video" tab type)
+                    if root.active-tab-type == "video": Rectangle {
+                        background: #11111b;
+                        
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Video Player";
+                                color: Theme.text-secondary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "WebView-based playback";
+                                color: #45475a;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    
+                    // Document Viewer (shown for "document" tab type)
+                    if root.active-tab-type == "document": Rectangle {
+                        background: Theme.panel-background;
+                        
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Document Viewer";
+                                color: Theme.text-secondary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    
+                    // Parameters Editor (shown for "parameters" tab type)
+                    if root.active-tab-type == "parameters": Rectangle {
+                        background: Theme.panel-background;
+                        
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Parameters Editor";
+                                color: Theme.text-secondary;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+                        }
                     }
                 }
                 } // close viewport-sizer

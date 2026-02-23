@@ -29,6 +29,9 @@ mod spawn_events;
 mod menu_events;
 mod world_view;
 pub mod webview;
+pub mod file_icons;
+pub mod center_tabs;
+pub mod monaco_bridge;
 
 // Re-exports
 pub use file_dialogs::{SceneFile, FileEvent, pick_open_file, pick_save_file};

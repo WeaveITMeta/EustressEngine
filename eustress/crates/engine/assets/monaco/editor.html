@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eustress Monaco Editor</title>
+    <style>
+        /* Dark theme matching Eustress Studio */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { 
+            width: 100%; 
+            height: 100%; 
+            overflow: hidden;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        #editor-container {
+            width: 100%;
+            height: 100%;
+        }
+        /* Loading state */
+        #loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            font-size: 14px;
+            color: #6c7086;
+        }
+        #loading.hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading editor...</div>
+    <div id="editor-container"></div>
+
+    <!-- Monaco Editor loader -->
+    <!-- In production, vs/ directory is bundled offline in assets/monaco/vs/ -->
+    <!-- For development, can use CDN fallback -->
+    <script>
+        // Determine base path for Monaco loader
+        const basePath = (function() {
+            // Try local assets first (offline bundle)
+            const scripts = document.getElementsByTagName('script');
+            const currentPath = window.location.pathname;
+            const dir = currentPath.substring(0, currentPath.lastIndexOf('/'));
+            return dir + '/vs';
+        })();
+    </script>
+    <script src="vs/loader.js" onerror="loadFromCDN()"></script>
+    <script>
+        // CDN fallback if local loader not found
+        function loadFromCDN() {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js';
+            script.onload = function() { initMonaco('https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min'); };
+            document.head.appendChild(script);
+        }
+
+        // Initialize Monaco when loader is available
+        if (typeof require !== 'undefined') {
+            initMonaco(basePath);
+        }
+
+        function initMonaco(vsPath) {
+            require.config({ paths: { vs: vsPath } });
+            require(['vs/editor/editor.main'], function() {
+                setupEditor();
+            });
+        }
+    </script>
+    <script src="editor.js"></script>
+</body>
+</html>

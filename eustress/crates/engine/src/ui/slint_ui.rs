@@ -300,12 +300,12 @@ pub enum SlintAction {
     ShowSettings,
     ShowFind,
     
-    // Explorer
-    SelectEntity(i32),
-    ExpandEntity(i32),
-    CollapseEntity(i32),
-    RenameEntity(i32, String),
-    ReparentEntity(i32, i32),
+    // Explorer (unified: entities + files)
+    SelectNode(i32, String),      // (id, node_type: "entity"|"file")
+    ExpandNode(i32, String),      // (id, node_type)
+    CollapseNode(i32, String),    // (id, node_type)
+    OpenNode(i32, String),        // (id, node_type) — double-click to open
+    RenameNode(i32, String, String), // (id, new_name, node_type)
     
     // Properties
     PropertyChanged(String, String),
@@ -683,18 +683,73 @@ pub struct StudioDockState {
     pub bottom_height: f32,
 }
 
-/// Explorer expanded state
-#[derive(Resource, Default)]
-pub struct ExplorerExpanded {
-    pub expanded: std::collections::HashSet<Entity>,
+/// Unified explorer state combining ECS entities and filesystem
+#[derive(Resource)]
+pub struct UnifiedExplorerState {
+    /// Currently selected item (entity or file)
+    pub selected: SelectedItem,
+    /// Set of expanded entity IDs
+    pub expanded_entities: std::collections::HashSet<Entity>,
+    /// Set of expanded directory paths
+    pub expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
+    /// Search query for filtering
+    pub search_query: String,
+    /// Project root directory
+    pub project_root: std::path::PathBuf,
+    /// Cached filesystem tree
+    pub file_cache: FileTreeCache,
+    /// Whether cache needs refresh
+    pub dirty: bool,
+    /// Reverse lookup: hash ID → file path (populated during sync)
+    pub file_path_cache: std::collections::HashMap<i32, std::path::PathBuf>,
 }
 
-/// Explorer state
-#[derive(Resource, Default)]
-pub struct ExplorerState {
-    pub selected: Option<Entity>,
-    pub search_query: String,
-    pub filter: String,
+impl Default for UnifiedExplorerState {
+    fn default() -> Self {
+        Self {
+            selected: SelectedItem::None,
+            expanded_entities: std::collections::HashSet::new(),
+            expanded_dirs: std::collections::HashSet::new(),
+            search_query: String::new(),
+            project_root: std::env::current_dir().unwrap_or_default(),
+            file_cache: FileTreeCache::default(),
+            dirty: true,
+            file_path_cache: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Selected item in unified explorer
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectedItem {
+    Entity(Entity),
+    File(std::path::PathBuf),
+    None,
+}
+
+/// Cached directory tree for efficient Slint sync
+pub struct FileTreeCache {
+    pub nodes: Vec<FileNodeData>,
+    pub last_scan: std::time::Instant,
+}
+
+/// File node data for caching
+pub struct FileNodeData {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub is_directory: bool,
+    pub extension: String,
+    pub size: u64,
+    pub modified: std::time::SystemTime,
+}
+
+impl Default for FileTreeCache {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            last_scan: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Explorer toggle event
@@ -726,13 +781,13 @@ pub fn parse_and_push_log(_msg: &str) {}
 /// Handle explorer toggle
 pub fn handle_explorer_toggle(
     mut events: MessageReader<ExplorerToggleEvent>,
-    mut expanded: ResMut<ExplorerExpanded>,
+    mut state: ResMut<UnifiedExplorerState>,
 ) {
     for event in events.read() {
-        if expanded.expanded.contains(&event.entity) {
-            expanded.expanded.remove(&event.entity);
+        if state.expanded_entities.contains(&event.entity) {
+            state.expanded_entities.remove(&event.entity);
         } else {
-            expanded.expanded.insert(event.entity);
+            state.expanded_entities.insert(event.entity);
         }
     }
 }
@@ -843,8 +898,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<CollaborationState>()
             .init_resource::<ToolboxState>()
             .init_resource::<StudioDockState>()
-            .init_resource::<ExplorerExpanded>()
-            .init_resource::<ExplorerState>()
+            .init_resource::<UnifiedExplorerState>()
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
             .init_resource::<SceneFile>()
@@ -892,8 +946,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<CollaborationState>()
             .init_resource::<ToolboxState>()
             .init_resource::<StudioDockState>()
-            .init_resource::<ExplorerExpanded>()
-            .init_resource::<ExplorerState>()
+            .init_resource::<UnifiedExplorerState>()
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
             .init_resource::<SceneFile>()
@@ -903,6 +956,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<SlintCursorState>()
             .init_resource::<super::ViewportBounds>()
             .init_resource::<LastWindowSize>()
+            .init_resource::<super::center_tabs::CenterTabManager>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -913,6 +967,7 @@ impl Plugin for SlintUiPlugin {
             .add_plugins(SpawnEventsPlugin)
             .add_plugins(WorldViewPlugin)
             .add_plugins(super::webview::WebViewPlugin)
+            .add_plugins(super::monaco_bridge::MonacoBridgePlugin)
             // Slint software renderer overlay systems
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, (
@@ -926,11 +981,12 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, handle_window_resize)
             // Performance tracking
             .add_systems(Update, update_ui_performance)
-            // Explorer sync (throttled internally)
-            .add_systems(Update, sync_explorer_to_slint)
+            // Unified explorer sync: entities + filesystem (throttled internally)
+            .add_systems(Update, sync_unified_explorer_to_slint)
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint)
-            // Center tab sync (Space1 + script tabs)
+            // Center tab sync: CenterTabManager → StudioState → Slint
+            .add_systems(Update, sync_tab_manager_to_studio_state.before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint)
             // UI systems
             .add_systems(Update, handle_window_close_request)
@@ -1066,17 +1122,17 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_stop(move || q.push(SlintAction::Stop));
     
-    // Explorer
+    // Explorer (unified: entities + files)
     let q = queue.clone();
-    ui.on_select_entity(move |id| q.push(SlintAction::SelectEntity(id)));
+    ui.on_select_node(move |id, node_type| q.push(SlintAction::SelectNode(id, node_type.to_string())));
     let q = queue.clone();
-    ui.on_expand_entity(move |id| q.push(SlintAction::ExpandEntity(id)));
+    ui.on_expand_node(move |id, node_type| q.push(SlintAction::ExpandNode(id, node_type.to_string())));
     let q = queue.clone();
-    ui.on_collapse_entity(move |id| q.push(SlintAction::CollapseEntity(id)));
+    ui.on_collapse_node(move |id, node_type| q.push(SlintAction::CollapseNode(id, node_type.to_string())));
     let q = queue.clone();
-    ui.on_rename_entity(move |id, name| q.push(SlintAction::RenameEntity(id, name.to_string())));
+    ui.on_open_node(move |id, node_type| q.push(SlintAction::OpenNode(id, node_type.to_string())));
     let q = queue.clone();
-    ui.on_reparent_entity(move |child, parent| q.push(SlintAction::ReparentEntity(child, parent)));
+    ui.on_rename_node(move |id, name, node_type| q.push(SlintAction::RenameNode(id, name.to_string(), node_type.to_string())));
     
     // Properties
     let q = queue.clone();
@@ -1502,12 +1558,12 @@ struct DrainEventWriters<'w> {
 struct DrainResources<'w> {
     state: Option<ResMut<'w, StudioState>>,
     output: Option<ResMut<'w, OutputConsole>>,
-    explorer_expanded: Option<ResMut<'w, ExplorerExpanded>>,
-    explorer_state: Option<ResMut<'w, ExplorerState>>,
+    explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
+    tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -1945,55 +2001,126 @@ fn drain_slint_actions(
                 }
             }
             
-            // Explorer actions — map instance ID (i32) back to Bevy Entity
-            SlintAction::SelectEntity(id) => {
+            // Explorer actions — unified node handling (entities + files)
+            SlintAction::SelectNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
-                    // Find the Entity with this instance ID
-                    let found = instances.iter()
-                        .find(|(_, inst)| inst.id as i32 == id)
-                        .map(|(e, _)| e);
-                    es.selected = found;
-                }
-            }
-            SlintAction::ExpandEntity(id) => {
-                if let Some(ref mut ee) = res.explorer_expanded {
-                    if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
-                        ee.expanded.insert(entity);
+                    if node_type == "entity" {
+                        // Find the Entity with this instance ID
+                        let found = instances.iter()
+                            .find(|(_, inst)| inst.id as i32 == id)
+                            .map(|(e, _)| SelectedItem::Entity(e));
+                        es.selected = found.unwrap_or(SelectedItem::None);
+                    } else {
+                        // File node — look up path by hash ID from file_path_cache
+                        if let Some(path) = es.file_path_cache.get(&id).cloned() {
+                            es.selected = SelectedItem::File(path);
+                        } else {
+                            es.selected = SelectedItem::None;
+                        }
                     }
                 }
             }
-            SlintAction::CollapseEntity(id) => {
-                if let Some(ref mut ee) = res.explorer_expanded {
-                    if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
-                        ee.expanded.remove(&entity);
+            SlintAction::ExpandNode(id, node_type) => {
+                if let Some(ref mut es) = res.explorer_state {
+                    if node_type == "entity" {
+                        if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                            es.expanded_entities.insert(entity);
+                        }
+                    } else {
+                        // File node — expand directory by hash ID lookup
+                        if let Some(path) = es.file_path_cache.get(&id).cloned() {
+                            es.expanded_dirs.insert(path);
+                        }
+                        es.dirty = true;
                     }
                 }
             }
-            SlintAction::RenameEntity(id, name) => {
-                if let Some((_, mut inst)) = instances.iter_mut().find(|(_, inst)| inst.id as i32 == id) {
-                    inst.name = name;
+            SlintAction::CollapseNode(id, node_type) => {
+                if let Some(ref mut es) = res.explorer_state {
+                    if node_type == "entity" {
+                        if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                            es.expanded_entities.remove(&entity);
+                        }
+                    } else {
+                        // File node — collapse directory by hash ID lookup
+                        if let Some(path) = es.file_path_cache.get(&id).cloned() {
+                            es.expanded_dirs.remove(&path);
+                        }
+                        es.dirty = true;
+                    }
                 }
             }
-            SlintAction::ReparentEntity(child_id, parent_id) => {
-                // Find child and parent entities by instance ID
-                let child_entity = instances.iter()
-                    .find(|(_, inst)| inst.id as i32 == child_id)
-                    .map(|(e, _)| e);
-                let parent_entity = instances.iter()
-                    .find(|(_, inst)| inst.id as i32 == parent_id)
-                    .map(|(e, _)| e);
-                if let (Some(child), Some(parent)) = (child_entity, parent_entity) {
-                    commands.entity(child).insert(ChildOf(parent));
+            SlintAction::OpenNode(id, node_type) => {
+                if node_type == "entity" {
+                    // Double-click entity — open script if SoulScript, else select
                     if let Some(ref mut out) = res.output {
-                        out.info(format!("Reparented entity {} under {}", child_id, parent_id));
+                        out.info(format!("Open entity node id={}", id));
+                    }
+                } else {
+                    // Double-click file — open in appropriate tab via CenterTabManager
+                    let file_path = res.explorer_state.as_ref()
+                        .and_then(|es| es.file_path_cache.get(&id).cloned());
+                    if let Some(path) = file_path {
+                        if path.is_file() {
+                            if let Some(ref mut mgr) = res.tab_manager {
+                                let idx = mgr.open_file(&path);
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Opened: {} (tab {})", path.display(), idx));
+                                }
+                            }
+                        } else if path.is_dir() {
+                            // Double-click directory — toggle expand
+                            if let Some(ref mut es) = res.explorer_state {
+                                if es.expanded_dirs.contains(&path) {
+                                    es.expanded_dirs.remove(&path);
+                                } else {
+                                    es.expanded_dirs.insert(path);
+                                }
+                                es.dirty = true;
+                            }
+                        }
+                    }
+                }
+            }
+            SlintAction::RenameNode(id, name, node_type) => {
+                if node_type == "entity" {
+                    if let Some((_, mut inst)) = instances.iter_mut().find(|(_, inst)| inst.id as i32 == id) {
+                        inst.name = name;
+                    }
+                } else {
+                    // File rename — filesystem operation
+                    let file_path = res.explorer_state.as_ref()
+                        .and_then(|es| es.file_path_cache.get(&id).cloned());
+                    if let Some(old_path) = file_path {
+                        let new_path = old_path.with_file_name(&name);
+                        match std::fs::rename(&old_path, &new_path) {
+                            Ok(_) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Renamed: {} → {}", old_path.display(), new_path.display()));
+                                }
+                                if let Some(ref mut es) = res.explorer_state {
+                                    es.dirty = true;
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Rename failed: {}", e));
+                                }
+                            }
+                        }
                     }
                 }
             }
             
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, val) => {
-                let selected = res.explorer_state.as_ref().and_then(|es| es.selected);
-                if let Some(entity) = selected {
+                let selected_entity = res.explorer_state.as_ref().and_then(|es| {
+                    match &es.selected {
+                        SelectedItem::Entity(e) => Some(*e),
+                        _ => None,
+                    }
+                });
+                if let Some(entity) = selected_entity {
                     match key.as_str() {
                         // Instance fields
                         "Name" => {
@@ -2359,15 +2486,32 @@ fn handle_window_resize(
     info!("🔄 Window resized to {}x{} physical (scale={})", new_width, new_height, scale_factor);
 }
 
-/// Forwards Bevy keyboard events to Slint for text input and key handling
+/// Forwards Bevy keyboard events to Slint for text input and key handling.
+/// Skips modifier-only keys and Alt+key combos (those are engine shortcuts, not text input).
 fn forward_keyboard_to_slint(
     mut key_events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     slint_context: Option<NonSend<SlintUiState>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let adapter = &slint_context.adapter;
     
+    // Check if Alt is held — if so, skip forwarding to Slint (engine shortcuts take priority)
+    let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    
     for event in key_events.read() {
+        // Skip bare modifier keys — Slint doesn't need them for text input
+        match &event.logical_key {
+            bevy::input::keyboard::Key::Alt
+            | bevy::input::keyboard::Key::Control
+            | bevy::input::keyboard::Key::Shift
+            | bevy::input::keyboard::Key::Super => continue,
+            _ => {}
+        }
+        
+        // Skip Alt+key combos — these are engine shortcuts (Alt+Z/X/C/V for tools)
+        if alt_held { continue; }
+        
         let text = convert_key_to_slint_text(&event.logical_key);
         if text.is_empty() { continue; }
         
@@ -2422,14 +2566,14 @@ fn update_ui_performance(
     perf.update(time.delta_secs());
 }
 
-/// Syncs the ECS Instance hierarchy to the Slint explorer panel.
-/// Builds a flat list of EntityNode structs with depth info for tree rendering.
+/// Syncs both ECS entities and filesystem to a single unified tree in Slint.
+/// Builds a flat list of TreeNode structs: entities first (services + children),
+/// then filesystem nodes (project root directories/files).
 /// Throttled to run every 30 frames to avoid per-frame overhead.
-fn sync_explorer_to_slint(
+fn sync_unified_explorer_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     perf: Option<Res<UIPerformance>>,
-    explorer_expanded: Res<ExplorerExpanded>,
-    explorer_state: Res<ExplorerState>,
+    mut explorer_state: ResMut<UnifiedExplorerState>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
@@ -2442,6 +2586,13 @@ fn sync_explorer_to_slint(
     let ui = &slint_context.window;
     
     use eustress_common::classes::ClassName;
+    use super::file_icons;
+    
+    let mut tree_nodes: Vec<TreeNode> = Vec::new();
+    
+    // ================================================================
+    // Part 1: Build ECS entity nodes (services + children)
+    // ================================================================
     
     // Build set of all entities that have Instance components
     let instance_entities: std::collections::HashSet<Entity> = 
@@ -2452,19 +2603,16 @@ fn sync_explorer_to_slint(
     for (entity, _instance) in instances.iter() {
         match child_of_query.get(entity) {
             Ok(child_of) => {
-                // If parent is not an Instance entity, treat as root
                 if !instance_entities.contains(&child_of.0) {
                     roots.push(entity);
                 }
             }
             Err(_) => {
-                // No parent → root entity
                 roots.push(entity);
             }
         }
     }
     
-    // Sort roots by name for stable ordering
     roots.sort_by(|a, b| {
         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
@@ -2472,30 +2620,26 @@ fn sync_explorer_to_slint(
     });
     
     // Classify root entities into service buckets
-    // Lighting children: Sky, Atmosphere, Sun, Moon, Clouds
-    // Workspace children: Camera, Part, MeshPart, Model, Folder, and other 3D objects
     let is_lighting_child = |cn: &ClassName| matches!(cn,
         ClassName::Sky | ClassName::Atmosphere | ClassName::Sun | ClassName::Moon | ClassName::Clouds
     );
     
     let mut workspace_roots: Vec<Entity> = Vec::new();
     let mut lighting_roots: Vec<Entity> = Vec::new();
-    let mut other_roots: Vec<Entity> = Vec::new();
     
     for entity in &roots {
         if let Ok((_, instance)) = instances.get(*entity) {
             if is_lighting_child(&instance.class_name) {
                 lighting_roots.push(*entity);
             } else {
-                // Default: workspace children (Camera, Part, Model, etc.)
                 workspace_roots.push(*entity);
             }
         }
     }
     
-    // Helper: build flat node list from a set of roots via DFS, starting at given base depth
-    let build_flat_nodes = |root_list: &[Entity], base_depth: i32| -> Vec<EntityNode> {
-        let mut nodes: Vec<EntityNode> = Vec::new();
+    // Helper: build entity TreeNodes via DFS
+    let build_entity_nodes = |root_list: &[Entity], base_depth: i32| -> Vec<TreeNode> {
+        let mut nodes: Vec<TreeNode> = Vec::new();
         let mut stack: Vec<(Entity, i32)> = root_list.iter().rev().map(|e| (*e, base_depth)).collect();
         
         while let Some((entity, depth)) = stack.pop() {
@@ -2506,20 +2650,26 @@ fn sync_explorer_to_slint(
                 .unwrap_or(false);
             
             let entity_id = instance.id as i32;
-            let is_expanded = explorer_expanded.expanded.contains(&entity);
-            let is_selected = explorer_state.selected == Some(entity);
+            let is_expanded = explorer_state.expanded_entities.contains(&entity);
+            let is_selected = matches!(&explorer_state.selected, SelectedItem::Entity(e) if *e == entity);
             let icon = load_class_icon(&instance.class_name);
             
-            nodes.push(EntityNode {
+            nodes.push(TreeNode {
                 id: entity_id,
                 name: instance.name.clone().into(),
-                class_name: format!("{:?}", instance.class_name).into(),
                 icon,
                 depth,
                 expandable: has_children,
                 expanded: is_expanded,
                 selected: is_selected,
                 visible: true,
+                node_type: "entity".into(),
+                class_name: format!("{:?}", instance.class_name).into(),
+                path: slint::SharedString::default(),
+                is_directory: false,
+                extension: slint::SharedString::default(),
+                size: slint::SharedString::default(),
+                modified: false,
             });
             
             if is_expanded && has_children {
@@ -2541,20 +2691,218 @@ fn sync_explorer_to_slint(
         nodes
     };
     
-    // Build per-service lists at depth 1 (children of hardcoded service TreeItems)
-    let workspace_nodes = build_flat_nodes(&workspace_roots, 1);
-    let lighting_nodes = build_flat_nodes(&lighting_roots, 1);
-    let other_nodes = build_flat_nodes(&other_roots, 0);
+    // Service: Workspace (depth 0) + children (depth 1+)
+    tree_nodes.push(make_service_node("Workspace", "workspace", 0, &explorer_state));
+    if explorer_state.expanded_entities.iter().any(|_| true) || true {
+        // Always show workspace children at depth 1
+        tree_nodes.extend(build_entity_nodes(&workspace_roots, 1));
+    }
     
-    // Push to Slint
-    let ws_rc = std::rc::Rc::new(slint::VecModel::from(workspace_nodes));
-    ui.set_workspace_entities(slint::ModelRc::from(ws_rc));
+    // Service: Lighting (depth 0) + children (depth 1+)
+    tree_nodes.push(make_service_node("Lighting", "lighting", 0, &explorer_state));
+    tree_nodes.extend(build_entity_nodes(&lighting_roots, 1));
     
-    let lt_rc = std::rc::Rc::new(slint::VecModel::from(lighting_nodes));
-    ui.set_lighting_entities(slint::ModelRc::from(lt_rc));
+    // Service: Players (depth 0)
+    tree_nodes.push(make_service_node("Players", "players", 0, &explorer_state));
     
-    let other_rc = std::rc::Rc::new(slint::VecModel::from(other_nodes));
-    ui.set_explorer_entities(slint::ModelRc::from(other_rc));
+    // ================================================================
+    // Part 2: Build filesystem nodes from project root
+    // ================================================================
+    
+    // Clear and rebuild the file_path_cache for reverse ID→path lookup
+    explorer_state.file_path_cache.clear();
+    
+    if explorer_state.project_root.exists() {
+        let project_root = explorer_state.project_root.clone();
+        let expanded_dirs = explorer_state.expanded_dirs.clone();
+        let selected = explorer_state.selected.clone();
+        build_file_tree_nodes(
+            &mut tree_nodes,
+            &project_root,
+            0,
+            &expanded_dirs,
+            &selected,
+            &mut explorer_state.file_path_cache,
+        );
+    }
+    
+    // ================================================================
+    // Part 3: Filter by search query
+    // ================================================================
+    
+    if !explorer_state.search_query.is_empty() {
+        let query = explorer_state.search_query.to_lowercase();
+        for node in tree_nodes.iter_mut() {
+            let name_lower: String = node.name.to_string().to_lowercase();
+            node.visible = name_lower.contains(&query);
+        }
+    }
+    
+    // Push unified tree to Slint
+    let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
+    ui.set_tree_nodes(slint::ModelRc::from(model));
+}
+
+/// Create a service header node (Workspace, Lighting, Players, etc.)
+fn make_service_node(
+    name: &str,
+    icon_name: &str,
+    depth: i32,
+    _state: &UnifiedExplorerState,
+) -> TreeNode {
+    TreeNode {
+        id: -(name.len() as i32), // Negative IDs for services
+        name: name.into(),
+        icon: load_service_icon(icon_name),
+        depth,
+        expandable: true,
+        expanded: true,
+        selected: false,
+        visible: true,
+        node_type: "entity".into(),
+        class_name: name.into(),
+        path: slint::SharedString::default(),
+        is_directory: false,
+        extension: slint::SharedString::default(),
+        size: slint::SharedString::default(),
+        modified: false,
+    }
+}
+
+/// Load icon for a service by name
+fn load_service_icon(name: &str) -> slint::Image {
+    // Service icons are in assets/icons/{name}.svg
+    // For now return default — icons loaded at Slint compile time via @image-url
+    slint::Image::default()
+}
+
+/// Recursively build filesystem TreeNodes from a directory.
+/// Populates `path_cache` with hash_id → PathBuf for reverse lookup in actions.
+fn build_file_tree_nodes(
+    nodes: &mut Vec<TreeNode>,
+    dir: &std::path::Path,
+    depth: i32,
+    expanded_dirs: &std::collections::HashSet<std::path::PathBuf>,
+    selected: &SelectedItem,
+    path_cache: &mut std::collections::HashMap<i32, std::path::PathBuf>,
+) {
+    use super::file_icons;
+    
+    // Read directory entries, skip errors
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        
+        // Skip hidden files/dirs (starting with .) and common noise
+        if name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        
+        if path.is_dir() {
+            dirs.push(path);
+        } else {
+            files.push(path);
+        }
+    }
+    
+    // Sort: directories first (alphabetical), then files (alphabetical)
+    dirs.sort_by(|a, b| {
+        let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        a_name.to_lowercase().cmp(&b_name.to_lowercase())
+    });
+    files.sort_by(|a, b| {
+        let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        a_name.to_lowercase().cmp(&b_name.to_lowercase())
+    });
+    
+    // Emit directory nodes
+    for dir_path in &dirs {
+        let dir_name = file_icons::get_dir_name(dir_path);
+        let is_expanded = expanded_dirs.contains(dir_path);
+        let is_selected = matches!(selected, SelectedItem::File(p) if p == dir_path);
+        let path_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            dir_path.hash(&mut hasher);
+            (hasher.finish() & 0x7FFFFFFF) as i32
+        };
+        
+        // Populate reverse lookup cache
+        path_cache.insert(path_hash, dir_path.clone());
+        
+        nodes.push(TreeNode {
+            id: path_hash,
+            name: dir_name.clone().into(),
+            icon: slint::Image::default(),
+            depth,
+            expandable: true,
+            expanded: is_expanded,
+            selected: is_selected,
+            visible: true,
+            node_type: "file".into(),
+            class_name: slint::SharedString::default(),
+            path: dir_path.to_string_lossy().to_string().into(),
+            is_directory: true,
+            extension: slint::SharedString::default(),
+            size: slint::SharedString::default(),
+            modified: false,
+        });
+        
+        // Recurse into expanded directories
+        if is_expanded {
+            build_file_tree_nodes(nodes, dir_path, depth + 1, expanded_dirs, selected, path_cache);
+        }
+    }
+    
+    // Emit file nodes
+    for file_path in &files {
+        let file_name = file_path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        let ext = file_icons::get_extension(file_path);
+        let is_selected = matches!(selected, SelectedItem::File(p) if p == file_path);
+        let file_size = std::fs::metadata(file_path)
+            .map(|m| file_icons::format_file_size(m.len()))
+            .unwrap_or_default();
+        let path_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            file_path.hash(&mut hasher);
+            (hasher.finish() & 0x7FFFFFFF) as i32
+        };
+        
+        // Populate reverse lookup cache
+        path_cache.insert(path_hash, file_path.clone());
+        
+        nodes.push(TreeNode {
+            id: path_hash,
+            name: file_name.into(),
+            icon: slint::Image::default(),
+            depth,
+            expandable: false,
+            expanded: false,
+            selected: is_selected,
+            visible: true,
+            node_type: "file".into(),
+            class_name: slint::SharedString::default(),
+            path: file_path.to_string_lossy().to_string().into(),
+            is_directory: false,
+            extension: ext.into(),
+            size: file_size.into(),
+            modified: false,
+        });
+    }
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -2563,7 +2911,7 @@ fn sync_explorer_to_slint(
 fn sync_properties_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     perf: Option<Res<UIPerformance>>,
-    explorer_state: Res<ExplorerState>,
+    explorer_state: Res<UnifiedExplorerState>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     transforms: Query<&Transform>,
     base_parts: Query<&eustress_common::classes::BasePart>,
@@ -2575,14 +2923,17 @@ fn sync_properties_to_slint(
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
     
-    let Some(selected_entity) = explorer_state.selected else {
-        // No selection — clear properties and update count
-        ui.set_selected_count(0);
-        ui.set_selected_class(slint::SharedString::default());
-        let empty: Vec<PropertyData> = Vec::new();
-        let model_rc = std::rc::Rc::new(slint::VecModel::from(empty));
-        ui.set_entity_properties(slint::ModelRc::from(model_rc));
-        return;
+    let selected_entity = match &explorer_state.selected {
+        SelectedItem::Entity(e) => *e,
+        _ => {
+            // No selection — clear properties and update count
+            ui.set_selected_count(0);
+            ui.set_selected_class(slint::SharedString::default());
+            let empty: Vec<PropertyData> = Vec::new();
+            let model_rc = std::rc::Rc::new(slint::VecModel::from(empty));
+            ui.set_entity_properties(slint::ModelRc::from(model_rc));
+            return;
+        }
     };
     
     let Ok((_, instance)) = instances.get(selected_entity) else { return };
@@ -2701,6 +3052,35 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
         PropertyValue::Enum(e) => (e.clone(), "enum"),
         PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "string"),
     }
+}
+
+/// Bridges CenterTabManager → StudioState.center_tabs when the tab manager is dirty.
+/// This allows files opened via the unified explorer (OpenNode) to appear in the Slint tab bar.
+fn sync_tab_manager_to_studio_state(
+    mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
+    mut state: Option<ResMut<StudioState>>,
+) {
+    let Some(ref mut mgr) = tab_manager else { return };
+    if !mgr.dirty { return; }
+    let Some(ref mut state) = state else { return };
+    
+    // Rebuild StudioState.center_tabs from CenterTabManager (skip Scene tab at index 0)
+    state.center_tabs = mgr.tabs.iter().skip(1).map(|tab| {
+        CenterTabData {
+            entity_id: tab.entity.map(|e| e.index().index() as i32).unwrap_or(-1),
+            name: tab.name.clone(),
+            tab_type: tab.tab_type.type_string().to_string(),
+            url: tab.url.clone().unwrap_or_default(),
+            dirty: tab.dirty,
+            loading: tab.loading,
+        }
+    }).collect();
+    
+    // Sync active tab index (CenterTabManager is 0-indexed with Scene at 0,
+    // StudioState uses 0 for Scene and 1+ for other tabs)
+    state.active_center_tab = mgr.active_tab as i32;
+    
+    mgr.dirty = false;
 }
 
 /// Syncs center tab state (Space1 + script/web tabs) from StudioState to Slint.
