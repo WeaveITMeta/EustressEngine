@@ -28,6 +28,7 @@ pub mod layers;
 pub mod vector_import;
 pub mod vector_render;
 pub mod spatial_index;
+pub mod terrain_import;
 pub mod plugin;
 
 pub use config::GeoConfig;
@@ -35,3 +36,4 @@ pub use coords::{geo_to_world, GeoOrigin};
 pub use layers::{GeoFeature, GeoLayer, GeoTerrainChunk};
 pub use plugin::GeoPlugin;
 pub use spatial_index::GeoSpatialIndex;
+pub use terrain_import::{HgtTile, PositionedTile};

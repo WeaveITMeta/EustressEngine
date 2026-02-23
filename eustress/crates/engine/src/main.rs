@@ -144,9 +144,6 @@ fn main() {
                 ..default()
             })
         )
-        // Explorer expand/collapse state
-        .init_resource::<ui::ExplorerExpanded>()
-        .init_resource::<ui::ExplorerState>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // Startup args
@@ -229,6 +226,8 @@ fn main() {
         .add_plugins(io_manager::IoManagerPlugin)
         // Telemetry
         .add_plugins(telemetry::TelemetryPlugin)
+        // Geospatial (file-system-first: GeoJSON, GeoTIFF, HGT → 3D terrain + vectors)
+        .add_plugins(eustress_geo::GeoPlugin)
         // Window focus
         .add_plugins(WindowFocusPlugin)
         // Startup

@@ -14,6 +14,7 @@ use crate::config::{GeoConfig, VectorLayerConfig};
 use crate::coords::GeoOrigin;
 use crate::layers::{GeoFeature, GeoLayer, GeoTerrainChunk};
 use crate::spatial_index::{GeoSpatialIndex, IndexedFeature};
+use crate::terrain_import;
 use crate::vector_import::{import_geojson, LocalFeature, LocalGeometry};
 use crate::vector_render::{
     generate_flat_polygon_mesh, generate_marker_mesh, generate_ribbon_mesh, generate_tube_mesh,
@@ -43,6 +44,7 @@ impl Plugin for GeoPlugin {
             // Systems
             .add_systems(Update, (
                 spawn_vector_layers.run_if(resource_exists::<GeoConfig>.and(not(geo_layers_loaded))),
+                spawn_terrain_from_config.run_if(resource_exists::<GeoConfig>.and(not(geo_terrain_loaded))),
                 update_layer_visibility,
             ));
     }
@@ -53,6 +55,8 @@ impl Plugin for GeoPlugin {
 pub struct GeoLoadState {
     /// Whether vector layers have been loaded and spawned
     pub layers_loaded: bool,
+    /// Whether terrain tiles have been loaded and spawned
+    pub terrain_loaded: bool,
     /// Path to the geo.toml directory (for resolving relative paths)
     pub geo_dir: Option<PathBuf>,
 }
@@ -80,6 +84,7 @@ pub fn load_geo_config(path: PathBuf, commands: &mut Commands) -> Result<(), Str
     commands.insert_resource(origin);
     commands.insert_resource(GeoLoadState {
         layers_loaded: false,
+        terrain_loaded: false,
         geo_dir,
     });
 
@@ -323,6 +328,84 @@ fn spawn_feature_mesh(
     )).id();
 
     Some(entity)
+}
+
+/// Run condition: terrain not yet loaded
+fn geo_terrain_loaded(state: Res<GeoLoadState>) -> bool {
+    state.terrain_loaded
+}
+
+/// System: load HGT terrain tiles from geo.toml terrain sources and spawn mesh entities.
+/// Each tile is positioned on the WGS84 orbital grid relative to GeoOrigin.
+fn spawn_terrain_from_config(
+    mut commands: Commands,
+    config: Res<GeoConfig>,
+    origin: Res<GeoOrigin>,
+    mut load_state: ResMut<GeoLoadState>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let geo_dir = match &load_state.geo_dir {
+        Some(dir) => dir.clone(),
+        None => {
+            load_state.terrain_loaded = true;
+            return;
+        }
+    };
+
+    // Collect all HGT tiles from configured terrain sources
+    let mut all_tiles = Vec::new();
+
+    for source in &config.terrain.sources {
+        let source_path = geo_dir.join(&source.path);
+        let extension = source_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        match extension.as_str() {
+            "hgt" => {
+                match terrain_import::HgtTile::load(&source_path) {
+                    Ok(tile) => all_tiles.push(tile),
+                    Err(e) => tracing::error!("Failed to load HGT tile: {}", e),
+                }
+            }
+            _ => {
+                // Check if it's a directory containing .hgt files
+                if source_path.is_dir() {
+                    all_tiles.extend(terrain_import::load_hgt_directory(&source_path));
+                } else {
+                    tracing::warn!(
+                        "Unsupported terrain format '{}' — only .hgt supported in Phase 2",
+                        extension
+                    );
+                }
+            }
+        }
+    }
+
+    if !all_tiles.is_empty() {
+        // Position tiles on the WGS84 orbital grid
+        let positioned = terrain_import::position_tiles(all_tiles, &origin);
+
+        // Spawn terrain mesh entities
+        let entities = terrain_import::spawn_terrain_tiles(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &positioned,
+            config.terrain.vertical_exaggeration,
+            config.terrain.chunk_resolution,
+        );
+
+        tracing::info!(
+            "Spawned {} terrain tiles with {}x vertical exaggeration",
+            entities.len(),
+            config.terrain.vertical_exaggeration,
+        );
+    }
+
+    load_state.terrain_loaded = true;
 }
 
 /// System: sync GeoLayer.visible to Bevy Visibility component

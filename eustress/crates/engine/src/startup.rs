@@ -678,7 +678,7 @@ fn load_startup_scene(
 fn load_scene_file(
     path: &PathBuf,
     commands: &mut Commands,
-    _asset_server: &Res<AssetServer>,
+    asset_server: &Res<AssetServer>,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Result<(), String> {
@@ -690,23 +690,22 @@ fn load_scene_file(
     
     info!("📄 Scene '{}' loaded - {} entities", scene.metadata.name, scene.entities.len());
     
-    // Spawn entities from scene
-    spawn_scene(commands, &scene, meshes, materials);
+    // Spawn entities from scene (file-system-first: .glb meshes via AssetServer)
+    spawn_scene(commands, asset_server, meshes, materials, &scene);
     
     Ok(())
 }
 
-/// Spawn entities from a unified scene
+/// Spawn entities from a unified scene (file-system-first: .glb meshes via AssetServer)
 fn spawn_scene(
     commands: &mut Commands,
-    scene: &eustress_common::scene::Scene,
-    meshes: &mut ResMut<Assets<Mesh>>,
+    asset_server: &AssetServer,
+    _meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
+    scene: &eustress_common::scene::Scene,
 ) {
-    use crate::rendering::PartEntity;
     use crate::classes::{Instance, BasePart, Part, PartType, ClassName, Material};
     use eustress_common::scene::EntityClass;
-    use avian3d::prelude::*;
     
     for entity in &scene.entities {
         // Get transform from entity - rotation is quaternion [x, y, z, w]
@@ -743,25 +742,12 @@ fn spawn_scene(
                     _ => PartType::Block,
                 };
                 
-                let mesh = match shape_type {
-                    PartType::Ball => meshes.add(Sphere::new(size.x / 2.0)),
-                    PartType::Cylinder => meshes.add(Cylinder::new(size.x / 2.0, size.y)),
-                    PartType::Wedge => meshes.add(Cuboid::new(size.x, size.y, size.z)), // TODO: Wedge mesh
-                    PartType::CornerWedge => meshes.add(Cuboid::new(size.x, size.y, size.z)), // TODO: Corner wedge
-                    _ => meshes.add(Cuboid::new(size.x, size.y, size.z)),
-                };
-                
                 let color = Color::srgba(
                     part_data.color[0],
                     part_data.color[1],
                     part_data.color[2],
                     1.0 - part_data.transparency,
                 );
-                
-                let material_handle = materials.add(StandardMaterial {
-                    base_color: color,
-                    ..default()
-                });
                 
                 // Create Instance component for Explorer
                 let instance = Instance {
@@ -814,28 +800,17 @@ fn spawn_scene(
                 // Create Part component with shape
                 let part = Part { shape: shape_type };
                 
-                // Create collider based on shape for physics raycasting (drag-to-move)
-                let collider = match shape_type {
-                    PartType::Ball => Collider::sphere(size.x / 2.0),
-                    PartType::Cylinder => Collider::cylinder(size.x / 2.0, size.y),
-                    _ => Collider::cuboid(size.x, size.y, size.z),
-                };
-                
                 info!("  Spawning '{}' ({:?}) at {:?} size {:?}", entity.name, shape_type, transform.translation, size);
                 
-                // Spawn entity with all required components including collider for surface detection
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material_handle),
-                    transform,
+                // File-system-first: spawn via .glb mesh loaded by AssetServer
+                crate::spawn::spawn_part_glb(
+                    commands,
+                    asset_server,
+                    materials,
                     instance,
                     base_part,
                     part,
-                    collider,
-                    RigidBody::Static, // Static body for editor (no physics simulation)
-                    PartEntity { part_id: entity.name.clone() },
-                    Name::new(entity.name.clone()),
-                ));
+                );
             }
             EntityClass::MeshPart(_mesh_data) => {
                 let instance = Instance {
@@ -852,23 +827,17 @@ fn spawn_scene(
                     ..default()
                 };
                 
-                let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-                let material_handle = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.5, 0.5, 0.5),
-                    ..default()
-                });
+                let part = Part { shape: PartType::Block };
                 
-                commands.spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material_handle),
-                    transform,
+                // File-system-first: spawn via .glb mesh loaded by AssetServer
+                crate::spawn::spawn_part_glb(
+                    commands,
+                    asset_server,
+                    materials,
                     instance,
                     base_part,
-                    Collider::cuboid(1.0, 1.0, 1.0),
-                    RigidBody::Static,
-                    PartEntity { part_id: entity.name.clone() },
-                    Name::new(entity.name.clone()),
-                ));
+                    part,
+                );
             }
             EntityClass::Folder => {
                 let instance = Instance {

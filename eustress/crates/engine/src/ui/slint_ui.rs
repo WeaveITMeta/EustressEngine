@@ -694,7 +694,9 @@ pub struct UnifiedExplorerState {
     pub expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
     /// Search query for filtering
     pub search_query: String,
-    /// Project root directory
+    /// Space root directory — the filesystem scope for the Explorer.
+    /// Defaults to the user's Documents folder. All file browsing is
+    /// relative to this path so the Explorer doesn't show the entire OS.
     pub project_root: std::path::PathBuf,
     /// Cached filesystem tree
     pub file_cache: FileTreeCache,
@@ -704,6 +706,19 @@ pub struct UnifiedExplorerState {
     pub file_path_cache: std::collections::HashMap<i32, std::path::PathBuf>,
 }
 
+/// Resolve the default Space root directory.
+/// Priority: Documents folder → current working directory → "."
+fn default_space_root() -> std::path::PathBuf {
+    // Use the user's Documents folder as the Space root
+    if let Some(docs) = dirs::document_dir() {
+        if docs.exists() {
+            return docs;
+        }
+    }
+    // Fallback to current directory
+    std::env::current_dir().unwrap_or_default()
+}
+
 impl Default for UnifiedExplorerState {
     fn default() -> Self {
         Self {
@@ -711,7 +726,7 @@ impl Default for UnifiedExplorerState {
             expanded_entities: std::collections::HashSet::new(),
             expanded_dirs: std::collections::HashSet::new(),
             search_query: String::new(),
-            project_root: std::env::current_dir().unwrap_or_default(),
+            project_root: default_space_root(),
             file_cache: FileTreeCache::default(),
             dirty: true,
             file_path_cache: std::collections::HashMap::new(),
