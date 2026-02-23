@@ -1,0 +1,71 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Paradip → Prayagraj Pipeline (Node 1)",
+        "node": "Node 1: Paradip",
+        "capacity_m3s": 200,
+        "diameter_m": 4.5,
+        "length_km": 990,
+        "status": "proposed"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [86.61, 20.32, 0],
+          [83.97, 21.47, 170],
+          [81.63, 21.25, 300],
+          [82.57, 25.15, 80],
+          [81.88, 25.43, 98]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kanpur Branch",
+        "parent": "Node 1",
+        "status": "proposed"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [81.88, 25.43, 98],
+          [80.35, 26.45, 126]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Lucknow Branch",
+        "parent": "Node 1",
+        "status": "proposed"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [81.88, 25.43, 98],
+          [80.95, 26.85, 123]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Varanasi Branch",
+        "parent": "Node 1",
+        "status": "proposed"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [81.88, 25.43, 98],
+          [83.01, 25.32, 76]
+        ]
+      }
+    }
+  ]
+}

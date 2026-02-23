@@ -1,0 +1,44 @@
+[project]
+name = "IGBWP — Indo-Gangetic Basin Water Project"
+# Origin: Prayagraj Terminus (primary recharge hub)
+origin_lat = 25.43
+origin_lon = 81.88
+origin_name = "Prayagraj Terminus"
+# UTM Zone 44N covers most of Uttar Pradesh
+target_crs = "EPSG:32644"
+
+[terrain]
+height_scale = 1.0
+vertical_exaggeration = 3.0
+chunk_size = 1000.0
+chunk_resolution = 128
+# SRTM tiles would go here when downloaded:
+# sources = [
+#     { path = "terrain/srtm_n25e081.hgt", format = "hgt" },
+#     { path = "terrain/srtm_n26e080.hgt", format = "hgt" },
+# ]
+
+[[layers.vector]]
+name = "Pipeline Route"
+path = "vectors/pipeline_route.geojson"
+[layers.vector.style]
+color = [0.2, 0.5, 1.0, 1.0]
+width = 20.0
+extrude = true
+height = 5.0
+
+[[layers.vector]]
+name = "Desalination Plants"
+path = "vectors/desal_plants.geojson"
+[layers.vector.style]
+color = [0.1, 0.8, 0.3, 1.0]
+marker = "cube"
+radius = 80.0
+
+[[layers.vector]]
+name = "Pump Stations"
+path = "vectors/pump_stations.geojson"
+[layers.vector.style]
+color = [1.0, 0.3, 0.3, 1.0]
+marker = "cylinder"
+radius = 50.0

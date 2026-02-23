@@ -1,0 +1,55 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Sambalpur Junction",
+        "type": "pump_station",
+        "elevation_m": 170
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [83.97, 21.47, 170]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Raipur Pump Station (Main Lift)",
+        "type": "pump_station",
+        "elevation_m": 300,
+        "notes": "Chhattisgarh plateau — highest point on route"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [81.63, 21.25, 300]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Mirzapur Junction",
+        "type": "pump_station",
+        "elevation_m": 80
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [82.57, 25.15, 80]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Prayagraj Terminus (Recharge Hub)",
+        "type": "terminus",
+        "elevation_m": 98,
+        "notes": "Primary aquifer recharge injection point"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [81.88, 25.43, 98]
+      }
+    }
+  ]
+}

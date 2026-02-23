@@ -1,0 +1,46 @@
+[package]
+name = "eustress-geo"
+version = "0.1.0"
+edition = "2021"
+description = "File-system-first geospatial data for 3D map visualization in Eustress Engine"
+
+[dependencies]
+# Core Bevy ECS + rendering
+bevy = { workspace = true, features = ["bevy_pbr", "bevy_render", "bevy_asset", "bevy_gltf"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tracing = "0.1"
+
+# Geospatial: geometry types + algorithms (area, distance, contains, buffer, simplify)
+geo = "0.29"
+
+# Geospatial: GeoJSON parsing/serialization
+geojson = "0.24"
+
+# Geospatial: R-tree spatial index for runtime queries
+rstar = "0.12"
+
+# Geospatial: coordinate transforms (Rust bindings to PROJ)
+proj = { version = "0.28", optional = true }
+
+# Geospatial: GeoTIFF/TIFF raster reader
+tiff = { version = "0.9", optional = true }
+
+# Geospatial: FlatGeobuf reader (spatial-indexed binary vector format)
+flatgeobuf = { version = "4.3", optional = true }
+
+# Image processing for heightmap export
+image = { version = "0.25", optional = true }
+
+[features]
+default = []
+# Accurate coordinate transforms via PROJ library (requires C dependency: libproj)
+# Enable when PROJ is installed: cargo build -p eustress-geo --features proj-transforms
+proj-transforms = ["proj"]
+# GeoTIFF raster elevation import
+geotiff = ["tiff", "image"]
+# FlatGeobuf large vector dataset support
+flatgeobuf-support = ["flatgeobuf"]

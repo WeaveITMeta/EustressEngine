@@ -1,0 +1,50 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Paradip Desalination Plant",
+        "node": "Node 1",
+        "capacity_m3s": 200,
+        "power_gw": 3,
+        "status": "proposed",
+        "notes": "Major port, IOCL refinery grid, NH-53"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [86.61, 20.32, 0]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Dhamra Desalination Plant",
+        "node": "Node 2",
+        "capacity_m3s": 200,
+        "power_gw": 3,
+        "status": "proposed",
+        "notes": "Adani deep-water port, less congested"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [86.90, 20.75, 0]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Haldia Desalination Plant",
+        "node": "Node 3",
+        "capacity_m3s": 195,
+        "power_gw": 3,
+        "status": "proposed",
+        "notes": "Existing petrochemical port; NH-16 to NH-19"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [88.07, 22.06, 0]
+      }
+    }
+  ]
+}

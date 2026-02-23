@@ -15,7 +15,8 @@ members = [
     "crates/player-mobile",
     "crates/bliss",
     "crates/embedvec",
-    "crates/spatial-llm"
+    "crates/spatial-llm",
+    "crates/geo"
 ]
 
 resolver = "2"
@@ -62,7 +63,7 @@ quinn = "0.11"  # Underlying QUIC transport
 avian3d = { git = "https://github.com/avianphysics/avian", branch = "main", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene"] }
 
 [profile.dev]
-opt-level = 1
+opt-level = 2
 
 [profile.dev.package."*"]
 opt-level = 3
