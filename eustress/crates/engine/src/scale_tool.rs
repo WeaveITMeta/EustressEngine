@@ -201,7 +201,7 @@ fn handle_scale_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
-    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>), With<SelectionBox>>,
+    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>, Option<&crate::spawn::MeshSource>), With<SelectionBox>>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     parent_query: Query<&ChildOf>,
@@ -227,7 +227,7 @@ fn handle_scale_interaction(
     if mouse.just_pressed(MouseButton::Left) {
         let mut clicked_handle = false;
 
-        for (entity, global_transform, transform, basepart_opt, _, _) in query.iter() {
+        for (entity, global_transform, transform, basepart_opt, _, _, _) in query.iter() {
             let t = global_transform.compute_transform();
             let pos = t.translation;
             let rot = t.rotation;
@@ -278,7 +278,7 @@ fn handle_scale_interaction(
 
                 state.initial_scales.clear();
                 state.initial_positions.clear();
-                for (ent, _, trans, bp_opt, _, _) in query.iter() {
+                for (ent, _, trans, bp_opt, _, _, _) in query.iter() {
                     let ent_size = bp_opt.as_ref().map(|bp| bp.size).unwrap_or(Vec3::ONE);
                     state.initial_scales.insert(ent, ent_size);
                     state.initial_positions.insert(ent, trans.translation);
@@ -330,7 +330,7 @@ fn handle_scale_interaction(
 
             let selected_entities: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
 
-            for (entity, global_transform, mut transform, basepart_opt, part_opt, mesh_opt) in query.iter_mut() {
+            for (entity, global_transform, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source) in query.iter_mut() {
                 if is_descendant(entity, &selected_entities, &parent_query) { continue; }
 
                 if let (Some(initial_size), Some(initial_pos)) = (
@@ -339,12 +339,13 @@ fn handle_scale_interaction(
                 ) {
                     let new_size = compute_new_size(axis, *initial_size, effective_drag);
                     let final_size = apply_snap(new_size, &editor_settings);
+                    let has_mesh_source = mesh_source.is_some();
 
                     if ctrl_pressed {
                         // Symmetric: position stays centered
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
-                            &mut meshes, final_size, *initial_pos,
+                            &mut meshes, final_size, *initial_pos, has_mesh_source,
                         );
                     } else {
                         // One-sided: opposite face stays fixed
@@ -363,7 +364,7 @@ fn handle_scale_interaction(
                         let new_pos = *initial_pos + world_offset;
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
-                            &mut meshes, final_size, new_pos,
+                            &mut meshes, final_size, new_pos, has_mesh_source,
                         );
                     }
                 }
@@ -374,7 +375,7 @@ fn handle_scale_interaction(
             let mut old_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
             let mut new_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
 
-            for (entity, _, transform, basepart_opt, _, _) in query.iter() {
+            for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
                 if let (Some(initial_pos), Some(initial_size)) = (
                     state.initial_positions.get(&entity),
                     state.initial_scales.get(&entity),
@@ -471,8 +472,8 @@ fn apply_size_to_entity(
     meshes: &mut Assets<Mesh>,
     size: Vec3,
     pos: Vec3,
+    has_mesh_source: bool,
 ) {
-    transform.scale = Vec3::ONE;
     transform.translation = pos;
 
     if let Some(mut bp) = basepart_opt {
@@ -480,14 +481,21 @@ fn apply_size_to_entity(
         bp.cframe.translation = pos;
     }
 
-    if let (Some(part), Some(mut mesh3d)) = (part_opt, mesh_opt) {
-        let new_mesh = match part.shape {
-            crate::classes::PartType::Block    => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
-            crate::classes::PartType::Ball     => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
-            crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
-            _                                  => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
-        };
-        mesh3d.0 = new_mesh;
+    if has_mesh_source {
+        // File-system-first: .glb mesh is unit-scale, apply size via Transform.scale
+        transform.scale = size;
+    } else {
+        // Legacy: inline mesh generation at actual size, scale stays ONE
+        transform.scale = Vec3::ONE;
+        if let (Some(part), Some(mut mesh3d)) = (part_opt, mesh_opt) {
+            let new_mesh = match part.shape {
+                crate::classes::PartType::Block    => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+                crate::classes::PartType::Ball     => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
+                crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
+                _                                  => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+            };
+            mesh3d.0 = new_mesh;
+        }
     }
 }
 

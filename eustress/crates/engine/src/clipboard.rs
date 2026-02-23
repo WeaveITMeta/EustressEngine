@@ -630,6 +630,7 @@ pub fn handle_paste_event(
     mut events: MessageReader<PasteEvent>,
     mut clipboard: ResMut<EditorClipboard>,
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     current_scene: Option<Res<CurrentScenePath>>,
@@ -672,6 +673,7 @@ pub fn handle_paste_event(
         for entity_data in &clipboard.entities {
             let spawned_id = spawn_entity_from_data(
                 &mut commands,
+                &asset_server,
                 &mut meshes,
                 &mut materials,
                 entity_data,
@@ -724,6 +726,7 @@ pub fn handle_duplicate_event(
 /// Helper function to spawn an entity from ClipboardEntityData2
 fn spawn_entity_from_data(
     commands: &mut Commands,
+    asset_server: &AssetServer,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     data: &ClipboardEntityData2,
@@ -795,7 +798,7 @@ fn spawn_entity_from_data(
             
             let part = Part::default();
             
-            Some(spawn_part(commands, meshes, materials, instance, basepart, part))
+            Some(spawn_part_glb(commands, asset_server, materials, instance, basepart, part))
         }
         ClassName::Model => {
             Some(spawn_model(commands, instance, Model::default()))

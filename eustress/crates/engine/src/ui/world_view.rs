@@ -689,6 +689,7 @@ pub fn extract_world_snapshot(
 pub fn apply_ui_actions(
     action_queue: Option<ResMut<UIActionQueue>>,
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     selection_manager: Option<Res<BevySelectionManager>>,
@@ -751,9 +752,8 @@ pub fn apply_ui_actions(
                 selection_manager.0.write().clear();
             }
             UIAction::SpawnPart { part_type, position } => {
-                // Spawn the part directly using the spawn module
+                // Spawn the part via SpawnPartEvent (file-system-first: .glb meshes)
                 use crate::classes::*;
-                use crate::spawn::spawn_part;
                 
                 info!("🔧 apply_ui_actions: Processing SpawnPart with type {:?}", part_type);
                 
@@ -962,10 +962,10 @@ pub fn apply_ui_actions(
                         };
                         let part = crate::classes::Part { shape: crate::classes::PartType::Block };
                         
-                        // Use spawn_part to create mesh and material
-                        let entity = crate::spawn::spawn_part(
+                        // Spawn part from .glb file (file-system-first)
+                        let entity = crate::spawn::spawn_part_glb(
                             &mut commands,
-                            &mut meshes,
+                            &asset_server,
                             &mut materials,
                             instance,
                             base_part,

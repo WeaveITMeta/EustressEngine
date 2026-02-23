@@ -39,11 +39,11 @@ pub struct PastePartEvent {
     pub locked: bool,
 }
 
-/// System to handle spawn part events
+/// System to handle spawn part events (file-system-first: loads .glb meshes)
 pub fn handle_spawn_part_events(
     mut spawn_events: MessageReader<SpawnPartEvent>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
     selection_manager: Option<Res<BevySelectionManager>>,
@@ -117,11 +117,10 @@ pub fn handle_spawn_part_events(
             shape: event.part_type,
         };
         
-        // Use the proper spawn_part function to create mesh and all components
-        // This returns the Entity that was spawned
-        let spawned_entity = crate::spawn::spawn_part(
+        // Spawn part from .glb file (file-system-first: mesh loaded via AssetServer)
+        let spawned_entity = crate::spawn::spawn_part_glb(
             &mut commands,
-            &mut meshes,
+            &asset_server,
             &mut materials,
             instance,
             base_part,
@@ -156,11 +155,11 @@ pub fn handle_spawn_part_events(
     }
 }
 
-/// System to handle paste part events (from clipboard with full properties)
+/// System to handle paste part events (from clipboard with full properties, file-system-first)
 pub fn handle_paste_part_events(
     mut paste_events: MessageReader<PastePartEvent>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     selection_manager: Option<Res<BevySelectionManager>>,
     play_mode_state: Option<Res<State<PlayModeState>>>,
@@ -216,10 +215,10 @@ pub fn handle_paste_part_events(
             shape: event.part_type,
         };
         
-        // Spawn the part with all properties preserved
-        let spawned_entity = crate::spawn::spawn_part(
+        // Spawn part from .glb file (file-system-first: mesh loaded via AssetServer)
+        let spawned_entity = crate::spawn::spawn_part_glb(
             &mut commands,
-            &mut meshes,
+            &asset_server,
             &mut materials,
             instance,
             base_part,

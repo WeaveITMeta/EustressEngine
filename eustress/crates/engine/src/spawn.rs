@@ -27,14 +27,133 @@ use crate::rendering::PartEntity;
 use eustress_common::{Attributes, Tags};
 
 // ============================================================================
-// Part Spawning
+// File-System-First Mesh Source
 // ============================================================================
 
-/// Spawn a Part entity with mesh, material, and physics collider
+/// Tracks the source .glb file for a part's mesh (file-system-first architecture).
+/// When present, the mesh was loaded from this path rather than generated inline.
+/// The Scale Tool uses Transform.scale instead of regenerating the mesh.
+#[derive(Component, Debug, Clone, Reflect)]
+#[reflect(Component)]
+pub struct MeshSource {
+    /// Relative path to the .glb file (from engine assets root)
+    pub path: String,
+}
+
+impl MeshSource {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+/// Map PartType to the corresponding .glb file path in assets/parts/
+pub fn part_type_to_glb_path(part_type: &PartType) -> &'static str {
+    match part_type {
+        PartType::Block => "parts/block.glb",
+        PartType::Ball => "parts/ball.glb",
+        PartType::Cylinder => "parts/cylinder.glb",
+        PartType::Wedge => "parts/wedge.glb",
+        PartType::CornerWedge => "parts/corner_wedge.glb",
+        PartType::Cone => "parts/cone.glb",
+    }
+}
+
+// ============================================================================
+// Part Spawning (file-system-first: .glb via AssetServer)
+// ============================================================================
+
+/// Spawn a Part entity by loading its mesh from a .glb file via AssetServer.
+///
+/// The .glb mesh is unit-scale (1×1×1). BasePart.size is applied via Transform.scale.
+/// This replaces inline mesh generation with file-system-first asset loading.
+pub fn spawn_part_glb(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    instance: Instance,
+    base_part: BasePart,
+    part: Part,
+) -> Entity {
+    let name = instance.name.clone();
+    let size = base_part.size;
+    let glb_path = part_type_to_glb_path(&part.shape);
+    
+    // Load mesh from .glb file (unit-scale, AssetServer handles caching)
+    let mesh: Handle<Mesh> = asset_server.load(
+        format!("{}#Mesh0/Primitive0", glb_path)
+    );
+    
+    // Create collider at ACTUAL SIZE for physics raycasting
+    let collider = match part.shape {
+        PartType::Ball => Collider::sphere(size.x / 2.0),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(size.x / 2.0, size.y),
+        _ => Collider::cuboid(size.x, size.y, size.z),
+    };
+    
+    // Create material with special handling for Glass
+    let (roughness, metallic, reflectance) = base_part.material.pbr_params();
+    let is_glass = matches!(base_part.material, crate::classes::Material::Glass);
+    let transparency = base_part.transparency;
+    
+    let material = materials.add(StandardMaterial {
+        base_color: base_part.color,
+        perceptual_roughness: roughness,
+        metallic,
+        reflectance,
+        alpha_mode: if transparency > 0.0 {
+            AlphaMode::Blend
+        } else {
+            AlphaMode::Opaque
+        },
+        specular_transmission: if is_glass { 0.9 } else { 0.0 },
+        diffuse_transmission: if is_glass { 0.3 } else { 0.0 },
+        thickness: if is_glass { 0.5 } else { 0.0 },
+        ior: if is_glass { 1.5 } else { 1.5 },
+        ..default()
+    });
+    
+    let no_shadow = transparency >= 0.5;
+    let glass_with_transmission = is_glass && transparency < 0.5;
+    
+    // Apply size via Transform.scale (mesh is unit-scale from .glb)
+    let mut transform = base_part.cframe;
+    transform.scale = size;
+    
+    let entity = commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        transform,
+        instance,
+        base_part,
+        part,
+        collider,
+        RigidBody::Static,
+        Name::new(name),
+        PartEntity { part_id: String::new() },
+        MeshSource::new(glb_path),
+        Attributes::new(),
+        Tags::new(),
+    )).id();
+    
+    if no_shadow {
+        commands.entity(entity).insert(NotShadowCaster);
+    }
+    if glass_with_transmission {
+        commands.entity(entity).insert(TransmittedShadowReceiver);
+    }
+    
+    entity
+}
+
+// ============================================================================
+// Part Spawning (legacy: inline mesh generation)
+// ============================================================================
+
+/// Spawn a Part entity with inline mesh generation (legacy fallback).
 /// 
-/// NOTE: Meshes are created at ACTUAL SIZE (BasePart.size).
+/// NOTE: Prefer spawn_part_glb() for file-system-first workflow.
+/// This function creates meshes at ACTUAL SIZE (BasePart.size).
 /// Transform.scale should remain Vec3::ONE.
-/// The Scale Tool updates BasePart.size and regenerates the mesh.
 pub fn spawn_part(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,

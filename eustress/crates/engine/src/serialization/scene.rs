@@ -873,7 +873,7 @@ fn spawn_entity_from_data(
         ClassName::Part => {
             let base_part = basepart_from_properties(&data.properties);
             let part = part_from_properties(&data.properties);
-            spawn_part(commands, meshes, materials, instance, base_part, part)
+            spawn_part_glb(commands, asset_server, materials, instance, base_part, part)
         }
         ClassName::MeshPart => {
             let base_part = basepart_from_properties(&data.properties);
