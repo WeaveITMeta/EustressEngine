@@ -169,8 +169,9 @@ impl CenterTabManager {
             self.dirty = true;
             return idx;
         }
+        let id = self.next_id();
         self.push_tab(CenterTabEntry {
-            id: self.next_id(),
+            id,
             name: name.to_string(),
             tab_type: CenterTabType::SoulScript,
             entity: Some(entity),
@@ -190,8 +191,9 @@ impl CenterTabManager {
             self.dirty = true;
             return idx;
         }
+        let id = self.next_id();
         self.push_tab(CenterTabEntry {
-            id: self.next_id(),
+            id,
             name: format!("{} - Parameters", name),
             tab_type: CenterTabType::ParametersEditor,
             entity: Some(entity),
@@ -230,8 +232,9 @@ impl CenterTabManager {
             _ => String::new(),
         };
 
+        let id = self.next_id();
         self.push_tab(CenterTabEntry {
-            id: self.next_id(),
+            id,
             name: file_name,
             tab_type,
             entity: None,
@@ -246,8 +249,9 @@ impl CenterTabManager {
 
     /// Open a web browser tab
     pub fn open_web_tab(&mut self, url: &str, title: &str) -> usize {
+        let id = self.next_id();
         self.push_tab(CenterTabEntry {
-            id: self.next_id(),
+            id,
             name: title.to_string(),
             tab_type: CenterTabType::WebBrowser,
             entity: None,
