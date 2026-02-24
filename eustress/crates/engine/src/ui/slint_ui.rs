@@ -486,6 +486,7 @@ pub struct StudioState {
     // Center tab management (Space1 + script/web tabs)
     pub center_tabs: Vec<CenterTabData>,
     pub active_center_tab: i32,          // 0 = Space1, 1+ = tab index
+    pub tabs_dirty: bool,                // Set when CenterTabManager updates tabs
     pub pending_open_script: Option<(i32, String)>,
     pub pending_open_web: Option<String>, // URL to open in new web tab
     pub pending_close_tab: Option<i32>,
@@ -564,6 +565,7 @@ impl Default for StudioState {
             mindspace_font_size: 14.0,
             center_tabs: Vec::new(),
             active_center_tab: 0,
+            tabs_dirty: false,
             pending_open_script: None,
             pending_open_web: None,
             pending_close_tab: None,
@@ -707,15 +709,33 @@ pub struct UnifiedExplorerState {
 }
 
 /// Resolve the default Space root directory.
-/// Priority: Documents folder → current working directory → "."
+/// Priority: Documents/Eustress/Universe1/spaces/Space1 → Documents/Eustress/Universe1 → Documents/Eustress → Documents → current dir
 fn default_space_root() -> std::path::PathBuf {
-    // Use the user's Documents folder as the Space root
     if let Some(docs) = dirs::document_dir() {
+        // Check for Documents/Eustress/Universe1/spaces/Space1 (default Space)
+        let space1 = docs.join("Eustress").join("Universe1").join("spaces").join("Space1");
+        if space1.exists() && space1.is_dir() {
+            return space1;
+        }
+        
+        // Check for Documents/Eustress/Universe1 (Universe root)
+        let universe1 = docs.join("Eustress").join("Universe1");
+        if universe1.exists() && universe1.is_dir() {
+            return universe1;
+        }
+        
+        // Check for Documents/Eustress (workspace root)
+        let eustress = docs.join("Eustress");
+        if eustress.exists() && eustress.is_dir() {
+            return eustress;
+        }
+        
+        // Fallback to Documents folder
         if docs.exists() {
             return docs;
         }
     }
-    // Fallback to current directory
+    // Final fallback to current directory
     std::env::current_dir().unwrap_or_default()
 }
 
@@ -1579,6 +1599,7 @@ struct DrainResources<'w> {
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
+    file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -1593,6 +1614,7 @@ fn drain_slint_actions(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     let Some(queue) = queue else { return };
     let actions = queue.drain();
@@ -2208,67 +2230,129 @@ fn drain_slint_actions(
                 }
             }
             
-            // Toolbox insertion — parts via SpawnPartEvent, others via direct spawn
+            // Toolbox insertion — mesh primitives create .glb.toml instance files,
+            // non-mesh items (lights, folders, etc.) spawn directly
             SlintAction::InsertPart(part_type_str) => {
-                use eustress_common::classes::PartType;
                 use crate::classes::*;
                 
-                // Generate unique instance ID
+                // Generate unique instance ID for non-mesh items
                 let uid = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() % u32::MAX as u128) as u32;
                 
-                match part_type_str.as_str() {
-                    // Primitive parts → SpawnPartEvent (handled by existing system)
-                    "Part" | "Block" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Block, position: Vec3::new(0.0, 5.0, 0.0) }); }
-                    "SpherePart" | "Ball" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Ball, position: Vec3::new(0.0, 5.0, 0.0) }); }
-                    "CylinderPart" | "Cylinder" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Cylinder, position: Vec3::new(0.0, 5.0, 0.0) }); }
-                    "WedgePart" | "Wedge" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Wedge, position: Vec3::new(0.0, 5.0, 0.0) }); }
-                    "CornerWedgePart" | "CornerWedge" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::CornerWedge, position: Vec3::new(0.0, 5.0, 0.0) }); }
-                    "Cone" => { events.spawn_events.write(super::SpawnPartEvent { part_type: PartType::Cone, position: Vec3::new(0.0, 5.0, 0.0) }); }
+                // Map Toolbox button IDs to mesh catalog IDs
+                let mesh_id = match part_type_str.as_str() {
+                    "Part" | "Block" => Some("block"),
+                    "SpherePart" | "Ball" => Some("ball"),
+                    "CylinderPart" | "Cylinder" => Some("cylinder"),
+                    "WedgePart" | "Wedge" => Some("wedge"),
+                    "CornerWedgePart" | "CornerWedge" => Some("corner_wedge"),
+                    "Cone" => Some("cone"),
+                    _ => None,
+                };
+                
+                if let Some(mesh_id) = mesh_id {
+                    // Mesh primitive → create .glb.toml instance file + spawn entity inline
+                    let space_root = std::path::PathBuf::from(
+                        "C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1"
+                    );
                     
-                    // Model — empty container
-                    "Model" => {
-                        let inst = Instance { name: "Model".into(), class_name: ClassName::Model, archivable: true, id: uid, ..Default::default() };
-                        crate::spawn::spawn_model(&mut commands, inst, Model::default());
-                        if let Some(ref mut out) = res.output { out.info("Inserted Model".to_string()); }
+                    match crate::toolbox::insert_mesh_instance(
+                        &space_root,
+                        mesh_id,
+                        [0.0, 5.0, 0.0],
+                        None,
+                    ) {
+                        Ok(toml_path) => {
+                            // Spawn entity inline (don't wait for file watcher)
+                            if let Ok(instance_def) = crate::space::load_instance_definition(&toml_path) {
+                                let entity = crate::space::instance_loader::spawn_instance(
+                                    &mut commands,
+                                    &asset_server,
+                                    &space_root,
+                                    toml_path.clone(),
+                                    instance_def,
+                                );
+                                
+                                // Register in SpaceFileRegistry
+                                if let Some(mut registry) = res.file_registry.as_mut() {
+                                    let name = toml_path.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("Unknown")
+                                        .trim_end_matches(".glb")
+                                        .to_string();
+                                    registry.register(
+                                        toml_path.clone(),
+                                        entity,
+                                        crate::space::FileMetadata {
+                                            path: toml_path,
+                                            file_type: crate::space::FileType::Toml,
+                                            service: "Workspace".to_string(),
+                                            name: name.clone(),
+                                            size: 0,
+                                            modified: std::time::SystemTime::now(),
+                                        },
+                                    );
+                                }
+                                
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Inserted {} (instance file created)", part_type_str));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to insert mesh instance: {}", e);
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Failed to insert {}: {}", part_type_str, e));
+                            }
+                        }
                     }
-                    
-                    // Folder — organizational container
-                    "Folder" => {
-                        let inst = Instance { name: "Folder".into(), class_name: ClassName::Folder, archivable: true, id: uid, ..Default::default() };
-                        crate::spawn::spawn_folder(&mut commands, inst);
-                        if let Some(ref mut out) = res.output { out.info("Inserted Folder".to_string()); }
-                    }
-                    
-                    // PointLight
-                    "PointLight" => {
-                        let inst = Instance { name: "PointLight".into(), class_name: ClassName::PointLight, archivable: true, id: uid, ..Default::default() };
-                        let light = EustressPointLight::default();
-                        crate::spawn::spawn_point_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0));
-                        if let Some(ref mut out) = res.output { out.info("Inserted PointLight".to_string()); }
-                    }
-                    
-                    // SpotLight
-                    "SpotLight" => {
-                        let inst = Instance { name: "SpotLight".into(), class_name: ClassName::SpotLight, archivable: true, id: uid, ..Default::default() };
-                        let light = EustressSpotLight::default();
-                        crate::spawn::spawn_spot_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y));
-                        if let Some(ref mut out) = res.output { out.info("Inserted SpotLight".to_string()); }
-                    }
-                    
-                    // DirectionalLight
-                    "DirectionalLight" => {
-                        let inst = Instance { name: "DirectionalLight".into(), class_name: ClassName::DirectionalLight, archivable: true, id: uid, ..Default::default() };
-                        let light = EustressDirectionalLight::default();
-                        crate::spawn::spawn_directional_light(&mut commands, inst, light, Transform::from_xyz(0.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y));
-                        if let Some(ref mut out) = res.output { out.info("Inserted DirectionalLight".to_string()); }
-                    }
-                    
-                    _ => {
-                        if let Some(ref mut out) = res.output {
-                            out.info(format!("Insert not yet supported: {}", part_type_str));
+                } else {
+                    // Non-mesh items: keep existing direct spawn behavior
+                    match part_type_str.as_str() {
+                        // Model — empty container
+                        "Model" => {
+                            let inst = Instance { name: "Model".into(), class_name: ClassName::Model, archivable: true, id: uid, ..Default::default() };
+                            crate::spawn::spawn_model(&mut commands, inst, Model::default());
+                            if let Some(ref mut out) = res.output { out.info("Inserted Model".to_string()); }
+                        }
+                        
+                        // Folder — organizational container
+                        "Folder" => {
+                            let inst = Instance { name: "Folder".into(), class_name: ClassName::Folder, archivable: true, id: uid, ..Default::default() };
+                            crate::spawn::spawn_folder(&mut commands, inst);
+                            if let Some(ref mut out) = res.output { out.info("Inserted Folder".to_string()); }
+                        }
+                        
+                        // PointLight
+                        "PointLight" => {
+                            let inst = Instance { name: "PointLight".into(), class_name: ClassName::PointLight, archivable: true, id: uid, ..Default::default() };
+                            let light = EustressPointLight::default();
+                            crate::spawn::spawn_point_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0));
+                            if let Some(ref mut out) = res.output { out.info("Inserted PointLight".to_string()); }
+                        }
+                        
+                        // SpotLight
+                        "SpotLight" => {
+                            let inst = Instance { name: "SpotLight".into(), class_name: ClassName::SpotLight, archivable: true, id: uid, ..Default::default() };
+                            let light = EustressSpotLight::default();
+                            crate::spawn::spawn_spot_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y));
+                            if let Some(ref mut out) = res.output { out.info("Inserted SpotLight".to_string()); }
+                        }
+                        
+                        // DirectionalLight
+                        "DirectionalLight" => {
+                            let inst = Instance { name: "DirectionalLight".into(), class_name: ClassName::DirectionalLight, archivable: true, id: uid, ..Default::default() };
+                            let light = EustressDirectionalLight::default();
+                            crate::spawn::spawn_directional_light(&mut commands, inst, light, Transform::from_xyz(0.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y));
+                            if let Some(ref mut out) = res.output { out.info("Inserted DirectionalLight".to_string()); }
+                        }
+                        
+                        _ => {
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Insert not yet supported: {}", part_type_str));
+                            }
                         }
                     }
                 }
@@ -2631,7 +2715,14 @@ fn sync_unified_explorer_to_slint(
     roots.sort_by(|a, b| {
         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        a_name.cmp(b_name)
+        
+        // Pin Camera at the top
+        match (a_name, b_name) {
+            ("Camera", "Camera") => std::cmp::Ordering::Equal,
+            ("Camera", _) => std::cmp::Ordering::Less,
+            (_, "Camera") => std::cmp::Ordering::Greater,
+            _ => a_name.cmp(b_name),
+        }
     });
     
     // Classify root entities into service buckets
@@ -2695,7 +2786,14 @@ fn sync_unified_explorer_to_slint(
                     child_instances.sort_by(|a, b| {
                         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
                         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        a_name.cmp(b_name)
+                        
+                        // Pin Camera at the top
+                        match (a_name, b_name) {
+                            ("Camera", "Camera") => std::cmp::Ordering::Equal,
+                            ("Camera", _) => std::cmp::Ordering::Less,
+                            (_, "Camera") => std::cmp::Ordering::Greater,
+                            _ => a_name.cmp(b_name),
+                        }
                     });
                     for child in child_instances.into_iter().rev() {
                         stack.push((child, depth + 1));
@@ -2855,10 +2953,52 @@ fn build_file_tree_nodes(
         // Populate reverse lookup cache
         path_cache.insert(path_hash, dir_path.clone());
         
+        let folder_icon_name = if is_expanded {
+            match dir_name.to_lowercase().as_str() {
+                "src" | "source" => "folder-src-open",
+                "assets" | "resources" | "res" => "folder-assets-open",
+                "docs" | "documentation" | "doc" => "folder-docs-open",
+                "test" | "tests" | "__tests__" | "spec" | "specs" => "folder-test-open",
+                "config" | "configs" | "configuration" | ".config" => "folder-config-open",
+                "dist" | "build" | "out" | "output" => "folder-dist-open",
+                "scripts" | "script" => "folder-scripts-open",
+                "lib" | "libs" | "library" | "libraries" => "folder-lib-open",
+                "target" | "bin" | "obj" => "folder-target-open",
+                ".git" => "folder-git-open",
+                ".github" | ".gitlab" => "folder-github-open",
+                ".vscode" | ".idea" | ".vs" => "folder-vscode-open",
+                "images" | "imgs" | "img" | "pictures" | "pics" => "folder-images-open",
+                _ => "folder-open",
+            }
+        } else {
+            match dir_name.to_lowercase().as_str() {
+                "src" | "source" => "folder-src",
+                "assets" | "resources" | "res" => "folder-assets",
+                "docs" | "documentation" | "doc" => "folder-docs",
+                "test" | "tests" | "__tests__" | "spec" | "specs" => "folder-test",
+                "config" | "configs" | "configuration" | ".config" => "folder-config",
+                "dist" | "build" | "out" | "output" => "folder-dist",
+                "scripts" | "script" => "folder-scripts",
+                "lib" | "libs" | "library" | "libraries" => "folder-lib",
+                "target" | "bin" | "obj" => "folder-target",
+                ".git" => "folder-git",
+                ".github" | ".gitlab" => "folder-github",
+                ".vscode" | ".idea" | ".vs" => "folder-vscode",
+                "images" | "imgs" | "img" | "pictures" | "pics" => "folder-images",
+                _ => "folder",
+            }
+        };
+        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("icons")
+            .join("folders")
+            .join(format!("{}.svg", folder_icon_name));
+        let icon = slint::Image::load_from_path(&icon_path).unwrap_or_default();
+        
         nodes.push(TreeNode {
             id: path_hash,
             name: dir_name.clone().into(),
-            icon: slint::Image::default(),
+            icon,
             depth,
             expandable: true,
             expanded: is_expanded,
@@ -2900,10 +3040,39 @@ fn build_file_tree_nodes(
         // Populate reverse lookup cache
         path_cache.insert(path_hash, file_path.clone());
         
+        let file_icon_name = match ext.to_lowercase().as_str() {
+            "rs" | "ron" => "rust",
+            "lua" => "lua",
+            "js" | "mjs" | "cjs" => "javascript",
+            "ts" | "mts" | "cts" => "typescript",
+            "py" => "python",
+            "json" | "jsonc" => "json",
+            "toml" => "toml",
+            "yaml" | "yml" => "yaml",
+            "xml" | "xsl" | "xsd" => "xml",
+            "html" | "htm" => "html",
+            "css" => "css",
+            "md" | "markdown" => "markdown",
+            "svg" => "svg",
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "ico" | "tga" | "tiff" | "tif" => "image",
+            "mp4" | "webm" | "mov" | "avi" | "mkv" | "flv" | "wmv" => "video",
+            "wav" | "ogg" | "mp3" | "flac" | "aac" | "m4a" | "opus" => "audio",
+            "pdf" => "pdf",
+            "glb" | "gltf" => "model",
+            "hgt" | "tif" | "tiff" | "geotiff" => "image",
+            _ => "file",
+        };
+        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("icons")
+            .join("filetypes")
+            .join(format!("{}.svg", file_icon_name));
+        let icon = slint::Image::load_from_path(&icon_path).unwrap_or_default();
+        
         nodes.push(TreeNode {
             id: path_hash,
             name: file_name.into(),
-            icon: slint::Image::default(),
+            icon,
             depth,
             expandable: false,
             expanded: false,
@@ -3095,6 +3264,9 @@ fn sync_tab_manager_to_studio_state(
     // StudioState uses 0 for Scene and 1+ for other tabs)
     state.active_center_tab = mgr.active_tab as i32;
     
+    // Mark tabs as dirty so sync_center_tabs_to_slint will push to Slint
+    state.tabs_dirty = true;
+    
     mgr.dirty = false;
 }
 
@@ -3108,7 +3280,11 @@ fn sync_center_tabs_to_slint(
     let Some(ref mut state) = state else { return };
     let ui = &slint_context.window;
     
-    let mut tabs_changed = false;
+    // Check if tabs were updated by CenterTabManager sync
+    let mut tabs_changed = state.tabs_dirty;
+    if state.tabs_dirty {
+        state.tabs_dirty = false;
+    }
     
     // Process pending open script request
     if let Some((entity_id, name)) = state.pending_open_script.take() {

@@ -102,6 +102,7 @@ export component Toolbox inherits Rectangle {
     // Properties
     in property <string> current-tool: "select";
     in property <[ToolItem]> tools: [];
+    in-out property <string> search-query: "";
     
     // Callbacks
     callback on-select-tool(string);
@@ -109,85 +110,168 @@ export component Toolbox inherits Rectangle {
     
     background: Theme.panel-background;
     
-    ScrollView {
-        VerticalLayout {
-            padding: 8px;
-            spacing: 8px;
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+        
+        // Search bar
+        Rectangle {
+            height: 28px;
+            background: Theme.input-background;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.input-border;
             
-            // Primitives
-            PanelHeader {
-                title: "Primitives";
-                collapsible: true;
+            HorizontalBox {
+                padding-left: 8px;
+                padding-right: 4px;
+                spacing: 4px;
+                
+                Image {
+                    source: @image-url("../../assets/icons/ui/search.svg");
+                    width: 14px;
+                    height: 14px;
+                    vertical-alignment: center;
+                    colorize: Theme.text-secondary;
+                }
+                
+                search-input := TextInput {
+                    text <=> root.search-query;
+                    font-size: 11px;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                }
+                
+                // Clear button (only visible when search has text)
+                if root.search-query != "" : Rectangle {
+                    width: 20px;
+                    border-radius: 3px;
+                    background: clear-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                    
+                    clear-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.search-query = ""; }
+                    }
+                    
+                    Text {
+                        text: "✕";
+                        font-size: 10px;
+                        color: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
             }
-            
-            // Row 1: 4 items
-            Rectangle {
-                height: 64px;
-                property <length> row-w: 4 * 64px + 3 * 4px;
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/block.svg"); label: "Block"; clicked => { root.on-insert-part("Part"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/sphere.svg"); label: "Sphere"; clicked => { root.on-insert-part("SpherePart"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/wedge.svg"); label: "Wedge"; clicked => { root.on-insert-part("WedgePart"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 3 * 68px; icon: @image-url("../../assets/icons/ui/cylinder.svg"); label: "Cylinder"; clicked => { root.on-insert-part("CylinderPart"); } }
-            }
-            
-            // Row 2: 2 items
-            Rectangle {
-                height: 64px;
-                property <length> row-w: 2 * 64px + 1 * 4px;
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/corner.svg"); label: "Corner"; clicked => { root.on-insert-part("CornerWedgePart"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/truss.svg"); label: "Truss"; clicked => { root.on-insert-part("TrussPart"); } }
-            }
-            
-            // Models
-            PanelHeader {
-                title: "Models";
-                collapsible: true;
-            }
-            
-            Rectangle {
-                height: 64px;
-                property <length> row-w: 2 * 64px + 1 * 4px;
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/package.svg"); label: "Model"; clicked => { root.on-insert-part("Model"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/group.svg"); label: "Folder"; clicked => { root.on-insert-part("Folder"); } }
-            }
-            
-            // Lighting
-            PanelHeader {
-                title: "Lighting";
-                collapsible: true;
-            }
-            
-            Rectangle {
-                height: 64px;
-                property <length> row-w: 3 * 64px + 2 * 4px;
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Point"; clicked => { root.on-insert-part("PointLight"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/flashlight.svg"); label: "Spot"; clicked => { root.on-insert-part("SpotLight"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Surface"; clicked => { root.on-insert-part("SurfaceLight"); } }
-            }
-            
-            // Physics
-            PanelHeader {
-                title: "Physics";
-                collapsible: true;
-            }
-            
-            Rectangle {
-                height: 64px;
-                property <length> row-w: 3 * 64px + 2 * 4px;
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; clicked => { root.on-insert-part("Attachment"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/link.svg"); label: "Weld"; clicked => { root.on-insert-part("WeldConstraint"); } }
-                ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/hinge.svg"); label: "Hinge"; clicked => { root.on-insert-part("HingeConstraint"); } }
-            }
-            
-            // Scripts
-            PanelHeader {
-                title: "Scripts";
-                collapsible: true;
-            }
-            
-            Rectangle {
-                height: 64px;
-                ToolButton { x: (parent.width - 64px) / 2; icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; clicked => { root.on-insert-part("SoulScript"); } }
+        }
+        
+        ScrollView {
+            VerticalLayout {
+                padding-top: 4px;
+                spacing: 6px;
+                
+                // Primitives
+                PanelHeader {
+                    title: "Primitives";
+                    collapsible: true;
+                }
+                
+                // Row 1: Block, Sphere, Wedge, Cylinder
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 4 * 64px + 3 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/block.svg"); label: "Block"; tooltip: "Basic building block"; clicked => { root.on-insert-part("Block"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/sphere.svg"); label: "Sphere"; tooltip: "Round sphere"; clicked => { root.on-insert-part("Ball"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/wedge.svg"); label: "Wedge"; tooltip: "Triangular wedge - ramps and roofs"; clicked => { root.on-insert-part("Wedge"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 3 * 68px; icon: @image-url("../../assets/icons/ui/cylinder.svg"); label: "Cylinder"; tooltip: "Cylindrical shape - pillars and poles"; clicked => { root.on-insert-part("Cylinder"); } }
+                }
+                
+                // Row 2: Corner Wedge, Cone
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 2 * 64px + 1 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/corner.svg"); label: "Corner"; tooltip: "Corner wedge - roof corners"; clicked => { root.on-insert-part("CornerWedge"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/cone.svg"); label: "Cone"; tooltip: "Cone shape - decorative element"; clicked => { root.on-insert-part("Cone"); } }
+                }
+                
+                // Models
+                PanelHeader {
+                    title: "Models";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 2 * 64px + 1 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/package.svg"); label: "Model"; tooltip: "Empty model container"; clicked => { root.on-insert-part("Model"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/group.svg"); label: "Folder"; tooltip: "Organizational folder"; clicked => { root.on-insert-part("Folder"); } }
+                }
+                
+                // Lighting
+                PanelHeader {
+                    title: "Lighting";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 3 * 64px + 2 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Point"; tooltip: "Omnidirectional light source"; clicked => { root.on-insert-part("PointLight"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/flashlight.svg"); label: "Spot"; tooltip: "Directional cone light"; clicked => { root.on-insert-part("SpotLight"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Surface"; tooltip: "Surface light emitter"; clicked => { root.on-insert-part("SurfaceLight"); } }
+                }
+                
+                // Gameplay
+                PanelHeader {
+                    title: "Gameplay";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 2 * 64px + 1 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Spawn"; tooltip: "Player spawn location"; clicked => { root.on-insert-part("SpawnPoint"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Sittable seat"; clicked => { root.on-insert-part("Seat"); } }
+                }
+                
+                // Physics
+                PanelHeader {
+                    title: "Physics";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 3 * 64px + 2 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; tooltip: "Attachment point"; clicked => { root.on-insert-part("Attachment"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/link.svg"); label: "Weld"; tooltip: "Weld constraint - join two parts"; clicked => { root.on-insert-part("WeldConstraint"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/hinge.svg"); label: "Hinge"; tooltip: "Hinge constraint - rotational joint"; clicked => { root.on-insert-part("HingeConstraint"); } }
+                }
+                
+                // Effects
+                PanelHeader {
+                    title: "Effects";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    property <length> row-w: 3 * 64px + 2 * 4px;
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/fire.svg"); label: "Particle"; tooltip: "Particle emitter"; clicked => { root.on-insert-part("ParticleEmitter"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/audio.svg"); label: "Sound"; tooltip: "Sound emitter"; clicked => { root.on-insert-part("Sound"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 2 * 68px; icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "3D billboard GUI"; clicked => { root.on-insert-part("BillboardGui"); } }
+                }
+                
+                // Scripts
+                PanelHeader {
+                    title: "Scripts";
+                    collapsible: true;
+                }
+                
+                Rectangle {
+                    height: 64px;
+                    ToolButton { x: (parent.width - 64px) / 2; icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; tooltip: "Soul script (.soul → .rune)"; clicked => { root.on-insert-part("SoulScript"); } }
+                }
             }
         }
     }
