@@ -48,6 +48,8 @@ pub mod move_tool;
 pub mod rotate_tool;
 pub mod scale_tool;
 pub mod select_tool;
+// pub mod space; // TODO: WIP - has compilation errors, needs toml crate + fixes
+pub mod toolbox;
 pub mod selection_box;
 pub mod selection_sync;
 pub mod part_selection;

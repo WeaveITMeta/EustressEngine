@@ -1008,10 +1008,10 @@ export component Ribbon inherits Rectangle {
                 // ── TOOLS group ──
                 ToolGroup {
                     label: "Tools";
-                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; tooltip: "Select (Q)"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; tooltip: "Move (W)"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; tooltip: "Scale (E)"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; tooltip: "Rotate (R)"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; tooltip: "Select (Alt+Z)"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; tooltip: "Move (Alt+X)"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; tooltip: "Scale (Alt+C)"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; tooltip: "Rotate (Alt+V)"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
                 }
                 GroupDivider {}
                 

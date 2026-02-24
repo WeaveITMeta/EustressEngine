@@ -42,6 +42,7 @@ pub fn setup_default_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     skybox_handle: Res<SkyboxHandle>,
     startup_args: Res<StartupArgs>,
+    asset_server: Res<AssetServer>,
 ) {
     // Check if we're loading a scene file - if so, skip default content
     let loading_scene_file = startup_args.scene_file.is_some();
@@ -85,15 +86,63 @@ pub fn setup_default_scene(
     // =========================================================================
     
     if !loading_scene_file {
-        // Spawn baseplate (512x1x512 dark gray) - shared with client
-        let baseplate_entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
-        println!("🟫 Spawned Baseplate entity: {:?}", baseplate_entity);
+        // FILE-SYSTEM-FIRST: Load all default parts from Universe1/spaces/Space1/Workspace
+        let universe_path = std::path::PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1");
+        let workspace_path = universe_path.join("spaces/Space1/Workspace");
         
-        // Spawn welcome cube (2x2x2 green) - shared with client
-        let cube_entity = eustress_common::spawn_welcome_cube(&mut commands, &mut meshes, &mut materials);
-        println!("🟩 Spawned Welcome Cube entity: {:?}", cube_entity);
+        // Load Baseplate from .glb file
+        let baseplate_path = workspace_path.join("Baseplate.glb");
+        if baseplate_path.exists() {
+            let baseplate_scene = asset_server.load(format!("{}#Scene0", baseplate_path.display()));
+            let baseplate_entity = commands.spawn((
+                SceneRoot(baseplate_scene),
+                Transform::from_xyz(0.0, -0.5, 0.0),
+                eustress_common::classes::Instance {
+                    name: "Baseplate".to_string(),
+                    class_name: eustress_common::classes::ClassName::Part,
+                    archivable: true,
+                    id: 1,
+                    ai: false,
+                },
+                eustress_common::default_scene::PartEntityMarker {
+                    part_id: "Baseplate".to_string(),
+                },
+                Name::new("Baseplate"),
+            )).id();
+            println!("🟫 Loaded Baseplate from .glb file: {:?}", baseplate_entity);
+        } else {
+            // Fallback: spawn programmatically if .glb doesn't exist
+            let baseplate_entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
+            println!("⚠️ Baseplate .glb not found, spawned programmatically: {:?}", baseplate_entity);
+        }
         
-        println!("✅ Default scene ready (shared with Client: Baseplate + Welcome Cube)!");
+        // Load Welcome Cube from .glb file
+        let welcome_cube_path = workspace_path.join("Welcome Cube.glb");
+        if welcome_cube_path.exists() {
+            let cube_scene = asset_server.load(format!("{}#Scene0", welcome_cube_path.display()));
+            let cube_entity = commands.spawn((
+                SceneRoot(cube_scene),
+                Transform::from_xyz(0.0, 0.980665, 0.0),
+                eustress_common::classes::Instance {
+                    name: "Welcome Cube".to_string(),
+                    class_name: eustress_common::classes::ClassName::Part,
+                    archivable: true,
+                    id: 2,
+                    ai: false,
+                },
+                eustress_common::default_scene::PartEntityMarker {
+                    part_id: "Welcome Cube".to_string(),
+                },
+                Name::new("Welcome Cube"),
+            )).id();
+            println!("🟩 Loaded Welcome Cube from .glb file: {:?}", cube_entity);
+        } else {
+            // Fallback: spawn programmatically if .glb doesn't exist
+            let cube_entity = eustress_common::spawn_welcome_cube(&mut commands, &mut meshes, &mut materials);
+            println!("⚠️ Welcome Cube .glb not found, spawned programmatically: {:?}", cube_entity);
+        }
+        
+        println!("✅ Default scene ready (file-system-first: Baseplate + Welcome Cube from Universe1/spaces/Space1)!");
     } else {
         println!("⏭️ Skipping default scene content (loading scene file)");
     }

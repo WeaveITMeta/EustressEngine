@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::rendering::PartEntity;
+use eustress_common::default_scene::PartEntityMarker;
 use crate::classes::{Instance, BasePart};
 use crate::selection_box::SelectionBox;
 use crate::math_utils::ray_obb_intersection;
@@ -17,8 +18,8 @@ pub fn part_selection_system(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
-    // Query parts with PartEntity OR Instance component (either works for selection)
-    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>, &GlobalTransform, &Mesh3d, Option<&BasePart>, Option<&ChildOf>)>,
+    // Query parts with PartEntity, PartEntityMarker, OR Instance component (any works for selection)
+    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, &Mesh3d, Option<&BasePart>, Option<&ChildOf>)>,
     // Query for children to calculate accurate group bounds (matching move_tool.rs)
     children_query: Query<&Children>,
     // Query for child transforms/baseparts
@@ -165,14 +166,22 @@ pub fn part_selection_system(
         }
     }
     
-    for (entity, part_entity, instance, transform, _mesh_handle, basepart, child_of) in part_entities_query.iter() {
-        // Skip entities that don't have either PartEntity or Instance (not selectable)
+    for (entity, part_entity, part_entity_marker, instance, transform, _mesh_handle, basepart, child_of) in part_entities_query.iter() {
+        // Skip entities that don't have PartEntity, PartEntityMarker, or Instance (not selectable)
         // Entity ID format must match: "indexVgeneration" e.g. "68v0"
         let entity_id = entity_to_id_string(entity);
         
         let part_id = if let Some(pe) = part_entity {
             if !pe.part_id.is_empty() {
                 pe.part_id.clone()
+            } else if instance.is_some() {
+                entity_id.clone()
+            } else {
+                continue;
+            }
+        } else if let Some(pem) = part_entity_marker {
+            if !pem.part_id.is_empty() {
+                pem.part_id.clone()
             } else if instance.is_some() {
                 entity_id.clone()
             } else {
@@ -295,11 +304,12 @@ pub fn part_selection_system(
                 let mut total_scale = 0.0;
                 let mut count = 0;
                 
-                for (entity, part_entity, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
+                for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
                     // Get part ID from either component (format: "indexVgeneration")
                     let entity_id = entity_to_id_string(entity);
                     let part_id = part_entity.map(|pe| pe.part_id.clone())
                         .filter(|id| !id.is_empty())
+                        .or_else(|| part_entity_marker.map(|pem| pem.part_id.clone()).filter(|id| !id.is_empty()))
                         .or_else(|| instance.map(|_| entity_id));
                     
                     if let Some(id) = part_id {
@@ -329,11 +339,12 @@ pub fn part_selection_system(
             let sel = selection_manager.0.read();
             let selected = sel.get_selected();
             
-            for (entity, part_entity, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
+            for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
                 // Get part ID from either component (format: "indexVgeneration")
                 let entity_id = entity_to_id_string(entity);
                 let part_id = part_entity.map(|pe| pe.part_id.clone())
                     .filter(|id| !id.is_empty())
+                    .or_else(|| part_entity_marker.map(|pem| pem.part_id.clone()).filter(|id| !id.is_empty()))
                     .or_else(|| instance.map(|_| entity_id));
                 
                 if let Some(id) = part_id {

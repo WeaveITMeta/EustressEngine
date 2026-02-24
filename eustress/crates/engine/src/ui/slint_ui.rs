@@ -1599,7 +1599,6 @@ struct DrainResources<'w> {
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
-    file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -1614,7 +1613,6 @@ fn drain_slint_actions(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    asset_server: Res<AssetServer>,
 ) {
     let Some(queue) = queue else { return };
     let actions = queue.drain();
@@ -2230,132 +2228,22 @@ fn drain_slint_actions(
                 }
             }
             
-            // Toolbox insertion — mesh primitives create .glb.toml instance files,
-            // non-mesh items (lights, folders, etc.) spawn directly
+            // Toolbox insertion - send SpawnPartEvent
             SlintAction::InsertPart(part_type_str) => {
-                use crate::classes::*;
-                
-                // Generate unique instance ID for non-mesh items
-                let uid = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() % u32::MAX as u128) as u32;
-                
-                // Map Toolbox button IDs to mesh catalog IDs
-                let mesh_id = match part_type_str.as_str() {
-                    "Part" | "Block" => Some("block"),
-                    "SpherePart" | "Ball" => Some("ball"),
-                    "CylinderPart" | "Cylinder" => Some("cylinder"),
-                    "WedgePart" | "Wedge" => Some("wedge"),
-                    "CornerWedgePart" | "CornerWedge" => Some("corner_wedge"),
-                    "Cone" => Some("cone"),
-                    _ => None,
+                use crate::classes::PartType;
+                let part_type = match part_type_str.as_str() {
+                    "Part" | "Block" => PartType::Block,
+                    "SpherePart" | "Ball" => PartType::Ball,
+                    "CylinderPart" | "Cylinder" => PartType::Cylinder,
+                    "WedgePart" | "Wedge" => PartType::Wedge,
+                    "CornerWedgePart" | "CornerWedge" => PartType::CornerWedge,
+                    "Cone" => PartType::Cylinder, // Use cylinder for cone until we add Cone variant
+                    _ => PartType::Block, // Default fallback
                 };
-                
-                if let Some(mesh_id) = mesh_id {
-                    // Mesh primitive → create .glb.toml instance file + spawn entity inline
-                    let space_root = std::path::PathBuf::from(
-                        "C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1"
-                    );
-                    
-                    match crate::toolbox::insert_mesh_instance(
-                        &space_root,
-                        mesh_id,
-                        [0.0, 5.0, 0.0],
-                        None,
-                    ) {
-                        Ok(toml_path) => {
-                            // Spawn entity inline (don't wait for file watcher)
-                            if let Ok(instance_def) = crate::space::load_instance_definition(&toml_path) {
-                                let entity = crate::space::instance_loader::spawn_instance(
-                                    &mut commands,
-                                    &asset_server,
-                                    &space_root,
-                                    toml_path.clone(),
-                                    instance_def,
-                                );
-                                
-                                // Register in SpaceFileRegistry
-                                if let Some(mut registry) = res.file_registry.as_mut() {
-                                    let name = toml_path.file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("Unknown")
-                                        .trim_end_matches(".glb")
-                                        .to_string();
-                                    registry.register(
-                                        toml_path.clone(),
-                                        entity,
-                                        crate::space::FileMetadata {
-                                            path: toml_path,
-                                            file_type: crate::space::FileType::Toml,
-                                            service: "Workspace".to_string(),
-                                            name: name.clone(),
-                                            size: 0,
-                                            modified: std::time::SystemTime::now(),
-                                        },
-                                    );
-                                }
-                                
-                                if let Some(ref mut out) = res.output {
-                                    out.info(format!("Inserted {} (instance file created)", part_type_str));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to insert mesh instance: {}", e);
-                            if let Some(ref mut out) = res.output {
-                                out.info(format!("Failed to insert {}: {}", part_type_str, e));
-                            }
-                        }
-                    }
-                } else {
-                    // Non-mesh items: keep existing direct spawn behavior
-                    match part_type_str.as_str() {
-                        // Model — empty container
-                        "Model" => {
-                            let inst = Instance { name: "Model".into(), class_name: ClassName::Model, archivable: true, id: uid, ..Default::default() };
-                            crate::spawn::spawn_model(&mut commands, inst, Model::default());
-                            if let Some(ref mut out) = res.output { out.info("Inserted Model".to_string()); }
-                        }
-                        
-                        // Folder — organizational container
-                        "Folder" => {
-                            let inst = Instance { name: "Folder".into(), class_name: ClassName::Folder, archivable: true, id: uid, ..Default::default() };
-                            crate::spawn::spawn_folder(&mut commands, inst);
-                            if let Some(ref mut out) = res.output { out.info("Inserted Folder".to_string()); }
-                        }
-                        
-                        // PointLight
-                        "PointLight" => {
-                            let inst = Instance { name: "PointLight".into(), class_name: ClassName::PointLight, archivable: true, id: uid, ..Default::default() };
-                            let light = EustressPointLight::default();
-                            crate::spawn::spawn_point_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0));
-                            if let Some(ref mut out) = res.output { out.info("Inserted PointLight".to_string()); }
-                        }
-                        
-                        // SpotLight
-                        "SpotLight" => {
-                            let inst = Instance { name: "SpotLight".into(), class_name: ClassName::SpotLight, archivable: true, id: uid, ..Default::default() };
-                            let light = EustressSpotLight::default();
-                            crate::spawn::spawn_spot_light(&mut commands, inst, light, Transform::from_xyz(0.0, 8.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y));
-                            if let Some(ref mut out) = res.output { out.info("Inserted SpotLight".to_string()); }
-                        }
-                        
-                        // DirectionalLight
-                        "DirectionalLight" => {
-                            let inst = Instance { name: "DirectionalLight".into(), class_name: ClassName::DirectionalLight, archivable: true, id: uid, ..Default::default() };
-                            let light = EustressDirectionalLight::default();
-                            crate::spawn::spawn_directional_light(&mut commands, inst, light, Transform::from_xyz(0.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y));
-                            if let Some(ref mut out) = res.output { out.info("Inserted DirectionalLight".to_string()); }
-                        }
-                        
-                        _ => {
-                            if let Some(ref mut out) = res.output {
-                                out.info(format!("Insert not yet supported: {}", part_type_str));
-                            }
-                        }
-                    }
-                }
+                events.spawn_events.write(super::SpawnPartEvent {
+                    part_type,
+                    position: Vec3::new(0.0, 5.0, 0.0),
+                });
             }
             
             // Context menu

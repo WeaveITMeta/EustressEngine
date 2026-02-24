@@ -6,33 +6,45 @@
 import { LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme, TreeItem } from "theme.slint";
 
-// Entity data structure for the tree
-export struct EntityNode {
+// Unified tree node for both ECS entities and filesystem items
+export struct TreeNode {
+    // Common fields
     id: int,
     name: string,
-    class-name: string,
     icon: image,
     depth: int,
     expandable: bool,
     expanded: bool,
     selected: bool,
     visible: bool,
+    
+    // Type discriminator
+    node-type: string,
+    
+    // Entity-specific (when node-type == "entity")
+    class-name: string,
+    
+    // File-specific (when node-type == "file")
+    path: string,
+    is-directory: bool,
+    extension: string,
+    size: string,
+    modified: bool,
 }
 
 export component ExplorerPanel inherits Rectangle {
     // Properties
-    in property <[EntityNode]> entities: [];
-    in property <[EntityNode]> workspace-entities: [];
-    in property <[EntityNode]> lighting-entities: [];
+    in property <[TreeNode]> tree-nodes: [];
     in-out property <string> search-text: "";
     
     // Callbacks
-    callback on-select-entity(int);
-    callback on-expand-entity(int);
-    callback on-collapse-entity(int);
+    callback on-select-node(int, string);
+    callback on-expand-node(int, string);
+    callback on-collapse-node(int, string);
+    callback on-open-node(int, string);
     callback on-context-menu(length, length);
     callback on-search-changed(string);
-    callback on-rename-entity(int, string);
+    callback on-rename-node(int, string, string);
     
     background: Theme.panel-background;
     
@@ -50,7 +62,7 @@ export component ExplorerPanel inherits Rectangle {
                 
                 search-input := LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Search entities...";
+                    placeholder-text: "Search...";
                     text <=> root.search-text;
                     edited(text) => { root.on-search-changed(text); }
                 }
@@ -62,194 +74,32 @@ export component ExplorerPanel inherits Rectangle {
             vertical-stretch: 1;
             
             VerticalLayout {
-                padding: 0px;
                 spacing: 0px;
-                alignment: start;
                 
                 // ============================================================
-                // Services — flat list matching egui explorer (13 services)
-                // SVG icons from crates/engine/assets/icons/
+                // Unified tree: ECS entities + filesystem nodes
+                // Rendered from single flat list with depth values
                 // ============================================================
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/workspace.svg");
-                    label: "Workspace";
-                    expandable: true;
-                    expanded: true;
-                    clicked => { root.on-select-entity(-1); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                // Workspace children (Camera, Baseplate, Welcome Cube, etc.)
-                for entity in root.workspace-entities: TreeItem {
-                    depth: entity.depth;
-                    icon: entity.icon;
-                    label: entity.name;
-                    expandable: entity.expandable;
-                    expanded: entity.expanded;
-                    selected: entity.selected;
-                    show: entity.visible;
+                for node in root.tree-nodes: TreeItem {
+                    depth: node.depth;
+                    icon: node.icon;
+                    label: node.name;
+                    expandable: node.expandable;
+                    expanded: node.expanded;
+                    selected: node.selected;
+                    show: node.visible;
                     
-                    clicked => { root.on-select-entity(entity.id); }
-                    toggle-expanded => {
-                        if entity.expanded {
-                            root.on-collapse-entity(entity.id);
-                        } else {
-                            root.on-expand-entity(entity.id);
-                        }
+                    clicked => { 
+                        root.on-select-node(node.id, node.node-type);
                     }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/players.svg");
-                    label: "Players";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-2); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/lighting.svg");
-                    label: "Lighting";
-                    expandable: true;
-                    expanded: true;
-                    clicked => { root.on-select-entity(-3); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                // Lighting children (Atmosphere, Sky, Sun, Moon)
-                for entity in root.lighting-entities: TreeItem {
-                    depth: entity.depth;
-                    icon: entity.icon;
-                    label: entity.name;
-                    expandable: entity.expandable;
-                    expanded: entity.expanded;
-                    selected: entity.selected;
-                    show: entity.visible;
-                    
-                    clicked => { root.on-select-entity(entity.id); }
-                    toggle-expanded => {
-                        if entity.expanded {
-                            root.on-collapse-entity(entity.id);
-                        } else {
-                            root.on-expand-entity(entity.id);
-                        }
+                    double-clicked => {
+                        root.on-open-node(node.id, node.node-type);
                     }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/soulservice.svg");
-                    label: "SoulService";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-4); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/serverstorage.svg");
-                    label: "ServerStorage";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-5); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/startergui.svg");
-                    label: "StarterGui";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-6); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/starterpack.svg");
-                    label: "StarterPack";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-7); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/starterplayer.svg");
-                    label: "StarterPlayer";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-8); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/soundservice.svg");
-                    label: "SoundService";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-9); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/teams.svg");
-                    label: "Teams";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-10); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/chat.svg");
-                    label: "Chat";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-11); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/localizationservice.svg");
-                    label: "LocalizationService";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-12); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                TreeItem {
-                    depth: 0;
-                    icon: @image-url("../../assets/icons/testservice.svg");
-                    label: "TestService";
-                    expandable: true;
-                    clicked => { root.on-select-entity(-13); }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
-                }
-                
-                // ============================================================
-                // Dynamic entity list (pushed from Bevy each frame)
-                // ============================================================
-                for entity in root.entities: TreeItem {
-                    depth: entity.depth;
-                    icon: entity.icon;
-                    label: entity.name;
-                    expandable: entity.expandable;
-                    expanded: entity.expanded;
-                    selected: entity.selected;
-                    show: entity.visible;
-                    
-                    clicked => { root.on-select-entity(entity.id); }
                     toggle-expanded => {
-                        if entity.expanded {
-                            root.on-collapse-entity(entity.id);
+                        if node.expanded {
+                            root.on-collapse-node(node.id, node.node-type);
                         } else {
-                            root.on-expand-entity(entity.id);
+                            root.on-expand-node(node.id, node.node-type);
                         }
                     }
                     context-menu(x, y) => { root.on-context-menu(x, y); }

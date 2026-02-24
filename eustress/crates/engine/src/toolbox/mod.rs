@@ -6,9 +6,8 @@
 
 use bevy::prelude::*;
 use std::path::PathBuf;
+use std::fs;
 use chrono::Utc;
-
-use crate::space::instance_loader::{InstanceDefinition, AssetReference, TransformData, InstanceProperties, InstanceMetadata};
 
 /// Toolbox mesh catalog entry
 #[derive(Debug, Clone)]
@@ -92,41 +91,46 @@ pub fn insert_mesh_instance(
     let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
     let instance_name = generate_unique_name(space_root, &base_name);
     
-    // Create instance definition
-    let instance = InstanceDefinition {
-        asset: AssetReference {
-            mesh: mesh.mesh_path.to_string(),
-            scene: "Scene0".to_string(),
-        },
-        transform: TransformData {
-            position,
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: mesh.default_size,
-        },
-        properties: InstanceProperties {
-            color: [0.5, 0.5, 0.5, 1.0],
-            transparency: 0.0,
-            anchored: false,
-            can_collide: true,
-            cast_shadow: true,
-            reflectance: 0.0,
-        },
-        metadata: InstanceMetadata {
-            class_name: "Part".to_string(),
-            archivable: true,
-            created: Utc::now().to_rfc3339(),
-            last_modified: Utc::now().to_rfc3339(),
-        },
-    };
+    // Create TOML content
+    let now = Utc::now().to_rfc3339();
+    let toml_content = format!(
+        r#"[asset]
+mesh = "{}"
+scene = "Scene0"
+
+[transform]
+position = [{}, {}, {}]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [{}, {}, {}]
+
+[properties]
+color = [0.5, 0.5, 0.5, 1.0]
+transparency = 0.0
+anchored = false
+can_collide = true
+cast_shadow = true
+reflectance = 0.0
+
+[metadata]
+class_name = "Part"
+archivable = true
+created = "{}"
+last_modified = "{}"
+"#,
+        mesh.mesh_path,
+        position[0], position[1], position[2],
+        mesh.default_size[0], mesh.default_size[1], mesh.default_size[2],
+        now, now
+    );
     
     // Write to Workspace folder
     let workspace_path = space_root.join("Workspace");
-    std::fs::create_dir_all(&workspace_path)
+    fs::create_dir_all(&workspace_path)
         .map_err(|e| format!("Failed to create Workspace directory: {}", e))?;
     
     let toml_path = workspace_path.join(format!("{}.glb.toml", instance_name));
     
-    crate::space::instance_loader::write_instance_definition(&toml_path, &instance)
+    fs::write(&toml_path, toml_content)
         .map_err(|e| format!("Failed to write instance file: {}", e))?;
     
     info!("📦 Toolbox: Created instance file {:?}", toml_path);

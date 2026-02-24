@@ -304,27 +304,34 @@ impl Plugin for KeyBindingsPlugin {
 // Keyboard Shortcut Dispatch System
 // ============================================================================
 
-/// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents
+/// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents.
+/// Uses Option<ResMut> to avoid silent skip from error handler when resources are missing.
 fn dispatch_keyboard_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     bindings: Res<KeyBindings>,
-    mut studio_state: ResMut<crate::ui::StudioState>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
 ) {
+    let Some(mut studio_state) = studio_state else { return };
+
     // Tool switching — directly update StudioState for instant response
     if bindings.check(Action::SelectTool, &keys) {
+        info!("⌨️ Shortcut: Select Tool (Alt+Z)");
         studio_state.current_tool = crate::ui::Tool::Select;
-        return; // Only one action per frame
+        return;
     }
     if bindings.check(Action::MoveTool, &keys) {
+        info!("⌨️ Shortcut: Move Tool (Alt+X)");
         studio_state.current_tool = crate::ui::Tool::Move;
         return;
     }
     if bindings.check(Action::ScaleTool, &keys) {
+        info!("⌨️ Shortcut: Scale Tool (Alt+C)");
         studio_state.current_tool = crate::ui::Tool::Scale;
         return;
     }
     if bindings.check(Action::RotateTool, &keys) {
+        info!("⌨️ Shortcut: Rotate Tool (Alt+V)");
         studio_state.current_tool = crate::ui::Tool::Rotate;
         return;
     }
@@ -349,8 +356,9 @@ fn dispatch_keyboard_shortcuts(
 
     for action in actions {
         if bindings.check(action, &keys) {
+            info!("⌨️ Shortcut: {:?}", action);
             menu_events.write(crate::ui::MenuActionEvent::new(action));
-            return; // One action per frame to avoid conflicts
+            return;
         }
     }
 }
@@ -361,12 +369,15 @@ fn dispatch_keyboard_shortcuts(
 
 /// Processes MenuActionEvents dispatched by keyboard shortcuts or Slint UI.
 /// Handles actions that modify StudioState or trigger editor behavior.
+/// Uses Option wrappers to prevent silent skip from error handler.
 fn handle_menu_action_events(
     mut events: MessageReader<crate::ui::MenuActionEvent>,
-    mut studio_state: ResMut<crate::ui::StudioState>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut undo_events: MessageWriter<crate::commands::UndoCommandEvent>,
     mut redo_events: MessageWriter<crate::commands::RedoCommandEvent>,
 ) {
+    let Some(mut studio_state) = studio_state else { return };
+
     for event in events.read() {
         match event.action {
             // Tool switching (also reachable via MenuActionEvent from Slint)
