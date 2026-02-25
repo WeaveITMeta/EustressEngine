@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use crossbeam_channel::{unbounded, Receiver};
 use std::time::Duration;
 
 use super::file_loader::{FileType, SpaceFileRegistry};
@@ -26,7 +26,7 @@ pub struct SpaceFileWatcher {
 impl SpaceFileWatcher {
     /// Create a new file watcher for the given Space path
     pub fn new(space_path: PathBuf) -> Result<Self, String> {
-        let (tx, rx) = channel();
+        let (tx, rx) = unbounded();
         
         // Create debounced watcher (300ms debounce to avoid rapid fire events)
         let mut debouncer = new_debouncer(
@@ -206,7 +206,6 @@ fn handle_file_modified(
                             // Trigger rebuild
                             commands.trigger(crate::soul::TriggerBuildEvent {
                                 entity,
-                                force: true,
                             });
                         }
                         Err(e) => {
@@ -372,8 +371,8 @@ fn handle_file_removed(
 ) {
     if let Some(entity) = registry.get_entity(&event.path) {
         info!("➖ File deleted, despawning entity: {:?}", event.path);
-        commands.entity(entity).despawn_recursive();
-        registry.unregister(&event.path);
+        commands.entity(entity).despawn();
+        registry.unregister_file(&event.path);
     }
 }
 

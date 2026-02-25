@@ -1599,6 +1599,7 @@ struct DrainResources<'w> {
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
+    file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -1613,6 +1614,7 @@ fn drain_slint_actions(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     let Some(queue) = queue else { return };
     let actions = queue.drain();
@@ -2228,22 +2230,85 @@ fn drain_slint_actions(
                 }
             }
             
-            // Toolbox insertion - send SpawnPartEvent
+            // Toolbox insertion - file-system-first: create .glb.toml → spawn inline
             SlintAction::InsertPart(part_type_str) => {
-                use crate::classes::PartType;
-                let part_type = match part_type_str.as_str() {
-                    "Part" | "Block" => PartType::Block,
-                    "SpherePart" | "Ball" => PartType::Ball,
-                    "CylinderPart" | "Cylinder" => PartType::Cylinder,
-                    "WedgePart" | "Wedge" => PartType::Wedge,
-                    "CornerWedgePart" | "CornerWedge" => PartType::CornerWedge,
-                    "Cone" => PartType::Cylinder, // Use cylinder for cone until we add Cone variant
-                    _ => PartType::Block, // Default fallback
+                // Map UI part type string to toolbox mesh ID
+                let mesh_id = match part_type_str.as_str() {
+                    "Part" | "Block" => "block",
+                    "SpherePart" | "Ball" => "ball",
+                    "CylinderPart" | "Cylinder" => "cylinder",
+                    "WedgePart" | "Wedge" => "wedge",
+                    "CornerWedgePart" | "CornerWedge" => "corner_wedge",
+                    "Cone" => "cone",
+                    _ => "block",
                 };
-                events.spawn_events.write(super::SpawnPartEvent {
-                    part_type,
-                    position: Vec3::new(0.0, 5.0, 0.0),
-                });
+                
+                // Space root path (TODO: make configurable via resource)
+                let space_root = std::path::PathBuf::from(
+                    "C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1"
+                );
+                
+                // Step 1: Create .glb.toml instance file on disk
+                match crate::toolbox::insert_mesh_instance(
+                    &space_root,
+                    mesh_id,
+                    [0.0, 5.0, 0.0],
+                    None,
+                ) {
+                    Ok(toml_path) => {
+                        // Step 2: Load the instance definition from the file we just wrote
+                        match crate::space::load_instance_definition(&toml_path) {
+                            Ok(instance) => {
+                                // Step 3: Spawn entity inline
+                                let entity = crate::space::instance_loader::spawn_instance(
+                                    &mut commands,
+                                    &asset_server,
+                                    &space_root,
+                                    toml_path.clone(),
+                                    instance,
+                                );
+                                
+                                // Step 4: Register in SpaceFileRegistry
+                                if let Some(ref mut registry) = res.file_registry {
+                                    let name = toml_path.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("Unknown")
+                                        .trim_end_matches(".glb")
+                                        .to_string();
+                                    
+                                    registry.register(
+                                        toml_path.clone(),
+                                        entity,
+                                        crate::space::FileMetadata {
+                                            path: toml_path.clone(),
+                                            file_type: crate::space::FileType::Toml,
+                                            service: "Workspace".to_string(),
+                                            name,
+                                            size: 0,
+                                            modified: std::time::SystemTime::now(),
+                                        },
+                                    );
+                                }
+                                
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Inserted {} via {:?}", part_type_str, toml_path));
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to load instance definition: {}", e);
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Failed to load instance: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create instance file: {}", e);
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Failed to insert part: {}", e));
+                        }
+                    }
+                }
             }
             
             // Context menu

@@ -51,7 +51,7 @@ mod studio_plugins;     // Studio plugin system (MindSpace, etc.)
 mod math_utils;         // Shared math utilities (ray intersection, AABB, etc.)
 mod entity_utils;       // Entity ID helpers
 mod io_manager;         // Async data fetching for Parameters
-// mod space;           // TODO: WIP - Space file-system-first architecture
+mod space;              // Space file-system-first architecture
 mod toolbox;            // Toolbox mesh insertion system
 
 mod plugins;
@@ -85,7 +85,7 @@ use window_focus::WindowFocusPlugin;
 use startup::{StartupPlugin, StartupArgs};
 // ServicePropertiesPlugin removed - now handled by Slint UI
 use soul::EngineSoulPlugin;
-// use space::SpaceFileLoaderPlugin; // TODO: WIP - space module has compilation errors
+use space::SpaceFileLoaderPlugin;
 
 fn main() {
     println!("Starting Eustress Engine...");
@@ -173,7 +173,7 @@ fn main() {
         // Default scene
         .add_plugins(DefaultScenePlugin)
         // Space file loader (dynamic file-system-first loading)
-        // .add_plugins(SpaceFileLoaderPlugin) // TODO: WIP - space module has compilation errors
+        .add_plugins(SpaceFileLoaderPlugin)
         // Toolbox (mesh insertion system)
         .add_plugins(toolbox::ToolboxPlugin)
         // Camera controls
