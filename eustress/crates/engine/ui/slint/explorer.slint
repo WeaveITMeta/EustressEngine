@@ -69,9 +69,10 @@ export component ExplorerPanel inherits Rectangle {
             }
         }
         
-        // Entity tree
+        // Entity tree (vertical scroll only — no horizontal scrollbar)
         ScrollView {
             vertical-stretch: 1;
+            horizontal-scrollbar-policy: always-off;
             
             VerticalLayout {
                 spacing: 0px;

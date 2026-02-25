@@ -25,6 +25,7 @@ pub mod floating_windows;
 
 // Core modules that don't depend on egui
 mod file_dialogs;
+pub mod file_event_handler;
 mod spawn_events;
 mod menu_events;
 mod world_view;

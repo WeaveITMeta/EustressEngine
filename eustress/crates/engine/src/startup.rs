@@ -101,7 +101,7 @@ impl StartupArgs {
 fn is_scene_file(path: &PathBuf) -> bool {
     if let Some(ext) = path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
-        matches!(ext.as_str(), "eustressengine" | "eustress" | "ron" | "escene" | "json")
+        matches!(ext.as_str(), "eustress" | "eustressengine" | "ron" | "escene" | "json")
     } else {
         false
     }

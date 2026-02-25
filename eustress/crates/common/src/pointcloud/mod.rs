@@ -32,7 +32,7 @@
 //                                    ▼
 // ┌─────────────────────────────────────────────────────────────────────────┐
 // │                       OUTPUT FORMATS                                     │
-// │  .eustress (Client) │ .eustressengine (Engine) │ Streaming Chunks       │
+// │  .eustress (unified) │ Streaming Chunks                                  │
 // └─────────────────────────────────────────────────────────────────────────┘
 // ```
 //

@@ -951,8 +951,13 @@ impl Plugin for StudioUiPlugin {
             .add_plugins(WorldViewPlugin)
             .add_plugins(super::floating_windows::FloatingWindowsPlugin)
             // Systems
+            .init_resource::<super::file_event_handler::PendingFileActions>()
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
+            .add_systems(Update, (
+                super::file_event_handler::drain_file_events,
+                super::file_event_handler::execute_file_actions,
+            ).chain())
             .add_systems(Update, crate::auth::auth_poll_system)
             .add_systems(Startup, try_restore_auth_session);
     }
@@ -1023,9 +1028,14 @@ impl Plugin for SlintUiPlugin {
             // Center tab sync: CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state.before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint)
+            .init_resource::<super::file_event_handler::PendingFileActions>()
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
+            .add_systems(Update, (
+                super::file_event_handler::drain_file_events,
+                super::file_event_handler::execute_file_actions,
+            ).chain())
             .add_systems(Update, crate::auth::auth_poll_system)
             .add_systems(Startup, try_restore_auth_session);
     }
@@ -2042,9 +2052,9 @@ fn drain_slint_actions(
             SlintAction::SelectNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        // Find the Entity with this instance ID
+                        // Find the Entity by its ECS index (used as TreeNode ID)
                         let found = instances.iter()
-                            .find(|(_, inst)| inst.id as i32 == id)
+                            .find(|(e, _)| e.to_bits() as i32 == id)
                             .map(|(e, _)| SelectedItem::Entity(e));
                         es.selected = found.unwrap_or(SelectedItem::None);
                     } else {
@@ -2060,7 +2070,7 @@ fn drain_slint_actions(
             SlintAction::ExpandNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                        if let Some((entity, _)) = instances.iter().find(|(e, _)| e.to_bits() as i32 == id) {
                             es.expanded_entities.insert(entity);
                         }
                     } else {
@@ -2075,7 +2085,7 @@ fn drain_slint_actions(
             SlintAction::CollapseNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        if let Some((entity, _)) = instances.iter().find(|(_, inst)| inst.id as i32 == id) {
+                        if let Some((entity, _)) = instances.iter().find(|(e, _)| e.to_bits() as i32 == id) {
                             es.expanded_entities.remove(&entity);
                         }
                     } else {
@@ -2262,7 +2272,8 @@ fn drain_slint_actions(
                                 // Step 3: Spawn entity inline
                                 let entity = crate::space::instance_loader::spawn_instance(
                                     &mut commands,
-                                    &asset_server,
+                                    &mut meshes,
+                                    &mut materials,
                                     &space_root,
                                     toml_path.clone(),
                                     instance,
@@ -2708,7 +2719,7 @@ fn sync_unified_explorer_to_slint(
                 .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
                 .unwrap_or(false);
             
-            let entity_id = instance.id as i32;
+            let entity_id = entity.to_bits() as i32;
             let is_expanded = explorer_state.expanded_entities.contains(&entity);
             let is_selected = matches!(&explorer_state.selected, SelectedItem::Entity(e) if *e == entity);
             let icon = load_class_icon(&instance.class_name);
@@ -2772,25 +2783,9 @@ fn sync_unified_explorer_to_slint(
     tree_nodes.push(make_service_node("Players", "players", 0, &explorer_state));
     
     // ================================================================
-    // Part 2: Build filesystem nodes from project root
+    // Part 2: Filesystem nodes DISABLED — Explorer shows entity items only.
+    // File browsing will be handled by a separate Asset Manager panel.
     // ================================================================
-    
-    // Clear and rebuild the file_path_cache for reverse ID→path lookup
-    explorer_state.file_path_cache.clear();
-    
-    if explorer_state.project_root.exists() {
-        let project_root = explorer_state.project_root.clone();
-        let expanded_dirs = explorer_state.expanded_dirs.clone();
-        let selected = explorer_state.selected.clone();
-        build_file_tree_nodes(
-            &mut tree_nodes,
-            &project_root,
-            0,
-            &expanded_dirs,
-            &selected,
-            &mut explorer_state.file_path_cache,
-        );
-    }
     
     // ================================================================
     // Part 3: Filter by search query

@@ -361,9 +361,9 @@ fn auto_save_scene_system(
             return;
         }
         
-        // Generate filename with timestamp - use binary .eustressengine format
+        // Generate filename with timestamp - use binary .eustress format
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("autosave_{}.eustressengine", timestamp);
+        let filename = format!("autosave_{}.eustress", timestamp);
         let save_path = auto_save_dir.join(&filename);
         
         // Count entities
@@ -374,7 +374,7 @@ fn auto_save_scene_system(
             return;
         }
         
-        // Build scene data and save as binary .eustressengine format
+        // Build scene data and save as binary .eustress format
         let scene = build_auto_save_scene(&parts_query);
         
         // Save to binary format using the unified scene serialization
@@ -467,14 +467,14 @@ fn build_auto_save_scene(
     }
 }
 
-/// Save auto-save scene to binary .eustressengine format
+/// Save auto-save scene to binary .eustress format
 fn save_auto_save_binary(path: &PathBuf, scene: &crate::serialization::Scene) -> std::io::Result<()> {
     use std::io::{BufWriter, Write};
     
     let file = fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
     
-    // Write magic bytes for .eustressengine format
+    // Write magic bytes for .eustress format
     writer.write_all(b"EUST")?;
     
     // Write version (u32 little-endian)
@@ -501,7 +501,7 @@ fn cleanup_old_autosaves(dir: &PathBuf, keep_count: usize) {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path().extension()
-                    .map(|ext| ext == "eustressengine")
+                    .map(|ext| ext == "eustress" || ext == "eustressengine")
                     .unwrap_or(false)
             })
             .collect(),

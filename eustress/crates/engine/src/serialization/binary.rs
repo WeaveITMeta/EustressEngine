@@ -1,4 +1,4 @@
-//! # Binary Scene Format (.eustressengine)
+//! # Binary Scene Format (.eustress)
 //! 
 //! High-performance binary format designed to scale to millions of instances.
 //! 
@@ -54,7 +54,7 @@ use crate::classes::*;
 // Constants
 // ============================================================================
 
-/// Magic number identifying .eustressengine files
+/// Magic number identifying .eustress binary files
 pub const MAGIC: &[u8; 8] = b"EUSTRESS";
 
 /// Current format version
@@ -490,6 +490,8 @@ impl ClassId {
             ClassName::SolarSystem => ClassId::Model,
             ClassName::CelestialBody => ClassId::Model,
             ClassName::RegionChunk => ClassId::Model,
+            // Realism - AdvancedPart serializes as Part (extends BasePart)
+            ClassName::AdvancedPart => ClassId::Part,
         }
     }
     
@@ -978,7 +980,7 @@ pub struct SoulScriptBinaryData {
 // High-Level Save/Load Functions
 // ============================================================================
 
-/// Save scene to binary .eustressengine file
+/// Save scene to binary .eustress file
 pub fn save_binary_scene(
     world: &mut World,
     path: &Path,
@@ -1407,7 +1409,7 @@ fn flush_chunk<W: Write>(writer: &mut W, buffer: &mut Vec<u8>, entity_count: u32
     Ok(())
 }
 
-/// Load scene from binary .eustressengine file (streaming)
+/// Load scene from binary .eustress file (streaming)
 pub fn load_binary_scene<F>(
     path: &Path,
     mut entity_callback: F,

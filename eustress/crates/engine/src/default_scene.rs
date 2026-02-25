@@ -87,62 +87,65 @@ pub fn setup_default_scene(
     
     if !loading_scene_file {
         // FILE-SYSTEM-FIRST: Load all default parts from Universe1/spaces/Space1/Workspace
-        let universe_path = std::path::PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1");
-        let workspace_path = universe_path.join("spaces/Space1/Workspace");
+        // Uses .glb.toml instance definitions that reference shared mesh assets
+        let space_root = std::path::PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1");
+        let workspace_path = space_root.join("Workspace");
         
-        // Load Baseplate from .glb file
-        let baseplate_path = workspace_path.join("Baseplate.glb");
-        if baseplate_path.exists() {
-            let baseplate_scene = asset_server.load(format!("{}#Scene0", baseplate_path.display()));
-            let baseplate_entity = commands.spawn((
-                SceneRoot(baseplate_scene),
-                Transform::from_xyz(0.0, -0.5, 0.0),
-                eustress_common::classes::Instance {
-                    name: "Baseplate".to_string(),
-                    class_name: eustress_common::classes::ClassName::Part,
-                    archivable: true,
-                    id: 1,
-                    ai: false,
-                },
-                eustress_common::default_scene::PartEntityMarker {
-                    part_id: "Baseplate".to_string(),
-                },
-                Name::new("Baseplate"),
-            )).id();
-            println!("🟫 Loaded Baseplate from .glb file: {:?}", baseplate_entity);
-        } else {
-            // Fallback: spawn programmatically if .glb doesn't exist
-            let baseplate_entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
-            println!("⚠️ Baseplate .glb not found, spawned programmatically: {:?}", baseplate_entity);
+        // Scan entire Workspace directory and load every .glb.toml instance file
+        let mut loaded_count = 0;
+        let mut baseplate_loaded = false;
+
+        if workspace_path.exists() {
+            // Collect and sort entries for deterministic load order (Baseplate first)
+            let mut toml_paths: Vec<std::path::PathBuf> = std::fs::read_dir(&workspace_path)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|p| {
+                    p.to_string_lossy().ends_with(".glb.toml")
+                })
+                .collect();
+
+            // Sort: Baseplate first, then alphabetically
+            toml_paths.sort_by(|a, b| {
+                let a_name = a.file_name().unwrap_or_default().to_string_lossy();
+                let b_name = b.file_name().unwrap_or_default().to_string_lossy();
+                if a_name.starts_with("Baseplate") { std::cmp::Ordering::Less }
+                else if b_name.starts_with("Baseplate") { std::cmp::Ordering::Greater }
+                else { a_name.cmp(&b_name) }
+            });
+
+            for toml_path in toml_paths {
+                let name = toml_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .trim_end_matches(".glb.toml")
+                    .to_string();
+
+                match crate::space::instance_loader::load_instance_definition(&toml_path) {
+                    Ok(instance) => {
+                        crate::space::instance_loader::spawn_instance(
+                            &mut commands, &mut meshes, &mut materials, &space_root, toml_path, instance,
+                        );
+                        if name == "Baseplate" { baseplate_loaded = true; }
+                        loaded_count += 1;
+                    }
+                    Err(e) => {
+                        println!("⚠️ Failed to load {}.glb.toml: {}", name, e);
+                    }
+                }
+            }
         }
-        
-        // Load Welcome Cube from .glb file
-        let welcome_cube_path = workspace_path.join("Welcome Cube.glb");
-        if welcome_cube_path.exists() {
-            let cube_scene = asset_server.load(format!("{}#Scene0", welcome_cube_path.display()));
-            let cube_entity = commands.spawn((
-                SceneRoot(cube_scene),
-                Transform::from_xyz(0.0, 0.980665, 0.0),
-                eustress_common::classes::Instance {
-                    name: "Welcome Cube".to_string(),
-                    class_name: eustress_common::classes::ClassName::Part,
-                    archivable: true,
-                    id: 2,
-                    ai: false,
-                },
-                eustress_common::default_scene::PartEntityMarker {
-                    part_id: "Welcome Cube".to_string(),
-                },
-                Name::new("Welcome Cube"),
-            )).id();
-            println!("🟩 Loaded Welcome Cube from .glb file: {:?}", cube_entity);
-        } else {
-            // Fallback: spawn programmatically if .glb doesn't exist
-            let cube_entity = eustress_common::spawn_welcome_cube(&mut commands, &mut meshes, &mut materials);
-            println!("⚠️ Welcome Cube .glb not found, spawned programmatically: {:?}", cube_entity);
+
+        // Programmatic fallback only if workspace had no Baseplate
+        if !baseplate_loaded {
+            let _entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
+            println!("⚠️ Baseplate.glb.toml not found, spawned programmatically");
         }
-        
-        println!("✅ Default scene ready (file-system-first: Baseplate + Welcome Cube from Universe1/spaces/Space1)!");
+
+        println!("✅ Default scene ready — loaded {} instance(s) from Workspace/", loaded_count);
     } else {
         println!("⏭️ Skipping default scene content (loading scene file)");
     }

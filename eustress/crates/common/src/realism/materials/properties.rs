@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use crate::realism::constants;
 
 // ============================================================================
@@ -58,6 +59,12 @@ pub struct MaterialProperties {
     pub friction_kinetic: f32,
     /// Coefficient of restitution (bounciness, 0-1)
     pub restitution: f32,
+    
+    // Domain-specific extensions
+    /// Custom properties for domain-specific fields (e.g., porosity, electrical_conductivity)
+    #[serde(default)]
+    #[reflect(ignore)]
+    pub custom_properties: HashMap<String, f64>,
 }
 
 impl Default for MaterialProperties {
@@ -85,6 +92,7 @@ impl MaterialProperties {
             friction_static: 0.74,
             friction_kinetic: 0.57,
             restitution: 0.6,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -106,6 +114,7 @@ impl MaterialProperties {
             friction_static: 0.61,
             friction_kinetic: 0.47,
             restitution: 0.7,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -127,6 +136,7 @@ impl MaterialProperties {
             friction_static: 0.6,
             friction_kinetic: 0.5,
             restitution: 0.2,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -148,6 +158,7 @@ impl MaterialProperties {
             friction_static: 0.94,
             friction_kinetic: 0.4,
             restitution: 0.5,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -169,6 +180,7 @@ impl MaterialProperties {
             friction_static: 1.0,
             friction_kinetic: 0.8,
             restitution: 0.8,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -190,6 +202,7 @@ impl MaterialProperties {
             friction_static: 0.5,
             friction_kinetic: 0.4,
             restitution: 0.3,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -211,6 +224,7 @@ impl MaterialProperties {
             friction_static: 0.1,
             friction_kinetic: 0.03,
             restitution: 0.3,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -219,6 +233,148 @@ impl MaterialProperties {
         Self {
             name: name.to_string(),
             ..Self::steel()
+        }
+    }
+
+    // ========================================================================
+    // V-Cell Battery Material Presets
+    // ========================================================================
+
+    /// Sodium metal anode (99.9% Na)
+    pub fn sodium_metal() -> Self {
+        use constants::vcell_materials::sodium as m;
+        Self {
+            name: "Sodium Metal (Na)".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Sc-doped NASICON solid electrolyte (Na₂.₈Sc₀.₂Zr₁.₈Si₂PO₁₂)
+    pub fn sc_nasicon() -> Self {
+        use constants::vcell_materials::sc_nasicon as m;
+        Self {
+            name: "Sc-NASICON Electrolyte".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Sulfur@VACNT composite cathode (sulfur infiltrated into vertically-aligned CNT forest)
+    pub fn sulfur_vacnt() -> Self {
+        use constants::vcell_materials::sulfur_vacnt as m;
+        Self {
+            name: "Sulfur@VACNT Cathode".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Aluminum hexagonal lattice current collector (50μm cells, 92% porosity)
+    pub fn al_hex_lattice() -> Self {
+        use constants::vcell_materials::al_hex_lattice as m;
+        Self {
+            name: "Al Hex Lattice (92% porosity)".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Aluminum nitride (AlN) thermal management pad
+    pub fn aluminum_nitride() -> Self {
+        use constants::vcell_materials::aluminum_nitride as m;
+        Self {
+            name: "Aluminum Nitride (AlN)".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
+        }
+    }
+
+    /// Aluminum 6061-T6 housing shell
+    pub fn al_6061_t6() -> Self {
+        use constants::vcell_materials::al_6061_t6 as m;
+        Self {
+            name: "Aluminum 6061-T6".to_string(),
+            young_modulus: m::YOUNG_MODULUS,
+            poisson_ratio: m::POISSON_RATIO,
+            yield_strength: m::YIELD_STRENGTH,
+            ultimate_strength: m::ULTIMATE_STRENGTH,
+            fracture_toughness: m::FRACTURE_TOUGHNESS,
+            hardness: m::HARDNESS,
+            thermal_conductivity: m::THERMAL_CONDUCTIVITY,
+            specific_heat: m::SPECIFIC_HEAT,
+            thermal_expansion: m::THERMAL_EXPANSION,
+            melting_point: m::MELTING_POINT,
+            density: m::DENSITY,
+            friction_static: m::FRICTION_STATIC,
+            friction_kinetic: m::FRICTION_KINETIC,
+            restitution: m::RESTITUTION,
+            custom_properties: HashMap::new(),
         }
     }
     
@@ -334,5 +490,42 @@ mod tests {
         
         let glass = MaterialProperties::glass();
         assert!(glass.is_brittle());
+    }
+
+    #[test]
+    fn test_vcell_sodium_metal() {
+        let na = MaterialProperties::sodium_metal();
+        assert!((na.density - 971.0).abs() < 1.0);
+        assert!(na.is_ductile(), "Sodium must be ductile");
+        assert!(na.melting_point > 370.0, "Na melting point ~371 K");
+    }
+
+    #[test]
+    fn test_vcell_sc_nasicon() {
+        let nsc = MaterialProperties::sc_nasicon();
+        assert!((nsc.density - 3200.0).abs() < 10.0);
+        assert!(nsc.is_brittle(), "NASICON ceramic must be brittle");
+        assert!(nsc.thermal_conductivity < 5.0, "NASICON has low k");
+    }
+
+    #[test]
+    fn test_vcell_al_hex_lattice() {
+        let hex = MaterialProperties::al_hex_lattice();
+        assert!((hex.density - 216.0).abs() < 5.0, "92% porosity → ~216 kg/m³");
+        assert!(hex.young_modulus < 5e9, "Lattice E << bulk Al");
+    }
+
+    #[test]
+    fn test_vcell_aluminum_nitride() {
+        let aln = MaterialProperties::aluminum_nitride();
+        assert!(aln.thermal_conductivity > 150.0, "AlN has very high k");
+        assert!(aln.is_brittle(), "AlN is a ceramic");
+    }
+
+    #[test]
+    fn test_vcell_al_6061_t6() {
+        let al = MaterialProperties::al_6061_t6();
+        assert!((al.density - 2700.0).abs() < 10.0);
+        assert!(al.is_ductile(), "6061-T6 must be ductile");
     }
 }

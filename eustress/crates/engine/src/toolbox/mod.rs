@@ -115,6 +115,9 @@ pub fn insert_mesh_instance(
             created: now.clone(),
             last_modified: now,
         },
+        material: None,
+        thermodynamic: None,
+        electrochemical: None,
     };
     
     // Write to Workspace folder

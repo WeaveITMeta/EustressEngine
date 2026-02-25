@@ -209,6 +209,8 @@ fn main() {
         // Physics (avian3d from git main - supports Bevy 0.18)
         .add_plugins(avian3d::PhysicsPlugins::default())
         .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
+        // Realism Physics System (materials, thermodynamics, fluids, deformation, visualizers)
+        .add_plugins(eustress_common::realism::RealismPlugin)
         // Gamepad
         .add_plugins(eustress_common::services::GamepadServicePlugin)
         // Notifications UI

@@ -215,6 +215,8 @@ pub enum ClassName {
     SolarSystem,      // Container for orbital hierarchies
     CelestialBody,    // Orbital object with n-body gravity
     RegionChunk,      // Geospatial fragment with floating origin
+    // Realism Physics Classes (extends BasePart with physical simulation)
+    AdvancedPart,     // BasePart + MaterialProperties + ThermodynamicState + ElectrochemicalState
 }
 
 impl ClassName {
@@ -277,6 +279,7 @@ impl ClassName {
             ClassName::SolarSystem => "SolarSystem",
             ClassName::CelestialBody => "CelestialBody",
             ClassName::RegionChunk => "RegionChunk",
+            ClassName::AdvancedPart => "AdvancedPart",
         }
     }
     
@@ -338,6 +341,7 @@ impl ClassName {
             "SolarSystem" => Ok(ClassName::SolarSystem),
             "CelestialBody" => Ok(ClassName::CelestialBody),
             "RegionChunk" => Ok(ClassName::RegionChunk),
+            "AdvancedPart" => Ok(ClassName::AdvancedPart),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }

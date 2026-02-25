@@ -55,6 +55,7 @@ pub mod materials;
 pub mod fluids;
 pub mod visualizers;
 pub mod deformation;
+pub mod thermal_conduction;
 
 #[cfg(feature = "realism-gpu")]
 pub mod gpu;
@@ -112,6 +113,7 @@ impl Plugin for RealismPlugin {
                 fluids::FluidsPlugin,
                 visualizers::VisualizersPlugin,
                 deformation::DeformationPlugin,
+                thermal_conduction::ThermalConductionPlugin,
             ));
         
         #[cfg(feature = "realism-symbolic")]

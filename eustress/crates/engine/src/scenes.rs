@@ -1,3 +1,15 @@
+//! DEPRECATED: Tauri-era JSON scene manager.
+//!
+//! This module uses `.scene.json` files and a Mutex-based SceneManager pattern
+//! from the old Tauri frontend. It is NOT connected to the Slint UI and is
+//! effectively dead code.
+//!
+//! Use instead:
+//! - Binary format: `serialization::save_binary_scene` / `load_binary_scene_to_world`
+//! - TOML instances: `space::instance_loader` for per-entity `.glb.toml` files
+//!
+//! This module will be removed in a future release.
+
 use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::fs;

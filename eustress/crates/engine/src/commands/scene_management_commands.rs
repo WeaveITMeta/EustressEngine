@@ -1,4 +1,13 @@
+//! DEPRECATED: Tauri-era scene management commands.
+//!
+//! These functions use the old Mutex-based SceneManager and State<T> pattern
+//! from the Tauri frontend. Not connected to the Slint UI.
+//! Save/Open is now handled by `ui::file_event_handler` using binary format.
+//!
+//! This module will be removed in a future release.
+
 // Removed: use tauri::State;
+#[allow(deprecated)]
 use crate::scenes::{SceneManager, SceneData, SceneMetadata, RecentScene};
 use crate::parts::PartManager;
 use std::sync::Mutex;

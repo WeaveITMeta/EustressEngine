@@ -1,5 +1,15 @@
-//! Scene Serialization - PropertyAccess-based JSON format
-//! The primary and only save format
+//! DEPRECATED: JSON PropertyAccess scene serialization.
+//!
+//! This module provides a thorough JSON-based scene format using the PropertyAccess
+//! trait for reflection-based serialization. It was the original scene format but is
+//! no longer connected to the UI save/open flow.
+//!
+//! Save/Open is now handled by:
+//! - Binary format: `serialization::binary` (save_binary_scene / load_binary_scene_to_world)
+//! - TOML instances: `space::instance_loader` for per-entity `.glb.toml` files
+//!
+//! The PropertyAccess serialization logic here may be reused for a future glTF exporter.
+//! This module will be removed or repurposed in a future release.
 
 #![allow(dead_code)]
 

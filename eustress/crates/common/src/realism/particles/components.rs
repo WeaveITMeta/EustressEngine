@@ -484,3 +484,78 @@ impl FluidParticleBundle {
         }
     }
 }
+
+// ============================================================================
+// Electrochemical State Component
+// ============================================================================
+
+/// Electrochemical state for battery/fuel-cell simulation entities.
+/// Holds runtime state that evolves during simulation. Static electrode
+/// properties live in `MaterialProperties::custom_properties`.
+#[derive(Component, Reflect, Clone, Debug, Serialize, Deserialize)]
+#[reflect(Component)]
+pub struct ElectrochemicalState {
+    /// Open-circuit voltage at current SOC (V)
+    pub voltage: f32,
+    /// Terminal voltage under load (V)
+    pub terminal_voltage: f32,
+    /// Nominal capacity (Ah)
+    pub capacity_ah: f32,
+    /// State of charge (0.0–1.0)
+    pub soc: f32,
+    /// Operating current (A, positive = discharge)
+    pub current: f32,
+    /// Internal resistance (Ω)
+    pub internal_resistance: f32,
+    /// Ionic conductivity of electrolyte (S/m)
+    pub ionic_conductivity: f32,
+    /// Cycle count
+    pub cycle_count: u32,
+    /// C-rate (h⁻¹)
+    pub c_rate: f32,
+    /// Capacity retention fraction (0.0–1.0)
+    pub capacity_retention: f32,
+    /// Total heat generation (W)
+    pub heat_generation: f32,
+    /// Dendrite risk factor (0.0 = safe, ≥1.0 = risk)
+    pub dendrite_risk: f32,
+}
+
+impl Default for ElectrochemicalState {
+    fn default() -> Self {
+        Self {
+            voltage: 2.23,
+            terminal_voltage: 2.23,
+            capacity_ah: 202.5,
+            soc: 1.0,
+            current: 0.0,
+            internal_resistance: 0.001,
+            ionic_conductivity: 0.01,
+            cycle_count: 0,
+            c_rate: 0.0,
+            capacity_retention: 1.0,
+            heat_generation: 0.0,
+            dendrite_risk: 0.0,
+        }
+    }
+}
+
+impl ElectrochemicalState {
+    /// V-Cell Na-S defaults (202.5 Ah, 2.23 V standard)
+    pub fn vcell_na_s() -> Self {
+        Self {
+            voltage: crate::realism::constants::na_s::STANDARD_POTENTIAL,
+            terminal_voltage: crate::realism::constants::na_s::STANDARD_POTENTIAL,
+            capacity_ah: 202.5,
+            soc: 1.0,
+            current: 0.0,
+            internal_resistance: 0.001,
+            ionic_conductivity: crate::realism::constants::sc_nasicon::IONIC_CONDUCTIVITY_TARGET * 100.0,
+            cycle_count: 0,
+            c_rate: 0.0,
+            capacity_retention: 1.0,
+            heat_generation: 0.0,
+            dendrite_risk: 0.0,
+        }
+    }
+}

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["physics"] }
+eustress-common = { path = "../common", features = ["physics", "realism"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
 # TODO: Fix Bevy 0.17 compatibility issues in eustress-networking

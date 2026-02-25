@@ -37,6 +37,7 @@ impl Plugin for ParticlePlugin {
             .register_type::<components::ThermodynamicState>()
             .register_type::<components::KineticState>()
             .register_type::<components::ParticleType>()
+            .register_type::<components::ElectrochemicalState>()
             .add_systems(Update, (
                 systems::update_spatial_hash,
                 systems::update_thermodynamics,

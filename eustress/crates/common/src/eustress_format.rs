@@ -1,7 +1,15 @@
 //! # Eustress File Format (.eustress / .eustressengine)
 //!
-//! The canonical file formats for Eustress scenes, places, and projects.
-//! These are THE formats - all other formats are legacy or for export only.
+//! ## DEPRECATION NOTICE
+//!
+//! The RON-based save/load functions in this module (`load_eustress`, `save_eustress`,
+//! `save_for_engine`, `save_for_client`) are **deprecated**. The engine now uses:
+//!
+//! - **Binary format** for whole-scene save/load (see `serialization/binary.rs`)
+//! - **TOML `.glb.toml`** for per-entity instance definitions (see `space/instance_loader.rs`)
+//!
+//! These RON functions are retained only for legacy file import and the `--scene` CLI flag.
+//! New code should use `save_binary_scene` / `load_binary_scene_to_world` instead.
 //!
 //! ## File Extensions
 //! - `.eustress` - Client/Player scene format (opens in Eustress Client)
@@ -12,33 +20,8 @@
 //! - `.eustress` = Published/Playable content → Opens in CLIENT
 //! - `.eustressengine` = Development/Editable content → Opens in ENGINE
 //!
-//! Both formats use identical RON structure - the extension determines
-//! which application handles the file.
-//!
-//! ## Format Features
-//! - Human-readable RON syntax
-//! - Full scene hierarchy with parent/child relationships
-//! - AI enhancement metadata (prompts, detail levels)
-//! - Network ownership rules for multiplayer
-//! - Atmosphere and lighting settings
-//! - Player and workspace configuration
-//! - Camera state persistence (position, rotation, zoom)
-//! - Thumbnail preview for file browsers
-//!
-//! ## Usage
-//! ```rust,ignore
-//! use eustress_common::eustress_format::{load_eustress, save_eustress};
-//!
-//! // Load a scene (works with both extensions)
-//! let scene = load_eustress("my_game.eustress")?;
-//! let scene = load_eustress("my_game.eustressengine")?;
-//!
-//! // Save for client (published)
-//! save_eustress(&scene, "my_game.eustress")?;
-//!
-//! // Save for engine (development)
-//! save_eustress(&scene, "my_game.eustressengine")?;
-//! ```
+//! The `.eustressengine` extension is now used by the binary format (magic bytes `EUSTRESS`).
+//! Legacy RON files with this extension are detected by the absence of magic bytes.
 
 use crate::scene::Scene;
 use std::path::Path;
@@ -48,32 +31,50 @@ use std::io::Write;
 // Constants
 // ============================================================================
 
-/// Client scene extension - opens in Eustress Client (published/playable)
-pub const EXTENSION_CLIENT: &str = "eustress";
-
-/// Engine scene extension - opens in Eustress Engine Studio (development/editable)
-pub const EXTENSION_ENGINE: &str = "eustressengine";
+/// Unified scene extension — used by both Studio and Client.
+/// Binary files start with `EUSTRESS` magic bytes (8 bytes).
+pub const EXTENSION: &str = "eustress";
 
 /// Project manifest extension
 pub const EXTENSION_PROJECT: &str = "eproject";
 
-/// All valid Eustress extensions (client first, then engine)
+/// All valid Eustress extensions
 pub const VALID_EXTENSIONS: &[&str] = &["eustress", "eustressengine", "eproject"];
 
-/// Legacy extensions (import only, will convert to .eustressengine on save in Engine)
+/// Legacy extensions (import only, will convert to .eustress on save)
+/// Note: "eustressengine" is in VALID_EXTENSIONS for backward compat but NOT here,
+/// because the RON load_eustress function rejects LEGACY_EXTENSIONS outright.
+/// Old .eustressengine RON files are handled by the magic-byte detection in file_event_handler.
 pub const LEGACY_EXTENSIONS: &[&str] = &["json", "ron", "escene", "rbxl", "rbxlx"];
 
 /// Current format version
-pub const FORMAT_VERSION: &str = "eustress_v4";
+pub const FORMAT_VERSION: &str = "eustress_v5";
 
-/// Magic bytes at start of binary format (future)
+/// Magic bytes at start of binary format
 pub const MAGIC_BYTES: &[u8; 4] = b"EUST";
 
-/// Default extension for Engine saves
-pub const DEFAULT_ENGINE_EXTENSION: &str = EXTENSION_ENGINE;
+/// Default extension for all saves
+pub const DEFAULT_EXTENSION: &str = EXTENSION;
 
-/// Default extension for Client/Published saves
-pub const DEFAULT_CLIENT_EXTENSION: &str = EXTENSION_CLIENT;
+// ============================================================================
+// Deprecated Aliases (will be removed)
+// ============================================================================
+
+/// DEPRECATED: Use `EXTENSION` instead. Client and Engine now share one extension.
+#[deprecated(note = "Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress")]
+pub const EXTENSION_CLIENT: &str = "eustress";
+
+/// DEPRECATED: Use `EXTENSION` instead. .eustressengine is replaced by .eustress.
+#[deprecated(note = "Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress")]
+pub const EXTENSION_ENGINE: &str = "eustress";
+
+/// DEPRECATED: Use `DEFAULT_EXTENSION` instead.
+#[deprecated(note = "Use DEFAULT_EXTENSION instead")]
+pub const DEFAULT_ENGINE_EXTENSION: &str = EXTENSION;
+
+/// DEPRECATED: Use `DEFAULT_EXTENSION` instead.
+#[deprecated(note = "Use DEFAULT_EXTENSION instead")]
+pub const DEFAULT_CLIENT_EXTENSION: &str = EXTENSION;
 
 // ============================================================================
 // Error Types
@@ -133,7 +134,11 @@ pub type Result<T> = std::result::Result<T, EustressError>;
 // Core Functions
 // ============================================================================
 
-/// Load a .eustress or .eustressengine scene file
+/// Load a .eustress or .eustressengine scene file (RON text format).
+///
+/// DEPRECATED: Use binary format (`serialization::load_binary_scene_to_world`) instead.
+/// Retained for legacy file import and `--scene` CLI flag.
+#[deprecated(note = "RON scene format is deprecated. Use binary format for new scenes.")]
 pub fn load_eustress<P: AsRef<Path>>(path: P) -> Result<Scene> {
     let path = path.as_ref();
     
@@ -149,8 +154,8 @@ pub fn load_eustress<P: AsRef<Path>>(path: P) -> Result<Scene> {
         // Verify it's a valid eustress extension
         if !VALID_EXTENSIONS.contains(&ext.as_str()) {
             return Err(EustressError::InvalidFormat(format!(
-                "Expected .{} or .{} file, got .{}", 
-                EXTENSION_CLIENT, EXTENSION_ENGINE, ext
+                "Expected .{} file, got .{}", 
+                EXTENSION, ext
             )));
         }
     }
@@ -177,21 +182,24 @@ pub fn load_eustress<P: AsRef<Path>>(path: P) -> Result<Scene> {
     Ok(scene)
 }
 
-/// Save a scene to .eustress or .eustressengine format
-/// If no valid extension is provided, defaults to .eustressengine (engine format)
+/// Save a scene to .eustress format (RON text).
+/// If no valid extension is provided, defaults to .eustress.
+///
+/// DEPRECATED: Use binary format (`serialization::save_binary_scene`) instead.
+#[deprecated(note = "RON scene format is deprecated. Use save_binary_scene instead.")]
 pub fn save_eustress<P: AsRef<Path>>(scene: &Scene, path: P) -> Result<()> {
     let path = path.as_ref();
     
-    // Check if extension is valid, otherwise default to engine format
+    // Check if extension is valid, otherwise default to .eustress
     let path = if let Some(ext) = path.extension() {
         let ext_str = ext.to_string_lossy().to_lowercase();
         if VALID_EXTENSIONS.contains(&ext_str.as_str()) {
             path.to_path_buf()
         } else {
-            path.with_extension(DEFAULT_ENGINE_EXTENSION)
+            path.with_extension(DEFAULT_EXTENSION)
         }
     } else {
-        path.with_extension(DEFAULT_ENGINE_EXTENSION)
+        path.with_extension(DEFAULT_EXTENSION)
     };
     
     // Create parent directories if needed
@@ -212,10 +220,10 @@ pub fn save_eustress<P: AsRef<Path>>(scene: &Scene, path: P) -> Result<()> {
     
     // Determine file type for header
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let file_type = if ext == EXTENSION_CLIENT {
-        "Client Scene (Published)"
+    let file_type = if ext == EXTENSION {
+        "Eustress Scene"
     } else {
-        "Engine Scene (Development)"
+        "Eustress Scene (Legacy)"
     };
     
     // Add header comment
@@ -235,15 +243,23 @@ pub fn save_eustress<P: AsRef<Path>>(scene: &Scene, path: P) -> Result<()> {
     Ok(())
 }
 
-/// Save specifically for Engine (development) - uses .eustressengine
+/// Save specifically for Engine (development) - uses .eustressengine (RON text).
+///
+/// DEPRECATED: Use binary format instead.
+#[deprecated(note = "RON scene format is deprecated. Use save_binary_scene instead.")]
+#[allow(deprecated)]
 pub fn save_for_engine<P: AsRef<Path>>(scene: &Scene, path: P) -> Result<()> {
-    let path = path.as_ref().with_extension(EXTENSION_ENGINE);
+    let path = path.as_ref().with_extension(EXTENSION);
     save_eustress(scene, path)
 }
 
-/// Save specifically for Client (published) - uses .eustress
+/// Save specifically for Client (published) - uses .eustress (RON text).
+///
+/// DEPRECATED: Use binary format instead.
+#[deprecated(note = "RON scene format is deprecated. Use save_binary_scene instead.")]
+#[allow(deprecated)]
 pub fn save_for_client<P: AsRef<Path>>(scene: &Scene, path: P) -> Result<()> {
-    let path = path.as_ref().with_extension(EXTENSION_CLIENT);
+    let path = path.as_ref().with_extension(EXTENSION);
     save_eustress(scene, path)
 }
 
@@ -259,18 +275,23 @@ pub fn is_eustress_file<P: AsRef<Path>>(path: P) -> bool {
 }
 
 /// Check if a path is a client scene (.eustress)
+#[deprecated(note = "Use is_eustress_file instead. Client/Engine distinction removed.")]
 pub fn is_client_scene<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
     path.extension()
-        .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION_CLIENT)
+        .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION)
         .unwrap_or(false)
 }
 
 /// Check if a path is an engine scene (.eustressengine)
+#[deprecated(note = "Use is_eustress_file instead. .eustressengine is now a legacy extension.")]
 pub fn is_engine_scene<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
     path.extension()
-        .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION_ENGINE)
+        .map(|e| {
+            let ext = e.to_string_lossy().to_lowercase();
+            ext == EXTENSION || ext == "eustressengine"
+        })
         .unwrap_or(false)
 }
 
@@ -285,19 +306,21 @@ pub fn is_legacy_format<P: AsRef<Path>>(path: P) -> bool {
     }
 }
 
-/// Convert a legacy file path to engine format (.eustressengine)
-pub fn to_engine_path<P: AsRef<Path>>(path: P) -> std::path::PathBuf {
-    path.as_ref().with_extension(EXTENSION_ENGINE)
-}
-
-/// Convert a path to client format (.eustress)
-pub fn to_client_path<P: AsRef<Path>>(path: P) -> std::path::PathBuf {
-    path.as_ref().with_extension(EXTENSION_CLIENT)
-}
-
-/// Legacy alias - converts to engine format
+/// Convert a path to .eustress extension
 pub fn to_eustress_path<P: AsRef<Path>>(path: P) -> std::path::PathBuf {
-    to_engine_path(path)
+    path.as_ref().with_extension(EXTENSION)
+}
+
+/// DEPRECATED: Use to_eustress_path instead.
+#[deprecated(note = "Use to_eustress_path instead. .eustressengine is deprecated.")]
+pub fn to_engine_path<P: AsRef<Path>>(path: P) -> std::path::PathBuf {
+    to_eustress_path(path)
+}
+
+/// DEPRECATED: Use to_eustress_path instead.
+#[deprecated(note = "Use to_eustress_path instead. Client/Engine distinction removed.")]
+pub fn to_client_path<P: AsRef<Path>>(path: P) -> std::path::PathBuf {
+    to_eustress_path(path)
 }
 
 // ============================================================================

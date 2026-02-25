@@ -1,12 +1,22 @@
-// Serialization Module - Supports multiple formats:
-// - Binary (.eustressengine) - Primary format, scales to millions of instances
-// - JSON (legacy) - Human-readable, for debugging
-// - RON (unified v3) - Structured text format
+// Serialization Module
+//
+// PRIMARY FORMAT:
+//   Binary (.eustress) — high-performance, scales to millions of instances.
+//   Used by: Save/Open (UI), auto-save, play-mode snapshot.
+//
+// DEPRECATED FORMATS (import-only, will be removed):
+//   JSON (.scene.json) — legacy PropertyAccess scene format from Tauri era.
+//   RON (unified v3) — legacy structured text, only used by --scene CLI flag.
+//
+// FILE-SYSTEM-FIRST FORMAT (per-entity, not whole-scene):
+//   TOML (.glb.toml) — instance definitions. See space/instance_loader.rs.
 
+/// DEPRECATED: JSON PropertyAccess scene format. Use binary format instead.
 pub mod scene;
 pub mod binary;
 
 #[allow(unused_imports)]
+#[deprecated(note = "JSON scene format is deprecated. Use save_binary_scene/load_binary_scene_to_world instead.")]
 pub use scene::{save_scene, load_scene, load_scene_from_world, Scene, EntityData, SceneMetadata};
 
 // Binary format for high-performance serialization (millions of instances)
@@ -65,14 +75,21 @@ impl From<ron::error::SpannedError> for SerializationError {
 
 pub type Result<T> = std::result::Result<T, SerializationError>;
 
-/// Load a unified scene from RON file
+/// Load a unified scene from RON file.
+///
+/// DEPRECATED: RON scene format is legacy. New scenes use binary format.
+/// This function is retained for --scene CLI flag and legacy file import.
+#[deprecated(note = "RON scene format is deprecated. Use binary format for new scenes.")]
 pub fn load_unified_scene(path: &std::path::Path) -> Result<unified::Scene> {
     let content = std::fs::read_to_string(path)?;
     let scene: unified::Scene = ron::from_str(&content)?;
     Ok(scene)
 }
 
-/// Save a unified scene to RON file
+/// Save a unified scene to RON file.
+///
+/// DEPRECATED: RON scene format is legacy. New scenes use binary format.
+#[deprecated(note = "RON scene format is deprecated. Use save_binary_scene instead.")]
 pub fn save_unified_scene(scene: &unified::Scene, path: &std::path::Path) -> Result<()> {
     let pretty = ron::ser::PrettyConfig::new()
         .depth_limit(8)

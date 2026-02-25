@@ -722,7 +722,7 @@ fn handle_start_play(
         // We'll do this via a deferred command since we need mutable World access
         commands.queue(|world: &mut World| {
             // Serialize to temp binary file
-            let temp_path = std::env::temp_dir().join("eustress_play_mode_snapshot.eustressengine");
+            let temp_path = std::env::temp_dir().join("eustress_play_mode_snapshot.eustress");
             match crate::serialization::save_binary_scene(world, &temp_path) {
                 Ok(()) => {
                     // Read the binary back into memory
@@ -993,7 +993,7 @@ fn handle_stop_play(
                         // only despawn entities that were originally in the scene
                         
                         // Get the list of entities that should exist after restoration
-                        let temp_path = std::env::temp_dir().join("eustress_play_mode_restore.eustressengine");
+                        let temp_path = std::env::temp_dir().join("eustress_play_mode_restore.eustress");
                         if std::fs::write(&temp_path, &binary_data).is_ok() {
                             use std::collections::HashSet;
                             

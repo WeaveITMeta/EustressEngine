@@ -119,19 +119,19 @@ generation = ["ureq", "base64", "image"]
 generation-candle = ["generation", "candle-core", "candle-nn", "candle-transformers"]
 # Enable placeholder textures for testing generation pipeline
 generation_placeholders = ["generation"]
-# Enable Realism Physics System with symbolic math and scripting - DISABLED until Bevy 0.19 support
-# realism = ["physics"]
+# Enable Realism Physics System (core always compiles; features gate optional sub-crates)
+realism = ["physics"]
 # Enable symbolic mathematics (Symbolica 1.0+) for real-time equation solving
-# realism-symbolic = ["realism", "symbolica"]
+realism-symbolic = ["realism", "symbolica"]
 # Enable Rune scripting for dynamic physics laws
-# realism-scripting = ["realism", "rune", "rune-modules", "notify"]
+realism-scripting = ["realism", "rune", "rune-modules", "notify"]
 # Enable Rune WASM for browser-based physics simulations
-# realism-wasm = ["realism-scripting", "rune-wasm"]
+realism-wasm = ["realism-scripting", "rune-wasm"]
 # Enable GPU compute for SPH fluid simulation
-# realism-gpu = ["realism", "wgpu", "encase"]
+realism-gpu = ["realism", "wgpu", "encase"]
 # Enable advanced spatial queries with zero-copy serialization
-# realism-spatial = ["realism", "kiddo", "rkyv"]
-# Enable quantum effects module
+realism-spatial = ["realism", "kiddo", "rkyv"]
+# Enable quantum effects module (DISABLED — future work)
 # realism-quantum = ["realism-symbolic"]
-# Enable full realism system with all features
-# realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
+# Enable full realism system with all features (excludes quantum)
+realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]

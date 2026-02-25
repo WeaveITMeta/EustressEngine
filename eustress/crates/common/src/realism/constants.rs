@@ -210,6 +210,219 @@ pub mod materials {
 }
 
 // ============================================================================
+// Electrochemistry Constants
+// ============================================================================
+
+/// Faraday constant (C/mol) — charge carried by one mole of electrons
+pub const FARADAY: f64 = 96_485.332_12;
+/// Faraday constant (f32)
+pub const FARADAY_F32: f32 = 96_485.332_12;
+
+/// Standard hydrogen electrode potential (V) — reference for all E° values
+pub const SHE_REFERENCE: f32 = 0.0;
+
+/// Electron charge (C) — same as ELEMENTARY_CHARGE, alias for electrochemistry context
+pub const ELECTRON_CHARGE: f64 = 1.602_176_634e-19;
+
+/// Thermal voltage at 298.15 K: V_T = k_B × T / e = RT/F ≈ 25.7 mV
+pub const THERMAL_VOLTAGE_25C: f32 = 0.025_693;
+
+/// Universal gas constant for electrochemistry (same as R, alias)
+pub const R_ELECTRO: f32 = 8.314_462_618;
+
+/// Standard Na-S electrochemistry
+pub mod na_s {
+    /// Standard cell potential for 2Na + S → Na₂S (V vs SHE)
+    pub const STANDARD_POTENTIAL: f32 = 2.23;
+
+    /// Standard anode potential Na/Na⁺ (V vs SHE)
+    pub const ANODE_POTENTIAL: f32 = -2.714;
+
+    /// Standard cathode potential S/S²⁻ (V vs SHE)
+    pub const CATHODE_POTENTIAL: f32 = -0.480;
+
+    /// Electrons transferred per formula unit (Na₂S)
+    pub const ELECTRONS: f32 = 2.0;
+
+    /// Theoretical specific capacity of sulfur (mAh/g)
+    pub const SULFUR_CAPACITY_MAH_G: f32 = 1_672.0;
+
+    /// Theoretical specific capacity of sodium (mAh/g)
+    pub const SODIUM_CAPACITY_MAH_G: f32 = 1_166.0;
+
+    /// Theoretical gravimetric energy density (Wh/kg) — pure reactants
+    pub const THEORETICAL_ENERGY_DENSITY: f32 = 5_517.0;
+
+    /// Sulfur volume expansion on full discharge S → Na₂S (fraction)
+    pub const SULFUR_VOLUME_EXPANSION: f32 = 0.80;
+
+    /// Entropic coefficient dE/dT for Na-S (V/K) — used for entropic heat
+    pub const ENTROPY_COEFFICIENT: f32 = -0.000_15;
+
+    /// Sulfur atomic mass (g/mol)
+    pub const SULFUR_MOLAR_MASS: f32 = 32.06;
+
+    /// Sodium atomic mass (g/mol)
+    pub const SODIUM_MOLAR_MASS: f32 = 22.990;
+
+    /// Na₂S molar mass (g/mol)
+    pub const NA2S_MOLAR_MASS: f32 = 78.04;
+
+    /// S₈ molar mass (g/mol) — elemental sulfur ring
+    pub const S8_MOLAR_MASS: f32 = 256.48;
+}
+
+/// Sc-doped NASICON solid electrolyte (Na₂.₈Sc₀.₂Zr₁.₈Si₂PO₁₂)
+pub mod sc_nasicon {
+    /// Ionic conductivity at 25°C target — breakthrough value (S/cm)
+    pub const IONIC_CONDUCTIVITY_TARGET: f32 = 1.0e-2;
+
+    /// Ionic conductivity at 25°C demonstrated for doped NASICON (S/cm)
+    pub const IONIC_CONDUCTIVITY_DEMONSTRATED: f32 = 1.0e-3;
+
+    /// Activation energy for Na⁺ migration (eV)
+    pub const ACTIVATION_ENERGY_EV: f32 = 0.22;
+
+    /// Activation energy in Joules (eV × 1.602e-19 × N_A)
+    pub const ACTIVATION_ENERGY_J_MOL: f32 = 21_224.0;
+
+    /// Pre-exponential factor for Arrhenius conductivity (S/cm)
+    pub const ARRHENIUS_PREFACTOR: f32 = 1_500.0;
+
+    /// Electronic conductivity — must be negligible (S/cm)
+    pub const ELECTRONIC_CONDUCTIVITY: f32 = 1.0e-10;
+
+    /// Na⁺ vacancy fraction from Sc substitution at x=0.2
+    pub const VACANCY_FRACTION: f32 = 0.067;
+
+    /// Electrochemical window lower limit (V vs Na/Na⁺)
+    pub const WINDOW_MIN: f32 = 0.0;
+
+    /// Electrochemical window upper limit (V vs Na/Na⁺)
+    pub const WINDOW_MAX: f32 = 5.0;
+
+    /// Density (kg/m³) — sintered >98% theoretical
+    pub const DENSITY: f32 = 3_200.0;
+}
+
+/// V-Cell specific battery material constants
+pub mod vcell_materials {
+    /// Sodium metal (99.9%)
+    pub mod sodium {
+        pub const YOUNG_MODULUS: f32 = 10.0e9;
+        pub const POISSON_RATIO: f32 = 0.29;
+        pub const YIELD_STRENGTH: f32 = 0.3e6;
+        pub const ULTIMATE_STRENGTH: f32 = 2.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 10.0e6;
+        pub const HARDNESS: f32 = 0.5;
+        pub const THERMAL_CONDUCTIVITY: f32 = 142.0;
+        pub const SPECIFIC_HEAT: f32 = 1_228.0;
+        pub const THERMAL_EXPANSION: f32 = 71.0e-6;
+        pub const MELTING_POINT: f32 = 370.95;
+        pub const DENSITY: f32 = 971.0;
+        pub const FRICTION_STATIC: f32 = 0.8;
+        pub const FRICTION_KINETIC: f32 = 0.6;
+        pub const RESTITUTION: f32 = 0.1;
+    }
+
+    /// Sc-doped NASICON ceramic membrane
+    pub mod sc_nasicon {
+        pub const YOUNG_MODULUS: f32 = 80.0e9;
+        pub const POISSON_RATIO: f32 = 0.25;
+        pub const YIELD_STRENGTH: f32 = 120.0e6;
+        pub const ULTIMATE_STRENGTH: f32 = 150.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 1.5e6;
+        pub const HARDNESS: f32 = 600.0;
+        pub const THERMAL_CONDUCTIVITY: f32 = 1.5;
+        pub const SPECIFIC_HEAT: f32 = 700.0;
+        pub const THERMAL_EXPANSION: f32 = 8.5e-6;
+        pub const MELTING_POINT: f32 = 1_553.0;
+        pub const DENSITY: f32 = 3_200.0;
+        pub const FRICTION_STATIC: f32 = 0.5;
+        pub const FRICTION_KINETIC: f32 = 0.4;
+        pub const RESTITUTION: f32 = 0.3;
+    }
+
+    /// Sulfur@VACNT composite cathode
+    pub mod sulfur_vacnt {
+        pub const YOUNG_MODULUS: f32 = 50.0e9;
+        pub const POISSON_RATIO: f32 = 0.24;
+        pub const YIELD_STRENGTH: f32 = 25.0e6;
+        pub const ULTIMATE_STRENGTH: f32 = 35.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 2.0e6;
+        pub const HARDNESS: f32 = 40.0;
+        pub const THERMAL_CONDUCTIVITY: f32 = 15.0;
+        pub const SPECIFIC_HEAT: f32 = 705.0;
+        pub const THERMAL_EXPANSION: f32 = 10.0e-6;
+        pub const MELTING_POINT: f32 = 388.36;
+        pub const DENSITY: f32 = 1_075.0;
+        pub const FRICTION_STATIC: f32 = 0.3;
+        pub const FRICTION_KINETIC: f32 = 0.2;
+        pub const RESTITUTION: f32 = 0.3;
+    }
+
+    /// Aluminum hexagonal lattice current collector (92% porosity)
+    pub mod al_hex_lattice {
+        pub const YOUNG_MODULUS: f32 = 4.2e9;
+        pub const POISSON_RATIO: f32 = 0.33;
+        pub const YIELD_STRENGTH: f32 = 16.2e6;
+        pub const ULTIMATE_STRENGTH: f32 = 22.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 2.3e6;
+        pub const HARDNESS: f32 = 7.6;
+        pub const THERMAL_CONDUCTIVITY: f32 = 19.0;
+        pub const SPECIFIC_HEAT: f32 = 897.0;
+        pub const THERMAL_EXPANSION: f32 = 23.1e-6;
+        pub const MELTING_POINT: f32 = 933.47;
+        pub const DENSITY: f32 = 216.0;
+        pub const FRICTION_STATIC: f32 = 0.5;
+        pub const FRICTION_KINETIC: f32 = 0.35;
+        pub const RESTITUTION: f32 = 0.5;
+        /// Hex cell edge length (m)
+        pub const HEX_EDGE_LENGTH: f32 = 50.0e-6;
+        /// Wall thickness (m)
+        pub const WALL_THICKNESS: f32 = 5.0e-6;
+        /// Porosity fraction
+        pub const POROSITY: f32 = 0.92;
+    }
+
+    /// Aluminum Nitride thermal pad
+    pub mod aluminum_nitride {
+        pub const YOUNG_MODULUS: f32 = 310.0e9;
+        pub const POISSON_RATIO: f32 = 0.24;
+        pub const YIELD_STRENGTH: f32 = 300.0e6;
+        pub const ULTIMATE_STRENGTH: f32 = 350.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 3.0e6;
+        pub const HARDNESS: f32 = 1_200.0;
+        pub const THERMAL_CONDUCTIVITY: f32 = 170.0;
+        pub const SPECIFIC_HEAT: f32 = 740.0;
+        pub const THERMAL_EXPANSION: f32 = 4.6e-6;
+        pub const MELTING_POINT: f32 = 2_473.0;
+        pub const DENSITY: f32 = 3_260.0;
+        pub const FRICTION_STATIC: f32 = 0.4;
+        pub const FRICTION_KINETIC: f32 = 0.3;
+        pub const RESTITUTION: f32 = 0.4;
+    }
+
+    /// Aluminum 6061-T6 housing
+    pub mod al_6061_t6 {
+        pub const YOUNG_MODULUS: f32 = 68.9e9;
+        pub const POISSON_RATIO: f32 = 0.33;
+        pub const YIELD_STRENGTH: f32 = 276.0e6;
+        pub const ULTIMATE_STRENGTH: f32 = 310.0e6;
+        pub const FRACTURE_TOUGHNESS: f32 = 29.0e6;
+        pub const HARDNESS: f32 = 95.0;
+        pub const THERMAL_CONDUCTIVITY: f32 = 167.0;
+        pub const SPECIFIC_HEAT: f32 = 896.0;
+        pub const THERMAL_EXPANSION: f32 = 23.6e-6;
+        pub const MELTING_POINT: f32 = 855.0;
+        pub const DENSITY: f32 = 2_700.0;
+        pub const FRICTION_STATIC: f32 = 0.61;
+        pub const FRICTION_KINETIC: f32 = 0.47;
+        pub const RESTITUTION: f32 = 0.7;
+    }
+}
+
+// ============================================================================
 // Conversion Helpers
 // ============================================================================
 

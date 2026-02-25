@@ -1,13 +1,12 @@
 //! # Eustress File Dialogs
 //!
-//! Engine uses `.eustressengine` for development scenes.
-//! Client uses `.eustress` for published/playable scenes.
-//! Legacy formats (.json, .ron, .escene) are supported for import only.
+//! All scenes use `.eustress` extension (binary format, `EUSTRESS` magic bytes).
+//! Legacy formats (.eustressengine, .json, .ron, .escene) are supported for import only.
 
 use bevy::prelude::*;
 use std::path::PathBuf;
 use eustress_common::{
-    EXTENSION_ENGINE, EXTENSION_CLIENT, EXTENSION_PROJECT,
+    EXTENSION, EXTENSION_PROJECT,
     VALID_EXTENSIONS, LEGACY_EXTENSIONS,
 };
 
@@ -74,30 +73,17 @@ impl SceneFile {
         false
     }
     
-    /// Check if this is a client scene (.eustress)
-    pub fn is_client_scene(&self) -> bool {
+    /// Check if this is an Eustress scene (.eustress)
+    pub fn is_eustress_scene(&self) -> bool {
         self.path.as_ref()
             .and_then(|p| p.extension())
-            .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION_CLIENT)
+            .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION)
             .unwrap_or(false)
     }
     
-    /// Check if this is an engine scene (.eustressengine)
-    pub fn is_engine_scene(&self) -> bool {
-        self.path.as_ref()
-            .and_then(|p| p.extension())
-            .map(|e| e.to_string_lossy().to_lowercase() == EXTENSION_ENGINE)
-            .unwrap_or(false)
-    }
-    
-    /// Get the path with .eustressengine extension (for Engine Save)
-    pub fn path_as_engine(&self) -> Option<PathBuf> {
-        self.path.as_ref().map(|p| p.with_extension(EXTENSION_ENGINE))
-    }
-    
-    /// Get the path with .eustress extension (for Publish/Client)
-    pub fn path_as_client(&self) -> Option<PathBuf> {
-        self.path.as_ref().map(|p| p.with_extension(EXTENSION_CLIENT))
+    /// Get the path with .eustress extension
+    pub fn path_as_eustress(&self) -> Option<PathBuf> {
+        self.path.as_ref().map(|p| p.with_extension(EXTENSION))
     }
 }
 
@@ -120,45 +106,32 @@ pub enum FileEvent {
     PublishAs,
 }
 
-/// Show file picker for opening scenes in Engine
-/// Prioritizes .eustressengine but accepts .eustress and legacy formats for import
+/// Show file picker for opening scenes
+/// Prioritizes .eustress but accepts legacy formats for import
 pub fn pick_open_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Engine Scene", &["eustressengine"])
-        .add_filter("Client Scene", &["eustress"])
-        .add_filter("Legacy Formats", &["ron", "json", "escene"])
-        .add_filter("All Scenes", &["eustressengine", "eustress", "ron", "json", "escene"])
-        .set_title("Open Scene in Eustress Engine")
+        .add_filter("Eustress Scene", &["eustress"])
+        .add_filter("Legacy Formats", &["eustressengine", "ron", "json", "escene"])
+        .add_filter("All Scenes", &["eustress", "eustressengine", "ron", "json", "escene"])
+        .set_title("Open Scene")
         .pick_file()
 }
 
-/// Show file picker for saving scenes in Engine
-/// Uses .eustressengine for development scenes
+/// Show file picker for saving scenes (binary .eustress format)
 pub fn pick_save_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Engine Scene", &["eustressengine"])
-        .set_title("Save Engine Scene")
-        .set_file_name("scene.eustressengine")
-        .save_file()
-}
-
-/// Show file picker for publishing/exporting to client format
-/// Uses .eustress for playable scenes
-pub fn pick_publish_file() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Client Scene (Playable)", &["eustress"])
-        .set_title("Publish Scene for Client")
+        .add_filter("Eustress Scene", &["eustress"])
+        .set_title("Save Scene")
         .set_file_name("scene.eustress")
         .save_file()
 }
 
-/// Show file picker for exporting to other formats
-pub fn pick_export_file() -> Option<PathBuf> {
+/// Show file picker for publishing (same format, just explicit naming)
+pub fn pick_publish_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("RON Format", &["ron"])
-        .add_filter("JSON Format", &["json"])
-        .set_title("Export Scene")
-        .set_file_name("scene.ron")
+        .add_filter("Eustress Scene", &["eustress"])
+        .set_title("Publish Scene")
+        .set_file_name("scene.eustress")
         .save_file()
 }
 
@@ -176,12 +149,7 @@ pub fn default_scenes_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Get the default scene file path for new projects (Engine format)
+/// Get the default scene file path for new projects
 pub fn default_scene_path() -> PathBuf {
-    default_scenes_dir().join(format!("Untitled.{}", EXTENSION_ENGINE))
-}
-
-/// Get the default published scene path (Client format)
-pub fn default_publish_path() -> PathBuf {
-    default_scenes_dir().join(format!("Untitled.{}", EXTENSION_CLIENT))
+    default_scenes_dir().join(format!("Untitled.{}", EXTENSION))
 }

@@ -276,6 +276,8 @@ pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
 pub fn load_space_files_system(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<SpaceFileRegistry>,
 ) {
     // Get Space path (TODO: make this configurable)
@@ -312,7 +314,8 @@ pub fn load_space_files_system(
                     Ok(instance) => {
                         let entity = super::instance_loader::spawn_instance(
                             &mut commands,
-                            &asset_server,
+                            &mut meshes,
+                            &mut materials,
                             &space_path,
                             file_meta.path.clone(),
                             instance,

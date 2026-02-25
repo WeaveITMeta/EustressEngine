@@ -74,9 +74,12 @@ pub use eustress_format::{
     // Path conversion
     to_eustress_path, to_engine_path, to_client_path,
     // Constants
-    EXTENSION_CLIENT, EXTENSION_ENGINE, EXTENSION_PROJECT,
+    EXTENSION, EXTENSION_PROJECT,
     VALID_EXTENSIONS, LEGACY_EXTENSIONS,
     FORMAT_VERSION,
+    DEFAULT_EXTENSION,
+    // Deprecated aliases (kept for backward compat, will be removed)
+    EXTENSION_CLIENT, EXTENSION_ENGINE,
     DEFAULT_ENGINE_EXTENSION, DEFAULT_CLIENT_EXTENSION,
     // Error type
     EustressError,

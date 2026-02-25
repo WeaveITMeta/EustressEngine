@@ -630,7 +630,7 @@ pub struct ArchiveSource { archive: MemoryMappedFile }
 
 ## 11. Migration Path
 
-### From Current .eustressengine Binary Format
+### From Current .eustress Binary Format
 
 The current binary format (`serialization/binary.rs`) and RON format (`serialization/scene.rs`) need a migration path:
 
@@ -654,7 +654,7 @@ eustress migrate ./my-old-project
 
 # What it does:
 # 1. Creates .eustress/ directory
-# 2. Converts .eustressengine scenes → .gltf scenes
+# 2. Converts .eustress scenes → .gltf scenes
 # 3. Extracts embedded assets to assets/ directory
 # 4. Generates project.toml
 # 5. Creates .gitignore

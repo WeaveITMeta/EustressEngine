@@ -1,6 +1,34 @@
-//! Scene loading - Supports both JSON and RON formats
-//! - JSON: eustress_propertyaccess (Engine/Studio format)
-//! - RON: eustress_v3 (Unified format from common)
+//! # Scene Loading
+//!
+//! ## DEPRECATION NOTICE — RON + JSON loaders
+//!
+//! The `scene_loader_system`, `spawn_ron_entity`, and `spawn_json_entity` functions
+//! in this file are **deprecated**. They load legacy text formats (RON/JSON) that
+//! are no longer produced by Studio.
+//!
+//! ## New Architecture (file-system-first → binary distribution)
+//!
+//! ```text
+//! AUTHORING (Studio)              DISTRIBUTION              PLAYBACK (Client)
+//! ──────────────────              ────────────              ─────────────────
+//! .glb.toml per entity            Publish                  Download binary from
+//! .glb shared meshes      ──────► binary blob   ──────►    R2 CDN, deserialize,
+//! .soul scripts                   to R2 bucket             spawn entities
+//! ```
+//!
+//! - **Studio** edits the file-system-first workspace (`.glb.toml` + `.glb` + `.soul`)
+//! - **Publish** walks the workspace, serializes everything into a single binary
+//!   `.eustress` blob (zstd compressed, `EUSTRESS` magic bytes), uploads to R2
+//! - **Client** downloads the binary blob and deserializes it using the shared
+//!   binary format parser from `eustress_common::serialization::binary_format`
+//!
+//! The binary parser will be extracted to `common` so both engine and client share
+//! the same deserialization code. The client spawns entities with procedural meshes
+//! (no `.glb` asset files needed at runtime for primitives).
+//!
+//! ## What stays
+//! - `LoadSceneEvent` / `LoadedScene` — resource/event API (will be reused for binary)
+//! - Entity spawning logic — will be adapted to read `BinaryEntityData` instead of JSON/RON
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -8,7 +36,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 // Re-export unified RON format from common
+#[allow(deprecated)]
 use eustress_common::Scene as RonScene;
+#[allow(deprecated)]
 use eustress_common::{Entity as RonEntity, EntityClass};
 
 // ============================================================================
@@ -76,7 +106,9 @@ pub struct LoadSceneEvent {
 // Scene Loader System
 // ============================================================================
 
-/// System to load scenes from JSON or RON files
+/// DEPRECATED: Loads legacy JSON/RON text scenes. Will be replaced by binary loader.
+/// New scenes use binary format downloaded from R2 CDN.
+#[deprecated(note = "Use binary scene loader (not yet implemented). RON/JSON formats are legacy.")]
 pub fn scene_loader_system(
     mut events: MessageReader<LoadSceneEvent>,
     mut loaded: ResMut<LoadedScene>,
