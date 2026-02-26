@@ -56,6 +56,9 @@ pub enum FileType {
     Json,           // .json
     Toml,           // .toml
     Ron,            // .ron
+
+    // Virtual — represents a filesystem subdirectory mapped to a Folder entity
+    Directory,
 }
 
 impl FileType {
@@ -132,7 +135,7 @@ impl FileType {
     }
 }
 
-/// Metadata extracted from a file
+/// Metadata extracted from a file or directory
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
     pub path: PathBuf,
@@ -141,6 +144,8 @@ pub struct FileMetadata {
     pub name: String,
     pub size: u64,
     pub modified: std::time::SystemTime,
+    /// For Directory entries: the child file entries inside this directory
+    pub children: Vec<FileMetadata>,
 }
 
 /// Resource tracking all loaded files in the current Space
@@ -207,7 +212,55 @@ pub struct LoadedFromFile {
     pub service: String,
 }
 
-/// Scan a Space directory and discover all loadable files
+/// Scan a single directory level, returning file entries and Directory entries
+/// (each Directory entry carries its own children recursively).
+fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
+    let mut entries: Vec<FileMetadata> = Vec::new();
+    let Ok(read_dir) = std::fs::read_dir(dir_path) else { return entries };
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() {
+            // Recurse — build a Directory entry whose children are its contents
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            let children = scan_dir_entries(&path, service);
+            entries.push(FileMetadata {
+                path: path.clone(),
+                file_type: FileType::Directory,
+                service: service.to_string(),
+                name,
+                size: 0,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+                children,
+            });
+        } else {
+            // Regular file
+            let Some(file_type) = FileType::from_path(&path) else { continue };
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let name = path.file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            entries.push(FileMetadata {
+                path,
+                file_type,
+                service: service.to_string(),
+                name,
+                size: meta.len(),
+                modified: meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                children: Vec::new(),
+            });
+        }
+    }
+    entries
+}
+
+/// Scan a Space directory and discover all loadable files and subdirectories.
+/// Returns a flat list — Directory entries carry their children inline.
 pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
     let mut files = Vec::new();
     
@@ -228,48 +281,207 @@ pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
     
     for service in &services {
         let service_path = space_path.join(service);
-        if !service_path.exists() {
-            continue;
-        }
-        
-        // Recursively scan service folder
-        if let Ok(entries) = std::fs::read_dir(&service_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                
-                // Skip directories for now (TODO: recursive scan)
-                if path.is_dir() {
-                    continue;
-                }
-                
-                // Determine file type (use from_path to handle compound extensions)
-                let Some(file_type) = FileType::from_path(&path) else {
-                    continue;
-                };
-                
-                // Get file metadata
-                let Ok(metadata) = std::fs::metadata(&path) else {
-                    continue;
-                };
-                
-                let name = path.file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("Unknown")
-                    .to_string();
-                
-                files.push(FileMetadata {
-                    path,
-                    file_type,
-                    service: service.to_string(),
-                    name,
-                    size: metadata.len(),
-                    modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                });
-            }
-        }
+        if !service_path.exists() { continue; }
+        files.extend(scan_dir_entries(&service_path, service));
     }
     
     files
+}
+
+/// Spawn a single file entry as an ECS entity, optionally parented to `parent_entity`.
+/// Returns the spawned entity if one was created.
+fn spawn_file_entry(
+    commands: &mut Commands,
+    asset_server: &Res<AssetServer>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    registry: &mut ResMut<SpaceFileRegistry>,
+    space_path: &Path,
+    file_meta: &FileMetadata,
+    parent_entity: Option<Entity>,
+) -> Option<Entity> {
+    // Skip if already loaded
+    if registry.is_loaded(&file_meta.path) {
+        return None;
+    }
+
+    // Check if this file type should spawn an entity in this service
+    if !file_meta.file_type.spawns_entity_in_service(&file_meta.service) {
+        debug!("Skipping {:?} in {} (doesn't spawn entity)", file_meta.path, file_meta.service);
+        return None;
+    }
+
+    let entity = match file_meta.file_type {
+        FileType::Toml => {
+            match super::instance_loader::load_instance_definition(&file_meta.path) {
+                Ok(instance) => {
+                    let e = super::instance_loader::spawn_instance(
+                        commands,
+                        meshes,
+                        materials,
+                        space_path,
+                        file_meta.path.clone(),
+                        instance,
+                    );
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    e
+                }
+                Err(err) => {
+                    error!("Failed to load instance file {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
+        }
+
+        FileType::Gltf => {
+            let scene_handle = asset_server.load(format!("{}#Scene0", file_meta.path.display()));
+            let e = commands.spawn((
+                SceneRoot(scene_handle),
+                Transform::default(),
+                eustress_common::classes::Instance {
+                    name: file_meta.name.clone(),
+                    class_name: eustress_common::classes::ClassName::Part,
+                    archivable: true,
+                    id: 0,
+                    ai: false,
+                },
+                eustress_common::default_scene::PartEntityMarker {
+                    part_id: file_meta.name.clone(),
+                },
+                LoadedFromFile {
+                    path: file_meta.path.clone(),
+                    file_type: file_meta.file_type,
+                    service: file_meta.service.clone(),
+                },
+                Name::new(file_meta.name.clone()),
+            )).id();
+            registry.register(file_meta.path.clone(), e, file_meta.clone());
+            info!("✅ Loaded {} from {:?}", file_meta.name, file_meta.path);
+            e
+        }
+
+        FileType::Soul => {
+            match std::fs::read_to_string(&file_meta.path) {
+                Ok(markdown_source) => {
+                    let e = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: file_meta.name.clone(),
+                            class_name: eustress_common::classes::ClassName::SoulScript,
+                            archivable: true,
+                            id: 0,
+                            ai: false,
+                        },
+                        crate::soul::SoulScriptData {
+                            source: markdown_source,
+                            dirty: false,
+                            ast: None,
+                            generated_code: None,
+                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                            errors: Vec::new(),
+                        },
+                        LoadedFromFile {
+                            path: file_meta.path.clone(),
+                            file_type: file_meta.file_type,
+                            service: file_meta.service.clone(),
+                        },
+                        Name::new(file_meta.name.clone()),
+                    )).id();
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("📜 Loaded Soul script {} from {:?}", file_meta.name, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("❌ Failed to read Soul script {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
+        }
+
+        FileType::Rune => {
+            debug!("Skipping .rune file (compiled bytecode): {:?}", file_meta.path);
+            return None;
+        }
+
+        FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
+            info!("🔊 Audio file discovered: {:?} (loader not yet implemented)", file_meta.path);
+            return None;
+        }
+
+        _ => {
+            debug!("File type {:?} loader not yet implemented", file_meta.file_type);
+            return None;
+        }
+    };
+
+    // Parent to Folder entity if provided
+    if let Some(parent) = parent_entity {
+        commands.entity(entity).insert(ChildOf(parent));
+    }
+
+    Some(entity)
+}
+
+/// Spawn a Directory entry as a Folder entity, then spawn all its children
+/// parented to that Folder.  Recurses for nested subdirectories.
+fn spawn_directory_entry(
+    commands: &mut Commands,
+    asset_server: &Res<AssetServer>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+    registry: &mut ResMut<SpaceFileRegistry>,
+    space_path: &Path,
+    dir_meta: &FileMetadata,
+    parent_entity: Option<Entity>,
+) {
+    // Skip if this directory path already has an entity registered
+    if registry.is_loaded(&dir_meta.path) {
+        return;
+    }
+
+    // Spawn the Folder entity
+    let folder_entity = commands.spawn((
+        eustress_common::classes::Instance {
+            name: dir_meta.name.clone(),
+            class_name: eustress_common::classes::ClassName::Folder,
+            archivable: true,
+            id: 0,
+            ai: false,
+        },
+        LoadedFromFile {
+            path: dir_meta.path.clone(),
+            file_type: FileType::Directory,
+            service: dir_meta.service.clone(),
+        },
+        Name::new(dir_meta.name.clone()),
+        Transform::default(),
+        Visibility::default(),
+    )).id();
+
+    // Parent to containing Folder or service root if provided
+    if let Some(parent) = parent_entity {
+        commands.entity(folder_entity).insert(ChildOf(parent));
+    }
+
+    registry.register(dir_meta.path.clone(), folder_entity, dir_meta.clone());
+    info!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
+
+    // Spawn all children parented to this folder
+    for child in &dir_meta.children {
+        match child.file_type {
+            FileType::Directory => {
+                spawn_directory_entry(
+                    commands, asset_server, meshes, materials, registry,
+                    space_path, child, Some(folder_entity),
+                );
+            }
+            _ => {
+                spawn_file_entry(
+                    commands, asset_server, meshes, materials, registry,
+                    space_path, child, Some(folder_entity),
+                );
+            }
+        }
+    }
 }
 
 /// System to dynamically load all files in the Space
@@ -288,132 +500,25 @@ pub fn load_space_files_system(
         return;
     }
     
-    // Scan for files
-    let files = scan_space_directory(&space_path);
+    // Scan for files and directories
+    let entries = scan_space_directory(&space_path);
+    info!("🔍 Discovered {} top-level entries in Space", entries.len());
     
-    info!("🔍 Discovered {} loadable files in Space", files.len());
-    
-    // Load each file
-    for file_meta in files {
-        // Skip if already loaded
-        if registry.is_loaded(&file_meta.path) {
-            continue;
-        }
-        
-        // Check if this file type should spawn an entity in this service
-        if !file_meta.file_type.spawns_entity_in_service(&file_meta.service) {
-            debug!("Skipping {:?} in {} (doesn't spawn entity)", file_meta.path, file_meta.service);
-            continue;
-        }
-        
-        // Load based on file type
-        match file_meta.file_type {
-            FileType::Toml => {
-                // Load .glb.toml instance file
-                match super::instance_loader::load_instance_definition(&file_meta.path) {
-                    Ok(instance) => {
-                        let entity = super::instance_loader::spawn_instance(
-                            &mut commands,
-                            &mut meshes,
-                            &mut materials,
-                            &space_path,
-                            file_meta.path.clone(),
-                            instance,
-                        );
-                        
-                        registry.register(file_meta.path.clone(), entity, file_meta.clone());
-                    }
-                    Err(e) => {
-                        error!("Failed to load instance file {:?}: {}", file_meta.path, e);
-                    }
-                }
+    for entry in &entries {
+        match entry.file_type {
+            // Subdirectory → Folder entity + children parented to it
+            FileType::Directory => {
+                spawn_directory_entry(
+                    &mut commands, &asset_server, &mut meshes, &mut materials,
+                    &mut registry, &space_path, entry, None,
+                );
             }
-            
-            FileType::Gltf => {
-                // Load glTF/GLB file directly (legacy, prefer .glb.toml instances)
-                let scene_handle = asset_server.load(format!("{}#Scene0", file_meta.path.display()));
-                
-                let entity = commands.spawn((
-                    SceneRoot(scene_handle),
-                    Transform::default(),
-                    eustress_common::classes::Instance {
-                        name: file_meta.name.clone(),
-                        class_name: eustress_common::classes::ClassName::Part,
-                        archivable: true,
-                        id: 0,
-                        ai: false,
-                    },
-                    eustress_common::default_scene::PartEntityMarker {
-                        part_id: file_meta.name.clone(),
-                    },
-                    LoadedFromFile {
-                        path: file_meta.path.clone(),
-                        file_type: file_meta.file_type,
-                        service: file_meta.service.clone(),
-                    },
-                    Name::new(file_meta.name.clone()),
-                )).id();
-                
-                registry.register(file_meta.path.clone(), entity, file_meta.clone());
-                info!("✅ Loaded {} from {:?}", file_meta.name, file_meta.path);
-            }
-            
-            FileType::Soul => {
-                // Load Soul script (.md file that compiles to .rune in cache)
-                // Read the markdown source
-                match std::fs::read_to_string(&file_meta.path) {
-                    Ok(markdown_source) => {
-                        // Create SoulScript entity with the markdown source
-                        let entity = commands.spawn((
-                            eustress_common::classes::Instance {
-                                name: file_meta.name.clone(),
-                                class_name: eustress_common::classes::ClassName::SoulScript,
-                                archivable: true,
-                                id: 0,
-                                ai: false,
-                            },
-                            crate::soul::SoulScriptData {
-                                source: markdown_source,
-                                dirty: false,
-                                ast: None,
-                                generated_code: None,
-                                build_status: crate::soul::SoulBuildStatus::NotBuilt,
-                                errors: Vec::new(),
-                            },
-                            LoadedFromFile {
-                                path: file_meta.path.clone(),
-                                file_type: file_meta.file_type,
-                                service: file_meta.service.clone(),
-                            },
-                            Name::new(file_meta.name.clone()),
-                        )).id();
-                        
-                        registry.register(file_meta.path.clone(), entity, file_meta.clone());
-                        info!("📜 Loaded Soul script {} from {:?}", file_meta.name, file_meta.path);
-                        
-                        // Note: The Soul build pipeline will automatically compile this to .rune
-                        // when the user triggers a build or when auto-build is enabled
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to read Soul script {:?}: {}", file_meta.path, e);
-                    }
-                }
-            }
-            
-            FileType::Rune => {
-                // .rune files are compiled bytecode in cache - skip for now
-                // These are generated by the Soul build pipeline
-                debug!("Skipping .rune file (compiled bytecode): {:?}", file_meta.path);
-            }
-            
-            FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
-                // Load audio file
-                // TODO: implement audio entity spawning
-                info!("🔊 Audio file discovered: {:?} (loader not yet implemented)", file_meta.path);
-            }
-            
+            // Regular file → entity at service root level (no parent)
             _ => {
-                debug!("File type {:?} loader not yet implemented", file_meta.file_type);
+                spawn_file_entry(
+                    &mut commands, &asset_server, &mut meshes, &mut materials,
+                    &mut registry, &space_path, entry, None,
+                );
             }
         }
     }

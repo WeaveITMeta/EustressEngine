@@ -2297,6 +2297,7 @@ fn drain_slint_actions(
                                             name,
                                             size: 0,
                                             modified: std::time::SystemTime::now(),
+                                            children: Vec::new(),
                                         },
                                     );
                                 }

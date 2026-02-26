@@ -561,6 +561,7 @@ pub fn load_instance_files_system(
                         name,
                         size: 0,
                         modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
                     },
                 );
             }

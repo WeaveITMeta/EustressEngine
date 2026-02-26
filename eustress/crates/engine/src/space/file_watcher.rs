@@ -304,6 +304,7 @@ fn handle_file_created(
                     name,
                     size: 0,
                     modified: std::time::SystemTime::now(),
+                    children: Vec::new(),
                 },
             );
         }
@@ -350,6 +351,7 @@ fn handle_file_created(
                             name,
                             size: 0,
                             modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
                         },
                     );
                 }
