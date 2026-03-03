@@ -1,5 +1,10 @@
 //! MCP Server error types.
 
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use thiserror::Error;
 
 /// MCP Server errors
@@ -50,3 +55,31 @@ pub enum McpError {
 
 /// Result type for MCP operations
 pub type McpResult<T> = Result<T, McpError>;
+
+impl IntoResponse for McpError {
+    fn into_response(self) -> Response {
+        let (status, message) = match &self {
+            McpError::Config(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            McpError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
+            McpError::InvalidApiKey => (StatusCode::UNAUTHORIZED, "Invalid API key".to_string()),
+            McpError::EntityNotFound(id) => (StatusCode::NOT_FOUND, format!("Entity not found: {}", id)),
+            McpError::SpaceNotFound(id) => (StatusCode::NOT_FOUND, format!("Space not found: {}", id)),
+            McpError::InvalidRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            McpError::PermissionDenied(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            McpError::RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()),
+            McpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            McpError::Serialization(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            McpError::Io(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            McpError::Protocol(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            McpError::WebSocket(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            McpError::RuneExecution(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+        };
+
+        let body = serde_json::json!({
+            "error": message,
+            "status": status.as_u16(),
+        });
+
+        (status, Json(body)).into_response()
+    }
+}

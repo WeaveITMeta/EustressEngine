@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 /// Classes that are abstract/non-visual and should not show selection boxes
 const ABSTRACT_CLASSES: &[ClassName] = &[
     ClassName::Atmosphere,
-    ClassName::Sun,
+    ClassName::Star,
     ClassName::Moon,
     ClassName::Sky,
     ClassName::SoulScript,

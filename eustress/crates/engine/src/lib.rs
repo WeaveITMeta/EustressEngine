@@ -28,7 +28,6 @@ pub mod light_cookies;
 pub mod csg;
 pub mod attachments;
 pub mod motor6d;
-pub mod mesh_part;
 pub mod humanoid;
 pub mod animation_state_machine;
 pub mod foot_ik;
@@ -77,6 +76,7 @@ pub mod generative_pipeline;
 pub mod viga;
 pub mod scenarios;
 pub mod circumstances;
+pub mod class_conversion;
 
 // Re-exports for convenience
 pub use rendering::{PartRenderingPlugin, PartChanged};

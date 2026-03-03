@@ -22,6 +22,7 @@ use crate::commands::{SelectionManager, TransformManager};
 pub mod slint_ui;
 pub mod slint_native;
 pub mod floating_windows;
+pub mod runtime_ui;
 
 // Core modules that don't depend on egui
 mod file_dialogs;
@@ -44,6 +45,7 @@ pub use spawn_events::{
 };
 pub use menu_events::MenuActionEvent;
 pub use world_view::{UIWorldSnapshot, UIActionQueue, UIAction, WorldViewPlugin};
+pub use runtime_ui::{RuntimeUIPlugin, RuntimeUIManager, UIEvent, GuiElement};
 
 // ============================================================================
 // Bevy Resource Wrappers

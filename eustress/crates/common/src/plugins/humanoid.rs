@@ -38,7 +38,7 @@ impl GameLayer {
 /// Marker for character body parts
 #[derive(Component, Reflect, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CharacterLimb {
-    Hips, Spine, Chest, Neck,
+    Hips, Spine, Chest, Neck, Head,
     LeftShoulder, LeftUpperArm, LeftLowerArm, LeftHand,
     RightShoulder, RightUpperArm, RightLowerArm, RightHand,
     LeftUpperLeg, LeftLowerLeg, LeftFoot,
@@ -52,6 +52,7 @@ pub struct CharacterHead;
 /// Body part entity references
 #[derive(Component, Reflect, Clone, Copy, Debug)]
 pub struct CharacterBody {
+    pub root: Entity,
     pub hips: Entity,
     pub spine: Entity,
     pub chest: Entity,
@@ -76,6 +77,7 @@ pub struct CharacterBody {
 impl CharacterBody {
     pub fn new(hips: Entity) -> Self {
         Self {
+            root: hips,
             hips,
             spine: hips,
             chest: hips,
@@ -124,7 +126,7 @@ impl Default for HumanoidConfig {
 }
 
 /// Helper to create a beveled box mesh
-fn create_beveled_box(width: f32, height: f32, depth: f32, bevel: f32) -> Mesh {
+pub fn create_beveled_box(width: f32, height: f32, depth: f32, _bevel: f32) -> Mesh {
     // Simplified beveled box - just return a regular box for now
     Cuboid::new(width, height, depth).into()
 }

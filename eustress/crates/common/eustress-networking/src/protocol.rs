@@ -12,6 +12,7 @@
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::scale::{MAX_SPEED, POSITION_QUANTUM};
 
@@ -192,14 +193,14 @@ impl NetworkParameters {
         // Compute a simple hash for change detection
         let hash = Self::compute_hash(params);
         
-        // Serialize custom params to JSON
-        let custom_data = serde_json::to_string(&params.custom_params).unwrap_or_default();
+        // Serialize sources map to JSON for network transfer
+        let custom_data = serde_json::to_string(&params.sources).unwrap_or_default();
         
         Self {
             domain: params.domain.clone(),
-            resource_id: params.resource_id.clone(),
+            resource_id: String::new(),
             source_ref: params.global_source_ref.clone(),
-            last_updated: params.last_updated.unwrap_or(0.0),
+            last_updated: 0.0,
             custom_data,
             data_hash: hash,
         }
@@ -217,17 +218,13 @@ impl NetworkParameters {
         
         let mut hasher = DefaultHasher::new();
         params.domain.hash(&mut hasher);
-        params.resource_id.hash(&mut hasher);
         params.global_source_ref.hash(&mut hasher);
         
-        // Hash custom params keys and values
-        let mut keys: Vec<_> = params.custom_params.keys().collect();
+        // Hash source config keys for change detection
+        let mut keys: Vec<_> = params.sources.keys().collect();
         keys.sort();
         for key in keys {
             key.hash(&mut hasher);
-            if let Some(value) = params.custom_params.get(key) {
-                value.hash(&mut hasher);
-            }
         }
         
         hasher.finish()
@@ -257,7 +254,7 @@ impl NetworkDomainScope {
         Self {
             domain: params.domain.clone(),
             source_override: params.global_source_ref.clone(),
-            is_domain_scope: params.is_domain_scope,
+            is_domain_scope: !params.domain.is_empty(),
             has_sync_config: params.sync_config.is_some(),
         }
     }
@@ -293,7 +290,7 @@ impl NetworkAttributes {
         use std::collections::hash_map::DefaultHasher;
         
         let mut hasher = DefaultHasher::new();
-        let mut keys: Vec<_> = attrs.keys().collect();
+        let mut keys: Vec<_> = attrs.values.keys().collect();
         keys.sort();
         for key in &keys {
             key.hash(&mut hasher);
@@ -710,15 +707,13 @@ pub fn sync_network_to_parameters(
     mut query: Query<(&NetworkParameters, &mut eustress_common::parameters::Parameters), Changed<NetworkParameters>>,
 ) {
     for (net_params, mut params) in query.iter_mut() {
-        // Update basic fields
+        // Update basic fields that exist on Parameters
         params.domain = net_params.domain.clone();
-        params.resource_id = net_params.resource_id.clone();
         params.global_source_ref = net_params.source_ref.clone();
-        params.last_updated = Some(net_params.last_updated);
         
-        // Deserialize custom params from JSON
-        if let Ok(custom) = serde_json::from_str(&net_params.custom_data) {
-            params.custom_params = custom;
+        // Deserialize sources from JSON if present
+        if let Ok(sources) = serde_json::from_str(&net_params.custom_data) {
+            params.sources = sources;
         }
     }
 }

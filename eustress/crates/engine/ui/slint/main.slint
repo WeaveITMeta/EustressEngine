@@ -563,8 +563,9 @@ export component StudioWindow inherits Window {
                         }
                     }
                     
-                    // Tab content
+                    // Tab content (must stretch to fill remaining space so inner ScrollView works)
                     Rectangle {
+                        vertical-stretch: 1;
                         background: Theme.panel-background;
                         
                         if root.left-tab-index == 0: ExplorerPanel {
@@ -1222,27 +1223,28 @@ export component StudioWindow inherits Window {
                         refresh => { root.web-refresh(); }
                     }
                     
-                    // Code Editor via Monaco WebView (shown for "code" tab type)
-                    // The Wry WebView renders directly into this transparent area
-                    if root.active-tab-type == "code": Rectangle {
-                        background: #1e1e2e;
+                    // Code Editor (shown for "code" tab type — .md, .rs, .toml, etc.)
+                    // Reuses ScriptEditor component with TextEdit for file content
+                    if root.active-tab-type == "code": ScriptEditor {
+                        show-tab-bar: false;
+                        tabs: root.center-tabs;
+                        active-tab: root.center-active-tab - 1;
+                        current-content <=> root.script-editor-content;
                         
-                        // Placeholder: Monaco WebView is positioned over this area by Rust
-                        VerticalLayout {
-                            alignment: center;
-                            Text {
-                                text: "Monaco Editor";
-                                color: #6c7086;
-                                font-size: 14px;
-                                horizontal-alignment: center;
-                            }
-                            Text {
-                                text: "WebView loading...";
-                                color: #45475a;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                            }
+                        on-tab-selected(idx) => {
+                            root.center-active-tab = idx + 1;
+                            root.select-center-tab(idx + 1);
                         }
+                        on-tab-closed(idx) => {
+                            root.close-center-tab(idx);
+                        }
+                        on-content-changed(text) => {
+                            root.script-content-changed(text);
+                        }
+                        on-save => {
+                            // Ctrl+S save handled by Rust
+                        }
+                        on-build => { }
                     }
                     
                     // Image Viewer (shown for "image" tab type)
@@ -1428,8 +1430,9 @@ export component StudioWindow inherits Window {
                         }
                     }
                     
-                    // Tab content
+                    // Tab content (must stretch to fill remaining space so inner ScrollView works)
                     Rectangle {
+                        vertical-stretch: 1;
                         background: Theme.panel-background;
                         
                         if root.right-tab-index == 0: PropertiesPanel {

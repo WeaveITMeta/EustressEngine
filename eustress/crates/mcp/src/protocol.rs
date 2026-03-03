@@ -320,18 +320,8 @@ pub struct BatchResponse {
     pub results: Vec<OperationResult>,
 }
 
-/// Individual operation result in batch
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperationResult {
-    /// Operation index
-    pub index: usize,
-    /// Success flag
-    pub success: bool,
-    /// Entity ID (if successful)
-    pub entity_id: Option<String>,
-    /// Error message (if failed)
-    pub error: Option<String>,
-}
+// OperationResult is defined in types.rs to avoid ambiguity
+pub use crate::types::OperationResult;
 
 // ============================================================================
 // WebSocket Messages
@@ -404,26 +394,8 @@ pub enum ChangeType {
     Reparented,
 }
 
-/// Change source information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChangeSource {
-    /// Source type
-    pub source_type: SourceType,
-    /// Source ID
-    pub id: String,
-    /// Source name
-    pub name: String,
-}
-
-/// Source types
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceType {
-    User,
-    AiModel,
-    System,
-    Script,
-}
+// ChangeSource and SourceType are defined in types.rs to avoid ambiguity
+pub use crate::types::{ChangeSource, SourceType};
 
 /// Error message
 #[derive(Debug, Clone, Serialize, Deserialize)]

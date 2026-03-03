@@ -17,13 +17,13 @@ pub struct InstanceDefinition {
     pub transform: TransformData,
     pub properties: InstanceProperties,
     pub metadata: InstanceMetadata,
-    /// Optional realism material properties (AdvancedPart only)
+    /// Optional realism material properties (dynamic on any class)
     #[serde(default)]
     pub material: Option<TomlMaterialProperties>,
-    /// Optional thermodynamic state (AdvancedPart only)
+    /// Optional thermodynamic state (dynamic on any class)
     #[serde(default)]
     pub thermodynamic: Option<TomlThermodynamicState>,
-    /// Optional electrochemical state (AdvancedPart only)
+    /// Optional electrochemical state (dynamic on any class)
     #[serde(default)]
     pub electrochemical: Option<TomlElectrochemicalState>,
 }
@@ -359,22 +359,31 @@ pub fn write_instance_definition(
     Ok(())
 }
 
-/// Spawn entity from instance definition using procedural meshes.
-/// The mesh path in .glb.toml is a shape hint:
-///   block.glb → Cuboid, ball.glb → Sphere, cylinder.glb → Cylinder,
-///   wedge.glb → Cuboid (placeholder), cone.glb → Cylinder (placeholder)
-/// Scale from [transform] sets the entity size via Transform.scale on a unit mesh.
+/// Known primitive mesh filenames that map to engine asset parts
+const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
+    ("block", "parts/block.glb", eustress_common::classes::PartType::Block),
+    ("ball", "parts/ball.glb", eustress_common::classes::PartType::Ball),
+    ("cylinder", "parts/cylinder.glb", eustress_common::classes::PartType::Cylinder),
+    ("wedge", "parts/wedge.glb", eustress_common::classes::PartType::Wedge),
+    ("corner_wedge", "parts/corner_wedge.glb", eustress_common::classes::PartType::CornerWedge),
+    ("cone", "parts/cone.glb", eustress_common::classes::PartType::Cone),
+];
+
+/// Spawn entity from instance definition, loading actual GLB meshes.
+///
+/// - **Primitives** (block.glb, ball.glb, etc.): loaded from engine `assets/parts/`
+/// - **Custom meshes** (V-Cell, user models): resolved relative to the .glb.toml
+///   file's parent directory and loaded as a GLTF scene via AssetServer
+///
+/// Scale from [transform] sets the entity size via Transform.scale.
 pub fn spawn_instance(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
-    space_root: &Path,
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
-    let mesh_path_str = space_root.join(&instance.asset.mesh);
-    
-    // Extract instance name from filename
+    // Extract instance name from filename (strip .glb.toml → name)
     let name = toml_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -382,18 +391,23 @@ pub fn spawn_instance(
         .trim_end_matches(".glb")
         .to_string();
     
-    // Determine procedural mesh from the asset.mesh path hint
-    let mesh_hint = instance.asset.mesh.to_lowercase();
-    let mesh_handle: Handle<Mesh> = if mesh_hint.contains("ball") {
-        meshes.add(Sphere::new(0.5))
-    } else if mesh_hint.contains("cylinder") {
-        meshes.add(Cylinder::new(0.5, 1.0))
-    } else if mesh_hint.contains("cone") {
-        meshes.add(Cylinder::new(0.5, 1.0)) // TODO: proper cone mesh
+    // Resolve the mesh path: check if it's a known primitive or a custom GLB
+    let mesh_ref = instance.asset.mesh.to_lowercase();
+    let primitive = PRIMITIVE_MESHES.iter().find(|(hint, _, _)| {
+        let fname = mesh_ref.rsplit('/').next().unwrap_or(&mesh_ref);
+        fname.contains(hint)
+    });
+    
+    let (is_custom_mesh, part_shape) = if let Some((_, _, shape)) = primitive {
+        (false, *shape)
     } else {
-        // Default: block (unit cuboid, scaled by Transform.scale)
-        meshes.add(Cuboid::new(1.0, 1.0, 1.0))
+        // Custom mesh — default to Block shape for bounding-box purposes
+        (true, eustress_common::classes::PartType::Block)
     };
+    
+    // Determine the absolute path for the GLB mesh file
+    let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
+    let absolute_mesh_path = toml_dir.join(&instance.asset.mesh);
     
     // Build material from properties
     let [r, g, b, a] = instance.properties.color;
@@ -408,27 +422,10 @@ pub fn spawn_instance(
         ..default()
     });
     
-    // Parse class name
-    let class_name = match instance.metadata.class_name.as_str() {
-        "Part" => eustress_common::classes::ClassName::Part,
-        "Model" => eustress_common::classes::ClassName::Model,
-        "MeshPart" => eustress_common::classes::ClassName::MeshPart,
-        "AdvancedPart" => eustress_common::classes::ClassName::AdvancedPart,
-        _ => eustress_common::classes::ClassName::Part,
-    };
-    
-    // Determine part shape from mesh hint
-    let part_shape = if mesh_hint.contains("ball") {
-        eustress_common::classes::PartType::Ball
-    } else if mesh_hint.contains("cylinder") {
-        eustress_common::classes::PartType::Cylinder
-    } else if mesh_hint.contains("wedge") {
-        eustress_common::classes::PartType::Wedge
-    } else if mesh_hint.contains("cone") {
-        eustress_common::classes::PartType::Cone
-    } else {
-        eustress_common::classes::PartType::Block
-    };
+    // Parse class name (legacy "AdvancedPart" maps to Part via ClassName::from_str)
+    let class_name = eustress_common::classes::ClassName::from_str(
+        &instance.metadata.class_name
+    ).unwrap_or(eustress_common::classes::ClassName::Part);
     
     let scale = Vec3::from_array(instance.transform.scale);
     
@@ -444,55 +441,132 @@ pub fn spawn_instance(
         ..default()
     };
     
-    // Spawn entity with procedural mesh + all components
-    let mut entity_commands = commands.spawn((
-        Mesh3d(mesh_handle),
-        MeshMaterial3d(material_handle),
-        Transform::from(instance.transform),
-        eustress_common::classes::Instance {
-            name: name.clone(),
-            class_name,
-            archivable: instance.metadata.archivable,
-            id: 0,
-            ai: false,
-        },
-        base_part,
-        eustress_common::classes::Part { shape: part_shape },
-        eustress_common::default_scene::PartEntityMarker {
-            part_id: name.clone(),
-        },
-        InstanceFile {
-            toml_path: toml_path.clone(),
-            mesh_path: mesh_path_str,
-            name: name.clone(),
-        },
-        Name::new(name.clone()),
-    ));
+    let transform = Transform::from(instance.transform);
     
-    // Attach realism components for AdvancedPart (or any instance with realism sections)
-    if let Some(ref mat) = instance.material {
-        entity_commands.insert(mat.to_component());
-        info!("  + MaterialProperties: {}", mat.name);
+    if is_custom_mesh && absolute_mesh_path.exists() {
+        // ── Custom GLB mesh: load the full GLTF scene ──
+        // Bevy's AssetServer accepts absolute paths on Windows
+        let scene_path = format!(
+            "{}#Scene0",
+            absolute_mesh_path.to_string_lossy().replace('\\', "/")
+        );
+        let scene_handle: Handle<Scene> = asset_server.load(scene_path);
+        
+        let mut entity_commands = commands.spawn((
+            SceneRoot(scene_handle),
+            transform,
+            eustress_common::classes::Instance {
+                name: name.clone(),
+                class_name,
+                archivable: instance.metadata.archivable,
+                id: 0,
+                ai: false,
+            },
+            base_part,
+            eustress_common::classes::Part { shape: part_shape },
+            eustress_common::default_scene::PartEntityMarker {
+                part_id: name.clone(),
+            },
+            InstanceFile {
+                toml_path: toml_path.clone(),
+                mesh_path: absolute_mesh_path,
+                name: name.clone(),
+            },
+            Name::new(name.clone()),
+        ));
+        
+        // Attach realism components if present in TOML
+        if let Some(ref mat) = instance.material {
+            entity_commands.insert(mat.to_component());
+            info!("  + MaterialProperties: {}", mat.name);
+        }
+        if let Some(ref thermo) = instance.thermodynamic {
+            entity_commands.insert(thermo.to_component());
+            info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
+        }
+        if let Some(ref echem) = instance.electrochemical {
+            entity_commands.insert(echem.to_component());
+            info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+        }
+        
+        let entity = entity_commands.id();
+        info!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        entity
+    } else {
+        // ── Primitive mesh: load from engine assets/parts/ ──
+        let glb_path = if let Some((_, asset_path, _)) = primitive {
+            *asset_path
+        } else {
+            "parts/block.glb" // fallback
+        };
+        let mesh_handle: Handle<Mesh> = asset_server.load(
+            format!("{}#Mesh0/Primitive0", glb_path)
+        );
+        
+        let mut entity_commands = commands.spawn((
+            Mesh3d(mesh_handle),
+            MeshMaterial3d(material_handle),
+            transform,
+            eustress_common::classes::Instance {
+                name: name.clone(),
+                class_name,
+                archivable: instance.metadata.archivable,
+                id: 0,
+                ai: false,
+            },
+            base_part,
+            eustress_common::classes::Part { shape: part_shape },
+            eustress_common::default_scene::PartEntityMarker {
+                part_id: name.clone(),
+            },
+            InstanceFile {
+                toml_path: toml_path.clone(),
+                mesh_path: absolute_mesh_path,
+                name: name.clone(),
+            },
+            Name::new(name.clone()),
+        ));
+        
+        // Attach realism components if present in TOML
+        if let Some(ref mat) = instance.material {
+            entity_commands.insert(mat.to_component());
+            info!("  + MaterialProperties: {}", mat.name);
+        }
+        if let Some(ref thermo) = instance.thermodynamic {
+            entity_commands.insert(thermo.to_component());
+            info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
+        }
+        if let Some(ref echem) = instance.electrochemical {
+            entity_commands.insert(echem.to_component());
+            info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+        }
+        
+        let entity = entity_commands.id();
+        info!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        entity
     }
-    if let Some(ref thermo) = instance.thermodynamic {
-        entity_commands.insert(thermo.to_component());
-        info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
-    }
-    if let Some(ref echem) = instance.electrochemical {
-        entity_commands.insert(echem.to_component());
-        info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
-    }
-    
-    let entity = entity_commands.id();
-    info!("📦 Spawned instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
-    
-    entity
 }
 
-/// System to load all .glb.toml instance files from Workspace
+/// Recursively collect all .glb.toml files from a directory
+fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_toml_files(&path, out);
+        } else if path.to_string_lossy().ends_with(".glb.toml") {
+            out.push(path);
+        }
+    }
+}
+
+/// System to load all .glb.toml instance files from Workspace (recursive)
 pub fn load_instance_files_system(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
 ) {
@@ -504,41 +578,23 @@ pub fn load_instance_files_system(
         return;
     }
     
-    // Scan Workspace for .glb.toml files
+    // Recursively scan Workspace for .glb.toml files
     let workspace_path = space_root.join("Workspace");
     if !workspace_path.exists() {
         return;
     }
     
-    let entries = match std::fs::read_dir(&workspace_path) {
-        Ok(entries) => entries,
-        Err(e) => {
-            error!("Failed to read Workspace directory: {}", e);
-            return;
-        }
-    };
+    let mut toml_files = Vec::new();
+    collect_toml_files(&workspace_path, &mut toml_files);
     
-    for entry in entries.flatten() {
-        let path = entry.path();
-        
-        // Check if it's a .glb.toml file
-        if !path.is_file() {
-            continue;
-        }
-        
-        let path_str = path.to_string_lossy();
-        if !path_str.ends_with(".glb.toml") {
-            continue;
-        }
-        
+    for path in toml_files {
         // Load instance definition
         match load_instance_definition(&path) {
             Ok(instance) => {
                 let entity = spawn_instance(
                     &mut commands,
-                    &mut meshes,
+                    &asset_server,
                     &mut materials,
-                    &space_root,
                     path.clone(),
                     instance,
                 );

@@ -81,14 +81,14 @@ impl McpServer {
         let addr = self.config.address();
         tracing::info!("Starting MCP server on {}", addr);
 
-        // Start the router in a background task
+        // Build the HTTP router before moving fields out of self
+        let app = self.build_router();
+
+        // Start the entity router in a background task
         let router = McpRouter::new(self.router_rx);
         tokio::spawn(async move {
             router.run().await;
         });
-
-        // Build and run the HTTP server
-        let app = self.build_router();
         let listener = tokio::net::TcpListener::bind(&addr).await
             .map_err(|e| McpError::Internal(format!("Failed to bind: {}", e)))?;
 

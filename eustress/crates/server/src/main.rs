@@ -39,6 +39,7 @@
 use bevy::prelude::*;
 use clap::Parser;
 use std::path::PathBuf;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use eustress_common::services::{
@@ -327,7 +328,7 @@ fn server_tick(
 
 fn handle_shutdown(
     keyboard: Option<Res<ButtonInput<KeyCode>>>,
-    mut exit: EventWriter<AppExit>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     // Note: In headless mode, we'd use signals instead
     // This is a placeholder for graceful shutdown

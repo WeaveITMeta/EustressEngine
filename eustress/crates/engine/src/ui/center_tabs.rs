@@ -437,8 +437,8 @@ pub fn route_file_to_tab_type(path: &Path) -> CenterTabType {
         "docx" | "doc" => CenterTabType::Document { doc_type: DocumentType::Docx },
         "pptx" | "ppt" => CenterTabType::Document { doc_type: DocumentType::Pptx },
         "xlsx" | "xls" => CenterTabType::Document { doc_type: DocumentType::Xlsx },
-        "md" | "markdown" => CenterTabType::Document { doc_type: DocumentType::Markdown },
-        "txt" | "log" | "cfg" | "ini" | "env" => CenterTabType::Document { doc_type: DocumentType::Text },
+        "md" | "markdown" => CenterTabType::CodeEditor { language: "markdown".into() },
+        "txt" | "log" | "cfg" | "ini" | "env" => CenterTabType::CodeEditor { language: "plaintext".into() },
 
         // Images
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tiff" | "tga" => {

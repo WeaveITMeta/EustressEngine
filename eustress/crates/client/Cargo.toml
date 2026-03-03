@@ -33,8 +33,8 @@ bevy = { workspace = true, features = [
     "multi_threaded",
 ] }
 
-# Physics (Bevy 0.19 compatible) - DISABLED until Bevy 0.19 support
-# avian3d = { workspace = true }
+# Physics (Avian3D from workspace - supports Bevy 0.18)
+avian3d = { workspace = true }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }

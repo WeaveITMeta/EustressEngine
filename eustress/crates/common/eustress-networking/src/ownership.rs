@@ -34,6 +34,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use crate::config::OwnershipConfig;
 use crate::error::{NetworkError, NetworkResult};
@@ -375,9 +376,9 @@ impl OwnershipManager {
 
 /// Process ownership requests (server-side).
 pub fn process_ownership_requests(
-    mut requests: EventReader<OwnershipRequest>,
-    mut transfers: EventWriter<OwnershipTransfer>,
-    mut denials: EventWriter<OwnershipDenied>,
+    mut requests: MessageReader<OwnershipRequest>,
+    mut transfers: MessageWriter<OwnershipTransfer>,
+    mut denials: MessageWriter<OwnershipDenied>,
     mut manager: ResMut<OwnershipManager>,
     config: Res<OwnershipConfig>,
     query: Query<(Entity, &Transform, &NetworkOwner, Option<&OwnershipLocked>)>,
@@ -495,7 +496,7 @@ pub fn process_ownership_requests(
 
 /// Apply ownership transfers to components.
 pub fn apply_ownership_transfers(
-    mut transfers: EventReader<OwnershipTransfer>,
+    mut transfers: MessageReader<OwnershipTransfer>,
     mut query: Query<&mut NetworkOwner>,
 ) {
     for transfer in transfers.read() {
@@ -508,7 +509,7 @@ pub fn apply_ownership_transfers(
 
 /// Handle ownership releases.
 pub fn handle_ownership_releases(
-    mut releases: EventReader<OwnershipReleased>,
+    mut releases: MessageReader<OwnershipReleased>,
     mut manager: ResMut<OwnershipManager>,
     mut query: Query<&mut NetworkOwner>,
     tick: Res<crate::config::NetworkState>,
@@ -544,7 +545,7 @@ pub fn auto_release_inactive(
     config: Res<OwnershipConfig>,
     mut query: Query<(Entity, &mut NetworkOwner)>,
     tick: Res<crate::config::NetworkState>,
-    mut transfers: EventWriter<OwnershipTransfer>,
+    mut transfers: MessageWriter<OwnershipTransfer>,
 ) {
     if config.auto_release_secs == 0 {
         return; // Disabled
@@ -569,7 +570,7 @@ pub fn auto_release_inactive(
             if owner.client_id == from_client {
                 // Check if this is the right entity (would need net_id component)
                 // For now, use entity index as net_id approximation
-                let entity_net_id = entity.index() as u64;
+                let entity_net_id = entity.index().index() as u64;
                 if entity_net_id == net_id {
                     info!(
                         "Auto-releasing idle entity {:?} (net_id {}) from client {}",
@@ -635,7 +636,7 @@ pub struct RecordActivityEvent {
 
 /// Handle activity recording events
 pub fn handle_activity_events(
-    mut events: EventReader<RecordActivityEvent>,
+    mut events: MessageReader<RecordActivityEvent>,
     mut manager: ResMut<OwnershipManager>,
 ) {
     for event in events.read() {
@@ -653,11 +654,11 @@ pub struct OwnershipPlugin;
 impl Plugin for OwnershipPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OwnershipManager>()
-            .add_event::<OwnershipRequest>()
-            .add_event::<OwnershipTransfer>()
-            .add_event::<OwnershipDenied>()
-            .add_event::<OwnershipReleased>()
-            .add_event::<RecordActivityEvent>()
+            .add_message::<OwnershipRequest>()
+            .add_message::<OwnershipTransfer>()
+            .add_message::<OwnershipDenied>()
+            .add_message::<OwnershipReleased>()
+            .add_message::<RecordActivityEvent>()
             .register_type::<NetworkOwner>()
             .register_type::<OwnershipLocked>()
             .register_type::<OwnershipPending>();

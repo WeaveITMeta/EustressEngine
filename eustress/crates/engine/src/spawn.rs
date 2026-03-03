@@ -15,7 +15,7 @@ use avian3d::prelude::{Collider, RigidBody};
 
 #[allow(unused_imports)]
 use crate::classes::{
-    Instance, BasePart, Part, PartType, MeshPart, Model, Humanoid,
+    Instance, BasePart, Part, PartType, Model, Humanoid,
     EustressCamera, EustressPointLight, EustressSpotLight, SurfaceLight, EustressDirectionalLight,
     Sound, Attachment, WeldConstraint, Motor6D, ParticleEmitter, Beam,
     Sky, SkyboxTextures, Terrain, BillboardGui, TextLabel, Folder,
@@ -222,87 +222,6 @@ pub fn spawn_part(
         Name::new(name),
         PartEntity { part_id: String::new() },
         // Default Attributes and Tags for all entities (Phase 3)
-        Attributes::new(),
-        Tags::new(),
-    )).id();
-    
-    // Highly transparent objects (>=50%) should not cast shadows
-    if no_shadow {
-        commands.entity(entity).insert(NotShadowCaster);
-    }
-    
-    // Glass material with < 50% transparency gets colored shadow transmission
-    if glass_with_transmission {
-        commands.entity(entity).insert(TransmittedShadowReceiver);
-    }
-    
-    entity
-}
-
-/// Spawn a MeshPart entity (custom mesh from asset)
-pub fn spawn_mesh_part(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    asset_server: &AssetServer,
-    materials: &mut Assets<StandardMaterial>,
-    instance: Instance,
-    base_part: BasePart,
-    mesh_part: MeshPart,
-) -> Entity {
-    let name = instance.name.clone();
-    let size = base_part.size;
-    
-    // Load mesh from asset or use default cube
-    let mesh: Handle<Mesh> = if !mesh_part.mesh_id.is_empty() {
-        asset_server.load(&mesh_part.mesh_id)
-    } else {
-        // Use a procedural cube as default placeholder
-        meshes.add(Cuboid::from_size(size))
-    };
-    
-    // Create collider based on size for physics raycasting
-    // Use cuboid as approximation for custom meshes
-    let collider = Collider::cuboid(size.x, size.y, size.z);
-    
-    // Create material with special handling for Glass
-    let (roughness, metallic, reflectance) = base_part.material.pbr_params();
-    let is_glass = matches!(base_part.material, crate::classes::Material::Glass);
-    let transparency = base_part.transparency;
-    
-    let material = materials.add(StandardMaterial {
-        base_color: base_part.color,
-        perceptual_roughness: roughness,
-        metallic,
-        reflectance,
-        alpha_mode: if transparency > 0.0 {
-            AlphaMode::Blend
-        } else {
-            AlphaMode::Opaque
-        },
-        // Glass material gets specular/diffuse transmission for colored shadows
-        specular_transmission: if is_glass { 0.9 } else { 0.0 },
-        diffuse_transmission: if is_glass { 0.3 } else { 0.0 },
-        thickness: if is_glass { 0.5 } else { 0.0 },
-        ior: if is_glass { 1.5 } else { 1.5 },
-        ..default()
-    });
-    
-    // Objects with >= 50% transparency don't cast shadows
-    let no_shadow = transparency >= 0.5;
-    // Glass with < 50% transparency gets TransmittedShadowReceiver for colored shadows
-    let glass_with_transmission = is_glass && transparency < 0.5;
-    
-    let entity = commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        base_part.cframe,
-        instance,
-        base_part,
-        mesh_part,
-        collider,
-        RigidBody::Static,
-        Name::new(name),
-        PartEntity { part_id: String::new() },
         Attributes::new(),
         Tags::new(),
     )).id();

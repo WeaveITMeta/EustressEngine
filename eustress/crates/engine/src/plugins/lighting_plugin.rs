@@ -99,7 +99,7 @@ fn setup_lighting_explorer_entities(
         commands.entity(entity).insert((
             Instance {
                 name: "Sun".to_string(),
-                class_name: ClassName::Sun,
+                class_name: ClassName::Star,
                 archivable: true,
                 id: entity.index().index(),
                 ..Default::default()

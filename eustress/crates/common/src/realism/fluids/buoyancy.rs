@@ -388,7 +388,7 @@ mod tests {
     
     #[test]
     fn test_sphere_submerged_volume() {
-        let r = 1.0;
+        let r: f32 = 1.0;
         let full_vol = (4.0 / 3.0) * std::f32::consts::PI * r.powi(3);
         
         // Fully submerged

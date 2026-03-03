@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 // 3. PVInstance (Pivot/Position)
 // 4. BasePart (Core 3D Object)
 // 5. Part (Primitive Shapes)
-// 6. MeshPart (Custom Meshes)
-// 7. Model (Container/Groups)
+// 6. Model (Container/Groups)
 // 8. Humanoid (Character Controller)
 // 9. Camera (Viewport Control)
 // 10. Light Classes (PointLight, SpotLight, SurfaceLight)
@@ -152,7 +151,6 @@ pub enum ClassName {
     PVInstance,
     BasePart,
     Part,
-    MeshPart,
     Model,
     Humanoid,
     Camera,
@@ -181,6 +179,7 @@ pub enum ClassName {
     Beam,
     Sound,
     Terrain,
+    ChunkedWorld,   // Large-scale world with binary chunk storage (10M+ instances)
     Sky,
     UnionOperation,
     // Soul Scripting - Single unified script class
@@ -192,7 +191,7 @@ pub enum ClassName {
     Workspace,      // Root container for 3D objects
     // Celestial Classes (Lighting children)
     Clouds,         // Volumetric cloud system
-    Sun,            // Sun celestial body with day/night cycle
+    Star,           // Star celestial body (sun) with day/night cycle
     Moon,           // Moon with phases and night lighting
     // Seat Classes (extends BasePart)
     Seat,           // Basic seat - characters auto-sit on touch
@@ -215,8 +214,6 @@ pub enum ClassName {
     SolarSystem,      // Container for orbital hierarchies
     CelestialBody,    // Orbital object with n-body gravity
     RegionChunk,      // Geospatial fragment with floating origin
-    // Realism Physics Classes (extends BasePart with physical simulation)
-    AdvancedPart,     // BasePart + MaterialProperties + ThermodynamicState + ElectrochemicalState
 }
 
 impl ClassName {
@@ -226,7 +223,6 @@ impl ClassName {
             ClassName::PVInstance => "PVInstance",
             ClassName::BasePart => "BasePart",
             ClassName::Part => "Part",
-            ClassName::MeshPart => "MeshPart",
             ClassName::Model => "Model",
             ClassName::Humanoid => "Humanoid",
             ClassName::Camera => "Camera",
@@ -255,6 +251,7 @@ impl ClassName {
             ClassName::Beam => "Beam",
             ClassName::Sound => "Sound",
             ClassName::Terrain => "Terrain",
+            ClassName::ChunkedWorld => "ChunkedWorld",
             ClassName::Sky => "Sky",
             ClassName::UnionOperation => "UnionOperation",
             ClassName::SoulScript => "SoulScript",
@@ -263,7 +260,7 @@ impl ClassName {
             ClassName::SpawnLocation => "SpawnLocation",
             ClassName::Workspace => "Workspace",
             ClassName::Clouds => "Clouds",
-            ClassName::Sun => "Sun",
+            ClassName::Star => "Star",
             ClassName::Moon => "Moon",
             ClassName::Seat => "Seat",
             ClassName::VehicleSeat => "VehicleSeat",
@@ -279,7 +276,6 @@ impl ClassName {
             ClassName::SolarSystem => "SolarSystem",
             ClassName::CelestialBody => "CelestialBody",
             ClassName::RegionChunk => "RegionChunk",
-            ClassName::AdvancedPart => "AdvancedPart",
         }
     }
     
@@ -289,7 +285,8 @@ impl ClassName {
             "PVInstance" => Ok(ClassName::PVInstance),
             "BasePart" => Ok(ClassName::BasePart),
             "Part" => Ok(ClassName::Part),
-            "MeshPart" => Ok(ClassName::MeshPart),
+            // Legacy: MeshPart maps to Part (file-system-first: all parts use glb.toml meshes)
+            "MeshPart" => Ok(ClassName::Part),
             "Model" => Ok(ClassName::Model),
             "Humanoid" => Ok(ClassName::Humanoid),
             "Camera" => Ok(ClassName::Camera),
@@ -318,6 +315,7 @@ impl ClassName {
             "Beam" => Ok(ClassName::Beam),
             "Sound" => Ok(ClassName::Sound),
             "Terrain" => Ok(ClassName::Terrain),
+            "ChunkedWorld" => Ok(ClassName::ChunkedWorld),
             "Sky" => Ok(ClassName::Sky),
             "UnionOperation" => Ok(ClassName::UnionOperation),
             "SoulScript" => Ok(ClassName::SoulScript),
@@ -326,7 +324,9 @@ impl ClassName {
             "SpawnLocation" => Ok(ClassName::SpawnLocation),
             "Workspace" => Ok(ClassName::Workspace),
             "Clouds" => Ok(ClassName::Clouds),
-            "Sun" => Ok(ClassName::Sun),
+            "Star" => Ok(ClassName::Star),
+            // Legacy: Sun maps to Star
+            "Sun" => Ok(ClassName::Star),
             "Moon" => Ok(ClassName::Moon),
             "Seat" => Ok(ClassName::Seat),
             "VehicleSeat" => Ok(ClassName::VehicleSeat),
@@ -341,7 +341,8 @@ impl ClassName {
             "SolarSystem" => Ok(ClassName::SolarSystem),
             "CelestialBody" => Ok(ClassName::CelestialBody),
             "RegionChunk" => Ok(ClassName::RegionChunk),
-            "AdvancedPart" => Ok(ClassName::AdvancedPart),
+            // Legacy: AdvancedPart maps to Part (realism data is now dynamic on any class)
+            "AdvancedPart" => Ok(ClassName::Part),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -412,7 +413,7 @@ impl Default for PVInstance {
 // 4. BasePart (Abstract: Core 3D Object; ~50 props)
 // ============================================================================
 
-/// Physical primitive base (inherited by Part, MeshPart, etc.)
+/// Physical primitive base (inherited by Part, etc.)
 /// Handles transform, physics, rendering (~50 properties in Eustress)
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
@@ -636,31 +637,6 @@ impl Default for Part {
     }
 }
 
-// ============================================================================
-// 6. MeshPart (Extends BasePart: Custom Meshes)
-// ============================================================================
-
-/// Asset-loaded geometry/textures
-#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
-#[reflect(Component)]
-pub struct MeshPart {
-    /// Mesh asset URL (Eustress "MeshId" rbxassetid://)
-    /// Bevy: Handle<Mesh> from AssetServer
-    pub mesh_id: String,
-    
-    /// Texture asset URL (Eustress "TextureId")
-    /// Bevy: Handle<Image>
-    pub texture_id: String,
-}
-
-impl Default for MeshPart {
-    fn default() -> Self {
-        Self {
-            mesh_id: String::new(),
-            texture_id: String::new(),
-        }
-    }
-}
 
 // ============================================================================
 // 7. Model (Container: Groups Parts)
@@ -1918,7 +1894,7 @@ pub struct DomainSyncConfig {
     /// Starting position offset from folder origin
     pub origin_offset: [f32; 3],
     
-    /// Default size for spawned Parts/MeshParts
+    /// Default size for spawned Parts
     pub default_size: [f32; 3],
     
     /// Default color for spawned entities (RGBA)
@@ -1957,7 +1933,6 @@ pub struct DomainSyncConfig {
 pub enum SyncTargetClass {
     #[default]
     Part,
-    MeshPart,
     Model,
     Folder,
 }
@@ -4422,6 +4397,69 @@ impl Default for Terrain {
     }
 }
 
+// ============================================================================
+// ChunkedWorld (Large-Scale World with Binary Chunk Storage)
+// ============================================================================
+
+/// Compression algorithm for chunk files
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
+pub enum ChunkCompression {
+    #[default]
+    None,
+    Lz4,
+    Zstd,
+}
+
+/// Large-scale world container with binary chunk storage (10M+ instances)
+/// Uses spatial partitioning and streaming for scalability
+/// See docs/development/CHUNKED_STORAGE.md for full specification
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ChunkedWorld {
+    /// Size of each chunk in meters [x, y, z]
+    pub chunk_size: Vec3,
+    
+    /// Minimum chunk coordinates (world bounds)
+    pub min_chunk: IVec3,
+    
+    /// Maximum chunk coordinates (world bounds)
+    pub max_chunk: IVec3,
+    
+    /// Number of chunks to load around camera
+    pub load_radius: i32,
+    
+    /// Number of chunks to keep loaded (hysteresis to prevent thrashing)
+    pub unload_radius: i32,
+    
+    /// LOD transition distances in meters
+    pub lod_distances: Vec<f32>,
+    
+    /// Compression algorithm for chunk files
+    pub compression: ChunkCompression,
+    
+    /// Path to manifest.toml (relative to _instance.toml)
+    pub manifest_path: String,
+    
+    /// Path to chunks directory (relative to _instance.toml)
+    pub chunks_path: String,
+}
+
+impl Default for ChunkedWorld {
+    fn default() -> Self {
+        Self {
+            chunk_size: Vec3::new(256.0, 256.0, 256.0),
+            min_chunk: IVec3::new(-64, -4, -64),
+            max_chunk: IVec3::new(63, 3, 63),
+            load_radius: 3,
+            unload_radius: 5,
+            lod_distances: vec![256.0, 512.0, 1024.0],
+            compression: ChunkCompression::Lz4,
+            manifest_path: "manifest.toml".to_string(),
+            chunks_path: "chunks".to_string(),
+        }
+    }
+}
+
 impl Terrain {
     /// Create a small terrain for testing
     pub fn small() -> Self {
@@ -4798,14 +4836,15 @@ impl Clouds {
 }
 
 // ============================================================================
-// 23d. Sun (Lighting child - Celestial Body)
+// 23d. Star (Lighting child - Celestial Body)
 // ============================================================================
 
-/// Sun celestial body component (Lighting child)
+/// Star celestial body component (Lighting child)
 /// Controls day/night cycle, directional lighting, and sky appearance
+/// Note: Renamed from Sun to Star for consistency with orbital systems
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
-pub struct Sun {
+pub struct Star {
     /// Whether the sun is enabled
     pub enabled: bool,
     
@@ -4863,7 +4902,7 @@ pub struct Sun {
     pub texture: String,
 }
 
-impl Default for Sun {
+impl Default for Star {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -4888,7 +4927,7 @@ impl Default for Sun {
     }
 }
 
-impl Sun {
+impl Star {
     /// Get sun elevation angle in degrees (-90 to 90)
     /// Negative = below horizon, 0 = at horizon, 90 = directly overhead
     pub fn elevation(&self) -> f32 {
@@ -5001,6 +5040,9 @@ impl Sun {
         }
     }
 }
+
+/// Type alias for backward compatibility (Sun renamed to Star)
+pub type Sun = Star;
 
 // ============================================================================
 // 23e. Moon (Lighting child - Celestial Body)

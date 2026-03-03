@@ -747,7 +747,6 @@ pub enum EntityClass {
     Folder,
     Model(ModelData),
     Part(PartData),
-    MeshPart(MeshPartData),
     UnionOperation(UnionOperationData),
     
     // --- Characters ---
@@ -825,19 +824,6 @@ pub struct PartData {
     pub anchored: bool,
     pub can_collide: bool,
     pub cast_shadow: bool,
-}
-
-/// MeshPart data - custom mesh
-#[derive(Debug, Clone, Serialize, Deserialize, Reflect, Default)]
-pub struct MeshPartData {
-    pub size: [f32; 3],
-    pub color: [f32; 4],
-    pub material: String,
-    pub mesh_id: String,
-    pub texture_id: String,
-    pub transparency: f32,
-    pub anchored: bool,
-    pub can_collide: bool,
 }
 
 /// Model data - container/group

@@ -1021,10 +1021,12 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, handle_window_resize)
             // Performance tracking
             .add_systems(Update, update_ui_performance)
+            // Bridge: viewport click → SelectionManager → UnifiedExplorerState (runs first)
+            .add_systems(Update, sync_viewport_selection_to_explorer)
             // Unified explorer sync: entities + filesystem (throttled internally)
-            .add_systems(Update, sync_unified_explorer_to_slint)
+            .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
             // Properties sync (throttled internally)
-            .add_systems(Update, sync_properties_to_slint)
+            .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
             // Center tab sync: CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state.before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint)
@@ -2272,9 +2274,8 @@ fn drain_slint_actions(
                                 // Step 3: Spawn entity inline
                                 let entity = crate::space::instance_loader::spawn_instance(
                                     &mut commands,
-                                    &mut meshes,
+                                    &asset_server,
                                     &mut materials,
-                                    &space_root,
                                     toml_path.clone(),
                                     instance,
                                 );
@@ -2630,6 +2631,52 @@ fn update_ui_performance(
     perf.update(time.delta_secs());
 }
 
+/// Bridges viewport click selection → UnifiedExplorerState.
+///
+/// Reads the current selection from BevySelectionManager (updated by
+/// part_selection_system on viewport clicks) and writes the matching ECS
+/// entity into UnifiedExplorerState.selected.  This ensures that:
+///   - The Explorer tree highlights the clicked entity
+///   - sync_properties_to_slint reads the correct entity for the Properties panel
+///
+/// Runs every frame (no throttle) so selection feels instant.
+fn sync_viewport_selection_to_explorer(
+    selection_manager: Option<Res<BevySelectionManager>>,
+    mut explorer_state: ResMut<UnifiedExplorerState>,
+    instances: Query<(Entity, &eustress_common::classes::Instance)>,
+) {
+    let Some(sel_mgr) = selection_manager else { return };
+    let selected_ids = sel_mgr.0.read().get_selected();
+
+    // Compute the new SelectedItem from the SelectionManager state
+    let new_selected = if selected_ids.is_empty() {
+        SelectedItem::None
+    } else {
+        // Try to find the first selected entity by matching the id string
+        // format "index v generation" (e.g. "42v0") produced by entity_to_id_string()
+        let first_id = &selected_ids[0];
+        let found = instances.iter().find(|(entity, _)| {
+            let id = format!("{}v{}", entity.index(), entity.generation());
+            &id == first_id
+        });
+        match found {
+            Some((entity, _)) => SelectedItem::Entity(entity),
+            None => SelectedItem::None,
+        }
+    };
+
+    // Only write if changed to avoid triggering unnecessary change detection
+    // on the two downstream throttled systems.
+    let changed = match (&explorer_state.selected, &new_selected) {
+        (SelectedItem::Entity(a), SelectedItem::Entity(b)) => a != b,
+        (SelectedItem::None, SelectedItem::None) => false,
+        _ => true,
+    };
+    if changed {
+        explorer_state.selected = new_selected;
+    }
+}
+
 /// Syncs both ECS entities and filesystem to a single unified tree in Slint.
 /// Builds a flat list of TreeNode structs: entities first (services + children),
 /// then filesystem nodes (project root directories/files).
@@ -2692,7 +2739,7 @@ fn sync_unified_explorer_to_slint(
     
     // Classify root entities into service buckets
     let is_lighting_child = |cn: &ClassName| matches!(cn,
-        ClassName::Sky | ClassName::Atmosphere | ClassName::Sun | ClassName::Moon | ClassName::Clouds
+        ClassName::Sky | ClassName::Atmosphere | ClassName::Star | ClassName::Moon | ClassName::Clouds
     );
     
     let mut workspace_roots: Vec<Entity> = Vec::new();
@@ -3048,6 +3095,9 @@ fn sync_properties_to_slint(
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     transforms: Query<&Transform>,
     base_parts: Query<&eustress_common::classes::BasePart>,
+    material_props: Query<&eustress_common::realism::materials::properties::MaterialProperties>,
+    thermo_states: Query<&eustress_common::realism::particles::components::ThermodynamicState>,
+    echem_states: Query<&eustress_common::realism::particles::components::ElectrochemicalState>,
 ) {
     // Throttle: only update every 15 frames
     if let Some(ref perf) = perf {
@@ -3058,7 +3108,12 @@ fn sync_properties_to_slint(
     
     let selected_entity = match &explorer_state.selected {
         SelectedItem::Entity(e) => *e,
-        _ => {
+        SelectedItem::File(path) => {
+            // File selected — show filesystem properties
+            build_file_properties(ui, path);
+            return;
+        }
+        SelectedItem::None => {
             // No selection — clear properties and update count
             ui.set_selected_count(0);
             ui.set_selected_class(slint::SharedString::default());
@@ -3116,9 +3171,55 @@ fn sync_properties_to_slint(
         }
     }
     
+    // -- Realism: MaterialProperties (dynamic, only if component present) --
+    if let Ok(mat) = material_props.get(selected_entity) {
+        add_prop("Material", "Name", mat.name.clone(), "string", false);
+        add_prop("Material", "Young's Modulus", format!("{:.2e} Pa", mat.young_modulus), "string", false);
+        add_prop("Material", "Poisson Ratio", format!("{:.3}", mat.poisson_ratio), "string", false);
+        add_prop("Material", "Yield Strength", format!("{:.2e} Pa", mat.yield_strength), "string", false);
+        add_prop("Material", "Ultimate Strength", format!("{:.2e} Pa", mat.ultimate_strength), "string", false);
+        add_prop("Material", "Fracture Toughness", format!("{:.2e} Pa√m", mat.fracture_toughness), "string", false);
+        add_prop("Material", "Hardness", format!("{:.1} HV", mat.hardness), "string", false);
+        add_prop("Material", "Thermal Conductivity", format!("{:.2} W/(m·K)", mat.thermal_conductivity), "string", false);
+        add_prop("Material", "Specific Heat", format!("{:.1} J/(kg·K)", mat.specific_heat), "string", false);
+        add_prop("Material", "Thermal Expansion", format!("{:.2e} 1/K", mat.thermal_expansion), "string", false);
+        add_prop("Material", "Melting Point", format!("{:.0} K", mat.melting_point), "string", false);
+        add_prop("Material", "Density", format!("{:.1} kg/m³", mat.density), "string", false);
+        add_prop("Material", "Friction (Static)", format!("{:.2}", mat.friction_static), "string", false);
+        add_prop("Material", "Friction (Kinetic)", format!("{:.2}", mat.friction_kinetic), "string", false);
+        add_prop("Material", "Restitution", format!("{:.2}", mat.restitution), "string", false);
+    }
+    
+    // -- Realism: ThermodynamicState (dynamic, only if component present) --
+    if let Ok(thermo) = thermo_states.get(selected_entity) {
+        add_prop("Thermodynamic", "Temperature", format!("{:.1} K", thermo.temperature), "string", false);
+        add_prop("Thermodynamic", "Pressure", format!("{:.0} Pa", thermo.pressure), "string", false);
+        add_prop("Thermodynamic", "Volume", format!("{:.6} m³", thermo.volume), "string", false);
+        add_prop("Thermodynamic", "Internal Energy", format!("{:.2} J", thermo.internal_energy), "string", false);
+        add_prop("Thermodynamic", "Entropy", format!("{:.4} J/K", thermo.entropy), "string", false);
+        add_prop("Thermodynamic", "Enthalpy", format!("{:.2} J", thermo.enthalpy), "string", false);
+        add_prop("Thermodynamic", "Moles", format!("{:.4}", thermo.moles), "string", false);
+    }
+    
+    // -- Realism: ElectrochemicalState (dynamic, only if component present) --
+    if let Ok(echem) = echem_states.get(selected_entity) {
+        add_prop("Electrochemical", "Voltage (OCV)", format!("{:.3} V", echem.voltage), "string", false);
+        add_prop("Electrochemical", "Terminal Voltage", format!("{:.3} V", echem.terminal_voltage), "string", false);
+        add_prop("Electrochemical", "Capacity", format!("{:.1} Ah", echem.capacity_ah), "string", false);
+        add_prop("Electrochemical", "SOC", format!("{:.1}%", echem.soc * 100.0), "string", false);
+        add_prop("Electrochemical", "Current", format!("{:.3} A", echem.current), "string", false);
+        add_prop("Electrochemical", "Internal Resistance", format!("{:.4} Ω", echem.internal_resistance), "string", false);
+        add_prop("Electrochemical", "Ionic Conductivity", format!("{:.4} S/m", echem.ionic_conductivity), "string", false);
+        add_prop("Electrochemical", "Cycle Count", format!("{}", echem.cycle_count), "string", false);
+        add_prop("Electrochemical", "C-Rate", format!("{:.2} h⁻¹", echem.c_rate), "string", false);
+        add_prop("Electrochemical", "Capacity Retention", format!("{:.1}%", echem.capacity_retention * 100.0), "string", false);
+        add_prop("Electrochemical", "Heat Generation", format!("{:.4} W", echem.heat_generation), "string", false);
+        add_prop("Electrochemical", "Dendrite Risk", format!("{:.3}", echem.dendrite_risk), "string", false);
+    }
+    
     // Build flat list with category headers interleaved
-    // Category display order: Transform, Appearance, Data, Physics, then any others
-    let category_order = ["Transform", "Appearance", "Data", "Physics"];
+    // Category display order: Transform, Appearance, Data, Physics, then realism, then any others
+    let category_order = ["Transform", "Appearance", "Data", "Physics", "Material", "Thermodynamic", "Electrochemical"];
     let mut ordered_categories: Vec<String> = Vec::new();
     for cat in &category_order {
         if categorized.contains_key(*cat) {
@@ -3187,6 +3288,87 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
     }
 }
 
+/// Builds filesystem properties for a selected file and pushes them to the Slint Properties panel.
+/// Shows: Name, Path, Extension, Size, Type, Modified, Created, Read-Only.
+fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
+    let file_name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+    let is_dir = path.is_dir();
+    let type_label = if is_dir { "Directory" } else { "File" };
+
+    ui.set_selected_count(1);
+    ui.set_selected_class(if is_dir { "Directory".into() } else { ext.as_str().into() });
+
+    let mut props: Vec<PropertyData> = Vec::new();
+
+    // Helper: create a property entry
+    let make_prop = |name: &str, value: &str, prop_type: &str, category: &str, is_hdr: bool| -> PropertyData {
+        PropertyData {
+            name: name.into(),
+            value: value.into(),
+            property_type: prop_type.into(),
+            editable: false,
+            category: category.into(),
+            options: slint::ModelRc::default(),
+            is_header: is_hdr,
+        }
+    };
+
+    // Category header: File Info
+    props.push(make_prop("", "", "", "File Info", true));
+    props.push(make_prop("Name", &file_name, "string", "File Info", false));
+    props.push(make_prop("Type", type_label, "string", "File Info", false));
+
+    // Extension (files only)
+    if !is_dir && !ext.is_empty() {
+        props.push(make_prop("Extension", &format!(".{}", ext), "string", "File Info", false));
+    }
+
+    // Path
+    props.push(make_prop("Path", &path.to_string_lossy(), "string", "File Info", false));
+
+    // Metadata-dependent properties
+    if let Ok(metadata) = std::fs::metadata(path) {
+        // Size
+        let size_str = if is_dir {
+            std::fs::read_dir(path)
+                .map(|entries| {
+                    let count = entries.filter_map(|e| e.ok()).count();
+                    format!("{} items", count)
+                })
+                .unwrap_or_else(|_| "Unknown".to_string())
+        } else {
+            super::file_icons::format_file_size(metadata.len())
+        };
+
+        // Category header: Details
+        props.push(make_prop("", "", "", "Details", true));
+        props.push(make_prop("Size", &size_str, "string", "Details", false));
+        props.push(make_prop("Read Only", &metadata.permissions().readonly().to_string(), "bool", "Details", false));
+
+        // Modified time
+        if let Ok(modified) = metadata.modified() {
+            let datetime: chrono::DateTime<chrono::Local> = modified.into();
+            props.push(make_prop("Modified", &datetime.format("%Y-%m-%d %H:%M:%S").to_string(), "string", "Details", false));
+        }
+
+        // Created time
+        if let Ok(created) = metadata.created() {
+            let datetime: chrono::DateTime<chrono::Local> = created.into();
+            props.push(make_prop("Created", &datetime.format("%Y-%m-%d %H:%M:%S").to_string(), "string", "Details", false));
+        }
+    }
+
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
+    ui.set_entity_properties(slint::ModelRc::from(model_rc));
+}
+
 /// Bridges CenterTabManager → StudioState.center_tabs when the tab manager is dirty.
 /// This allows files opened via the unified explorer (OpenNode) to appear in the Slint tab bar.
 fn sync_tab_manager_to_studio_state(
@@ -3212,6 +3394,15 @@ fn sync_tab_manager_to_studio_state(
     // Sync active tab index (CenterTabManager is 0-indexed with Scene at 0,
     // StudioState uses 0 for Scene and 1+ for other tabs)
     state.active_center_tab = mgr.active_tab as i32;
+    
+    // Sync active tab's content to script_editor_content for TextEdit display.
+    // This covers both "script" and "code" tab types (Soul scripts + .md/.rs/.toml etc.)
+    if let Some(active_tab) = mgr.active() {
+        let tab_type_str = active_tab.tab_type.type_string();
+        if tab_type_str == "script" || tab_type_str == "code" {
+            state.script_editor_content = active_tab.content.clone();
+        }
+    }
     
     // Mark tabs as dirty so sync_center_tabs_to_slint will push to Slint
     state.tabs_dirty = true;
@@ -3332,6 +3523,11 @@ fn sync_center_tabs_to_slint(
         ui.set_center_active_tab(state.active_center_tab);
     }
 
+    // Sync editor content to Slint when a script or code tab is active
+    if (tab_type == "script" || tab_type == "code") && tabs_changed {
+        ui.set_script_editor_content(state.script_editor_content.as_str().into());
+    }
+
     // Always sync web browser properties when a web tab is active (loading can change each frame)
     if tab_type == "web" {
         let idx = (state.active_center_tab - 1) as usize;
@@ -3349,7 +3545,6 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
     use eustress_common::classes::ClassName;
     match class_name {
         ClassName::Part | ClassName::BasePart => "part",
-        ClassName::MeshPart => "meshpart",
         ClassName::Model | ClassName::PVInstance => "model",
         ClassName::Folder => "folder",
         ClassName::Humanoid => "humanoid",
@@ -3364,7 +3559,7 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Terrain => "terrain",
         ClassName::Sky => "sky",
         ClassName::Atmosphere => "atmosphere",
-        ClassName::Sun => "sun",
+        ClassName::Star => "star",
         ClassName::Moon => "moon",
         ClassName::Clouds => "sky",
         ClassName::SoulScript => "soulservice",

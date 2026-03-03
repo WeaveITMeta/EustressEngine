@@ -19,7 +19,6 @@ impl Plugin for WorkspacePlugin {
             .register_type::<Instance>()
             .register_type::<BasePart>()
             .register_type::<Part>()
-            .register_type::<MeshPart>()
             .register_type::<Model>()
             .register_type::<Folder>()
             .register_type::<Humanoid>()

@@ -13,6 +13,7 @@
 use bevy::prelude::*;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use tracing::{info, warn};
 
 use crate::config::{NetworkConfig, NetworkState};
 use crate::error::NetworkError;
@@ -176,15 +177,15 @@ impl InputBuffer {
 // Client Events
 // ============================================================================
 
-/// Event to connect to server.
-#[derive(Event, Message, Debug)]
+/// Message to connect to server.
+#[derive(Message, Debug)]
 pub struct Connect {
     pub server_addr: SocketAddr,
     pub player_name: String,
 }
 
-/// Event to disconnect from server.
-#[derive(Event, Message, Debug)]
+/// Message to disconnect from server.
+#[derive(Message, Debug)]
 pub struct Disconnect {
     pub reason: String,
 }
@@ -207,7 +208,7 @@ pub struct ConnectionLost {
 
 /// Handle connect request.
 fn handle_connect(
-    mut events: EventReader<Connect>,
+    mut events: MessageReader<Connect>,
     mut state: ResMut<ClientState>,
     mut local: ResMut<LocalClient>,
     mut transport: ResMut<TransportState>,
@@ -232,7 +233,7 @@ fn handle_connect(
 
 /// Handle disconnect request.
 fn handle_disconnect(
-    mut events: EventReader<Disconnect>,
+    mut events: MessageReader<Disconnect>,
     mut state: ResMut<ClientState>,
     mut transport: ResMut<TransportState>,
     mut local: ResMut<LocalClient>,
@@ -434,7 +435,7 @@ fn reconcile_prediction(
 
 /// Handle ownership transfers.
 fn handle_ownership_transfers(
-    mut transfers: EventReader<OwnershipTransfer>,
+    mut transfers: MessageReader<OwnershipTransfer>,
     local: Res<LocalClient>,
     mut commands: Commands,
     query: Query<Entity, With<NetworkOwner>>,
@@ -490,10 +491,10 @@ impl Plugin for ClientNetworkPlugin {
             .init_resource::<LocalClient>()
             .init_resource::<NetworkState>()
             .insert_resource(InputBuffer::new(256))
-            .add_event::<Connect>()
-            .add_event::<Disconnect>()
-            .add_event::<ConnectionEstablished>()
-            .add_event::<ConnectionLost>()
+            .add_message::<Connect>()
+            .add_message::<Disconnect>()
+            .add_message::<ConnectionEstablished>()
+            .add_message::<ConnectionLost>()
             // TransportPlugin added by EustressNetworkingPlugin
             .register_type::<Predicted>()
             .register_type::<Interpolated>()

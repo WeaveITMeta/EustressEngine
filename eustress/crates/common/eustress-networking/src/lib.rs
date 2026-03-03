@@ -69,6 +69,7 @@ pub use protocol::{EustressChannel, EustressMessage, EustressProtocol};
 pub use replication::{Replicated, ReplicationFilter, ReplicationGroup};
 
 use bevy::prelude::*;
+use tracing::info;
 
 // ============================================================================
 // Main Plugin

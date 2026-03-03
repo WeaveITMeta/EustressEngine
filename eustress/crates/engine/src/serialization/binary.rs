@@ -347,6 +347,7 @@ pub enum ClassId {
     // Core Classes (0-9)
     Instance = 0,
     Part = 1,
+    /// Legacy: MeshPart maps to Part (file-system-first: all parts use glb.toml meshes)
     MeshPart = 2,
     Model = 3,
     Folder = 4,
@@ -423,7 +424,6 @@ impl ClassId {
             ClassName::PVInstance => ClassId::PVInstance,
             ClassName::BasePart => ClassId::BasePart,
             ClassName::Part => ClassId::Part,
-            ClassName::MeshPart => ClassId::MeshPart,
             ClassName::Model => ClassId::Model,
             ClassName::Folder => ClassId::Folder,
             ClassName::Humanoid => ClassId::Humanoid,
@@ -452,7 +452,7 @@ impl ClassId {
             ClassName::Sky => ClassId::Sky,
             ClassName::Atmosphere => ClassId::Atmosphere,
             ClassName::Clouds => ClassId::Clouds,
-            ClassName::Sun => ClassId::Sun,
+            ClassName::Star => ClassId::Sun,
             ClassName::Moon => ClassId::Moon,
             ClassName::Lighting => ClassId::Lighting,
             ClassName::Workspace => ClassId::Workspace,
@@ -490,8 +490,8 @@ impl ClassId {
             ClassName::SolarSystem => ClassId::Model,
             ClassName::CelestialBody => ClassId::Model,
             ClassName::RegionChunk => ClassId::Model,
-            // Realism - AdvancedPart serializes as Part (extends BasePart)
-            ClassName::AdvancedPart => ClassId::Part,
+            // Large-scale worlds - map to Model as container fallback
+            ClassName::ChunkedWorld => ClassId::Model,
         }
     }
     
@@ -502,7 +502,8 @@ impl ClassId {
             ClassId::PVInstance => ClassName::PVInstance,
             ClassId::BasePart => ClassName::BasePart,
             ClassId::Part => ClassName::Part,
-            ClassId::MeshPart => ClassName::MeshPart,
+            // Legacy: MeshPart maps to Part (file-system-first: all parts use glb.toml meshes)
+            ClassId::MeshPart => ClassName::Part,
             ClassId::Model => ClassName::Model,
             ClassId::Folder => ClassName::Folder,
             ClassId::Humanoid => ClassName::Humanoid,
@@ -531,7 +532,7 @@ impl ClassId {
             ClassId::Sky => ClassName::Sky,
             ClassId::Atmosphere => ClassName::Atmosphere,
             ClassId::Clouds => ClassName::Clouds,
-            ClassId::Sun => ClassName::Sun,
+            ClassId::Sun => ClassName::Star,
             ClassId::Moon => ClassName::Moon,
             ClassId::Lighting => ClassName::Lighting,
             ClassId::Workspace => ClassName::Workspace,

@@ -127,7 +127,7 @@ pub fn setup_default_scene(
                 match crate::space::instance_loader::load_instance_definition(&toml_path) {
                     Ok(instance) => {
                         crate::space::instance_loader::spawn_instance(
-                            &mut commands, &mut meshes, &mut materials, &space_root, toml_path, instance,
+                            &mut commands, &asset_server, &mut materials, toml_path, instance,
                         );
                         if name == "Baseplate" { baseplate_loaded = true; }
                         loaded_count += 1;

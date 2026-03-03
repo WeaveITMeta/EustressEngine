@@ -151,7 +151,7 @@ fn setup_lighting(
         sun_class,
         Instance {
             name: "Sun".to_string(),
-            class_name: ClassName::Sun,
+            class_name: ClassName::Star,
             archivable: true,
             ai: false,
             id: 0,

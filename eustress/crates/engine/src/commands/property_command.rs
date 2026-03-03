@@ -74,13 +74,6 @@ impl PropertyCommand {
             }
         }
         
-        // MeshPart
-        if let Some(mut mesh_part) = world.get_mut::<MeshPart>(self.entity) {
-            if mesh_part.has_property(&self.property_name) {
-                return mesh_part.set_property(&self.property_name, value);
-            }
-        }
-        
         // Model
         if let Some(mut model) = world.get_mut::<Model>(self.entity) {
             if model.has_property(&self.property_name) {

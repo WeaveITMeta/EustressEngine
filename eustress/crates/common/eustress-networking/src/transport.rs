@@ -97,27 +97,27 @@ impl Default for TransportState {
 // ============================================================================
 
 /// Client connected event.
-#[derive(Event, Message, Debug, Clone)]
+#[derive(Message, Debug, Clone)]
 pub struct ClientConnected {
     pub client_id: u64,
     pub addr: SocketAddr,
 }
 
 /// Client disconnected event.
-#[derive(Event, Message, Debug, Clone)]
+#[derive(Message, Debug, Clone)]
 pub struct ClientDisconnected {
     pub client_id: u64,
     pub reason: String,
 }
 
 /// Connection established (client-side).
-#[derive(Event, Message, Debug, Clone)]
+#[derive(Message, Debug, Clone)]
 pub struct Connected {
     pub server_addr: SocketAddr,
 }
 
 /// Connection lost (client-side).
-#[derive(Event, Message, Debug, Clone)]
+#[derive(Message, Debug, Clone)]
 pub struct Disconnected {
     pub reason: String,
 }
@@ -290,10 +290,10 @@ impl Plugin for TransportPlugin {
         
         app.init_resource::<TransportState>()
             .init_resource::<BandwidthTracker>()
-            .add_event::<ClientConnected>()
-            .add_event::<ClientDisconnected>()
-            .add_event::<Connected>()
-            .add_event::<Disconnected>()
+            .add_message::<ClientConnected>()
+            .add_message::<ClientDisconnected>()
+            .add_message::<Connected>()
+            .add_message::<Disconnected>()
             .add_systems(Update, update_bandwidth_tracker);
     }
 }

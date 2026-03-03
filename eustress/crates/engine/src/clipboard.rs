@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use std::collections::HashMap;
 use crate::classes::{
-    Instance, ClassName, BasePart, Part, MeshPart, Model,
+    Instance, ClassName, BasePart, Part, Model,
     EustressPointLight, EustressSpotLight, EustressDirectionalLight, SurfaceLight,
     Sound, Attachment, ParticleEmitter, Beam, Decal, SpecialMesh,
     BillboardGui, TextLabel,
@@ -65,11 +65,6 @@ pub enum ClipboardEntityData {
     Part {
         basepart: BasePart,
         part: Part,
-    },
-    /// MeshPart with custom mesh
-    MeshPart {
-        basepart: BasePart,
-        meshpart: MeshPart,
     },
     /// Model container (children stored separately)
     Model {
@@ -155,8 +150,7 @@ impl ClipboardEntity {
     /// Get the bounding box top (for stacking)
     pub fn get_top(&self) -> f32 {
         match &self.data {
-            ClipboardEntityData::Part { basepart, .. } |
-            ClipboardEntityData::MeshPart { basepart, .. } => {
+            ClipboardEntityData::Part { basepart, .. } => {
                 self.transform.translation.y + basepart.size.y * 0.5
             }
             _ => self.transform.translation.y + 0.5, // Default 1 unit height
@@ -166,8 +160,7 @@ impl ClipboardEntity {
     /// Get the bounding box bottom
     pub fn get_bottom(&self) -> f32 {
         match &self.data {
-            ClipboardEntityData::Part { basepart, .. } |
-            ClipboardEntityData::MeshPart { basepart, .. } => {
+            ClipboardEntityData::Part { basepart, .. } => {
                 self.transform.translation.y - basepart.size.y * 0.5
             }
             _ => self.transform.translation.y - 0.5,

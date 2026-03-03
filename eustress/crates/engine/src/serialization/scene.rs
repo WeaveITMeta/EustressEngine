@@ -438,18 +438,6 @@ fn collect_entity_properties(
         }
     }
     
-    // Add MeshPart properties if present
-    if let Some(mesh_part) = world.get::<MeshPart>(entity) {
-        for prop_desc in mesh_part.list_properties() {
-            if let Some(value) = mesh_part.get_property(&prop_desc.name) {
-                entity_data.properties.insert(
-                    prop_desc.name.clone(),
-                    property_to_json(value),
-                );
-            }
-        }
-    }
-    
     // Add Model properties if present
     if let Some(model) = world.get::<Model>(entity) {
         for prop_desc in model.list_properties() {
@@ -885,11 +873,7 @@ fn spawn_entity_from_data(
             let part = part_from_properties(&data.properties);
             spawn_part_glb(commands, asset_server, materials, instance, base_part, part)
         }
-        ClassName::MeshPart => {
-            let base_part = basepart_from_properties(&data.properties);
-            let mesh_part = meshpart_from_properties(&data.properties);
-            spawn_mesh_part(commands, meshes, asset_server, materials, instance, base_part, mesh_part)
-        }
+        // Legacy: MeshPart now treated as Part (file-system-first: all parts use glb.toml meshes)
         ClassName::Model => {
             let model = model_from_properties(&data.properties);
             spawn_model(commands, instance, model)
@@ -1164,20 +1148,6 @@ fn size_from_properties(props: &HashMap<String, serde_json::Value>) -> Vec3 {
 }
 
 // Reconstruction functions for all remaining classes
-fn meshpart_from_properties(props: &HashMap<String, serde_json::Value>) -> MeshPart {
-    let mut mesh_part = MeshPart::default();
-    
-    if let Some(mesh_id) = props.get("MeshId").and_then(|v| v.as_str()) {
-        let _ = mesh_part.set_property("MeshId", PropertyValue::String(mesh_id.to_string()));
-    }
-    
-    if let Some(texture_id) = props.get("TextureID").and_then(|v| v.as_str()) {
-        let _ = mesh_part.set_property("TextureID", PropertyValue::String(texture_id.to_string()));
-    }
-    
-    mesh_part
-}
-
 fn humanoid_from_properties(props: &HashMap<String, serde_json::Value>) -> Humanoid {
     let mut humanoid = Humanoid::default();
     

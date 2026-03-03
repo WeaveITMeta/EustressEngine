@@ -317,9 +317,8 @@ fn spawn_file_entry(
                 Ok(instance) => {
                     let e = super::instance_loader::spawn_instance(
                         commands,
-                        meshes,
+                        asset_server,
                         materials,
-                        space_path,
                         file_meta.path.clone(),
                         instance,
                     );

@@ -11,7 +11,7 @@ pub use eustress_common::classes::{
     Instance, ClassName,
     
     // Part system
-    BasePart, Part, PartType, Material, MeshPart, PhysicalProperties,
+    BasePart, Part, PartType, Material, PhysicalProperties,
     
     // Model/Hierarchy
     Model, PVInstance, Folder,

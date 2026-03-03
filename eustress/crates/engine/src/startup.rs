@@ -812,33 +812,7 @@ fn spawn_scene(
                     part,
                 );
             }
-            EntityClass::MeshPart(_mesh_data) => {
-                let instance = Instance {
-                    id: entity.id,
-                    name: entity.name.clone(),
-                    class_name: ClassName::MeshPart,
-                    archivable: true,
-                    ..Default::default()
-                };
-                
-                let base_part = BasePart {
-                    cframe: transform,
-                    size: Vec3::ONE,
-                    ..default()
-                };
-                
-                let part = Part { shape: PartType::Block };
-                
-                // File-system-first: spawn via .glb mesh loaded by AssetServer
-                crate::spawn::spawn_part_glb(
-                    commands,
-                    asset_server,
-                    materials,
-                    instance,
-                    base_part,
-                    part,
-                );
-            }
+            // Legacy: MeshPart removed — all parts use glb.toml meshes (file-system-first)
             EntityClass::Folder => {
                 let instance = Instance {
                     id: entity.id,

@@ -48,6 +48,7 @@ pub mod replication;
 pub mod physics;
 
 use bevy::prelude::*;
+use tracing::info;
 
 // ============================================================================
 // Runtime Plugin

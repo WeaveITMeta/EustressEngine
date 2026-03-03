@@ -92,7 +92,7 @@ pub use scene::{
     DetailLevel, NodeCategory, GenerationStatus,
     Connection, ConnectionType,
     // Class data types
-    PartData, MeshPartData, ModelData, HumanoidData,
+    PartData, ModelData, HumanoidData,
     PointLightData, SpotLightData, SurfaceLightData,
     TerrainData, SkyData, SoundData,
     ParticleEmitterData, BeamData,

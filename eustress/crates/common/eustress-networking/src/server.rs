@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
+use tracing::{info, warn};
 
 use crate::config::{NetworkConfig, NetworkState, TickConfig};
 use crate::error::NetworkError;
@@ -169,7 +170,7 @@ pub struct ServerReady {
 
 /// Handle server start request.
 fn handle_start_server(
-    mut events: EventReader<StartServer>,
+    mut events: MessageReader<StartServer>,
     mut state: ResMut<ServerState>,
     mut transport: ResMut<TransportState>,
     config: Res<NetworkConfig>,
@@ -197,7 +198,7 @@ fn handle_start_server(
 
 /// Handle server stop request.
 fn handle_stop_server(
-    mut events: EventReader<StopServer>,
+    mut events: MessageReader<StopServer>,
     mut state: ResMut<ServerState>,
     mut transport: ResMut<TransportState>,
     mut clients: ResMut<ClientManager>,
@@ -225,7 +226,7 @@ fn handle_stop_server(
 /// Process incoming client connections.
 fn process_connections(
     mut clients: ResMut<ClientManager>,
-    mut connected_events: EventWriter<ClientConnected>,
+    mut connected_events: MessageWriter<ClientConnected>,
     config: Res<NetworkConfig>,
     // Lightyear connection events would be read here
 ) {
@@ -236,7 +237,7 @@ fn process_connections(
 /// Process client disconnections.
 fn process_disconnections(
     mut clients: ResMut<ClientManager>,
-    mut disconnected_events: EventWriter<ClientDisconnected>,
+    mut disconnected_events: MessageWriter<ClientDisconnected>,
     mut ownership: ResMut<OwnershipManager>,
     mut query: Query<&mut NetworkOwner>,
 ) {
@@ -328,7 +329,7 @@ fn validate_client_physics(
     mut clients: ResMut<ClientManager>,
     config: Res<NetworkConfig>,
     query: Query<(&NetworkOwner, &NetworkTransform, &NetworkVelocity)>,
-    mut disconnected: EventWriter<ClientDisconnected>,
+    mut disconnected: MessageWriter<ClientDisconnected>,
 ) {
     if !config.anti_exploit.validate_physics {
         return;
@@ -412,9 +413,9 @@ impl Plugin for ServerNetworkPlugin {
             .init_resource::<ClientManager>()
             .init_resource::<NetworkIdGenerator>()
             .init_resource::<NetworkState>()
-            .add_event::<StartServer>()
-            .add_event::<StopServer>()
-            .add_event::<ServerReady>()
+            .add_message::<StartServer>()
+            .add_message::<StopServer>()
+            .add_message::<ServerReady>()
             // TransportPlugin added by EustressNetworkingPlugin
             .add_plugins(OwnershipPlugin)
             .add_plugins(ReplicationPlugin)

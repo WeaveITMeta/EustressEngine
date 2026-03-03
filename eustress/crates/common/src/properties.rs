@@ -572,35 +572,6 @@ impl PropertyAccess for EustressSpotLight {
 }
 
 // ============================================================================
-// PropertyAccess Implementation for MeshPart
-// ============================================================================
-
-impl PropertyAccess for MeshPart {
-    fn get_property(&self, name: &str) -> Option<PropertyValue> {
-        match name {
-            "MeshId" => Some(PropertyValue::String(self.mesh_id.clone())),
-            "TextureID" => Some(PropertyValue::String(self.texture_id.clone())),
-            _ => None,
-        }
-    }
-    
-    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) {
-            ("MeshId", PropertyValue::String(s)) => { self.mesh_id = s; Ok(()) }
-            ("TextureID", PropertyValue::String(s)) => { self.texture_id = s; Ok(()) }
-            _ => Err(format!("Unknown property: {}", name)),
-        }
-    }
-    
-    fn list_properties(&self) -> Vec<PropertyDescriptor> {
-        vec![
-            PropertyDescriptor { name: "MeshId".to_string(), property_type: "string".to_string(), read_only: false, category: "Data".to_string() },
-            PropertyDescriptor { name: "TextureID".to_string(), property_type: "string".to_string(), read_only: false, category: "Data".to_string() },
-        ]
-    }
-}
-
-// ============================================================================
 // PropertyAccess Implementation for ParticleEmitter
 // ============================================================================
 
