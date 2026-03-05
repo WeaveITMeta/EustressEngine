@@ -381,9 +381,9 @@ fn handle_file_removed(
 /// Initialize file watcher on startup
 pub fn setup_file_watcher(
     mut commands: Commands,
+    space_root: Res<super::SpaceRoot>,
 ) {
-    // Get Space path (TODO: make this configurable)
-    let space_path = PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1");
+    let space_path = space_root.0.clone();
     
     if !space_path.exists() {
         warn!("Space path does not exist, file watcher disabled: {:?}", space_path);

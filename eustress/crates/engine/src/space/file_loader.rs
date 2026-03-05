@@ -8,6 +8,7 @@
 /// - Properties panel edits actual files on disk, not just in-memory ECS
 
 use bevy::prelude::*;
+use bevy::asset::io::AssetSourceBuilder;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
@@ -92,20 +93,41 @@ impl FileType {
         }
     }
     
-    /// Get file type from full path (handles compound extensions like .glb.toml)
+    /// Get file type from full path (handles compound extensions like .glb.toml, .part.toml)
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         let path_str = path.to_string_lossy();
         
-        // Check for compound extensions first
-        if path_str.ends_with(".glb.toml") {
-            return Some(Self::Toml); // Instance file
-        } else if path_str.ends_with(".scene.toml") {
-            return Some(Self::Scene);
-        } else if path_str.ends_with(".mat.toml") {
-            return Some(Self::Material);
+        // Check for compound extensions first (order matters - check specific before generic)
+        
+        // EEP marker files (folder containers per EEP_SPECIFICATION.md)
+        // _service.toml - marks a folder as a Service (Workspace, Lighting, etc.)
+        // _instance.toml - marks a folder as a container (Model, Folder, ScreenGui, etc.)
+        if path_str.ends_with("_service.toml") || path_str.ends_with("_instance.toml") {
+            return Some(Self::Toml); // Container marker file
         }
         
-        // Fall back to simple extension check
+        // Instance files (spawn as entities)
+        if path_str.ends_with(".glb.toml") 
+            || path_str.ends_with(".part.toml") 
+            || path_str.ends_with(".model.toml")
+            || path_str.ends_with(".instance.toml") 
+        {
+            return Some(Self::Toml); // Instance file
+        }
+        // Scene files
+        if path_str.ends_with(".scene.toml") {
+            return Some(Self::Scene);
+        }
+        // Material files
+        if path_str.ends_with(".mat.toml") {
+            return Some(Self::Material);
+        }
+        // Plain .toml files (config, settings, etc.) - don't spawn entities
+        if path_str.ends_with(".toml") {
+            return None; // Ignore plain .toml files - they're config, not instances
+        }
+        
+        // Fall back to simple extension check for non-TOML files
         path.extension()
             .and_then(|ext| ext.to_str())
             .and_then(Self::from_extension)
@@ -114,7 +136,7 @@ impl FileType {
     /// Check if this file type should spawn an entity in the given service folder
     pub fn spawns_entity_in_service(&self, service: &str) -> bool {
         match (self, service) {
-            // Workspace: Instance files (.glb.toml) and 3D models spawn as Parts
+            // Workspace: Instance files (.glb.toml, .part.toml, .model.toml, .instance.toml, _instance.toml, _service.toml) and 3D models spawn as Parts
             (Self::Toml | Self::Gltf | Self::Obj | Self::Fbx, "Workspace") => true,
             
             // Lighting: Models can be light sources
@@ -261,31 +283,61 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
 
 /// Scan a Space directory and discover all loadable files and subdirectories.
 /// Returns a flat list — Directory entries carry their children inline.
+/// 
+/// Services are discovered from the filesystem by looking for directories
+/// containing `_service.toml` marker files (EEP-compliant, no hardcoding).
 pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
     let mut files = Vec::new();
     
-    // Services to scan
-    let services = [
-        "Workspace",
-        "Lighting",
-        "Players",
-        "ServerStorage",
-        "SoulService",
-        "SoundService",
-        "StarterCharacterScripts",
-        "StarterGui",
-        "StarterPack",
-        "StarterPlayerScripts",
-        "Teams",
-    ];
+    // Discover services from filesystem - look for directories with _service.toml
+    // This replaces the hardcoded service list with EEP-compliant discovery
+    let services = discover_services(space_path);
     
-    for service in &services {
-        let service_path = space_path.join(service);
+    for service_name in &services {
+        let service_path = space_path.join(service_name);
         if !service_path.exists() { continue; }
-        files.extend(scan_dir_entries(&service_path, service));
+        files.extend(scan_dir_entries(&service_path, service_name));
     }
     
     files
+}
+
+/// Discover services by scanning for directories containing `_service.toml` marker files.
+/// This is EEP-compliant: services are defined by filesystem structure, not hardcoded.
+fn discover_services(space_path: &Path) -> Vec<String> {
+    let mut services = Vec::new();
+    
+    let entries = match std::fs::read_dir(space_path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            warn!("Failed to read Space directory {:?}: {}", space_path, e);
+            return services;
+        }
+    };
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        
+        // Check if this directory contains a _service.toml marker file
+        let service_marker = path.join("_service.toml");
+        if service_marker.exists() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                services.push(name.to_string());
+                debug!("Discovered service: {} (has _service.toml)", name);
+            }
+        }
+    }
+    
+    // Sort for deterministic order (Workspace first for consistency)
+    services.sort_by(|a, b| {
+        if a == "Workspace" { std::cmp::Ordering::Less }
+        else if b == "Workspace" { std::cmp::Ordering::Greater }
+        else { a.cmp(b) }
+    });
+    
+    info!("📁 Discovered {} services from filesystem: {:?}", services.len(), services);
+    services
 }
 
 /// Spawn a single file entry as an ECS entity, optionally parented to `parent_entity`.
@@ -302,6 +354,13 @@ fn spawn_file_entry(
 ) -> Option<Entity> {
     // Skip if already loaded
     if registry.is_loaded(&file_meta.path) {
+        return None;
+    }
+
+    // Skip files inside 'meshes' folders - these are raw assets, not parts to spawn
+    // They are referenced by .glb.toml or .part.toml instance files instead
+    if file_meta.path.components().any(|c| c.as_os_str() == "meshes") {
+        debug!("Skipping {:?} (inside meshes folder - raw asset)", file_meta.path);
         return None;
     }
 
@@ -333,7 +392,13 @@ fn spawn_file_entry(
         }
 
         FileType::Gltf => {
-            let scene_handle = asset_server.load(format!("{}#Scene0", file_meta.path.display()));
+            // Use space:// asset source for GLB files in the Space directory
+            let space_root = super::default_space_root();
+            let relative_path = file_meta.path
+                .strip_prefix(&space_root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| file_meta.path.to_string_lossy().replace('\\', "/"));
+            let scene_handle = asset_server.load(format!("space://{}#Scene0", relative_path));
             let e = commands.spawn((
                 SceneRoot(scene_handle),
                 Transform::default(),
@@ -437,6 +502,12 @@ fn spawn_directory_entry(
         return;
     }
 
+    // Skip 'meshes' directories - these are asset storage, not part of the scene hierarchy
+    if dir_meta.name == "meshes" || dir_meta.path.components().any(|c| c.as_os_str() == "meshes") {
+        debug!("Skipping meshes directory {:?} (asset storage)", dir_meta.path);
+        return;
+    }
+
     // Spawn the Folder entity
     let folder_entity = commands.spawn((
         eustress_common::classes::Instance {
@@ -490,9 +561,9 @@ pub fn load_space_files_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<SpaceFileRegistry>,
+    space_root: Res<super::SpaceRoot>,
 ) {
-    // Get Space path (TODO: make this configurable)
-    let space_path = PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1");
+    let space_path = &space_root.0;
     
     if !space_path.exists() {
         warn!("Space path does not exist: {:?}", space_path);
@@ -500,7 +571,7 @@ pub fn load_space_files_system(
     }
     
     // Scan for files and directories
-    let entries = scan_space_directory(&space_path);
+    let entries = scan_space_directory(space_path);
     info!("🔍 Discovered {} top-level entries in Space", entries.len());
     
     for entry in &entries {
@@ -509,14 +580,14 @@ pub fn load_space_files_system(
             FileType::Directory => {
                 spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &space_path, entry, None,
+                    &mut registry, space_path, entry, None,
                 );
             }
             // Regular file → entity at service root level (no parent)
             _ => {
                 spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &space_path, entry, None,
+                    &mut registry, space_path, entry, None,
                 );
             }
         }
@@ -528,7 +599,18 @@ pub struct SpaceFileLoaderPlugin;
 
 impl Plugin for SpaceFileLoaderPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SpaceFileRegistry>()
+        // Register the Space directory as a custom asset source
+        // This allows loading assets with "space://path/to/asset.glb" syntax
+        let space_root = super::default_space_root();
+        info!("📁 Registering Space asset source at: {:?}", space_root);
+        
+        app.register_asset_source(
+            "space",
+            AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
+        );
+        
+        app.init_resource::<super::SpaceRoot>()
+            .init_resource::<SpaceFileRegistry>()
             .add_systems(Startup, (
                 load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,

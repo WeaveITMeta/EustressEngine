@@ -53,6 +53,7 @@ mod entity_utils;       // Entity ID helpers
 mod io_manager;         // Async data fetching for Parameters
 mod space;              // Space file-system-first architecture
 mod toolbox;            // Toolbox mesh insertion system
+mod txt_to_toml_watcher; // Automatic .txt to .toml converter
 
 mod plugins;
 mod shaders;
@@ -172,6 +173,8 @@ fn main() {
         .add_plugins(SharedLightingPlugin)
         // Default scene
         .add_plugins(DefaultScenePlugin)
+        // Automatic .txt to .toml converter (file system workaround)
+        .add_plugins(txt_to_toml_watcher::TxtToTomlWatcherPlugin)
         // Space file loader (dynamic file-system-first loading)
         .add_plugins(SpaceFileLoaderPlugin)
         // Toolbox (mesh insertion system)

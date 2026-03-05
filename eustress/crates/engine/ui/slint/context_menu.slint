@@ -38,12 +38,13 @@ component MenuItemRow inherits Rectangle {
         padding-right: 8px;
         spacing: 8px;
         
-        // Icon
+        // Icon (centered vertically with text)
         Rectangle {
             width: 20px;
+            height: 100%;
             Image {
                 x: 2px;
-                y: 6px;
+                y: (parent.height - self.height) / 2;
                 width: 16px;
                 height: 16px;
                 source: root.icon;

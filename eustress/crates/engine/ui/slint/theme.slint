@@ -322,7 +322,8 @@ export component TreeItem inherits Rectangle {
         double-clicked => { root.double-clicked(); }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                root.context-menu(self.mouse-x, self.mouse-y);
+                // Use absolute position + local mouse offset for correct global coordinates
+                root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
     }

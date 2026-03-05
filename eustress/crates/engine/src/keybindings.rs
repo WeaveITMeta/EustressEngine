@@ -375,6 +375,8 @@ fn handle_menu_action_events(
     studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut undo_events: MessageWriter<crate::commands::UndoCommandEvent>,
     mut redo_events: MessageWriter<crate::commands::RedoCommandEvent>,
+    mut frame_events: MessageWriter<crate::camera_controller::FrameSelectionEvent>,
+    selected_query: Query<(&GlobalTransform, Option<&eustress_common::classes::BasePart>), With<crate::selection_box::SelectionBox>>,
 ) {
     let Some(mut studio_state) = studio_state else { return };
 
@@ -400,6 +402,39 @@ fn handle_menu_action_events(
 
             // Command bar
             Action::ToggleCommandBar => { /* Handled by Slint UI directly */ }
+
+            // Focus camera on selection (F key)
+            Action::FocusSelection => {
+                // Calculate bounds of all selected entities
+                let mut min = Vec3::splat(f32::MAX);
+                let mut max = Vec3::splat(f32::MIN);
+                let mut has_selection = false;
+                
+                for (transform, base_part) in selected_query.iter() {
+                    let pos = transform.translation();
+                    // Use BasePart size if available, otherwise assume 1 unit
+                    let half_size = base_part
+                        .map(|bp| bp.size * 0.5)
+                        .unwrap_or(Vec3::splat(0.5));
+                    
+                    min = min.min(pos - half_size);
+                    max = max.max(pos + half_size);
+                    has_selection = true;
+                }
+                
+                if has_selection {
+                    frame_events.write(crate::camera_controller::FrameSelectionEvent {
+                        target_bounds: Some((min, max)),
+                    });
+                    info!("📷 Focus on selection: bounds ({:?} to {:?})", min, max);
+                } else {
+                    // No selection - frame entire scene
+                    frame_events.write(crate::camera_controller::FrameSelectionEvent {
+                        target_bounds: None,
+                    });
+                    info!("📷 Focus on scene (no selection)");
+                }
+            }
 
             // Snapping
             Action::SnapMode1 | Action::SnapMode2 | Action::SnapModeOff => {

@@ -16,6 +16,10 @@ export struct PropertyData {
     options: [string], // For enum types
     // Section header flag: if true, this entry is a category header (not a property)
     is-header: bool,
+    // Vec3 parsed values (populated by Rust for vec3 types)
+    x-value: string,
+    y-value: string,
+    z-value: string,
 }
 
 // Collapsible section header
@@ -66,7 +70,9 @@ component PropRow inherits Rectangle {
     height: 26px;
     background: touch.has-hover ? #ffffff06 : transparent;
     
-    touch := TouchArea {}
+    touch := TouchArea {
+        scroll-event(e) => { return reject; }
+    }
     
     HorizontalLayout {
         padding-left: 12px;
@@ -102,10 +108,16 @@ component PropRow inherits Rectangle {
 }
 
 // Vec3 property row with colored X/Y/Z fields
+// Value format: "x, y, z" (comma-separated)
 component Vec3Row inherits Rectangle {
     in property <string> label: "";
-    in property <string> value: ""; // "x, y, z" format
+    in property <string> value: "0, 0, 0"; // "x, y, z" format
     in property <bool> editable: true;
+    
+    // Parsed values (split from value string)
+    in property <string> x-value: "0";
+    in property <string> y-value: "0";
+    in property <string> z-value: "0";
     
     callback value-changed(string);
     
@@ -119,7 +131,7 @@ component Vec3Row inherits Rectangle {
         
         // Label
         Text {
-            width: 90px;
+            width: 80px;
             text: root.label;
             color: Theme.text-secondary;
             font-size: 11px;
@@ -130,6 +142,8 @@ component Vec3Row inherits Rectangle {
         // X field
         Rectangle {
             horizontal-stretch: 1;
+            min-width: 50px;
+            height: 22px;
             background: Theme.input-background;
             border-radius: 2px;
             border-width: 1px;
@@ -137,11 +151,11 @@ component Vec3Row inherits Rectangle {
             
             HorizontalLayout {
                 padding-left: 2px;
-                padding-right: 2px;
+                padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 12px;
+                    width: 14px;
                     text: "X";
                     color: Theme.gizmo-x;
                     font-size: 9px;
@@ -150,10 +164,14 @@ component Vec3Row inherits Rectangle {
                     horizontal-alignment: center;
                 }
                 
-                LineEdit {
+                x-edit := LineEdit {
                     horizontal-stretch: 1;
-                    text: "0";
+                    text: root.x-value;
                     input-type: decimal;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(t + ", " + y-edit.text + ", " + z-edit.text);
+                    }
                 }
             }
         }
@@ -161,6 +179,8 @@ component Vec3Row inherits Rectangle {
         // Y field
         Rectangle {
             horizontal-stretch: 1;
+            min-width: 50px;
+            height: 22px;
             background: Theme.input-background;
             border-radius: 2px;
             border-width: 1px;
@@ -168,11 +188,11 @@ component Vec3Row inherits Rectangle {
             
             HorizontalLayout {
                 padding-left: 2px;
-                padding-right: 2px;
+                padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 12px;
+                    width: 14px;
                     text: "Y";
                     color: Theme.gizmo-y;
                     font-size: 9px;
@@ -181,10 +201,14 @@ component Vec3Row inherits Rectangle {
                     horizontal-alignment: center;
                 }
                 
-                LineEdit {
+                y-edit := LineEdit {
                     horizontal-stretch: 1;
-                    text: "0";
+                    text: root.y-value;
                     input-type: decimal;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(x-edit.text + ", " + t + ", " + z-edit.text);
+                    }
                 }
             }
         }
@@ -192,6 +216,8 @@ component Vec3Row inherits Rectangle {
         // Z field
         Rectangle {
             horizontal-stretch: 1;
+            min-width: 50px;
+            height: 22px;
             background: Theme.input-background;
             border-radius: 2px;
             border-width: 1px;
@@ -199,11 +225,11 @@ component Vec3Row inherits Rectangle {
             
             HorizontalLayout {
                 padding-left: 2px;
-                padding-right: 2px;
+                padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 12px;
+                    width: 14px;
                     text: "Z";
                     color: Theme.gizmo-z;
                     font-size: 9px;
@@ -212,10 +238,14 @@ component Vec3Row inherits Rectangle {
                     horizontal-alignment: center;
                 }
                 
-                LineEdit {
+                z-edit := LineEdit {
                     horizontal-stretch: 1;
-                    text: "0";
+                    text: root.z-value;
                     input-type: decimal;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(x-edit.text + ", " + y-edit.text + ", " + t);
+                    }
                 }
             }
         }
@@ -299,6 +329,7 @@ component BoolRow inherits Rectangle {
                 root.value-changed(root.value == "true" ? "false" : "true");
             }
         }
+        scroll-event(e) => { return reject; }
     }
     
     HorizontalLayout {
@@ -399,6 +430,7 @@ export component PropertiesPanel inherits Rectangle {
         // Dynamic property list — fully driven by Rust binding
         if root.selected-count > 0: ScrollView {
             vertical-stretch: 1;
+            horizontal-scrollbar-policy: always-off;
             
             VerticalLayout {
                 padding: 0px;
@@ -417,6 +449,9 @@ export component PropertiesPanel inherits Rectangle {
                     if !prop.is-header && prop.property-type == "vec3": Vec3Row {
                         label: prop.name;
                         value: prop.value;
+                        x-value: prop.x-value;
+                        y-value: prop.y-value;
+                        z-value: prop.z-value;
                         editable: prop.editable;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                     }

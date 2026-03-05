@@ -86,9 +86,9 @@ pub fn setup_default_scene(
     // =========================================================================
     
     if !loading_scene_file {
-        // FILE-SYSTEM-FIRST: Load all default parts from Universe1/spaces/Space1/Workspace
+        // FILE-SYSTEM-FIRST: Load all default parts from Space/Workspace
         // Uses .glb.toml instance definitions that reference shared mesh assets
-        let space_root = std::path::PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1");
+        let space_root = crate::space::default_space_root();
         let workspace_path = space_root.join("Workspace");
         
         // Scan entire Workspace directory and load every .glb.toml instance file
@@ -97,15 +97,9 @@ pub fn setup_default_scene(
 
         if workspace_path.exists() {
             // Collect and sort entries for deterministic load order (Baseplate first)
-            let mut toml_paths: Vec<std::path::PathBuf> = std::fs::read_dir(&workspace_path)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.ok())
-                .map(|entry| entry.path())
-                .filter(|p| {
-                    p.to_string_lossy().ends_with(".glb.toml")
-                })
-                .collect();
+            // Recursively scan all subdirectories for .glb.toml files
+            let mut toml_paths: Vec<std::path::PathBuf> = Vec::new();
+            collect_toml_files_recursive(&workspace_path, &mut toml_paths);
 
             // Sort: Baseplate first, then alphabetically
             toml_paths.sort_by(|a, b| {
@@ -139,10 +133,9 @@ pub fn setup_default_scene(
             }
         }
 
-        // Programmatic fallback only if workspace had no Baseplate
+        // File-system-first: No programmatic fallback - Baseplate only appears if TOML exists
         if !baseplate_loaded {
-            let _entity = eustress_common::spawn_baseplate(&mut commands, &mut meshes, &mut materials);
-            println!("⚠️ Baseplate.glb.toml not found, spawned programmatically");
+            println!("ℹ️ No Baseplate.glb.toml found in Workspace/ (file-system-first: use Toolbox to add parts)");
         }
 
         println!("✅ Default scene ready — loaded {} instance(s) from Workspace/", loaded_count);
@@ -224,3 +217,21 @@ pub fn draw_grid(mut gizmos: Gizmos) {
 }
 
 // Skybox is now created by SharedLightingPlugin from eustress_common
+
+/// Recursively collect all .glb.toml files from a directory and its subdirectories
+fn collect_toml_files_recursive(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip meshes/ directories (they contain .glb files, not .glb.toml)
+            if path.file_name().map(|n| n == "meshes").unwrap_or(false) {
+                continue;
+            }
+            collect_toml_files_recursive(&path, results);
+        } else if path.to_string_lossy().ends_with(".glb.toml") {
+            results.push(path);
+        }
+    }
+}

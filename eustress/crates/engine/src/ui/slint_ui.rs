@@ -1623,6 +1623,7 @@ fn drain_slint_actions(
     mut instances: Query<(Entity, &mut eustress_common::classes::Instance)>,
     mut transforms: Query<&mut Transform>,
     mut base_parts: Query<&mut eustress_common::classes::BasePart>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -2232,6 +2233,40 @@ fn drain_slint_actions(
                             }
                         }
                     }
+                    
+                    // ══════════════════════════════════════════════════════════
+                    // File-System-First: Write property changes back to TOML
+                    // Supports ALL properties dynamically
+                    // ══════════════════════════════════════════════════════════
+                    if let Ok(instance_file) = instance_files.get(entity) {
+                        match crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
+                            Ok(mut def) => {
+                                let changed = update_toml_property(&mut def, &key, &val);
+                                
+                                if changed {
+                                    def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+                                    
+                                    if let Err(e) = crate::space::instance_loader::write_instance_definition(
+                                        &instance_file.toml_path,
+                                        &def,
+                                    ) {
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!("Failed to write TOML: {}", e));
+                                        }
+                                    } else {
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("💾 Saved {} to {:?}", key, instance_file.toml_path.file_name().unwrap_or_default()));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Failed to load TOML for write-back: {}", e));
+                                }
+                            }
+                        }
+                    }
                 }
             }
             
@@ -2255,10 +2290,8 @@ fn drain_slint_actions(
                     _ => "block",
                 };
                 
-                // Space root path (TODO: make configurable via resource)
-                let space_root = std::path::PathBuf::from(
-                    "C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1"
-                );
+                // Space root path (uses dynamic default)
+                let space_root = crate::space::default_space_root();
                 
                 // Step 1: Create .glb.toml instance file on disk
                 match crate::toolbox::insert_mesh_instance(
@@ -3095,6 +3128,7 @@ fn sync_properties_to_slint(
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     transforms: Query<&Transform>,
     base_parts: Query<&eustress_common::classes::BasePart>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     material_props: Query<&eustress_common::realism::materials::properties::MaterialProperties>,
     thermo_states: Query<&eustress_common::realism::particles::components::ThermodynamicState>,
     echem_states: Query<&eustress_common::realism::particles::components::ElectrochemicalState>,
@@ -3129,8 +3163,6 @@ fn sync_properties_to_slint(
     ui.set_selected_count(1);
     ui.set_selected_class(format!("{:?}", instance.class_name).into());
     
-    use eustress_common::classes::PropertyAccess;
-    
     // Collect raw properties with categories into buckets
     // category -> Vec<(name, value, type, editable)>
     let mut categorized: std::collections::BTreeMap<String, Vec<(String, String, String, bool)>> = std::collections::BTreeMap::new();
@@ -3142,96 +3174,147 @@ fn sync_properties_to_slint(
             .push((name.to_string(), value, prop_type.to_string(), editable));
     };
     
-    // -- Data properties from Instance --
-    add_prop("Data", "Name", instance.name.clone(), "string", true);
-    add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
-    add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
-    
-    // -- Transform properties from Bevy Transform --
-    if let Ok(transform) = transforms.get(selected_entity) {
-        let (rx, ry, rz) = transform.rotation.to_euler(bevy::math::EulerRot::XYZ);
-        add_prop("Transform", "Position",
-            format!("{:.2}, {:.2}, {:.2}", transform.translation.x, transform.translation.y, transform.translation.z),
-            "vec3", true);
-        add_prop("Transform", "Rotation",
-            format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
-            "vec3", true);
-        add_prop("Transform", "Scale",
-            format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
-            "vec3", true);
-    }
-    
-    // -- BasePart properties with proper categories from PropertyDescriptor --
-    if let Ok(base_part) = base_parts.get(selected_entity) {
-        for prop_desc in base_part.list_properties() {
-            if let Some(value) = base_part.get_property(&prop_desc.name) {
-                let (val_str, prop_type) = property_value_to_display(&value);
-                add_prop(&prop_desc.category, &prop_desc.name, val_str, prop_type, !prop_desc.read_only);
+    // ══════════════════════════════════════════════════════════════════════════
+    // FILE-SYSTEM-FIRST: Read ALL properties directly from TOML file
+    // This ensures Properties panel shows exactly what's in the TOML
+    // ══════════════════════════════════════════════════════════════════════════
+    if let Ok(instance_file) = instance_files.get(selected_entity) {
+        if let Ok(toml_def) = crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
+            // -- Metadata section --
+            add_prop("Metadata", "ClassName", toml_def.metadata.class_name.clone(), "string", false);
+            add_prop("Metadata", "Name", instance_file.name.clone(), "string", true);
+            add_prop("Metadata", "Archivable", toml_def.metadata.archivable.to_string(), "bool", true);
+            if !toml_def.metadata.created.is_empty() {
+                add_prop("Metadata", "Created", toml_def.metadata.created.clone(), "string", false);
+            }
+            if !toml_def.metadata.last_modified.is_empty() {
+                add_prop("Metadata", "LastModified", toml_def.metadata.last_modified.clone(), "string", false);
+            }
+            
+            // -- Asset section --
+            add_prop("Asset", "Mesh", toml_def.asset.mesh.clone(), "string", true);
+            add_prop("Asset", "Scene", toml_def.asset.scene.clone(), "string", true);
+            
+            // -- Transform section --
+            add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}", 
+                toml_def.transform.position[0], toml_def.transform.position[1], toml_def.transform.position[2]), "vec3", true);
+            add_prop("Transform", "Rotation", format!("{:.4}, {:.4}, {:.4}, {:.4}", 
+                toml_def.transform.rotation[0], toml_def.transform.rotation[1], toml_def.transform.rotation[2], toml_def.transform.rotation[3]), "string", true);
+            add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}", 
+                toml_def.transform.scale[0], toml_def.transform.scale[1], toml_def.transform.scale[2]), "vec3", true);
+            
+            // -- Properties section --
+            add_prop("Appearance", "Color", format!("{:.3}, {:.3}, {:.3}, {:.3}", 
+                toml_def.properties.color[0], toml_def.properties.color[1], toml_def.properties.color[2], toml_def.properties.color[3]), "color", true);
+            add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
+            add_prop("Appearance", "Reflectance", format!("{:.3}", toml_def.properties.reflectance), "float", true);
+            add_prop("Appearance", "CastShadow", toml_def.properties.cast_shadow.to_string(), "bool", true);
+            
+            // -- Physics section --
+            add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
+            add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
+            
+            // -- Material section (realism, optional) --
+            if let Some(ref mat) = toml_def.material {
+                add_prop("Material", "Name", mat.name.clone(), "string", true);
+                add_prop("Material", "YoungModulus", format!("{:.2e}", mat.young_modulus), "float", true);
+                add_prop("Material", "PoissonRatio", format!("{:.4}", mat.poisson_ratio), "float", true);
+                add_prop("Material", "YieldStrength", format!("{:.2e}", mat.yield_strength), "float", true);
+                add_prop("Material", "UltimateStrength", format!("{:.2e}", mat.ultimate_strength), "float", true);
+                add_prop("Material", "FractureToughness", format!("{:.2e}", mat.fracture_toughness), "float", true);
+                add_prop("Material", "Hardness", format!("{:.1}", mat.hardness), "float", true);
+                add_prop("Material", "ThermalConductivity", format!("{:.3}", mat.thermal_conductivity), "float", true);
+                add_prop("Material", "SpecificHeat", format!("{:.1}", mat.specific_heat), "float", true);
+                add_prop("Material", "ThermalExpansion", format!("{:.2e}", mat.thermal_expansion), "float", true);
+                add_prop("Material", "MeltingPoint", format!("{:.1}", mat.melting_point), "float", true);
+                add_prop("Material", "Density", format!("{:.1}", mat.density), "float", true);
+                add_prop("Material", "FrictionStatic", format!("{:.3}", mat.friction_static), "float", true);
+                add_prop("Material", "FrictionKinetic", format!("{:.3}", mat.friction_kinetic), "float", true);
+                add_prop("Material", "Restitution", format!("{:.3}", mat.restitution), "float", true);
+                // Custom properties
+                for (key, val) in &mat.custom {
+                    let val_str = match val {
+                        toml::Value::Float(f) => format!("{:.4}", f),
+                        toml::Value::Integer(i) => i.to_string(),
+                        toml::Value::String(s) => s.clone(),
+                        toml::Value::Boolean(b) => b.to_string(),
+                        _ => format!("{:?}", val),
+                    };
+                    add_prop("Material", key, val_str, "string", true);
+                }
+            }
+            
+            // -- Thermodynamic section (realism, optional) --
+            if let Some(ref thermo) = toml_def.thermodynamic {
+                add_prop("Thermodynamic", "Temperature", format!("{:.2}", thermo.temperature), "float", true);
+                add_prop("Thermodynamic", "Pressure", format!("{:.1}", thermo.pressure), "float", true);
+                add_prop("Thermodynamic", "Volume", format!("{:.6}", thermo.volume), "float", true);
+                add_prop("Thermodynamic", "InternalEnergy", format!("{:.2}", thermo.internal_energy), "float", true);
+                add_prop("Thermodynamic", "Entropy", format!("{:.4}", thermo.entropy), "float", true);
+                add_prop("Thermodynamic", "Enthalpy", format!("{:.2}", thermo.enthalpy), "float", true);
+                add_prop("Thermodynamic", "Moles", format!("{:.4}", thermo.moles), "float", true);
+            }
+            
+            // -- Electrochemical section (realism, optional) --
+            if let Some(ref echem) = toml_def.electrochemical {
+                add_prop("Electrochemical", "Voltage", format!("{:.4}", echem.voltage), "float", true);
+                add_prop("Electrochemical", "TerminalVoltage", format!("{:.4}", echem.terminal_voltage), "float", true);
+                add_prop("Electrochemical", "CapacityAh", format!("{:.2}", echem.capacity_ah), "float", true);
+                add_prop("Electrochemical", "SOC", format!("{:.4}", echem.soc), "float", true);
+                add_prop("Electrochemical", "Current", format!("{:.4}", echem.current), "float", true);
+                add_prop("Electrochemical", "InternalResistance", format!("{:.6}", echem.internal_resistance), "float", true);
+                add_prop("Electrochemical", "IonicConductivity", format!("{:.6}", echem.ionic_conductivity), "float", true);
+                add_prop("Electrochemical", "CycleCount", echem.cycle_count.to_string(), "int", true);
+                add_prop("Electrochemical", "CRate", format!("{:.3}", echem.c_rate), "float", true);
+                add_prop("Electrochemical", "CapacityRetention", format!("{:.4}", echem.capacity_retention), "float", true);
+                add_prop("Electrochemical", "HeatGeneration", format!("{:.6}", echem.heat_generation), "float", true);
+                add_prop("Electrochemical", "DendriteRisk", format!("{:.4}", echem.dendrite_risk), "float", true);
+            }
+        } else {
+            // Fallback: show basic instance info if TOML load fails
+            add_prop("Data", "Name", instance.name.clone(), "string", true);
+            add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
+            add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
+            add_prop("Data", "Error", "Failed to load TOML file".to_string(), "string", false);
+        }
+    } else {
+        // No InstanceFile component — show ECS-based properties (legacy/programmatic entities)
+        add_prop("Data", "Name", instance.name.clone(), "string", true);
+        add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
+        add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
+        
+        // Transform from Bevy
+        if let Ok(transform) = transforms.get(selected_entity) {
+            let (rx, ry, rz) = transform.rotation.to_euler(bevy::math::EulerRot::XYZ);
+            add_prop("Transform", "Position",
+                format!("{:.2}, {:.2}, {:.2}", transform.translation.x, transform.translation.y, transform.translation.z),
+                "vec3", true);
+            add_prop("Transform", "Rotation",
+                format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
+                "vec3", true);
+            add_prop("Transform", "Scale",
+                format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
+                "vec3", true);
+        }
+        
+        // BasePart properties
+        use eustress_common::classes::PropertyAccess;
+        let transform_props = ["Position", "Orientation", "Size", "Rotation", "Scale"];
+        if let Ok(base_part) = base_parts.get(selected_entity) {
+            for prop_desc in base_part.list_properties() {
+                if transform_props.contains(&prop_desc.name.as_str()) { continue; }
+                if let Some(value) = base_part.get_property(&prop_desc.name) {
+                    let (val_str, prop_type) = property_value_to_display(&value);
+                    add_prop(&prop_desc.category, &prop_desc.name, val_str, prop_type, !prop_desc.read_only);
+                }
             }
         }
     }
     
-    // -- Realism: MaterialProperties (dynamic, only if component present) --
-    if let Ok(mat) = material_props.get(selected_entity) {
-        add_prop("Material", "Name", mat.name.clone(), "string", false);
-        add_prop("Material", "Young's Modulus", format!("{:.2e} Pa", mat.young_modulus), "string", false);
-        add_prop("Material", "Poisson Ratio", format!("{:.3}", mat.poisson_ratio), "string", false);
-        add_prop("Material", "Yield Strength", format!("{:.2e} Pa", mat.yield_strength), "string", false);
-        add_prop("Material", "Ultimate Strength", format!("{:.2e} Pa", mat.ultimate_strength), "string", false);
-        add_prop("Material", "Fracture Toughness", format!("{:.2e} Pa√m", mat.fracture_toughness), "string", false);
-        add_prop("Material", "Hardness", format!("{:.1} HV", mat.hardness), "string", false);
-        add_prop("Material", "Thermal Conductivity", format!("{:.2} W/(m·K)", mat.thermal_conductivity), "string", false);
-        add_prop("Material", "Specific Heat", format!("{:.1} J/(kg·K)", mat.specific_heat), "string", false);
-        add_prop("Material", "Thermal Expansion", format!("{:.2e} 1/K", mat.thermal_expansion), "string", false);
-        add_prop("Material", "Melting Point", format!("{:.0} K", mat.melting_point), "string", false);
-        add_prop("Material", "Density", format!("{:.1} kg/m³", mat.density), "string", false);
-        add_prop("Material", "Friction (Static)", format!("{:.2}", mat.friction_static), "string", false);
-        add_prop("Material", "Friction (Kinetic)", format!("{:.2}", mat.friction_kinetic), "string", false);
-        add_prop("Material", "Restitution", format!("{:.2}", mat.restitution), "string", false);
-    }
-    
-    // -- Realism: ThermodynamicState (dynamic, only if component present) --
-    if let Ok(thermo) = thermo_states.get(selected_entity) {
-        add_prop("Thermodynamic", "Temperature", format!("{:.1} K", thermo.temperature), "string", false);
-        add_prop("Thermodynamic", "Pressure", format!("{:.0} Pa", thermo.pressure), "string", false);
-        add_prop("Thermodynamic", "Volume", format!("{:.6} m³", thermo.volume), "string", false);
-        add_prop("Thermodynamic", "Internal Energy", format!("{:.2} J", thermo.internal_energy), "string", false);
-        add_prop("Thermodynamic", "Entropy", format!("{:.4} J/K", thermo.entropy), "string", false);
-        add_prop("Thermodynamic", "Enthalpy", format!("{:.2} J", thermo.enthalpy), "string", false);
-        add_prop("Thermodynamic", "Moles", format!("{:.4}", thermo.moles), "string", false);
-    }
-    
-    // -- Realism: ElectrochemicalState (dynamic, only if component present) --
-    if let Ok(echem) = echem_states.get(selected_entity) {
-        add_prop("Electrochemical", "Voltage (OCV)", format!("{:.3} V", echem.voltage), "string", false);
-        add_prop("Electrochemical", "Terminal Voltage", format!("{:.3} V", echem.terminal_voltage), "string", false);
-        add_prop("Electrochemical", "Capacity", format!("{:.1} Ah", echem.capacity_ah), "string", false);
-        add_prop("Electrochemical", "SOC", format!("{:.1}%", echem.soc * 100.0), "string", false);
-        add_prop("Electrochemical", "Current", format!("{:.3} A", echem.current), "string", false);
-        add_prop("Electrochemical", "Internal Resistance", format!("{:.4} Ω", echem.internal_resistance), "string", false);
-        add_prop("Electrochemical", "Ionic Conductivity", format!("{:.4} S/m", echem.ionic_conductivity), "string", false);
-        add_prop("Electrochemical", "Cycle Count", format!("{}", echem.cycle_count), "string", false);
-        add_prop("Electrochemical", "C-Rate", format!("{:.2} h⁻¹", echem.c_rate), "string", false);
-        add_prop("Electrochemical", "Capacity Retention", format!("{:.1}%", echem.capacity_retention * 100.0), "string", false);
-        add_prop("Electrochemical", "Heat Generation", format!("{:.4} W", echem.heat_generation), "string", false);
-        add_prop("Electrochemical", "Dendrite Risk", format!("{:.3}", echem.dendrite_risk), "string", false);
-    }
-    
     // Build flat list with category headers interleaved
-    // Category display order: Transform, Appearance, Data, Physics, then realism, then any others
-    let category_order = ["Transform", "Appearance", "Data", "Physics", "Material", "Thermodynamic", "Electrochemical"];
-    let mut ordered_categories: Vec<String> = Vec::new();
-    for cat in &category_order {
-        if categorized.contains_key(*cat) {
-            ordered_categories.push(cat.to_string());
-        }
-    }
-    // Append any remaining categories not in the predefined order
-    for cat in categorized.keys() {
-        if !ordered_categories.contains(cat) {
-            ordered_categories.push(cat.clone());
-        }
-    }
+    // Sort categories alphabetically (A-Z)
+    let mut ordered_categories: Vec<String> = categorized.keys().cloned().collect();
+    ordered_categories.sort();
     
     let mut flat_props: Vec<PropertyData> = Vec::new();
     for cat in &ordered_categories {
@@ -3244,19 +3327,35 @@ fn sync_properties_to_slint(
             editable: false,
             options: slint::ModelRc::default(),
             is_header: true,
+            x_value: slint::SharedString::default(),
+            y_value: slint::SharedString::default(),
+            z_value: slint::SharedString::default(),
         });
         
-        // Insert properties in this category
+        // Insert properties in this category (sorted A-Z by name)
         if let Some(entries) = categorized.get(cat.as_str()) {
-            for (name, value, prop_type, editable) in entries {
+            let mut sorted_entries = entries.clone();
+            sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            
+            for (name, value, prop_type, editable) in sorted_entries {
+                // Parse Vec3 values into x, y, z components
+                let (x_val, y_val, z_val) = if prop_type == "vec3" {
+                    parse_vec3_string(&value)
+                } else {
+                    (String::new(), String::new(), String::new())
+                };
+                
                 flat_props.push(PropertyData {
                     name: name.as_str().into(),
                     value: value.as_str().into(),
                     property_type: prop_type.as_str().into(),
                     category: cat.as_str().into(),
-                    editable: *editable,
+                    editable,
                     options: slint::ModelRc::default(),
                     is_header: false,
+                    x_value: x_val.into(),
+                    y_value: y_val.into(),
+                    z_value: z_val.into(),
                 });
             }
         }
@@ -3285,6 +3384,182 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
         PropertyValue::Material(m) => (format!("{:?}", m), "enum"),
         PropertyValue::Enum(e) => (e.clone(), "enum"),
         PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "string"),
+    }
+}
+
+/// Updates a property in the InstanceDefinition based on property name
+/// Returns true if a property was changed
+fn update_toml_property(
+    def: &mut crate::space::instance_loader::InstanceDefinition,
+    key: &str,
+    val: &str,
+) -> bool {
+    match key {
+        // Metadata (Name is derived from filename, not stored in TOML)
+        "Name" => { false } // Name changes require file rename, not TOML edit
+        "Archivable" => { def.metadata.archivable = val == "true"; true }
+        
+        // Asset
+        "Mesh" => { def.asset.mesh = val.to_string(); true }
+        "Scene" => { def.asset.scene = val.to_string(); true }
+        
+        // Transform
+        "Position" => {
+            if let Some((x, y, z)) = parse_vec3_value(val) {
+                def.transform.position = [x, y, z]; true
+            } else { false }
+        }
+        "Scale" => {
+            if let Some((x, y, z)) = parse_vec3_value(val) {
+                def.transform.scale = [x, y, z]; true
+            } else { false }
+        }
+        "Rotation" => {
+            // Quaternion: "x, y, z, w"
+            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if parts.len() == 4 {
+                def.transform.rotation = [parts[0], parts[1], parts[2], parts[3]]; true
+            } else { false }
+        }
+        
+        // Appearance (properties section)
+        "Color" => {
+            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if parts.len() >= 3 {
+                def.properties.color = [parts[0], parts[1], parts[2], parts.get(3).copied().unwrap_or(1.0)]; true
+            } else { false }
+        }
+        "Transparency" => { if let Ok(v) = val.parse() { def.properties.transparency = v; true } else { false } }
+        "Reflectance" => { if let Ok(v) = val.parse() { def.properties.reflectance = v; true } else { false } }
+        "CastShadow" => { def.properties.cast_shadow = val == "true"; true }
+        
+        // Physics (properties section)
+        "Anchored" => { def.properties.anchored = val == "true"; true }
+        "CanCollide" => { def.properties.can_collide = val == "true"; true }
+        
+        // Material section (realism)
+        k if k.starts_with("Material.") || is_material_prop(k) => {
+            let mat = def.material.get_or_insert_with(Default::default);
+            update_material_property(mat, k, val)
+        }
+        
+        // Thermodynamic section (realism)
+        k if k.starts_with("Thermodynamic.") || is_thermo_prop(k) => {
+            let thermo = def.thermodynamic.get_or_insert_with(Default::default);
+            update_thermo_property(thermo, k, val)
+        }
+        
+        // Electrochemical section (realism)
+        k if k.starts_with("Electrochemical.") || is_echem_prop(k) => {
+            let echem = def.electrochemical.get_or_insert_with(Default::default);
+            update_echem_property(echem, k, val)
+        }
+        
+        _ => false
+    }
+}
+
+fn is_material_prop(k: &str) -> bool {
+    matches!(k, "YoungModulus" | "PoissonRatio" | "YieldStrength" | "UltimateStrength" | 
+        "FractureToughness" | "Hardness" | "ThermalConductivity" | "SpecificHeat" | 
+        "ThermalExpansion" | "MeltingPoint" | "Density" | "FrictionStatic" | 
+        "FrictionKinetic" | "Restitution")
+}
+
+fn is_thermo_prop(k: &str) -> bool {
+    matches!(k, "Temperature" | "Pressure" | "Volume" | "InternalEnergy" | "Entropy" | "Enthalpy" | "Moles")
+}
+
+fn is_echem_prop(k: &str) -> bool {
+    matches!(k, "Voltage" | "TerminalVoltage" | "CapacityAh" | "SOC" | "Current" | 
+        "InternalResistance" | "IonicConductivity" | "CycleCount" | "CRate" | 
+        "CapacityRetention" | "HeatGeneration" | "DendriteRisk")
+}
+
+fn update_material_property(mat: &mut crate::space::instance_loader::TomlMaterialProperties, key: &str, val: &str) -> bool {
+    let k = key.strip_prefix("Material.").unwrap_or(key);
+    match k {
+        "Name" => { mat.name = val.to_string(); true }
+        "YoungModulus" | "young_modulus" => { if let Ok(v) = val.parse() { mat.young_modulus = v; true } else { false } }
+        "PoissonRatio" | "poisson_ratio" => { if let Ok(v) = val.parse() { mat.poisson_ratio = v; true } else { false } }
+        "YieldStrength" | "yield_strength" => { if let Ok(v) = val.parse() { mat.yield_strength = v; true } else { false } }
+        "UltimateStrength" | "ultimate_strength" => { if let Ok(v) = val.parse() { mat.ultimate_strength = v; true } else { false } }
+        "FractureToughness" | "fracture_toughness" => { if let Ok(v) = val.parse() { mat.fracture_toughness = v; true } else { false } }
+        "Hardness" | "hardness" => { if let Ok(v) = val.parse() { mat.hardness = v; true } else { false } }
+        "ThermalConductivity" | "thermal_conductivity" => { if let Ok(v) = val.parse() { mat.thermal_conductivity = v; true } else { false } }
+        "SpecificHeat" | "specific_heat" => { if let Ok(v) = val.parse() { mat.specific_heat = v; true } else { false } }
+        "ThermalExpansion" | "thermal_expansion" => { if let Ok(v) = val.parse() { mat.thermal_expansion = v; true } else { false } }
+        "MeltingPoint" | "melting_point" => { if let Ok(v) = val.parse() { mat.melting_point = v; true } else { false } }
+        "Density" | "density" => { if let Ok(v) = val.parse() { mat.density = v; true } else { false } }
+        "FrictionStatic" | "friction_static" => { if let Ok(v) = val.parse() { mat.friction_static = v; true } else { false } }
+        "FrictionKinetic" | "friction_kinetic" => { if let Ok(v) = val.parse() { mat.friction_kinetic = v; true } else { false } }
+        "Restitution" | "restitution" => { if let Ok(v) = val.parse() { mat.restitution = v; true } else { false } }
+        // Custom properties
+        _ => {
+            if let Ok(f) = val.parse::<f64>() {
+                mat.custom.insert(k.to_string(), toml::Value::Float(f));
+            } else {
+                mat.custom.insert(k.to_string(), toml::Value::String(val.to_string()));
+            }
+            true
+        }
+    }
+}
+
+fn update_thermo_property(thermo: &mut crate::space::instance_loader::TomlThermodynamicState, key: &str, val: &str) -> bool {
+    let k = key.strip_prefix("Thermodynamic.").unwrap_or(key);
+    match k {
+        "Temperature" | "temperature" => { if let Ok(v) = val.parse() { thermo.temperature = v; true } else { false } }
+        "Pressure" | "pressure" => { if let Ok(v) = val.parse() { thermo.pressure = v; true } else { false } }
+        "Volume" | "volume" => { if let Ok(v) = val.parse() { thermo.volume = v; true } else { false } }
+        "InternalEnergy" | "internal_energy" => { if let Ok(v) = val.parse() { thermo.internal_energy = v; true } else { false } }
+        "Entropy" | "entropy" => { if let Ok(v) = val.parse() { thermo.entropy = v; true } else { false } }
+        "Enthalpy" | "enthalpy" => { if let Ok(v) = val.parse() { thermo.enthalpy = v; true } else { false } }
+        "Moles" | "moles" => { if let Ok(v) = val.parse() { thermo.moles = v; true } else { false } }
+        _ => false
+    }
+}
+
+fn update_echem_property(echem: &mut crate::space::instance_loader::TomlElectrochemicalState, key: &str, val: &str) -> bool {
+    let k = key.strip_prefix("Electrochemical.").unwrap_or(key);
+    match k {
+        "Voltage" | "voltage" => { if let Ok(v) = val.parse() { echem.voltage = v; true } else { false } }
+        "TerminalVoltage" | "terminal_voltage" => { if let Ok(v) = val.parse() { echem.terminal_voltage = v; true } else { false } }
+        "CapacityAh" | "capacity_ah" => { if let Ok(v) = val.parse() { echem.capacity_ah = v; true } else { false } }
+        "SOC" | "soc" => { if let Ok(v) = val.parse() { echem.soc = v; true } else { false } }
+        "Current" | "current" => { if let Ok(v) = val.parse() { echem.current = v; true } else { false } }
+        "InternalResistance" | "internal_resistance" => { if let Ok(v) = val.parse() { echem.internal_resistance = v; true } else { false } }
+        "IonicConductivity" | "ionic_conductivity" => { if let Ok(v) = val.parse() { echem.ionic_conductivity = v; true } else { false } }
+        "CycleCount" | "cycle_count" => { if let Ok(v) = val.parse() { echem.cycle_count = v; true } else { false } }
+        "CRate" | "c_rate" => { if let Ok(v) = val.parse() { echem.c_rate = v; true } else { false } }
+        "CapacityRetention" | "capacity_retention" => { if let Ok(v) = val.parse() { echem.capacity_retention = v; true } else { false } }
+        "HeatGeneration" | "heat_generation" => { if let Ok(v) = val.parse() { echem.heat_generation = v; true } else { false } }
+        "DendriteRisk" | "dendrite_risk" => { if let Ok(v) = val.parse() { echem.dendrite_risk = v; true } else { false } }
+        _ => false
+    }
+}
+
+/// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back
+fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if parts.len() == 3 {
+        let x = parts[0].parse::<f32>().ok()?;
+        let y = parts[1].parse::<f32>().ok()?;
+        let z = parts[2].parse::<f32>().ok()?;
+        Some((x, y, z))
+    } else {
+        None
+    }
+}
+
+/// Parses a Vec3 string "x, y, z" into individual components
+fn parse_vec3_string(value: &str) -> (String, String, String) {
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    match parts.as_slice() {
+        [x, y, z] => (x.to_string(), y.to_string(), z.to_string()),
+        [x, y] => (x.to_string(), y.to_string(), "0".to_string()),
+        [x] => (x.to_string(), "0".to_string(), "0".to_string()),
+        _ => ("0".to_string(), "0".to_string(), "0".to_string()),
     }
 }
 
@@ -3317,6 +3592,9 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             category: category.into(),
             options: slint::ModelRc::default(),
             is_header: is_hdr,
+            x_value: slint::SharedString::default(),
+            y_value: slint::SharedString::default(),
+            z_value: slint::SharedString::default(),
         }
     };
 
@@ -3559,7 +3837,7 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::Terrain => "terrain",
         ClassName::Sky => "sky",
         ClassName::Atmosphere => "atmosphere",
-        ClassName::Star => "star",
+        ClassName::Star => "sun",
         ClassName::Moon => "moon",
         ClassName::Clouds => "sky",
         ClassName::SoulScript => "soulservice",

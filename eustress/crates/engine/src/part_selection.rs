@@ -19,7 +19,8 @@ pub fn part_selection_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     // Query parts with PartEntity, PartEntityMarker, OR Instance component (any works for selection)
-    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, &Mesh3d, Option<&BasePart>, Option<&ChildOf>)>,
+    // Mesh3d is optional to support SceneRoot entities (TOML-spawned instances) that have BasePart for bounds
+    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, Option<&Mesh3d>, Option<&BasePart>, Option<&ChildOf>)>,
     // Query for children to calculate accurate group bounds (matching move_tool.rs)
     children_query: Query<&Children>,
     // Query for child transforms/baseparts

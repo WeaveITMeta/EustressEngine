@@ -161,7 +161,7 @@ impl Default for InstanceMetadata {
 // ============================================================================
 
 /// Material properties as they appear in .glb.toml [material] section
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TomlMaterialProperties {
     #[serde(default = "default_material_name")]
     pub name: String,
@@ -235,7 +235,7 @@ impl TomlMaterialProperties {
 }
 
 /// Thermodynamic state as it appears in .glb.toml [thermodynamic] section
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TomlThermodynamicState {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
@@ -273,7 +273,7 @@ impl TomlThermodynamicState {
 }
 
 /// Electrochemical state as it appears in .glb.toml [electrochemical] section
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TomlElectrochemicalState {
     #[serde(default = "default_voltage")]
     pub voltage: f32,
@@ -445,11 +445,16 @@ pub fn spawn_instance(
     
     if is_custom_mesh && absolute_mesh_path.exists() {
         // ── Custom GLB mesh: load the full GLTF scene ──
-        // Bevy's AssetServer accepts absolute paths on Windows
-        let scene_path = format!(
-            "{}#Scene0",
-            absolute_mesh_path.to_string_lossy().replace('\\', "/")
-        );
+        // Use the "space://" asset source which is registered to the Space root directory
+        // Convert the absolute mesh path to a path relative to the Space root
+        let space_root = super::default_space_root();
+        let relative_mesh_path = absolute_mesh_path
+            .strip_prefix(&space_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| absolute_mesh_path.to_string_lossy().replace('\\', "/"));
+        
+        let scene_path = format!("space://{}#Scene0", relative_mesh_path);
+        info!("Loading mesh from: {}", scene_path);
         let scene_handle: Handle<Scene> = asset_server.load(scene_path);
         
         let mut entity_commands = commands.spawn((
@@ -569,9 +574,9 @@ pub fn load_instance_files_system(
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
+    space_root_res: Res<super::SpaceRoot>,
 ) {
-    // Get Space root path (TODO: make configurable)
-    let space_root = PathBuf::from("C:/Users/miksu/Documents/Eustress/Universe1/spaces/Space1");
+    let space_root = &space_root_res.0;
     
     if !space_root.exists() {
         warn!("Space path does not exist: {:?}", space_root);

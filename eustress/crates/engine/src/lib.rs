@@ -77,6 +77,7 @@ pub mod viga;
 pub mod scenarios;
 pub mod circumstances;
 pub mod class_conversion;
+pub mod txt_to_toml_watcher;
 
 // Re-exports for convenience
 pub use rendering::{PartRenderingPlugin, PartChanged};
