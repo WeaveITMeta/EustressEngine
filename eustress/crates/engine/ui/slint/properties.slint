@@ -22,30 +22,40 @@ export struct PropertyData {
     z-value: string,
 }
 
-// Collapsible section header
+// Collapsible section header - polished with gradient and better typography
 component SectionHeader inherits Rectangle {
     in property <string> title: "";
     in-out property <bool> expanded: true;
     
-    height: 28px;
-    background: Theme.header-background;
+    height: 32px;
+    background: @linear-gradient(180deg, #252525 0%, #1e1e1e 100%);
+    
+    // Bottom border line
+    Rectangle {
+        y: parent.height - 1px;
+        width: 100%;
+        height: 1px;
+        background: #333333;
+    }
     
     TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.expanded = !root.expanded; }
     }
     
     HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 6px;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
         
-        // Chevron
+        // Chevron with smooth rotation feel
         Text {
-            width: 12px;
-            text: root.expanded ? "▾" : "▸";
-            color: Theme.text-secondary;
-            font-size: 10px;
+            width: 14px;
+            text: root.expanded ? "▼" : "▶";
+            color: root.expanded ? Theme.accent-blue : Theme.text-secondary;
+            font-size: 8px;
             vertical-alignment: center;
+            horizontal-alignment: center;
         }
         
         Text {
@@ -53,12 +63,27 @@ component SectionHeader inherits Rectangle {
             color: Theme.text-primary;
             font-size: 11px;
             font-weight: 600;
+            letter-spacing: 0.3px;
             vertical-alignment: center;
+        }
+        
+        // Spacer
+        Rectangle { horizontal-stretch: 1; }
+        
+        // Item count badge (visual polish)
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.expanded ? Theme.accent-blue : #444444;
+            }
         }
     }
 }
 
-// Generic property row with label + value editor
+// Generic property row with label + value editor - polished design
 component PropRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "";
@@ -67,33 +92,46 @@ component PropRow inherits Rectangle {
     
     callback value-changed(string);
     
-    height: 26px;
-    background: touch.has-hover ? #ffffff06 : transparent;
+    height: 28px;
+    background: touch.has-hover ? #1a1a1a : transparent;
+    border-radius: 2px;
     
     touch := TouchArea {
         scroll-event(e) => { return reject; }
     }
     
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 8px;
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 12px;
         
-        // Label
+        // Label with better typography
         Text {
-            width: 90px;
+            width: 100px;
             text: root.label;
-            color: Theme.text-secondary;
+            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
         
-        // Value editor
-        if root.editable: LineEdit {
+        // Value editor with refined styling
+        if root.editable: Rectangle {
             horizontal-stretch: 1;
-            text: root.value;
-            edited(text) => { root.value-changed(text); }
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+            
+            LineEdit {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: root.value;
+                edited(text) => { root.value-changed(text); }
+            }
         }
         
         if !root.editable: Text {
@@ -107,7 +145,7 @@ component PropRow inherits Rectangle {
     }
 }
 
-// Vec3 property row with colored X/Y/Z fields
+// Vec3 property row with colored X/Y/Z fields - polished design
 // Value format: "x, y, z" (comma-separated)
 component Vec3Row inherits Rectangle {
     in property <string> label: "";
@@ -121,41 +159,55 @@ component Vec3Row inherits Rectangle {
     
     callback value-changed(string);
     
-    height: 26px;
-    background: transparent;
+    height: 28px;
+    background: touch.has-hover ? #1a1a1a : transparent;
+    border-radius: 2px;
+    
+    touch := TouchArea {
+        scroll-event(e) => { return reject; }
+    }
     
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 4px;
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 6px;
         
         // Label
         Text {
-            width: 80px;
+            width: 100px;
             text: root.label;
-            color: Theme.text-secondary;
+            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
         
-        // X field
+        // X field with accent border
         Rectangle {
             horizontal-stretch: 1;
-            min-width: 50px;
+            min-width: 52px;
             height: 22px;
             background: Theme.input-background;
-            border-radius: 2px;
+            border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: #3a2020;
+            
+            // Left accent bar
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 3px;
+                height: 100%;
+                background: Theme.gizmo-x;
+            }
             
             HorizontalLayout {
-                padding-left: 2px;
+                padding-left: 6px;
                 padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "X";
                     color: Theme.gizmo-x;
                     font-size: 9px;
@@ -176,23 +228,32 @@ component Vec3Row inherits Rectangle {
             }
         }
         
-        // Y field
+        // Y field with accent border
         Rectangle {
             horizontal-stretch: 1;
-            min-width: 50px;
+            min-width: 52px;
             height: 22px;
             background: Theme.input-background;
-            border-radius: 2px;
+            border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: #203a30;
+            
+            // Left accent bar
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 3px;
+                height: 100%;
+                background: Theme.gizmo-y;
+            }
             
             HorizontalLayout {
-                padding-left: 2px;
+                padding-left: 6px;
                 padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "Y";
                     color: Theme.gizmo-y;
                     font-size: 9px;
@@ -213,23 +274,32 @@ component Vec3Row inherits Rectangle {
             }
         }
         
-        // Z field
+        // Z field with accent border
         Rectangle {
             horizontal-stretch: 1;
-            min-width: 50px;
+            min-width: 52px;
             height: 22px;
             background: Theme.input-background;
-            border-radius: 2px;
+            border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: #202a3a;
+            
+            // Left accent bar
+            Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 3px;
+                height: 100%;
+                background: Theme.gizmo-z;
+            }
             
             HorizontalLayout {
-                padding-left: 2px;
+                padding-left: 6px;
                 padding-right: 4px;
                 spacing: 2px;
                 
                 Text {
-                    width: 14px;
+                    width: 12px;
                     text: "Z";
                     color: Theme.gizmo-z;
                     font-size: 9px;
@@ -252,7 +322,190 @@ component Vec3Row inherits Rectangle {
     }
 }
 
-// Color property row with swatch + hex value
+// Rotation Vec3 row — degrees, supports negative values and +/- step buttons
+// Step buttons use a special "step:X:±1" prefix that Rust's on-property-changed handles
+// by parsing the current value, applying the step, and writing back.
+// Direct text edits send "X, Y, Z" as usual.
+component RotationVec3Row inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "0, 0, 0";
+    in property <bool> editable: true;
+    in property <string> x-value: "0";
+    in property <string> y-value: "0";
+    in property <string> z-value: "0";
+
+    callback value-changed(string);
+
+    height: 28px;
+    background: touch.has-hover ? #1a1a1a : transparent;
+    border-radius: 2px;
+
+    touch := TouchArea {
+        scroll-event(e) => { return reject; }
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 4px;
+
+        // Label
+        Text {
+            width: 100px;
+            text: root.label;
+            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // ── X ──────────────────────────────────────────────
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 68px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #3a2020;
+
+            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-x; }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 2px;
+                spacing: 2px;
+
+                Text { width: 12px; text: "X"; color: Theme.gizmo-x; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
+
+                rx-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.x-value;
+                    input-type: text;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(t + ", " + ry-edit.text + ", " + rz-edit.text);
+                    }
+                }
+
+                Rectangle {
+                    width: 16px; height: 18px; background: rx-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    rx-m := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:x:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 16px; height: 18px; background: rx-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    rx-p := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:x:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+
+        // ── Y ──────────────────────────────────────────────
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 68px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #203a30;
+
+            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-y; }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 2px;
+                spacing: 2px;
+
+                Text { width: 12px; text: "Y"; color: Theme.gizmo-y; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
+
+                ry-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.y-value;
+                    input-type: text;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(rx-edit.text + ", " + t + ", " + rz-edit.text);
+                    }
+                }
+
+                Rectangle {
+                    width: 16px; height: 18px; background: ry-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    ry-m := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:y:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 16px; height: 18px; background: ry-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    ry-p := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:y:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+
+        // ── Z ──────────────────────────────────────────────
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 68px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #202a3a;
+
+            Rectangle { x: 0px; y: 0px; width: 3px; height: 100%; background: Theme.gizmo-z; }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 2px;
+                spacing: 2px;
+
+                Text { width: 12px; text: "Z"; color: Theme.gizmo-z; font-size: 9px; font-weight: 700; vertical-alignment: center; horizontal-alignment: center; }
+
+                rz-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.z-value;
+                    input-type: text;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + t);
+                    }
+                }
+
+                Rectangle {
+                    width: 16px; height: 18px; background: rz-m.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    rz-m := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:z:-1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "-"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 16px; height: 18px; background: rz-p.has-hover ? #3a3a3a : #2a2a2a; border-radius: 2px;
+                    rz-p := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.value-changed("step:z:+1:" + rx-edit.text + "," + ry-edit.text + "," + rz-edit.text); }
+                    }
+                    Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+}
+
+// Color property row with swatch + hex value - polished design
 component ColorRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "#808080";
@@ -260,46 +513,65 @@ component ColorRow inherits Rectangle {
     
     callback value-changed(string);
     
-    height: 26px;
-    background: transparent;
+    height: 28px;
+    background: touch.has-hover ? #1a1a1a : transparent;
+    border-radius: 2px;
+    
+    touch := TouchArea {
+        scroll-event(e) => { return reject; }
+    }
     
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 8px;
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 10px;
         
         // Label
         Text {
-            width: 90px;
+            width: 100px;
             text: root.label;
-            color: Theme.text-secondary;
+            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
         
-        // Color swatch
+        // Color swatch with shadow effect
         Rectangle {
-            width: 22px;
-            height: 18px;
-            // Checkerboard background for transparency
+            width: 28px;
+            height: 20px;
             background: #808080;
-            border-radius: 3px;
+            border-radius: 4px;
             border-width: 1px;
-            border-color: Theme.border-color;
+            border-color: #444444;
+            drop-shadow-blur: 2px;
+            drop-shadow-color: #00000040;
             
             TouchArea {
+                mouse-cursor: pointer;
                 clicked => {
                     // TODO: Open color picker
                 }
             }
         }
         
-        // Hex input
-        if root.editable: LineEdit {
+        // Hex input with refined styling
+        if root.editable: Rectangle {
             horizontal-stretch: 1;
-            text: root.value;
-            edited(text) => { root.value-changed(text); }
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+            
+            LineEdit {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                text: root.value;
+                edited(text) => { root.value-changed(text); }
+            }
         }
         
         if !root.editable: Text {
@@ -312,7 +584,7 @@ component ColorRow inherits Rectangle {
     }
 }
 
-// Bool property row with true/false toggle
+// Bool property row with true/false toggle - polished design
 component BoolRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "false";
@@ -320,10 +592,12 @@ component BoolRow inherits Rectangle {
     
     callback value-changed(string);
     
-    height: 26px;
-    background: touch.has-hover ? #ffffff06 : transparent;
+    height: 28px;
+    background: touch.has-hover ? #1a1a1a : transparent;
+    border-radius: 2px;
     
     touch := TouchArea {
+        mouse-cursor: root.editable ? pointer : default;
         clicked => {
             if root.editable {
                 root.value-changed(root.value == "true" ? "false" : "true");
@@ -333,42 +607,47 @@ component BoolRow inherits Rectangle {
     }
     
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        spacing: 8px;
+        padding-left: 14px;
+        padding-right: 10px;
+        spacing: 10px;
         
         // Label
         Text {
-            width: 90px;
+            width: 100px;
             text: root.label;
-            color: Theme.text-secondary;
+            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
         
-        // Checkbox visual
-        Rectangle {
-            width: 16px;
-            height: 16px;
-            background: root.value == "true" ? Theme.accent-blue : Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: root.value == "true" ? Theme.accent-blue : Theme.input-border;
-            
-            if root.value == "true": Text {
-                text: "✓";
-                color: white;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+        // Checkbox — vertically centered, checkmark when true
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 15px;
+                height: 15px;
+                background: root.value == "true" ? Theme.accent-blue : Theme.input-background;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: root.value == "true" ? Theme.accent-blue : Theme.input-border;
+                
+                Text {
+                    text: root.value == "true" ? "✓" : "";
+                    color: white;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
         
+        // State label — "Enabled"/"Disabled" instead of raw "true"/"false"
         Text {
             horizontal-stretch: 1;
-            text: root.value;
-            color: Theme.text-primary;
+            text: root.value == "true" ? "Enabled" : "Disabled";
+            color: root.value == "true" ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
         }
@@ -379,6 +658,7 @@ export component PropertiesPanel inherits Rectangle {
     // Properties
     in property <int> selected-count: 0;
     in property <string> selected-class: "";
+    in property <image> selected-icon;   // SVG icon for the selected class
     in property <[PropertyData]> properties: [];
     
     // Callbacks
@@ -390,36 +670,120 @@ export component PropertiesPanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
         
-        // Header showing selection info
+        // Header showing selection info - polished design
         Rectangle {
-            height: 32px;
-            background: Theme.header-background;
+            height: 36px;
+            background: @linear-gradient(180deg, #1e1e1e 0%, #181818 100%);
+            
+            // Bottom border
+            Rectangle {
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: #2a2a2a;
+            }
             
             HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 8px;
+                alignment: center;
+
+                // Class icon — SVG image when something is selected, fallback placeholder
+                if root.selected-count > 0: Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    
+                    Image {
+                        width: 100%;
+                        height: 100%;
+                        source: root.selected-icon;
+                        image-fit: contain;
+                    }
+                }
+                if root.selected-count == 0: Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 3px;
+                    background: #333333;
+                    Text {
+                        text: "?";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
                 Text {
-                    text: root.selected-count == 0 ? "No selection" :
+                    text: root.selected-count == 0 ? "No Selection" :
                           root.selected-count == 1 ? root.selected-class :
-                          root.selected-count + " objects selected";
+                          root.selected-count + " Objects Selected";
                     color: Theme.text-primary;
-                    font-weight: 500;
+                    font-weight: 600;
                     font-size: 12px;
+                    letter-spacing: 0.3px;
                     vertical-alignment: center;
+                }
+                
+                Rectangle { horizontal-stretch: 1; }
+                
+                // Selection count badge
+                if root.selected-count > 1: Rectangle {
+                    width: 24px;
+                    height: 18px;
+                    border-radius: 9px;
+                    background: Theme.accent-blue;
+                    
+                    Text {
+                        text: root.selected-count;
+                        color: white;
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
         
-        // Empty state
+        // Empty state - polished design
         if root.selected-count == 0: Rectangle {
             vertical-stretch: 1;
+            background: Theme.panel-background;
             
             VerticalLayout {
                 alignment: center;
+                spacing: 12px;
+                
+                // Empty state icon
+                Rectangle {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: #1a1a1a;
+                    border-width: 1px;
+                    border-color: #2a2a2a;
+                    
+                    Text {
+                        text: "◇";
+                        color: Theme.text-secondary;
+                        font-size: 20px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
                 
                 Text {
-                    text: "Select an object to view its properties";
+                    text: "No Selection";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 500;
+                    horizontal-alignment: center;
+                }
+                
+                Text {
+                    text: "Select an object in the viewport\nor Explorer to view its properties";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     horizontal-alignment: center;
@@ -433,8 +797,9 @@ export component PropertiesPanel inherits Rectangle {
             horizontal-scrollbar-policy: always-off;
             
             VerticalLayout {
-                padding: 0px;
-                spacing: 0px;
+                padding: 4px;
+                padding-top: 6px;
+                spacing: 1px;
                 alignment: start;
                 
                 for prop in root.properties: VerticalLayout {
@@ -445,8 +810,19 @@ export component PropertiesPanel inherits Rectangle {
                         title: prop.category;
                     }
                     
-                    // Vec3 property
+                    // Vec3 property (position, scale)
                     if !prop.is-header && prop.property-type == "vec3": Vec3Row {
+                        label: prop.name;
+                        value: prop.value;
+                        x-value: prop.x-value;
+                        y-value: prop.y-value;
+                        z-value: prop.z-value;
+                        editable: prop.editable;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                    }
+
+                    // Rotation property — degrees with +/- buttons, supports negatives
+                    if !prop.is-header && prop.property-type == "rotation": RotationVec3Row {
                         label: prop.name;
                         value: prop.value;
                         x-value: prop.x-value;
@@ -473,7 +849,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
                     
                     // String / float / int / enum — generic row
-                    if !prop.is-header && prop.property-type != "vec3" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
+                    if !prop.is-header && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

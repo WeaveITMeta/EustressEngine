@@ -1,0 +1,23 @@
+# Workspace Service - Root container for all game entities
+# This is a data-driven service definition - any properties defined here
+# will be displayed and editable in the Properties panel
+
+[service]
+class_name = "Workspace"
+icon = "workspace"
+description = "Root container for all game entities and physics simulation"
+can_have_children = true
+
+# Physics properties
+gravity = [0.0, -196.2, 0.0]
+air_density = 1.225
+
+# Streaming properties
+streaming_enabled = false
+streaming_min_radius = 64
+streaming_target_radius = 1024
+
+[metadata]
+id = "workspace-service"
+created = ""
+last_modified = ""

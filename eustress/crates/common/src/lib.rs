@@ -27,6 +27,7 @@ pub mod generation;
 pub mod parameters;
 pub mod plugins;
 pub mod pointcloud;
+pub mod project_manifest;
 pub mod properties;
 pub mod scene;
 pub mod scene_ops;
@@ -39,6 +40,7 @@ pub mod utils;
 pub mod xr;
 pub mod orbital;
 pub mod realism;
+pub mod simulation;
 
 // Re-export Attributes and Parameters for convenience
 pub use attributes::{
@@ -63,6 +65,22 @@ pub use parameters::{
 
 // Re-export default scene functions
 pub use default_scene::{spawn_baseplate, spawn_welcome_cube, spawn_default_scene};
+
+// Re-export project manifest types for file-system-first Spaces and publishing
+pub use project_manifest::{
+    AssetIndexEntry, AssetIndexManifest,
+    CameraSettings, EditorSettings,
+    LocalFirstSettings,
+    PackageIndexEntry, PackageIndexManifest,
+    ProjectFormat, ProjectInfo, ProjectManifest, ProjectSettingsManifest,
+    PublishedExperienceDetail, PublishedExperienceSummary, PublishedExperienceSyncRequest,
+    PublishedPackageRef, PublishedReleaseManifest,
+    PublishCheckpoint, PublishJournalManifest, PublishJournalState,
+    PublishManifest, PublishState, PublishVisibility, ReleaseEntry,
+    RenderingSettings,
+    RemoteState, SyncManifest, SyncState,
+    load_toml_file, save_toml_file,
+};
 
 // Re-export eustress format as the canonical file format
 pub use eustress_format::{

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Input field border -->
+  <rect x="1.5" y="4" width="13" height="8" rx="1.5" stroke="#4fc1ff" stroke-width="1.2" fill="none"/>
+  <!-- Inner field background -->
+  <rect x="3" y="5.5" width="10" height="5" rx="0.5" fill="#4fc1ff" fill-opacity="0.1"/>
+  <!-- Text cursor line -->
+  <line x1="3.5" y1="6.5" x2="3.5" y2="9.5" stroke="#4fc1ff" stroke-width="1.1" stroke-linecap="round"/>
+  <!-- Placeholder text lines -->
+  <line x1="5" y1="7.5" x2="10" y2="7.5" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round" stroke-opacity="0.5"/>
+  <line x1="5" y1="9" x2="8" y2="9" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round" stroke-opacity="0.5"/>
+</svg>

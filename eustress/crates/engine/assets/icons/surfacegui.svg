@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- 3D block face (front face of a part) -->
+  <path d="M2 5 L8 2.5 L14 5 L14 13 L8 13 L2 13 Z" fill="#4fc1ff" fill-opacity="0.1" stroke="#4fc1ff" stroke-width="1.1" stroke-linejoin="round"/>
+  <!-- Top face for 3D feel -->
+  <path d="M2 5 L8 2.5 L14 5 L8 7.5 Z" fill="#4fc1ff" fill-opacity="0.2"/>
+  <!-- UI panel on the front face -->
+  <rect x="4" y="6.5" width="8" height="5" rx="0.5" fill="#4fc1ff" fill-opacity="0.25" stroke="#4fc1ff" stroke-width="0.7"/>
+  <!-- Text line on panel -->
+  <line x1="5.5" y1="8.5" x2="10.5" y2="8.5" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round"/>
+  <line x1="5.5" y1="10" x2="8.5" y2="10" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round"/>
+</svg>

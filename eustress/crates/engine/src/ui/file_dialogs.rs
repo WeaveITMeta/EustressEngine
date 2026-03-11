@@ -87,9 +87,36 @@ impl SceneFile {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishRequest {
+    pub experience_name: String,
+    pub description: String,
+    pub genre: String,
+    pub is_public: bool,
+    pub open_source: bool,
+    pub studio_editable: bool,
+    pub as_new: bool,
+}
+
+impl Default for PublishRequest {
+    fn default() -> Self {
+        Self {
+            experience_name: String::new(),
+            description: String::new(),
+            genre: "All".to_string(),
+            is_public: true,
+            open_source: false,
+            studio_editable: false,
+            as_new: false,
+        }
+    }
+}
+
 /// Events for file operations
 #[derive(Message)]
 pub enum FileEvent {
+    /// Create a new Universe folder
+    NewUniverse,
     /// Create a new empty scene
     NewScene,
     /// Open an existing scene file
@@ -101,7 +128,7 @@ pub enum FileEvent {
     /// Open a recent scene by path
     OpenRecent(PathBuf),
     /// Publish the experience to Eustress platform
-    Publish,
+    Publish(PublishRequest),
     /// Publish with new name/settings
     PublishAs,
 }

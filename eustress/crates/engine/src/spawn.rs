@@ -129,11 +129,15 @@ pub fn spawn_part_glb(
         collider,
         RigidBody::Static,
         Name::new(name),
-        PartEntity { part_id: String::new() },
+        PartEntity { part_id: String::new() }, // filled in below
         MeshSource::new(glb_path),
         Attributes::new(),
         Tags::new(),
     )).id();
+    
+    // Populate the part_id now that we have the entity — format matches entity_to_id_string()
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    commands.entity(entity).insert(PartEntity { part_id });
     
     if no_shadow {
         commands.entity(entity).insert(NotShadowCaster);
@@ -220,11 +224,15 @@ pub fn spawn_part(
         collider,
         RigidBody::Static, // Static body for editor (no physics simulation)
         Name::new(name),
-        PartEntity { part_id: String::new() },
+        PartEntity { part_id: String::new() }, // filled in below
         // Default Attributes and Tags for all entities (Phase 3)
         Attributes::new(),
         Tags::new(),
     )).id();
+    
+    // Populate the part_id now that we have the entity — format matches entity_to_id_string()
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    commands.entity(entity).insert(PartEntity { part_id });
     
     // Highly transparent objects (>=50%) should not cast shadows
     if no_shadow {
@@ -1383,7 +1391,7 @@ pub fn spawn_union(
         ..default()
     });
     
-    commands.spawn((
+    let entity = commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
         base_part.cframe,
@@ -1391,8 +1399,11 @@ pub fn spawn_union(
         base_part,
         union_op,
         Name::new(name),
-        PartEntity { part_id: String::new() },
-    )).id()
+        PartEntity { part_id: String::new() }, // filled in below
+    )).id();
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    commands.entity(entity).insert(PartEntity { part_id });
+    entity
 }
 
 /// Spawn an Animator entity

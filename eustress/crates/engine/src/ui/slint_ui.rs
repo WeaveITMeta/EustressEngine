@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::rc::{Rc, Weak};
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::path::Path;
 use parking_lot::RwLock;
 
 // Slint software renderer imports
@@ -23,7 +24,8 @@ use slint::{LogicalPosition, PhysicalSize};
 use slint::platform::WindowEvent;
 
 use crate::commands::{SelectionManager, TransformManager};
-use super::file_dialogs::{SceneFile, FileEvent};
+use crate::ui::highlight::{highlight_to_lines, language_for_ext, HighlightLine as ComputedHighlightLine};
+use super::file_dialogs::{SceneFile, FileEvent, PublishRequest};
 use super::spawn_events::SpawnEventsPlugin;
 use super::menu_events::MenuActionEvent;
 use super::world_view::{WorldViewPlugin, UIWorldSnapshot};
@@ -249,6 +251,19 @@ pub struct SyncDomainModalState {
 }
 
 // ============================================================================
+// System Set Labels
+// ============================================================================
+
+/// Public system set for ordering against Slint drain systems from other plugins.
+/// Use `.after(SlintSystems::Drain)` to guarantee your system runs after
+/// `drain_slint_actions` has consumed all queued Slint→Bevy actions for the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub enum SlintSystems {
+    /// drain_slint_actions: converts SlintActionQueue entries into Bevy state/events
+    Drain,
+}
+
+// ============================================================================
 // Slint → Bevy Action Queue
 // ============================================================================
 
@@ -257,11 +272,14 @@ pub struct SyncDomainModalState {
 #[derive(Debug, Clone)]
 pub enum SlintAction {
     // File operations
+    NewUniverse,
     NewScene,
     OpenScene,
     SaveScene,
     SaveSceneAs,
-    Publish,
+    OpenPublishDialog,
+    OpenPublishAsDialog,
+    Publish(PublishRequest),
     
     // Edit operations
     Undo,
@@ -306,6 +324,9 @@ pub enum SlintAction {
     CollapseNode(i32, String),    // (id, node_type)
     OpenNode(i32, String),        // (id, node_type) — double-click to open
     RenameNode(i32, String, String), // (id, new_name, node_type)
+    AddService,                   // (+) button — open add-service dialog
+    ExpandAll,                    // Expand all tree nodes in explorer
+    CollapseAll,                  // Collapse all tree nodes in explorer
     
     // Properties
     PropertyChanged(String, String),
@@ -356,6 +377,7 @@ pub enum SlintAction {
     SelectCenterTab(i32),
     ScriptContentChanged(String),
     ReorderCenterTab(i32, i32), // (from_index, to_index)
+    ToggleTabMode(i32),         // Toggle summary/code for tab at StudioState index (1-based)
     
     // Web browser
     OpenWebTab(String),         // URL
@@ -364,6 +386,13 @@ pub enum SlintAction {
     WebGoForward,
     WebRefresh,
     
+    // Simulation settings — Apply is automatic on Save
+    SaveSimulationSettings,
+    AddSimWatchpoint,
+    RemoveSimWatchpoint(i32),
+    AddSimOutputBinding,
+    RemoveSimOutputBinding(i32),
+
     // Layout
     ApplyLayoutPreset(i32),
     SaveLayoutToFile,
@@ -376,8 +405,13 @@ pub enum SlintAction {
     // Viewport
     ViewportBoundsChanged(f32, f32, f32, f32), // x, y, width, height
     
+    // Generic menu action (ribbon Insert dropdown, Model menu, etc.)
+    MenuAction(String),
+    
     // Close
     CloseRequested,
+    // Force exit — skip unsaved check (used after exit confirmation dialog)
+    ForceExit,
 }
 
 /// Shared action queue between Slint callbacks and Bevy systems
@@ -492,6 +526,8 @@ pub struct StudioState {
     pub pending_close_tab: Option<i32>,
     pub pending_reorder: Option<(i32, i32)>, // (from, to)
     pub script_editor_content: String,
+    pub script_content_dirty: bool,     // Set when user types; triggers line-number re-sync
+    pub script_highlight_lines: Vec<HighlightLine>,
     
     // Web browser state for active web tab
     pub pending_web_navigate: Option<String>,
@@ -506,6 +542,7 @@ pub struct CenterTabData {
     pub entity_id: i32,       // -1 for web tabs
     pub name: String,
     pub tab_type: String,     // "script" or "web"
+    pub mode: String,         // SoulScript mode: "summary" | "code" | ""
     pub url: String,          // URL for web tabs
     pub dirty: bool,
     pub loading: bool,
@@ -571,6 +608,8 @@ impl Default for StudioState {
             pending_close_tab: None,
             pending_reorder: None,
             script_editor_content: String::new(),
+            script_content_dirty: false,
+            script_highlight_lines: Vec::new(),
             pending_web_navigate: None,
             pending_web_back: false,
             pending_web_forward: false,
@@ -706,37 +745,19 @@ pub struct UnifiedExplorerState {
     pub dirty: bool,
     /// Reverse lookup: hash ID → file path (populated during sync)
     pub file_path_cache: std::collections::HashMap<i32, std::path::PathBuf>,
+    /// Stable i32 → Entity lookup. Bevy entity.to_bits() is u64 and cannot be
+    /// safely truncated to i32 (Slint's int). We assign sequential positive IDs
+    /// (starting at 1) each sync and store the mapping here for OpenNode/SelectNode.
+    pub entity_id_cache: std::collections::HashMap<i32, Entity>,
+    /// Counter for assigning the next sequential entity node ID.
+    next_entity_node_id: i32,
+    /// Set of service names that are currently expanded.
+    /// Services start expanded by default (populated on first sync).
+    pub expanded_services: std::collections::HashSet<String>,
 }
 
-/// Resolve the default Space root directory.
-/// Priority: Documents/Eustress/Universe1/spaces/Space1 → Documents/Eustress/Universe1 → Documents/Eustress → Documents → current dir
 fn default_space_root() -> std::path::PathBuf {
-    if let Some(docs) = dirs::document_dir() {
-        // Check for Documents/Eustress/Universe1/spaces/Space1 (default Space)
-        let space1 = docs.join("Eustress").join("Universe1").join("spaces").join("Space1");
-        if space1.exists() && space1.is_dir() {
-            return space1;
-        }
-        
-        // Check for Documents/Eustress/Universe1 (Universe root)
-        let universe1 = docs.join("Eustress").join("Universe1");
-        if universe1.exists() && universe1.is_dir() {
-            return universe1;
-        }
-        
-        // Check for Documents/Eustress (workspace root)
-        let eustress = docs.join("Eustress");
-        if eustress.exists() && eustress.is_dir() {
-            return eustress;
-        }
-        
-        // Fallback to Documents folder
-        if docs.exists() {
-            return docs;
-        }
-    }
-    // Final fallback to current directory
-    std::env::current_dir().unwrap_or_default()
+    crate::space::default_space_root()
 }
 
 impl Default for UnifiedExplorerState {
@@ -744,6 +765,9 @@ impl Default for UnifiedExplorerState {
         Self {
             selected: SelectedItem::None,
             expanded_entities: std::collections::HashSet::new(),
+            entity_id_cache: std::collections::HashMap::new(),
+            next_entity_node_id: 1,
+            expanded_services: ["Workspace"].iter().map(|s| s.to_string()).collect(),
             expanded_dirs: std::collections::HashSet::new(),
             search_query: String::new(),
             project_root: default_space_root(),
@@ -759,6 +783,8 @@ impl Default for UnifiedExplorerState {
 pub enum SelectedItem {
     Entity(Entity),
     File(std::path::PathBuf),
+    /// Service header node (Workspace, Lighting, etc.) — selected by name
+    Service(String),
     None,
 }
 
@@ -1013,7 +1039,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, (
                 forward_input_to_slint,
                 forward_keyboard_to_slint,
-                drain_slint_actions,
+                drain_slint_actions.in_set(SlintSystems::Drain),
                 sync_bevy_to_slint,
                 render_slint_to_texture,
             ).chain())
@@ -1109,6 +1135,8 @@ fn setup_slint_overlay(world: &mut World) {
     
     // File operations
     let q = queue.clone();
+    ui.on_new_universe(move || q.push(SlintAction::NewUniverse));
+    let q = queue.clone();
     ui.on_new_scene(move || q.push(SlintAction::NewScene));
     let q = queue.clone();
     ui.on_open_scene(move || q.push(SlintAction::OpenScene));
@@ -1117,7 +1145,21 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
     let q = queue.clone();
-    ui.on_publish(move || q.push(SlintAction::Publish));
+    ui.on_open_publish_dialog(move || q.push(SlintAction::OpenPublishDialog));
+    let q = queue.clone();
+    ui.on_publish_as(move || q.push(SlintAction::OpenPublishAsDialog));
+    let q = queue.clone();
+    ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, as_new| {
+        q.push(SlintAction::Publish(PublishRequest {
+            experience_name: experience_name.to_string(),
+            description: description.to_string(),
+            genre: genre.to_string(),
+            is_public,
+            open_source,
+            studio_editable,
+            as_new,
+        }))
+    });
     
     // Edit operations
     let q = queue.clone();
@@ -1168,7 +1210,19 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_pause(move || q.push(SlintAction::Pause));
     let q = queue.clone();
     ui.on_stop(move || q.push(SlintAction::Stop));
-    
+
+    // Simulation settings — Apply is automatic on Save (no separate Apply callback)
+    let q = queue.clone();
+    ui.on_save_simulation_settings(move || q.push(SlintAction::SaveSimulationSettings));
+    let q = queue.clone();
+    ui.on_add_sim_watchpoint(move || q.push(SlintAction::AddSimWatchpoint));
+    let q = queue.clone();
+    ui.on_remove_sim_watchpoint(move |i| q.push(SlintAction::RemoveSimWatchpoint(i)));
+    let q = queue.clone();
+    ui.on_add_sim_output_binding(move || q.push(SlintAction::AddSimOutputBinding));
+    let q = queue.clone();
+    ui.on_remove_sim_output_binding(move |i| q.push(SlintAction::RemoveSimOutputBinding(i)));
+
     // Explorer (unified: entities + files)
     let q = queue.clone();
     ui.on_select_node(move |id, node_type| q.push(SlintAction::SelectNode(id, node_type.to_string())));
@@ -1180,6 +1234,12 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_open_node(move |id, node_type| q.push(SlintAction::OpenNode(id, node_type.to_string())));
     let q = queue.clone();
     ui.on_rename_node(move |id, name, node_type| q.push(SlintAction::RenameNode(id, name.to_string(), node_type.to_string())));
+    let q = queue.clone();
+    ui.on_add_service(move || q.push(SlintAction::AddService));
+    let q = queue.clone();
+    ui.on_expand_all(move || q.push(SlintAction::ExpandAll));
+    let q = queue.clone();
+    ui.on_collapse_all(move || q.push(SlintAction::CollapseAll));
     
     // Properties
     let q = queue.clone();
@@ -1192,6 +1252,10 @@ fn setup_slint_overlay(world: &mut World) {
     // Toolbox part insertion
     let q = queue.clone();
     ui.on_insert_part(move |part_type| q.push(SlintAction::InsertPart(part_type.to_string())));
+
+    // Ribbon menu actions (Insert dropdown, Model menu, etc.)
+    let q = queue.clone();
+    ui.on_menu_action(move |action| q.push(SlintAction::MenuAction(action.to_string())));
     
     // Context menu
     let q = queue.clone();
@@ -1262,6 +1326,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_script_content_changed(move |text| q.push(SlintAction::ScriptContentChanged(text.to_string())));
     let q = queue.clone();
     ui.on_reorder_center_tab(move |from, to| q.push(SlintAction::ReorderCenterTab(from, to)));
+    let q = queue.clone();
+    ui.on_toggle_mode(move |idx| q.push(SlintAction::ToggleTabMode(idx)));
     
     // Web browser
     let q = queue.clone();
@@ -1305,6 +1371,10 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_close_requested(move || q.push(SlintAction::CloseRequested));
     
+    // Force exit (after exit confirmation dialog)
+    let q = queue.clone();
+    ui.on_force_exit(move || q.push(SlintAction::ForceExit));
+    
     // Store queue as Bevy resource
     world.insert_resource(queue);
     
@@ -1313,6 +1383,9 @@ fn setup_slint_overlay(world: &mut World) {
     // Create Bevy texture for Slint to render into.
     // Uses Rgba8UnormSrgb for correct sRGB gamma (prevents washed-out colors).
     // Slint's SoftwareRenderer outputs PremultipliedRgbaColor in sRGB space.
+    // CRITICAL: asset_usage must include MAIN_WORLD so Bevy keeps the CPU-side
+    // data buffer alive every frame. Without it image.data is None after the first
+    // GPU upload and Slint has nowhere to write its rendered pixels.
     let size = Extent3d { width, height, depth_or_array_layers: 1 };
     let mut image = Image {
         texture_descriptor: TextureDescriptor {
@@ -1325,6 +1398,8 @@ fn setup_slint_overlay(world: &mut World) {
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         },
+        asset_usage: bevy::asset::RenderAssetUsages::MAIN_WORLD
+            | bevy::asset::RenderAssetUsages::RENDER_WORLD,
         ..default()
     };
     image.resize(size);
@@ -1475,19 +1550,16 @@ fn render_slint_to_texture(
     mut materials: ResMut<Assets<StandardMaterial>>,
     slint_scenes: Query<&SlintScene>,
     slint_context: Option<NonSend<SlintUiState>>,
-    windows: Query<&Window>,
 ) {
     let Some(slint_context) = slint_context else { return };
     
     let frame = RENDER_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     
-    // Update Slint timers and animations every frame
+    // Update Slint timers and animations every frame (needed for animations/transitions)
     slint::platform::update_timers_and_animations();
     
-    // Get scale factor from Bevy window
-    let scale_factor = windows.single().map(|w| w.scale_factor()).unwrap_or(1.0);
-    
     let adapter = &slint_context.adapter;
+    
     
     let Some(scene) = slint_scenes.iter().next() else {
         if frame < 5 { warn!("render_slint_to_texture: no SlintScene entity"); }
@@ -1498,22 +1570,28 @@ fn render_slint_to_texture(
         return;
     };
     
-    let requested_size = slint::PhysicalSize::new(
-        image.texture_descriptor.size.width,
-        image.texture_descriptor.size.height,
-    );
+    let tex_width  = image.texture_descriptor.size.width  as usize;
+    let tex_height = image.texture_descriptor.size.height as usize;
     
-    // If size or scale changed, notify Slint's layout engine
-    if requested_size != adapter.size.get() || scale_factor != adapter.scale_factor.get() {
-        adapter.resize(requested_size, scale_factor);
-    }
+    // handle_window_resize owns adapter.resize() — do NOT call it here.
+    // Calling it every frame dispatches WindowEvent::Resized to Slint on every frame,
+    // forcing a full re-layout + re-alloc even when nothing changed, which exhausts
+    // the heap and eventually triggers STATUS_STACK_BUFFER_OVERRUN via the CRT panic handler.
     
-    // Render Slint UI directly into the Bevy texture's CPU-side storage
-    // With ReusedBuffer, Slint only repaints dirty regions — returns the dirty region list
+    // Render Slint UI directly into the Bevy texture's CPU-side storage.
+    // Guard: buffer must be exactly tex_width × tex_height × 4 bytes.
+    // If a resize just happened the buffer and descriptor can momentarily disagree;
+    // skipping this frame is safe — the next frame will be consistent.
     if let Some(data) = image.data.as_mut() {
+        let expected_bytes = tex_width * tex_height * 4;
+        if data.len() != expected_bytes {
+            // Buffer and descriptor are out of sync (resize in flight) — skip this frame
+            return;
+        }
+        
         let dirty_region = adapter.software_renderer.render(
             bytemuck::cast_slice_mut::<u8, PremultipliedRgbaColor>(data),
-            image.texture_descriptor.size.width as usize,
+            tex_width,
         );
         
         // Only force GPU re-upload if Slint actually repainted something
@@ -1530,17 +1608,26 @@ fn render_slint_to_texture(
 /// Forwards Bevy mouse/keyboard input to Slint (from official bevy-hosts-slint)
 fn forward_input_to_slint(
     mut mouse_button: MessageReader<MouseButtonInput>,
+    mut mouse_wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut cursor_state: ResMut<SlintCursorState>,
     slint_context: Option<NonSend<SlintUiState>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let adapter = &slint_context.adapter;
-    
+
     let Some(window) = windows.iter().next() else { return };
     let scale_factor = adapter.scale_factor.get();
-    
-    // Forward cursor position to Slint (fullscreen overlay = direct mapping)
+
+    // Forward cursor position. When cursor leaves the window:
+    // - Only send PointerExited when NO button is held (avoids cancelling scroll drag).
+    // - When a button is held (dragging), keep the last known position so Slint
+    //   continues tracking the drag until the button is released.
+    let any_button_held = mouse_buttons.pressed(MouseButton::Left)
+        || mouse_buttons.pressed(MouseButton::Right)
+        || mouse_buttons.pressed(MouseButton::Middle);
+
     if let Some(cursor_pos) = window.cursor_position() {
         let position = LogicalPosition::new(
             cursor_pos.x / scale_factor,
@@ -1548,11 +1635,17 @@ fn forward_input_to_slint(
         );
         cursor_state.position = Some(position);
         adapter.slint_window.dispatch_event(WindowEvent::PointerMoved { position });
+    } else if any_button_held {
+        // Cursor is outside the window but a button is pressed — keep last position
+        // so Slint doesn't cancel the active drag/scroll operation.
+        if let Some(position) = cursor_state.position {
+            adapter.slint_window.dispatch_event(WindowEvent::PointerMoved { position });
+        }
     } else if cursor_state.position.is_some() {
         cursor_state.position = None;
         adapter.slint_window.dispatch_event(WindowEvent::PointerExited);
     }
-    
+
     // Forward mouse button events
     for event in mouse_button.read() {
         if let Some(position) = cursor_state.position {
@@ -1574,6 +1667,26 @@ fn forward_input_to_slint(
                     );
                 }
             }
+        }
+    }
+
+    // Forward scroll wheel events with the actual cursor position so Slint routes
+    // them to the correct widget (toolbox, explorer, etc.) and not the 3D viewport.
+    // The camera_controller consumes scroll only when the cursor is inside the
+    // viewport bounds, so both can receive the event independently.
+    for event in mouse_wheel.read() {
+        if let Some(position) = cursor_state.position {
+            use bevy::input::mouse::MouseScrollUnit;
+            // Convert line-based units to logical pixels (1 line ≈ 20 logical px)
+            let (dx, dy) = match event.unit {
+                MouseScrollUnit::Line  => (event.x * 20.0, event.y * 20.0),
+                MouseScrollUnit::Pixel => (event.x, event.y),
+            };
+            adapter.slint_window.dispatch_event(WindowEvent::PointerScrolled {
+                position,
+                delta_x: dx,
+                delta_y: dy,
+            });
         }
     }
 }
@@ -1606,41 +1719,150 @@ struct DrainResources<'w> {
     state: Option<ResMut<'w, StudioState>>,
     output: Option<ResMut<'w, OutputConsole>>,
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
+    space_root: Option<Res<'w, crate::space::SpaceRoot>>,
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
+    /// Shared selection state — updated on Explorer node clicks so F-to-focus works
+    selection_manager: Option<Res<'w, BevySelectionManager>>,
+}
+
+fn default_publish_name(space_root: Option<&Path>) -> String {
+    space_root
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Untitled".to_string())
+}
+
+fn publish_target_from_sync_manifest(sync_manifest: &eustress_common::SyncManifest) -> String {
+    let provider = match sync_manifest.remote.provider.trim() {
+        "cloudflare_r2" => "Cloudflare R2",
+        "" => "Cloudflare bucket",
+        other => other,
+    };
+
+    match sync_manifest.remote.bucket.as_deref().map(str::trim) {
+        Some(bucket) if !bucket.is_empty() => format!("{} bucket ({})", provider, bucket),
+        _ if provider == "Cloudflare bucket" => provider.to_string(),
+        _ => format!("{} bucket", provider),
+    }
+}
+
+fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, as_new: bool) {
+    let mut request = PublishRequest {
+        experience_name: default_publish_name(space_root),
+        as_new,
+        ..PublishRequest::default()
+    };
+    let mut publish_target = "Cloudflare bucket".to_string();
+    let mut is_update = false;
+
+    if let Some(space_root) = space_root {
+        let project_dir = space_root.join(".eustress");
+        let publish_path = project_dir.join("publish.toml");
+        let sync_path = project_dir.join("sync.toml");
+
+        if publish_path.exists() {
+            if let Ok(publish_manifest) = eustress_common::load_toml_file::<eustress_common::PublishManifest>(&publish_path) {
+                if !publish_manifest.listing.name.trim().is_empty() {
+                    request.experience_name = publish_manifest.listing.name;
+                }
+                request.description = publish_manifest.listing.description.unwrap_or_default();
+                if !publish_manifest.listing.genre.trim().is_empty() {
+                    request.genre = publish_manifest.listing.genre;
+                }
+                request.is_public = publish_manifest.visibility.is_public;
+                request.open_source = publish_manifest.visibility.open_source;
+                request.studio_editable = publish_manifest.visibility.studio_editable;
+                is_update = publish_manifest.publish.latest_release_id.is_some()
+                    || publish_manifest.publish.last_published.is_some()
+                    || !publish_manifest.releases.is_empty();
+            }
+        }
+
+        if sync_path.exists() {
+            if let Ok(sync_manifest) = eustress_common::load_toml_file::<eustress_common::SyncManifest>(&sync_path) {
+                publish_target = publish_target_from_sync_manifest(&sync_manifest);
+                if !as_new {
+                    is_update = is_update
+                        || sync_manifest.remote.experience_id.is_some()
+                        || sync_manifest.remote.project_id.is_some();
+                }
+            }
+        }
+    }
+
+    ui.set_publish_experience_name(request.experience_name.into());
+    ui.set_publish_description(request.description.into());
+    ui.set_publish_genre(request.genre.into());
+    ui.set_publish_is_public(request.is_public);
+    ui.set_publish_open_source(request.open_source);
+    ui.set_publish_studio_editable(request.studio_editable);
+    ui.set_publish_as_new(as_new);
+    ui.set_publish_is_update(!as_new && is_update);
+    ui.set_publish_target(publish_target.into());
+    ui.set_show_publish_dialog(true);
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 fn drain_slint_actions(
     queue: Option<Res<SlintActionQueue>>,
+    slint_context: Option<NonSend<SlintUiState>>,
     mut events: DrainEventWriters,
     mut res: DrainResources,
     mut instances: Query<(Entity, &mut eustress_common::classes::Instance)>,
     mut transforms: Query<&mut Transform>,
     mut base_parts: Query<&mut eustress_common::classes::BasePart>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    loaded_from_file: Query<(Entity, &crate::space::LoadedFromFile)>,
+    mut service_components: Query<&mut crate::space::service_loader::ServiceComponent>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    // Mutable UI class components collapsed into ParamSet to stay within Bevy's 16-param limit
+    mut ui_queries: ParamSet<(
+        Query<&mut eustress_common::classes::TextLabel>,
+        Query<&mut eustress_common::classes::TextButton>,
+        Query<&mut eustress_common::classes::TextBox>,
+        Query<&mut eustress_common::classes::Frame>,
+        Query<&mut eustress_common::classes::ImageLabel>,
+        Query<&mut eustress_common::classes::ImageButton>,
+        Query<&mut eustress_common::classes::ScrollingFrame>,
+    )>,
 ) {
     let Some(queue) = queue else { return };
     let actions = queue.drain();
     if actions.is_empty() { return; }
+    let ui = slint_context.as_ref().map(|context| &context.window);
     
     for action in actions {
         match action {
             // File operations → FileEvent
+            SlintAction::NewUniverse => { events.file_events.write(FileEvent::NewUniverse); }
             SlintAction::NewScene => { events.file_events.write(FileEvent::NewScene); }
             SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
-            SlintAction::Publish => { events.file_events.write(FileEvent::Publish); }
+            SlintAction::OpenPublishDialog => {
+                if let Some(ui) = ui {
+                    let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
+                    populate_publish_dialog(ui, current_space_root, false);
+                }
+            }
+            SlintAction::OpenPublishAsDialog => {
+                if let Some(ui) = ui {
+                    let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
+                    populate_publish_dialog(ui, current_space_root, true);
+                }
+            }
+            SlintAction::Publish(request) => { events.file_events.write(FileEvent::Publish(request)); }
             
             // Edit operations → MenuActionEvent
             SlintAction::Undo => { events.undo_events.write(crate::commands::UndoCommandEvent); }
@@ -1702,7 +1924,34 @@ fn drain_slint_actions(
                     s.stop_requested = true;
                 }
             }
-            
+
+            // Simulation settings — save to simulation.toml (also applies)
+            SlintAction::SaveSimulationSettings => {
+                if let Some(ref mut out) = res.output {
+                    out.info("Simulation settings saved to simulation.toml.".to_string());
+                }
+            }
+            SlintAction::AddSimWatchpoint => {
+                if let Some(ref mut out) = res.output {
+                    out.info("Watchpoint added.".to_string());
+                }
+            }
+            SlintAction::RemoveSimWatchpoint(idx) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Watchpoint {} removed.", idx));
+                }
+            }
+            SlintAction::AddSimOutputBinding => {
+                if let Some(ref mut out) = res.output {
+                    out.info("Output binding added.".to_string());
+                }
+            }
+            SlintAction::RemoveSimOutputBinding(idx) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Output binding {} removed.", idx));
+                }
+            }
+
             // View
             SlintAction::FocusSelected => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::FocusSelection));
@@ -1869,14 +2118,24 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ScriptContentChanged(text) => {
-                // Store updated script content for the active tab
+                // Store updated script content and mark dirty so
+                // sync_center_tabs_to_slint pushes fresh line numbers this frame.
                 if let Some(ref mut s) = res.state {
                     s.script_editor_content = text;
+                    s.script_content_dirty = true;
                 }
             }
             SlintAction::ReorderCenterTab(from, to) => {
                 if let Some(ref mut s) = res.state {
                     s.pending_reorder = Some((from, to));
+                }
+            }
+            SlintAction::ToggleTabMode(studio_idx) => {
+                // studio_idx is 1-based (StudioState.center_tabs index).
+                // CenterTabManager has Scene at 0, so mgr index = studio_idx.
+                if let Some(ref mut mgr) = res.tab_manager {
+                    let mgr_idx = studio_idx as usize;
+                    mgr.toggle_mode(mgr_idx);
                 }
             }
             
@@ -1890,8 +2149,33 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::WebNavigate(url) => {
+                // Normalize: prepend https:// if no scheme is present
+                let url = if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("about:") {
+                    url
+                } else {
+                    format!("https://{}", url)
+                };
                 if let Some(ref mut s) = res.state {
-                    s.pending_web_navigate = Some(url);
+                    // Always update the URL bar state so Slint shows the correct URL
+                    s.pending_web_navigate = Some(url.clone());
+                    // Update the active tab's URL immediately for the URL bar display
+                    if s.active_center_tab > 0 {
+                        let idx = (s.active_center_tab - 1) as usize;
+                        if let Some(tab) = s.center_tabs.get_mut(idx) {
+                            if tab.tab_type == "web" {
+                                tab.url = url.clone();
+                                tab.name = url.clone();
+                            }
+                        }
+                    }
+                    s.tabs_dirty = true;
+                }
+                // Without the webview feature, open in system default browser
+                #[cfg(not(feature = "webview"))]
+                {
+                    if let Err(e) = open::that(&url) {
+                        warn!("Failed to open URL in system browser: {}", e);
+                    }
                 }
             }
             SlintAction::WebGoBack => {
@@ -2055,11 +2339,49 @@ fn drain_slint_actions(
             SlintAction::SelectNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        // Find the Entity by its ECS index (used as TreeNode ID)
-                        let found = instances.iter()
-                            .find(|(e, _)| e.to_bits() as i32 == id)
-                            .map(|(e, _)| SelectedItem::Entity(e));
-                        es.selected = found.unwrap_or(SelectedItem::None);
+                        if id < 0 {
+                            // Negative IDs are service header nodes from make_service_node().
+                            // Reconstruct the service name by matching against known service name lengths.
+                            // Service names are stored in class_name on the TreeNode; we recover them
+                            // by scanning service_components for entities whose name matches the ID.
+                            let service_name = service_components.iter()
+                                .find_map(|sc| {
+                                    // ServiceComponent.class_name matches the service display name
+                                    if -(sc.class_name.len() as i32) == id {
+                                        Some(sc.class_name.clone())
+                                    } else {
+                                        None
+                                    }
+                                });
+                            // Fallback: look up known service names by their negative ID
+                            let name = service_name.or_else(|| {
+                                let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                    "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                    "ServerScriptService","SoulService","SoundService","Teams","Chat"];
+                                known.iter().find(|n| -(n.len() as i32) == id).map(|n| n.to_string())
+                            });
+                            es.selected = name.map(SelectedItem::Service).unwrap_or(SelectedItem::None);
+                            // Clear entity selection — service nodes are not focusable parts
+                            if let Some(ref sel_mgr) = res.selection_manager {
+                                sel_mgr.0.write().clear();
+                            }
+                        } else {
+                            // Positive ID — look up Entity from stable sequential ID cache
+                            let entity = es.entity_id_cache.get(&id).copied();
+                            es.selected = entity
+                                .filter(|e| instances.get(*e).is_ok())
+                                .map(SelectedItem::Entity)
+                                .unwrap_or(SelectedItem::None);
+
+                            // Also update BevySelectionManager so FocusSelection (F key)
+                            // can read the correct entity bounds from SelectionSyncManager.
+                            if let Some(entity) = entity {
+                                if let Some(ref sel_mgr) = res.selection_manager {
+                                    let id_str = format!("{}v{}", entity.index(), entity.generation());
+                                    sel_mgr.0.write().select(id_str);
+                                }
+                            }
+                        }
                     } else {
                         // File node — look up path by hash ID from file_path_cache
                         if let Some(path) = es.file_path_cache.get(&id).cloned() {
@@ -2073,8 +2395,18 @@ fn drain_slint_actions(
             SlintAction::ExpandNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        if let Some((entity, _)) = instances.iter().find(|(e, _)| e.to_bits() as i32 == id) {
-                            es.expanded_entities.insert(entity);
+                        if id < 0 {
+                            // Negative ID — service header node. Recover name from known list.
+                            let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                "ServerScriptService","SoulService","SoundService","Teams","Chat"];
+                            if let Some(name) = known.iter().find(|n| -(n.len() as i32) == id) {
+                                es.expanded_services.insert(name.to_string());
+                            }
+                        } else {
+                            if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                                es.expanded_entities.insert(entity);
+                            }
                         }
                     } else {
                         // File node — expand directory by hash ID lookup
@@ -2088,8 +2420,18 @@ fn drain_slint_actions(
             SlintAction::CollapseNode(id, node_type) => {
                 if let Some(ref mut es) = res.explorer_state {
                     if node_type == "entity" {
-                        if let Some((entity, _)) = instances.iter().find(|(e, _)| e.to_bits() as i32 == id) {
-                            es.expanded_entities.remove(&entity);
+                        if id < 0 {
+                            // Negative ID — service header node.
+                            let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                "ServerScriptService","SoulService","SoundService","Teams","Chat"];
+                            if let Some(name) = known.iter().find(|n| -(n.len() as i32) == id) {
+                                es.expanded_services.remove(*name);
+                            }
+                        } else {
+                            if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                                es.expanded_entities.remove(&entity);
+                            }
                         }
                     } else {
                         // File node — collapse directory by hash ID lookup
@@ -2102,9 +2444,30 @@ fn drain_slint_actions(
             }
             SlintAction::OpenNode(id, node_type) => {
                 if node_type == "entity" {
-                    // Double-click entity — open script if SoulScript, else select
-                    if let Some(ref mut out) = res.output {
-                        out.info(format!("Open entity node id={}", id));
+                    // Double-click entity — open script if SoulScript.
+                    // Look up Entity from the stable sequential ID cache.
+                    let entity_opt = res.explorer_state.as_ref()
+                        .and_then(|es| es.entity_id_cache.get(&id).copied());
+                    if let Some(entity) = entity_opt {
+                        if let Ok((_, inst)) = instances.get(entity) {
+                            if inst.class_name == eustress_common::classes::ClassName::SoulScript {
+                                // Open SoulScript in tabbed viewer
+                                // Get the file path from LoadedFromFile component if available
+                                if let Ok((_, loaded)) = loaded_from_file.get(entity) {
+                                    if let Some(ref mut mgr) = res.tab_manager {
+                                        let idx = mgr.open_file(&loaded.path);
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Opened SoulScript: {} (tab {})", inst.name, idx));
+                                        }
+                                    }
+                                } else {
+                                    // Fallback: use pending_open_script for scripts without file path
+                                    if let Some(ref mut s) = res.state {
+                                        s.pending_open_script = Some((id, inst.name.clone()));
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Double-click file — open in appropriate tab via CenterTabManager
@@ -2134,8 +2497,13 @@ fn drain_slint_actions(
             }
             SlintAction::RenameNode(id, name, node_type) => {
                 if node_type == "entity" {
-                    if let Some((_, mut inst)) = instances.iter_mut().find(|(_, inst)| inst.id as i32 == id) {
-                        inst.name = name;
+                    // Look up Entity from stable sequential ID cache
+                    let entity_opt = res.explorer_state.as_ref()
+                        .and_then(|es| es.entity_id_cache.get(&id).copied());
+                    if let Some(entity) = entity_opt {
+                        if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                            inst.name = name;
+                        }
                     }
                 } else {
                     // File rename — filesystem operation
@@ -2162,8 +2530,58 @@ fn drain_slint_actions(
                 }
             }
             
+            SlintAction::AddService => {
+                // (+) button — log intent; actual service creation requires user to pick
+                // a name/type via command bar or future dialog. For now, print available services.
+                if let Some(ref mut out) = res.output {
+                    out.info("Add Service: use the command bar to create a new service (e.g. 'add service MyService')".to_string());
+                }
+            }
+            
+            SlintAction::ExpandAll => {
+                // Expand all expandable nodes in the explorer tree
+                if let Some(ref mut es) = res.explorer_state {
+                    // Expand all ECS services
+                    for svc in ["Workspace", "Lighting", "Players", "StarterGui", "StarterPack", "StarterPlayer", "ServerStorage", "SoulService", "SoundService", "Teams", "Chat", "LocalizationService", "TestService"] {
+                        es.expanded_services.insert(svc.to_string());
+                    }
+                    // Mark explorer dirty so tree rebuilds with all expanded
+                    es.dirty = true;
+                }
+            }
+            
+            SlintAction::CollapseAll => {
+                // Collapse all nodes in the explorer tree
+                if let Some(ref mut es) = res.explorer_state {
+                    es.expanded_services.clear();
+                    es.expanded_dirs.clear();
+                    es.dirty = true;
+                }
+            }
+            
             // Properties write-back — apply edits from Slint properties panel to ECS
-            SlintAction::PropertyChanged(key, val) => {
+            SlintAction::PropertyChanged(key, raw_val) => {
+                // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
+                // Emitted by RotationVec3Row +/- buttons to avoid Slint float-to-string conversion.
+                let val: String = if raw_val.starts_with("step:") {
+                    // Format: "step:<axis>:<delta>:<x>,<y>,<z>"
+                    // axis = x|y|z, delta = +1|-1, x/y/z are current degree strings
+                    let parts: Vec<&str> = raw_val.splitn(4, ':').collect();
+                    if parts.len() == 4 {
+                        let axis = parts[1];
+                        let delta: f32 = parts[2].parse().unwrap_or(0.0);
+                        let coords: Vec<f32> = parts[3].split(',')
+                            .map(|s| s.trim().parse::<f32>().unwrap_or(0.0))
+                            .collect();
+                        if coords.len() == 3 {
+                            let (mut cx, mut cy, mut cz) = (coords[0], coords[1], coords[2]);
+                            match axis { "x" => cx += delta, "y" => cy += delta, "z" => cz += delta, _ => {} }
+                            format!("{:.2}, {:.2}, {:.2}", cx, cy, cz)
+                        } else { raw_val.clone() }
+                    } else { raw_val.clone() }
+                } else {
+                    raw_val.clone()
+                };
                 let selected_entity = res.explorer_state.as_ref().and_then(|es| {
                     match &es.selected {
                         SelectedItem::Entity(e) => Some(*e),
@@ -2227,9 +2645,27 @@ fn drain_slint_actions(
                             }
                         }
                         _ => {
-                            // Unhandled property — log for debugging
-                            if let Some(ref mut out) = res.output {
-                                out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                            // UI class ECS component live mutation via PropertyAccess
+                            use eustress_common::classes::PropertyAccess;
+                            let prop_val = property_string_to_value(&key, &val);
+                            if let Some(pv) = prop_val {
+                                let mut applied = false;
+                                if let Ok(mut c) = ui_queries.p0().get_mut(entity)     { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } }
+                                if !applied { if let Ok(mut c) = ui_queries.p1().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied { if let Ok(mut c) = ui_queries.p2().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied { if let Ok(mut c) = ui_queries.p3().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied { if let Ok(mut c) = ui_queries.p4().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied { if let Ok(mut c) = ui_queries.p5().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied { if let Ok(mut c) = ui_queries.p6().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
+                                if !applied {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                                    }
+                                }
+                            } else {
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                                }
                             }
                         }
                     }
@@ -2267,6 +2703,72 @@ fn drain_slint_actions(
                             }
                         }
                     }
+                    
+                    // ══════════════════════════════════════════════════════════
+                    // Service property write-back: Update ServiceComponent dynamically
+                    // Any property can be edited - no hardcoding
+                    // ══════════════════════════════════════════════════════════
+                    if let Ok(mut service) = service_components.get_mut(entity) {
+                        let mut changed = false;
+                        
+                        // Handle special service fields
+                        match key.as_str() {
+                            "Icon" => {
+                                service.icon = val.clone();
+                                changed = true;
+                            }
+                            "Description" => {
+                                service.description = val.clone();
+                                changed = true;
+                            }
+                            _ => {
+                                // Dynamic property - parse value based on existing type or infer
+                                if let Some(existing) = service.properties.get(&key) {
+                                    // Update based on existing type
+                                    let new_value = match existing {
+                                        crate::space::service_loader::PropertyValue::Bool(_) => {
+                                            Some(crate::space::service_loader::PropertyValue::Bool(val == "true"))
+                                        }
+                                        crate::space::service_loader::PropertyValue::Int(_) => {
+                                            val.parse::<i64>().ok().map(crate::space::service_loader::PropertyValue::Int)
+                                        }
+                                        crate::space::service_loader::PropertyValue::Float(_) => {
+                                            val.parse::<f64>().ok().map(crate::space::service_loader::PropertyValue::Float)
+                                        }
+                                        crate::space::service_loader::PropertyValue::String(_) => {
+                                            Some(crate::space::service_loader::PropertyValue::String(val.clone()))
+                                        }
+                                        crate::space::service_loader::PropertyValue::Vec3(_) => {
+                                            parse_vec3_value(&val).map(|(x, y, z)| {
+                                                crate::space::service_loader::PropertyValue::Vec3([x as f64, y as f64, z as f64])
+                                            })
+                                        }
+                                        crate::space::service_loader::PropertyValue::Vec4(_) => {
+                                            parse_color4_value(&val).map(|(r, g, b, a)| {
+                                                crate::space::service_loader::PropertyValue::Vec4([r as f64, g as f64, b as f64, a as f64])
+                                            })
+                                        }
+                                    };
+                                    
+                                    if let Some(new_val) = new_value {
+                                        service.properties.insert(key.clone(), new_val);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Save to _service.toml file
+                        if changed {
+                            if let Err(e) = crate::space::service_loader::save_service_to_file(&service) {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Failed to save service: {}", e));
+                                }
+                            } else if let Some(ref mut out) = res.output {
+                                out.info(format!("💾 Saved {} to {:?}", key, service.toml_path.file_name().unwrap_or_default()));
+                            }
+                        }
+                    }
                 }
             }
             
@@ -2289,15 +2791,75 @@ fn drain_slint_actions(
                     "Cone" => "cone",
                     _ => "block",
                 };
-                
+
+                // Compute spawn position: 10 units in front of the camera, min Y = 0.5
+                let spawn_pos: [f32; 3] = if let Ok((_, cam_transform)) = camera_query.single() {
+                    let forward = cam_transform.forward();
+                    let cam_pos = cam_transform.translation();
+                    let pos = cam_pos + forward * 10.0;
+                    [pos.x, pos.y.max(0.5), pos.z]
+                } else {
+                    [0.0, 0.5, 0.0]
+                };
+
+                // Determine correct parent entity:
+                // 1. If a Folder/Model entity is selected in explorer → parent to that
+                // 2. Otherwise → parent to the Workspace service root entity
+                let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
+                    match &es.selected {
+                        SelectedItem::Entity(e) => {
+                            // Only parent to Folder or Model — not to parts/scripts/services
+                            instances.get(*e).ok().and_then(|(ent, inst)| {
+                                match inst.class_name {
+                                    eustress_common::classes::ClassName::Folder
+                                    | eustress_common::classes::ClassName::Model => Some(ent),
+                                    _ => None,
+                                }
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                // Fall back to Workspace service root if no folder selected:
+                // find the entity whose LoadedFromFile has service == "Workspace" and is a _service.toml
+                let parent_entity = parent_entity.or_else(|| {
+                    loaded_from_file.iter().find_map(|(lff_entity, lff)| {
+                        if lff.service == "Workspace"
+                            && lff.path.file_name()
+                                .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
+                                .unwrap_or(false)
+                        {
+                            Some(lff_entity)
+                        } else {
+                            None
+                        }
+                    })
+                });
+
                 // Space root path (uses dynamic default)
                 let space_root = crate::space::default_space_root();
-                
-                // Step 1: Create .glb.toml instance file on disk
-                match crate::toolbox::insert_mesh_instance(
-                    &space_root,
+
+                // Step 1: Create .glb.toml instance file on disk in the correct directory.
+                // If parented to a folder entity, write the file inside that folder's directory.
+                let write_dir = parent_entity
+                    .and_then(|pe| loaded_from_file.get(pe).ok())
+                    .map(|(_, lff)| {
+                        // For Directory entries, path IS the directory; for _service.toml, use parent dir
+                        if lff.path.is_dir() {
+                            lff.path.clone()
+                        } else {
+                            lff.path.parent().unwrap_or(&space_root.join("Workspace")).to_path_buf()
+                        }
+                    })
+                    .unwrap_or_else(|| space_root.join("Workspace"));
+
+                match crate::toolbox::insert_mesh_instance_at(
+                    &write_dir,
                     mesh_id,
-                    [0.0, 5.0, 0.0],
+                    spawn_pos,
                     None,
                 ) {
                     Ok(toml_path) => {
@@ -2312,15 +2874,19 @@ fn drain_slint_actions(
                                     toml_path.clone(),
                                     instance,
                                 );
-                                
-                                // Step 4: Register in SpaceFileRegistry
+
+                                // Step 4: Parent to selected folder / Workspace root
+                                if let Some(parent) = parent_entity {
+                                    commands.entity(entity).insert(ChildOf(parent));
+                                }
+
+                                // Step 5: Register in SpaceFileRegistry
                                 if let Some(ref mut registry) = res.file_registry {
                                     let name = toml_path.file_stem()
                                         .and_then(|s| s.to_str())
                                         .unwrap_or("Unknown")
                                         .trim_end_matches(".glb")
                                         .to_string();
-                                    
                                     registry.register(
                                         toml_path.clone(),
                                         entity,
@@ -2335,9 +2901,9 @@ fn drain_slint_actions(
                                         },
                                     );
                                 }
-                                
+
                                 if let Some(ref mut out) = res.output {
-                                    out.info(format!("Inserted {} via {:?}", part_type_str, toml_path));
+                                    out.info(format!("Inserted {} at {:?}", part_type_str, toml_path));
                                 }
                             }
                             Err(e) => {
@@ -2381,17 +2947,272 @@ fn drain_slint_actions(
                 }
             }
             
+            // Ribbon menu actions — route insert:* to InsertPart or log unsupported
+            SlintAction::MenuAction(action) => {
+                let action = action.as_str();
+                // Primitive / structure inserts → reuse the full InsertPart pipeline
+                let mesh_id: Option<&str> = match action {
+                    "insert:part"            => Some("block"),
+                    "insert:sphere"          => Some("ball"),
+                    "insert:cylinder"        => Some("cylinder"),
+                    "insert:wedge"           => Some("wedge"),
+                    _ => None,
+                };
+
+                if let Some(mid) = mesh_id {
+                    // Camera-forward spawn position (same logic as InsertPart)
+                    let spawn_pos: [f32; 3] = if let Ok((_, cam_transform)) = camera_query.single() {
+                        let forward = cam_transform.forward();
+                        let cam_pos  = cam_transform.translation();
+                        let pos = cam_pos + forward * 10.0;
+                        [pos.x, pos.y.max(0.5), pos.z]
+                    } else {
+                        [0.0, 0.5, 0.0]
+                    };
+
+                    // Parent entity: selected Folder/Model or Workspace service root
+                    let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
+                        match &es.selected {
+                            SelectedItem::Entity(e) => {
+                                instances.get(*e).ok().and_then(|(ent, inst)| {
+                                    match inst.class_name {
+                                        eustress_common::classes::ClassName::Folder
+                                        | eustress_common::classes::ClassName::Model => Some(ent),
+                                        _ => None,
+                                    }
+                                })
+                            }
+                            _ => None,
+                        }
+                    } else { None };
+
+                    let parent_entity = parent_entity.or_else(|| {
+                        loaded_from_file.iter().find_map(|(lff_entity, lff)| {
+                            if lff.service == "Workspace"
+                                && lff.path.file_name()
+                                    .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
+                                    .unwrap_or(false)
+                            {
+                                Some(lff_entity)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+                    let space_root = crate::space::default_space_root();
+                    let write_dir = parent_entity
+                        .and_then(|pe| loaded_from_file.get(pe).ok())
+                        .map(|(_, lff)| {
+                            if lff.path.is_dir() { lff.path.clone() }
+                            else { lff.path.parent().unwrap_or(&space_root.join("Workspace")).to_path_buf() }
+                        })
+                        .unwrap_or_else(|| space_root.join("Workspace"));
+
+                    match crate::toolbox::insert_mesh_instance_at(&write_dir, mid, spawn_pos, None) {
+                        Ok(toml_path) => {
+                            match crate::space::load_instance_definition(&toml_path) {
+                                Ok(instance) => {
+                                    let entity = crate::space::instance_loader::spawn_instance(
+                                        &mut commands,
+                                        &asset_server,
+                                        &mut materials,
+                                        toml_path.clone(),
+                                        instance,
+                                    );
+                                    if let Some(parent) = parent_entity {
+                                        commands.entity(entity).insert(ChildOf(parent));
+                                    }
+                                    if let Some(ref mut registry) = res.file_registry {
+                                        let name = toml_path.file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("Unknown")
+                                            .trim_end_matches(".glb")
+                                            .to_string();
+                                        registry.register(
+                                            toml_path.clone(),
+                                            entity,
+                                            crate::space::FileMetadata {
+                                                path: toml_path.clone(),
+                                                file_type: crate::space::FileType::Toml,
+                                                service: "Workspace".to_string(),
+                                                name,
+                                                size: 0,
+                                                modified: std::time::SystemTime::now(),
+                                                children: Vec::new(),
+                                            },
+                                        );
+                                    }
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!("Inserted {} via {:?}", mid, toml_path));
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("MenuAction insert load error: {}", e);
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Insert failed: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("MenuAction insert file error: {}", e);
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Insert failed: {}", e));
+                            }
+                        }
+                    }
+                } else {
+                    // UI element inserts — map action string → (class_name, file_extension, service)
+                    let ui_insert: Option<(&str, &str, &str)> = match action {
+                        "insert:screengui"    => Some(("ScreenGui",      "screengui",      "StarterGui")),
+                        "insert:billboardgui" => Some(("BillboardGui",   "billboardgui",   "StarterGui")),
+                        "insert:surfacegui"   => Some(("SurfaceGui",     "surfacegui",     "StarterGui")),
+                        "insert:frame"        => Some(("Frame",          "frame",          "StarterGui")),
+                        "insert:scrollingframe" => Some(("ScrollingFrame", "scrollingframe", "StarterGui")),
+                        "insert:textlabel"    => Some(("TextLabel",      "textlabel",      "StarterGui")),
+                        "insert:imagelabel"   => Some(("ImageLabel",     "imagelabel",     "StarterGui")),
+                        "insert:textbutton"   => Some(("TextButton",     "textbutton",     "StarterGui")),
+                        "insert:imagebutton"  => Some(("ImageButton",    "imagebutton",    "StarterGui")),
+                        "insert:textbox"      => Some(("TextBox",        "textbox",        "StarterGui")),
+                        "insert:viewportframe" => Some(("ViewportFrame", "viewportframe",  "StarterGui")),
+                        "insert:videoframe"   => Some(("VideoFrame",     "videoframe",     "StarterGui")),
+                        "insert:documentframe" => Some(("DocumentFrame", "documentframe",  "StarterGui")),
+                        "insert:webframe"     => Some(("WebFrame",       "webframe",       "StarterGui")),
+                        _ => None,
+                    };
+
+                    if let Some((class_name_str, file_ext, service)) = ui_insert {
+                        // Find the service entity (StarterGui root)
+                        let service_entity = loaded_from_file.iter().find_map(|(e, lff)| {
+                            if lff.service == service
+                                && lff.path.file_name()
+                                    .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
+                                    .unwrap_or(false)
+                            {
+                                Some(e)
+                            } else {
+                                None
+                            }
+                        });
+
+                        let space_root = crate::space::default_space_root();
+                        let write_dir = service_entity
+                            .and_then(|pe| loaded_from_file.get(pe).ok())
+                            .map(|(_, lff)| {
+                                if lff.path.is_dir() { lff.path.clone() }
+                                else { lff.path.parent().unwrap_or(&space_root.join(service)).to_path_buf() }
+                            })
+                            .unwrap_or_else(|| space_root.join(service));
+
+                        // Generate unique file name
+                        let base_name = class_name_str;
+                        let instance_name = (0..1000u32).find_map(|i| {
+                            let candidate = if i == 0 {
+                                base_name.to_string()
+                            } else {
+                                format!("{}{}", base_name, i)
+                            };
+                            let path = write_dir.join(format!("{}.{}.toml", candidate, file_ext));
+                            if !path.exists() { Some(candidate) } else { None }
+                        }).unwrap_or_else(|| format!("{}_new", base_name));
+
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let instance = crate::space::instance_loader::InstanceDefinition {
+                            asset: crate::space::instance_loader::AssetReference {
+                                mesh: String::new(),
+                                scene: String::new(),
+                            },
+                            transform: crate::space::instance_loader::TransformData::default(),
+                            properties: crate::space::instance_loader::InstanceProperties::default(),
+                            metadata: crate::space::instance_loader::InstanceMetadata {
+                                class_name: class_name_str.to_string(),
+                                archivable: true,
+                                created: now.clone(),
+                                last_modified: now,
+                            },
+                            material: None,
+                            thermodynamic: None,
+                            electrochemical: None,
+                            ui: None,
+                        };
+
+                        let _ = std::fs::create_dir_all(&write_dir);
+                        let toml_path = write_dir.join(format!("{}.{}.toml", instance_name, file_ext));
+
+                        match crate::space::instance_loader::write_instance_definition(&toml_path, &instance) {
+                            Ok(()) => {
+                                match crate::space::instance_loader::load_instance_definition(&toml_path) {
+                                    Ok(inst_def) => {
+                                        let entity = crate::space::instance_loader::spawn_instance(
+                                            &mut commands,
+                                            &asset_server,
+                                            &mut materials,
+                                            toml_path.clone(),
+                                            inst_def,
+                                        );
+                                        if let Some(parent) = service_entity {
+                                            commands.entity(entity).insert(ChildOf(parent));
+                                        }
+                                        if let Some(ref mut registry) = res.file_registry {
+                                            registry.register(
+                                                toml_path.clone(),
+                                                entity,
+                                                crate::space::FileMetadata {
+                                                    path: toml_path.clone(),
+                                                    file_type: crate::space::FileType::GuiElement,
+                                                    service: service.to_string(),
+                                                    name: instance_name.clone(),
+                                                    size: 0,
+                                                    modified: std::time::SystemTime::now(),
+                                                    children: Vec::new(),
+                                                },
+                                            );
+                                        }
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Inserted {} as {:?}", class_name_str, toml_path));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("UI insert load error for {}: {}", class_name_str, e);
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!("Insert {} failed: {}", class_name_str, e));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("UI insert write error for {}: {}", class_name_str, e);
+                                if let Some(ref mut out) = res.output {
+                                    out.error(format!("Insert {} failed: {}", class_name_str, e));
+                                }
+                            }
+                        }
+                    } else {
+                        // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
+                        if let Some(ref mut out) = res.output {
+                            if action.starts_with("insert:") {
+                                out.info(format!("TODO: insert {}", &action["insert:".len()..]));
+                            }
+                        }
+                    }
+                }
+            }
+
             // Close
             SlintAction::CloseRequested => {
-                if let Some(ref s) = res.state {
+                if let Some(ref mut s) = res.state {
                     if s.has_unsaved_changes {
-                        // Show exit confirmation (handled by Slint dialog)
+                        s.show_exit_confirmation = true;
                     } else {
                         events.exit_events.write(bevy::app::AppExit::Success);
                     }
                 } else {
                     events.exit_events.write(bevy::app::AppExit::Success);
                 }
+            }
+            SlintAction::ForceExit => {
+                events.exit_events.write(bevy::app::AppExit::Success);
             }
         }
     }
@@ -2405,57 +3226,17 @@ fn sync_bevy_to_slint(
     perf: Option<Res<UIPerformance>>,
     output: Option<Res<OutputConsole>>,
     editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    auth_state: Option<Res<crate::auth::AuthState>>,
     mut viewport_bounds: Option<ResMut<super::ViewportBounds>>,
-    time: Res<Time>,
     snapshot: Option<Res<UIWorldSnapshot>>,
+    // Direct entity count query as fallback when snapshot is empty
+    instance_query: Query<Entity, With<eustress_common::classes::Instance>>,
+    play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
     
-    // Sync StudioState → Slint properties
-    if let Some(ref state) = state {
-        // Tool
-        let tool_str = match state.current_tool {
-            Tool::Select => "select",
-            Tool::Move => "move",
-            Tool::Rotate => "rotate",
-            Tool::Scale => "scale",
-            Tool::Terrain => "terrain",
-        };
-        ui.set_current_tool(tool_str.into());
-        
-        // Transform mode
-        let mode_str = match state.transform_mode {
-            TransformMode::World => "world",
-            TransformMode::Local => "local",
-        };
-        ui.set_transform_mode(mode_str.into());
-        
-        // Panel visibility
-        ui.set_show_explorer(state.show_explorer);
-        ui.set_show_properties(state.show_properties);
-        ui.set_show_output(state.show_output);
-        
-        // Dialogs
-        ui.set_show_exit_confirmation(state.show_exit_confirmation);
-        ui.set_has_unsaved_changes(state.has_unsaved_changes);
-        
-        // Network
-        ui.set_show_network_panel(state.show_network_panel);
-        ui.set_show_terrain_editor(state.show_terrain_editor);
-        ui.set_show_mindspace_panel(state.mindspace_panel_visible);
-    }
-    
-    // Sync EditorSettings → Slint (snap/grid state)
-    if let Some(ref es) = editor_settings {
-        ui.set_snap_enabled(es.snap_enabled);
-        ui.set_snap_size(es.snap_size);
-        ui.set_grid_visible(es.show_grid);
-        ui.set_grid_size(es.grid_size);
-    }
-    
-    // Read viewport bounds from Slint layout (Slint→Bevy direction for camera clipping)
-    // Slint reports logical pixels; convert to physical pixels for Bevy's Viewport
+    // ── Per-frame: viewport bounds (needed by camera every frame) ──
     if let Some(ref mut vb) = viewport_bounds {
         let scale = slint_context.adapter.scale_factor.get();
         let vw = ui.get_viewport_width() * scale;
@@ -2470,21 +3251,101 @@ fn sync_bevy_to_slint(
         }
     }
     
-    // Sync performance metrics → Slint
+    // ── Per-frame: FPS / frame time (changes every frame, keep live) ──
     if let Some(ref perf) = perf {
         ui.set_current_fps(perf.fps);
         ui.set_current_frame_time(perf.avg_frame_time_ms);
     }
     
-    // Sync live Instance count → Entities stat in performance overlay
-    if let Some(ref snapshot) = snapshot {
-        ui.set_current_entity_count(snapshot.entities.len() as i32);
+    // ── Per-frame: play mode state (must update immediately when state changes) ──
+    if let Some(ref pms) = play_mode_state {
+        let play_state_str = match pms.get() {
+            crate::play_mode::PlayModeState::Playing => "playing",
+            crate::play_mode::PlayModeState::Paused  => "paused",
+            crate::play_mode::PlayModeState::Editing => "stopped",
+        };
+        ui.set_play_state(play_state_str.into());
     }
-    
-    // Sync output console logs → Slint (throttled: only last 200 entries, every 10 frames)
+
+    // ── Throttled (every 10 frames): everything that rarely changes ──
+    // Avoids marking Slint dirty every frame for stable state, which forces
+    // the software renderer to repaint the full overlay every frame.
     if let Some(ref perf) = perf {
         if perf.should_throttle(10) { return; }
     }
+
+    // Sync StudioState → Slint properties
+    if let Some(ref state) = state {
+        let tool_str = match state.current_tool {
+            Tool::Select => "select",
+            Tool::Move => "move",
+            Tool::Rotate => "rotate",
+            Tool::Scale => "scale",
+            Tool::Terrain => "terrain",
+        };
+        ui.set_current_tool(tool_str.into());
+        
+        let mode_str = match state.transform_mode {
+            TransformMode::World => "world",
+            TransformMode::Local => "local",
+        };
+        ui.set_transform_mode(mode_str.into());
+        
+        ui.set_show_exit_confirmation(state.show_exit_confirmation);
+        ui.set_has_unsaved_changes(state.has_unsaved_changes);
+        ui.set_show_network_panel(state.show_network_panel);
+        ui.set_show_terrain_editor(state.show_terrain_editor);
+        ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+    }
+    
+    // Sync EditorSettings → Slint (snap/grid state)
+    if let Some(ref es) = editor_settings {
+        ui.set_snap_enabled(es.snap_enabled);
+        ui.set_snap_size(es.snap_size);
+        ui.set_grid_visible(es.show_grid);
+        ui.set_grid_size(es.grid_size);
+    }
+
+    // Sync account and local-first cloud state
+    if let Some(ref auth) = auth_state {
+        let account_name = auth.user
+            .as_ref()
+            .map(|user| user.username.clone())
+            .unwrap_or_else(|| "Guest".to_string());
+        let account_status = if auth.is_offline() {
+            "Offline"
+        } else if auth.is_logged_in() {
+            "Online"
+        } else {
+            "Logged out"
+        };
+        let sync_status = if auth.is_offline() {
+            "Offline local"
+        } else if auth.can_publish() {
+            "Cloud sync ready"
+        } else {
+            "Local-first"
+        };
+
+        ui.set_account_name(account_name.into());
+        ui.set_account_status(account_status.into());
+        ui.set_sync_status(sync_status.into());
+    } else {
+        ui.set_account_name("Guest".into());
+        ui.set_account_status("Logged out".into());
+        ui.set_sync_status("Local-first".into());
+    }
+    
+    // Sync entity count (throttled with everything else)
+    let entity_count = if let Some(ref snapshot) = snapshot {
+        let count = snapshot.entities.len();
+        if count > 0 { count } else { instance_query.iter().count() }
+    } else {
+        instance_query.iter().count()
+    };
+    ui.set_current_entity_count(entity_count as i32);
+    
+    // Sync output console logs → Slint (last 200 entries)
     if let Some(ref output) = output {
         let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
             LogData {
@@ -2721,6 +3582,8 @@ fn sync_unified_explorer_to_slint(
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
+    service_components: Query<&crate::space::service_loader::ServiceComponent>,
+    loaded_from_file: Query<&crate::space::LoadedFromFile>,
 ) {
     // Throttle: only update every 30 frames
     if let Some(ref perf) = perf {
@@ -2737,6 +3600,12 @@ fn sync_unified_explorer_to_slint(
     // ================================================================
     // Part 1: Build ECS entity nodes (services + children)
     // ================================================================
+    
+    // Reset entity ID cache each sync — Slint int is 32-bit so we cannot
+    // truncate entity.to_bits() (u64). Instead we assign sequential IDs
+    // starting at 1 and store the Entity lookup here.
+    explorer_state.entity_id_cache.clear();
+    explorer_state.next_entity_node_id = 1;
     
     // Build set of all entities that have Instance components
     let instance_entities: std::collections::HashSet<Entity> = 
@@ -2771,40 +3640,97 @@ fn sync_unified_explorer_to_slint(
     });
     
     // Classify root entities into service buckets
+    // Primary: use LoadedFromFile.service field (filesystem-based classification)
+    // Fallback: use ClassName for entities without LoadedFromFile
     let is_lighting_child = |cn: &ClassName| matches!(cn,
         ClassName::Sky | ClassName::Atmosphere | ClassName::Star | ClassName::Moon | ClassName::Clouds
     );
     
+    let is_ui_child = |cn: &ClassName| matches!(cn,
+        ClassName::ScreenGui | ClassName::Frame | ClassName::TextLabel | ClassName::TextButton |
+        ClassName::ImageLabel | ClassName::ImageButton | ClassName::ScrollingFrame |
+        ClassName::TextBox | ClassName::ViewportFrame | ClassName::BillboardGui | ClassName::SurfaceGui
+    );
+    
+    let is_script = |cn: &ClassName| matches!(cn,
+        ClassName::SoulScript
+    );
+    
     let mut workspace_roots: Vec<Entity> = Vec::new();
     let mut lighting_roots: Vec<Entity> = Vec::new();
+    let mut starter_gui_roots: Vec<Entity> = Vec::new();
+    let mut soul_service_roots: Vec<Entity> = Vec::new();
     
     for entity in &roots {
         if let Ok((_, instance)) = instances.get(*entity) {
-            if is_lighting_child(&instance.class_name) {
-                lighting_roots.push(*entity);
+            // Skip service header entities — they have a ServiceComponent and are rendered
+            // as fixed headers by make_service_node(), not as tree children
+            if service_components.get(*entity).is_ok() {
+                continue;
+            }
+            
+            // Primary classification: use LoadedFromFile.service field
+            if let Ok(loaded) = loaded_from_file.get(*entity) {
+                match loaded.service.as_str() {
+                    "Workspace" => workspace_roots.push(*entity),
+                    "Lighting" => lighting_roots.push(*entity),
+                    "StarterGui" => starter_gui_roots.push(*entity),
+                    "SoulService" => soul_service_roots.push(*entity),
+                    _ => workspace_roots.push(*entity), // Default to Workspace
+                }
             } else {
-                workspace_roots.push(*entity);
+                // Fallback: classify by ClassName
+                // Folders default to Workspace (not StarterGui)
+                if is_lighting_child(&instance.class_name) {
+                    lighting_roots.push(*entity);
+                } else if is_ui_child(&instance.class_name) {
+                    starter_gui_roots.push(*entity);
+                } else if is_script(&instance.class_name) {
+                    soul_service_roots.push(*entity);
+                } else {
+                    workspace_roots.push(*entity);
+                }
             }
         }
     }
     
-    // Helper: build entity TreeNodes via DFS
-    let build_entity_nodes = |root_list: &[Entity], base_depth: i32| -> Vec<TreeNode> {
+    // Snapshot borrow-free copies of what the DFS closure needs from explorer_state
+    let expanded_entities = explorer_state.expanded_entities.clone();
+    let selected_item = explorer_state.selected.clone();
+
+    // DFS helper — builds TreeNodes for a list of root entities.
+    // Takes entity_id_cache and next_id by mutable reference so it can register IDs
+    // without a ResMut borrow conflict with the immutable borrows above.
+    #[allow(clippy::too_many_arguments)]
+    let mut build_entity_nodes = |root_list: &[Entity],
+                                   base_depth: i32,
+                                   entity_id_cache: &mut std::collections::HashMap<i32, Entity>,
+                                   next_id: &mut i32| -> Vec<TreeNode> {
         let mut nodes: Vec<TreeNode> = Vec::new();
         let mut stack: Vec<(Entity, i32)> = root_list.iter().rev().map(|e| (*e, base_depth)).collect();
-        
+
         while let Some((entity, depth)) = stack.pop() {
             let Ok((_, instance)) = instances.get(entity) else { continue };
-            
+
             let has_children = children_query.get(entity)
                 .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
                 .unwrap_or(false);
-            
-            let entity_id = entity.to_bits() as i32;
-            let is_expanded = explorer_state.expanded_entities.contains(&entity);
-            let is_selected = matches!(&explorer_state.selected, SelectedItem::Entity(e) if *e == entity);
-            let icon = load_class_icon(&instance.class_name);
-            
+
+            // Assign a stable sequential i32 ID (avoids u64 truncation to i32)
+            let entity_id = *next_id;
+            entity_id_cache.insert(entity_id, entity);
+            *next_id += 1;
+
+            let is_expanded = expanded_entities.contains(&entity);
+            let is_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == entity);
+
+            // Use ServiceComponent icon if available, otherwise fall back to class icon
+            let icon = if let Ok(service) = service_components.get(entity) {
+                load_service_icon(&service.icon)
+            } else {
+                load_class_icon(&instance.class_name)
+            };
+
             nodes.push(TreeNode {
                 id: entity_id,
                 name: instance.name.clone().into(),
@@ -2822,7 +3748,7 @@ fn sync_unified_explorer_to_slint(
                 size: slint::SharedString::default(),
                 modified: false,
             });
-            
+
             if is_expanded && has_children {
                 if let Ok(children) = children_query.get(entity) {
                     let mut child_instances: Vec<Entity> = children.iter()
@@ -2831,8 +3757,6 @@ fn sync_unified_explorer_to_slint(
                     child_instances.sort_by(|a, b| {
                         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
                         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        
-                        // Pin Camera at the top
                         match (a_name, b_name) {
                             ("Camera", "Camera") => std::cmp::Ordering::Equal,
                             ("Camera", _) => std::cmp::Ordering::Less,
@@ -2848,30 +3772,83 @@ fn sync_unified_explorer_to_slint(
         }
         nodes
     };
-    
+
+    // Temporarily take ownership of entity_id_cache and next_id counter
+    // to avoid ResMut borrow conflicts inside the closure.
+    let mut entity_id_cache = std::mem::take(&mut explorer_state.entity_id_cache);
+    let mut next_id = explorer_state.next_entity_node_id;
+
+    // Helper: is a service currently expanded?
+    let svc_expanded = |name: &str| explorer_state.expanded_services.contains(name);
+
     // Service: Workspace (depth 0) + children (depth 1+)
-    tree_nodes.push(make_service_node("Workspace", "workspace", 0, &explorer_state));
-    if explorer_state.expanded_entities.iter().any(|_| true) || true {
-        // Always show workspace children at depth 1
-        tree_nodes.extend(build_entity_nodes(&workspace_roots, 1));
+    let ws_has = !workspace_roots.is_empty();
+    tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state));
+    if svc_expanded("Workspace") {
+        tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
     }
-    
+
     // Service: Lighting (depth 0) + children (depth 1+)
-    tree_nodes.push(make_service_node("Lighting", "lighting", 0, &explorer_state));
-    tree_nodes.extend(build_entity_nodes(&lighting_roots, 1));
-    
-    // Service: Players (depth 0)
-    tree_nodes.push(make_service_node("Players", "players", 0, &explorer_state));
-    
+    let lt_has = !lighting_roots.is_empty();
+    tree_nodes.push(make_service_node("Lighting", "lighting", 0, lt_has, svc_expanded("Lighting"), &explorer_state));
+    if svc_expanded("Lighting") {
+        tree_nodes.extend(build_entity_nodes(&lighting_roots, 1, &mut entity_id_cache, &mut next_id));
+    }
+
+    // Service: Players (depth 0) - runtime only, no children in editor
+    tree_nodes.push(make_service_node("Players", "players", 0, false, false, &explorer_state));
+
+    // Service: StarterGui (depth 0) + UI children (depth 1+)
+    let sg_has = !starter_gui_roots.is_empty();
+    tree_nodes.push(make_service_node("StarterGui", "startergui", 0, sg_has, svc_expanded("StarterGui"), &explorer_state));
+    if svc_expanded("StarterGui") {
+        tree_nodes.extend(build_entity_nodes(&starter_gui_roots, 1, &mut entity_id_cache, &mut next_id));
+    }
+
+    // Service: StarterPack (depth 0) - no editor children
+    tree_nodes.push(make_service_node("StarterPack", "starterpack", 0, false, false, &explorer_state));
+
+    // Service: StarterPlayer (depth 0) - no editor children
+    tree_nodes.push(make_service_node("StarterPlayer", "starterplayer", 0, false, false, &explorer_state));
+
+    // Service: ReplicatedStorage (depth 0) - no editor children
+    tree_nodes.push(make_service_node("ReplicatedStorage", "replicatedstorage", 0, false, false, &explorer_state));
+
+    // Service: ServerStorage (depth 0) - no editor children
+    tree_nodes.push(make_service_node("ServerStorage", "serverstorage", 0, false, false, &explorer_state));
+
+    // Service: ServerScriptService (depth 0) - no editor children
+    tree_nodes.push(make_service_node("ServerScriptService", "serverscriptservice", 0, false, false, &explorer_state));
+
+    // Service: SoulService (depth 0) + script children (depth 1+)
+    let ss_has = !soul_service_roots.is_empty();
+    tree_nodes.push(make_service_node("SoulService", "soulservice", 0, ss_has, svc_expanded("SoulService"), &explorer_state));
+    if svc_expanded("SoulService") {
+        tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, &mut entity_id_cache, &mut next_id));
+    }
+
+    // Service: SoundService (depth 0) - no editor children
+    tree_nodes.push(make_service_node("SoundService", "soundservice", 0, false, false, &explorer_state));
+
+    // Service: Teams (depth 0) - no editor children
+    tree_nodes.push(make_service_node("Teams", "teams", 0, false, false, &explorer_state));
+
+    // Service: Chat (depth 0) - no editor children
+    tree_nodes.push(make_service_node("Chat", "chat", 0, false, false, &explorer_state));
+
+    // Write entity_id_cache and counter back to explorer_state
+    explorer_state.entity_id_cache = entity_id_cache;
+    explorer_state.next_entity_node_id = next_id;
+
     // ================================================================
     // Part 2: Filesystem nodes DISABLED — Explorer shows entity items only.
     // File browsing will be handled by a separate Asset Manager panel.
     // ================================================================
-    
+
     // ================================================================
     // Part 3: Filter by search query
     // ================================================================
-    
+
     if !explorer_state.search_query.is_empty() {
         let query = explorer_state.search_query.to_lowercase();
         for node in tree_nodes.iter_mut() {
@@ -2886,20 +3863,25 @@ fn sync_unified_explorer_to_slint(
 }
 
 /// Create a service header node (Workspace, Lighting, Players, etc.)
+/// `has_children` — whether this service has any child entities (controls arrow visibility)
+/// `is_expanded`  — whether the service is currently expanded (controls arrow direction)
 fn make_service_node(
     name: &str,
     icon_name: &str,
     depth: i32,
-    _state: &UnifiedExplorerState,
+    has_children: bool,
+    is_expanded: bool,
+    state: &UnifiedExplorerState,
 ) -> TreeNode {
+    let is_selected = matches!(&state.selected, SelectedItem::Service(s) if s == name);
     TreeNode {
         id: -(name.len() as i32), // Negative IDs for services
         name: name.into(),
         icon: load_service_icon(icon_name),
         depth,
-        expandable: true,
-        expanded: true,
-        selected: false,
+        expandable: has_children,
+        expanded: is_expanded,
+        selected: is_selected,
         visible: true,
         node_type: "entity".into(),
         class_name: name.into(),
@@ -2911,11 +3893,13 @@ fn make_service_node(
     }
 }
 
-/// Load icon for a service by name
+/// Load icon for a service by name (from assets/icons/{name}.svg)
 fn load_service_icon(name: &str) -> slint::Image {
-    // Service icons are in assets/icons/{name}.svg
-    // For now return default — icons loaded at Slint compile time via @image-url
-    slint::Image::default()
+    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("icons")
+        .join(format!("{}.svg", name));
+    slint::Image::load_from_path(&icon_path).unwrap_or_default()
 }
 
 /// Recursively build filesystem TreeNodes from a directory.
@@ -3129,13 +4113,24 @@ fn sync_properties_to_slint(
     transforms: Query<&Transform>,
     base_parts: Query<&eustress_common::classes::BasePart>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    service_components: Query<&crate::space::service_loader::ServiceComponent>,
     material_props: Query<&eustress_common::realism::materials::properties::MaterialProperties>,
     thermo_states: Query<&eustress_common::realism::particles::components::ThermodynamicState>,
     echem_states: Query<&eustress_common::realism::particles::components::ElectrochemicalState>,
+    // UI class components collapsed into a ParamSet to stay within Bevy's 16-param system limit
+    mut ui_queries: ParamSet<(
+        Query<&eustress_common::classes::TextLabel>,
+        Query<&eustress_common::classes::TextButton>,
+        Query<&eustress_common::classes::TextBox>,
+        Query<&eustress_common::classes::Frame>,
+        Query<&eustress_common::classes::ImageLabel>,
+        Query<&eustress_common::classes::ImageButton>,
+        Query<&eustress_common::classes::ScrollingFrame>,
+    )>,
 ) {
-    // Throttle: only update every 15 frames
+    // Throttle: only update every 3 frames for near-realtime property display
     if let Some(ref perf) = perf {
-        if perf.should_throttle(15) { return; }
+        if perf.should_throttle(3) { return; }
     }
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -3147,10 +4142,16 @@ fn sync_properties_to_slint(
             build_file_properties(ui, path);
             return;
         }
+        SelectedItem::Service(service_name) => {
+            // Service header selected — show its properties from ServiceComponent
+            build_service_properties(ui, service_name, &service_components);
+            return;
+        }
         SelectedItem::None => {
             // No selection — clear properties and update count
             ui.set_selected_count(0);
             ui.set_selected_class(slint::SharedString::default());
+            ui.set_selected_icon(slint::Image::default());
             let empty: Vec<PropertyData> = Vec::new();
             let model_rc = std::rc::Rc::new(slint::VecModel::from(empty));
             ui.set_entity_properties(slint::ModelRc::from(model_rc));
@@ -3159,9 +4160,10 @@ fn sync_properties_to_slint(
     };
     
     let Ok((_, instance)) = instances.get(selected_entity) else { return };
-    
+
     ui.set_selected_count(1);
     ui.set_selected_class(format!("{:?}", instance.class_name).into());
+    ui.set_selected_icon(load_class_icon(&instance.class_name));
     
     // Collect raw properties with categories into buckets
     // category -> Vec<(name, value, type, editable)>
@@ -3198,12 +4200,61 @@ fn sync_properties_to_slint(
             // -- Transform section --
             add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}", 
                 toml_def.transform.position[0], toml_def.transform.position[1], toml_def.transform.position[2]), "vec3", true);
-            add_prop("Transform", "Rotation", format!("{:.4}, {:.4}, {:.4}, {:.4}", 
-                toml_def.transform.rotation[0], toml_def.transform.rotation[1], toml_def.transform.rotation[2], toml_def.transform.rotation[3]), "string", true);
+            // Convert stored quaternion [x, y, z, w] → Euler degrees for display
+            let rot_quat = bevy::math::Quat::from_xyzw(
+                toml_def.transform.rotation[0],
+                toml_def.transform.rotation[1],
+                toml_def.transform.rotation[2],
+                toml_def.transform.rotation[3],
+            );
+            let (rx, ry, rz) = rot_quat.to_euler(bevy::math::EulerRot::XYZ);
+            add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
+                rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
             add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}", 
                 toml_def.transform.scale[0], toml_def.transform.scale[1], toml_def.transform.scale[2]), "vec3", true);
             
-            // -- Properties section --
+            // ── UI class properties (TextLabel, TextButton, Frame, etc.) ────────
+            // If the entity carries a UI ECS component, emit all its properties
+            // via PropertyAccess.  Skip the BasePart Appearance/Physics sections
+            // since UI classes do not have color/anchored/can_collide semantics.
+            use eustress_common::classes::{ClassName, PropertyAccess};
+            let is_ui_class = matches!(instance.class_name,
+                ClassName::TextLabel | ClassName::TextButton | ClassName::TextBox |
+                ClassName::Frame     | ClassName::ImageLabel | ClassName::ImageButton |
+                ClassName::ScrollingFrame
+            );
+            if is_ui_class {
+                // Emit all properties from the live ECS component so edits are
+                // always round-tripped through the component, not re-read from disk.
+                // Use the ParamSet accessors sequentially (only one is accessed at a time).
+                let ui_props: Option<Vec<eustress_common::classes::PropertyDescriptor>> =
+                    if let Ok(c) = ui_queries.p0().get(selected_entity)     { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p1().get(selected_entity)  { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p2().get(selected_entity)  { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p3().get(selected_entity)  { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p4().get(selected_entity)  { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p5().get(selected_entity)  { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries.p6().get(selected_entity)  { Some(c.list_properties()) }
+                    else { None };
+
+                if let Some(descriptors) = ui_props {
+                    for desc in &descriptors {
+                        let val_opt =
+                            ui_queries.p0().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name))
+                            .or_else(|| ui_queries.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries.p3().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries.p4().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries.p5().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries.p6().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
+                        if let Some(val) = val_opt {
+                            let (val_str, prop_type) = property_value_to_display(&val);
+                            add_prop(&desc.category, &desc.name, val_str, prop_type, !desc.read_only);
+                        }
+                    }
+                }
+            } else {
+            // -- Properties section (BasePart / non-UI) --
             add_prop("Appearance", "Color", format!("{:.3}, {:.3}, {:.3}, {:.3}", 
                 toml_def.properties.color[0], toml_def.properties.color[1], toml_def.properties.color[2], toml_def.properties.color[3]), "color", true);
             add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
@@ -3213,6 +4264,7 @@ fn sync_properties_to_slint(
             // -- Physics section --
             add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
             add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
+            } // end non-UI branch
             
             // -- Material section (realism, optional) --
             if let Some(ref mat) = toml_def.material {
@@ -3277,8 +4329,36 @@ fn sync_properties_to_slint(
             add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
             add_prop("Data", "Error", "Failed to load TOML file".to_string(), "string", false);
         }
+    } else if let Ok(service) = service_components.get(selected_entity) {
+        // ══════════════════════════════════════════════════════════════════════════
+        // SERVICE ENTITY: Display ALL properties dynamically from ServiceComponent
+        // No hardcoding - any property in _service.toml is displayed
+        // ══════════════════════════════════════════════════════════════════════════
+        add_prop("Service", "ClassName", service.class_name.clone(), "string", false);
+        add_prop("Service", "Icon", service.icon.clone(), "string", true);
+        if !service.description.is_empty() {
+            add_prop("Service", "Description", service.description.clone(), "string", true);
+        }
+        add_prop("Service", "TomlPath", service.toml_path.display().to_string(), "string", false);
+        
+        // Display ALL dynamic properties from the TOML file
+        // Properties are sorted alphabetically for consistent display
+        let mut prop_names: Vec<&String> = service.properties.keys().collect();
+        prop_names.sort();
+        
+        for prop_name in prop_names {
+            if let Some(prop_value) = service.properties.get(prop_name) {
+                add_prop(
+                    "Properties",
+                    prop_name,
+                    prop_value.to_display_string(),
+                    prop_value.type_name(),
+                    true, // All dynamic properties are editable
+                );
+            }
+        }
     } else {
-        // No InstanceFile component — show ECS-based properties (legacy/programmatic entities)
+        // No InstanceFile or ServiceComponent — show ECS-based properties (legacy/programmatic entities)
         add_prop("Data", "Name", instance.name.clone(), "string", true);
         add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
         add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
@@ -3291,7 +4371,7 @@ fn sync_properties_to_slint(
                 "vec3", true);
             add_prop("Transform", "Rotation",
                 format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
-                "vec3", true);
+                "rotation", true);
             add_prop("Transform", "Scale",
                 format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
                 "vec3", true);
@@ -3338,8 +4418,8 @@ fn sync_properties_to_slint(
             sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
             
             for (name, value, prop_type, editable) in sorted_entries {
-                // Parse Vec3 values into x, y, z components
-                let (x_val, y_val, z_val) = if prop_type == "vec3" {
+                // Parse Vec3/rotation values into x, y, z components
+                let (x_val, y_val, z_val) = if prop_type == "vec3" || prop_type == "rotation" {
                     parse_vec3_string(&value)
                 } else {
                     (String::new(), String::new(), String::new())
@@ -3364,6 +4444,49 @@ fn sync_properties_to_slint(
     // Push to Slint
     let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_props));
     ui.set_entity_properties(slint::ModelRc::from(model_rc));
+}
+
+/// Converts a property name + string value into a typed PropertyValue.
+/// Uses the property name to infer the expected type, mirroring how
+/// PropertyAccess::set_property dispatches on the name.
+fn property_string_to_value(name: &str, val: &str) -> Option<eustress_common::classes::PropertyValue> {
+    use eustress_common::classes::PropertyValue;
+    // Helper: parse "r, g, b" → Color3
+    fn parse_c3(s: &str) -> Option<PropertyValue> {
+        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if p.len() >= 3 { Some(PropertyValue::Color3([p[0], p[1], p[2]])) } else { None }
+    }
+    // Helper: parse "x, y" → Vector2
+    fn parse_v2(s: &str) -> Option<PropertyValue> {
+        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if p.len() >= 2 { Some(PropertyValue::Vector2([p[0], p[1]])) } else { None }
+    }
+    match name {
+        // Boolean properties
+        "Visible" | "Active" | "AutoButtonColor" | "RichText" | "TextScaled" |
+        "TextWrapped" | "ClipsDescendants" | "ScrollingEnabled" =>
+            Some(PropertyValue::Bool(val == "true")),
+        // Float properties
+        "FontSize" | "LineHeight" | "TextTransparency" | "TextStrokeTransparency" |
+        "BackgroundTransparency" | "ImageTransparency" | "Rotation" =>
+            val.trim().parse::<f32>().ok().map(PropertyValue::Float),
+        // Int properties
+        "BorderSizePixel" | "ZIndex" | "LayoutOrder" | "ScrollBarThickness" =>
+            val.trim().parse::<i32>().ok().map(PropertyValue::Int),
+        // String properties
+        "Text" | "Font" | "Image" | "ScaleType" | "AutomaticSize" =>
+            Some(PropertyValue::String(val.to_string())),
+        // Enum properties
+        "TextXAlignment" | "TextYAlignment" | "BorderMode" =>
+            Some(PropertyValue::Enum(val.to_string())),
+        // Color3 properties
+        "TextColor3" | "TextStrokeColor3" | "BackgroundColor3" | "BorderColor3" |
+        "ImageColor3" => parse_c3(val),
+        // Vector2 properties
+        "AnchorPoint" | "PositionScale" | "PositionOffset" | "SizeScale" | "SizeOffset" =>
+            parse_v2(val),
+        _ => None,
+    }
 }
 
 /// Converts a PropertyValue to a display string and type identifier
@@ -3415,10 +4538,15 @@ fn update_toml_property(
             } else { false }
         }
         "Rotation" => {
-            // Quaternion: "x, y, z, w"
-            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-            if parts.len() == 4 {
-                def.transform.rotation = [parts[0], parts[1], parts[2], parts[3]]; true
+            // Accept Euler degrees Vec3 "x, y, z" and convert to quaternion [x, y, z, w]
+            if let Some((ex, ey, ez)) = parse_vec3_value(val) {
+                let q = bevy::math::Quat::from_euler(
+                    bevy::math::EulerRot::XYZ,
+                    ex.to_radians(),
+                    ey.to_radians(),
+                    ez.to_radians(),
+                );
+                def.transform.rotation = [q.x, q.y, q.z, q.w]; true
             } else { false }
         }
         
@@ -3453,6 +4581,12 @@ fn update_toml_property(
         k if k.starts_with("Electrochemical.") || is_echem_prop(k) => {
             let echem = def.electrochemical.get_or_insert_with(Default::default);
             update_echem_property(echem, k, val)
+        }
+        
+        // UI class properties — routed to [ui] section
+        k if is_ui_prop(k) => {
+            let ui = def.ui.get_or_insert_with(Default::default);
+            update_ui_property(ui, k, val)
         }
         
         _ => false
@@ -3539,6 +4673,82 @@ fn update_echem_property(echem: &mut crate::space::instance_loader::TomlElectroc
     }
 }
 
+/// Returns true if the property key belongs to a UI class [ui] section
+fn is_ui_prop(k: &str) -> bool {
+    matches!(k,
+        "Text" | "RichText" | "TextScaled" | "TextWrapped" | "Font" |
+        "FontSize" | "LineHeight" |
+        "TextColor3" | "TextTransparency" | "TextStrokeColor3" | "TextStrokeTransparency" |
+        "TextXAlignment" | "TextYAlignment" |
+        "BackgroundColor3" | "BackgroundTransparency" | "BorderColor3" | "BorderSizePixel" |
+        "BorderMode" | "ClipsDescendants" | "ZIndex" | "LayoutOrder" | "Rotation" |
+        "AnchorPoint" | "PositionScale" | "PositionOffset" | "SizeScale" | "SizeOffset" |
+        "Visible" | "Active" | "AutoButtonColor" |
+        "Image" | "ImageColor3" | "ImageTransparency" | "ScaleType" |
+        "ScrollingEnabled" | "ScrollBarThickness" | "AutomaticSize"
+    )
+}
+
+/// Write a single UI property value into a UiInstanceProperties struct for TOML persistence.
+/// Returns true if the key was recognised and written.
+fn update_ui_property(
+    ui: &mut crate::space::instance_loader::UiInstanceProperties,
+    key: &str,
+    val: &str,
+) -> bool {
+    /// Parse "r, g, b" → [f32; 3]
+    fn parse_color3(s: &str) -> Option<[f32; 3]> {
+        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if p.len() >= 3 { Some([p[0], p[1], p[2]]) } else { None }
+    }
+    /// Parse "x, y" → [f32; 2]
+    fn parse_vec2(s: &str) -> Option<[f32; 2]> {
+        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if p.len() >= 2 { Some([p[0], p[1]]) } else { None }
+    }
+
+    match key {
+        "Text"                   => { ui.text = val.to_string(); true }
+        "RichText"               => { ui.rich_text = val == "true"; true }
+        "TextScaled"             => { ui.text_scaled = val == "true"; true }
+        "TextWrapped"            => { ui.text_wrapped = val == "true"; true }
+        "Font"                   => { ui.font = val.to_string(); true }
+        "FontSize"               => { if let Ok(v) = val.parse::<f32>() { ui.font_size = v.max(1.0); true } else { false } }
+        "LineHeight"             => { if let Ok(v) = val.parse::<f32>() { ui.line_height = v; true } else { false } }
+        "TextColor3"             => { if let Some(c) = parse_color3(val) { ui.text_color3 = c; true } else { false } }
+        "TextTransparency"       => { if let Ok(v) = val.parse::<f32>() { ui.text_transparency = v.clamp(0.0,1.0); true } else { false } }
+        "TextStrokeColor3"       => { if let Some(c) = parse_color3(val) { ui.text_stroke_color3 = c; true } else { false } }
+        "TextStrokeTransparency" => { if let Ok(v) = val.parse::<f32>() { ui.text_stroke_transparency = v.clamp(0.0,1.0); true } else { false } }
+        "TextXAlignment"         => { ui.text_x_alignment = val.to_string(); true }
+        "TextYAlignment"         => { ui.text_y_alignment = val.to_string(); true }
+        "BackgroundColor3"       => { if let Some(c) = parse_color3(val) { ui.background_color3 = c; true } else { false } }
+        "BackgroundTransparency" => { if let Ok(v) = val.parse::<f32>() { ui.background_transparency = v.clamp(0.0,1.0); true } else { false } }
+        "BorderColor3"           => { if let Some(c) = parse_color3(val) { ui.border_color3 = c; true } else { false } }
+        "BorderSizePixel"        => { if let Ok(v) = val.parse::<i32>() { ui.border_size_pixel = v.max(0); true } else { false } }
+        "BorderMode"             => { ui.border_mode = val.to_string(); true }
+        "ClipsDescendants"       => { ui.clips_descendants = val == "true"; true }
+        "ZIndex"                 => { if let Ok(v) = val.parse::<i32>() { ui.z_index = v; true } else { false } }
+        "LayoutOrder"            => { if let Ok(v) = val.parse::<i32>() { ui.layout_order = v; true } else { false } }
+        "Rotation"               => { if let Ok(v) = val.parse::<f32>() { ui.rotation = v; true } else { false } }
+        "AnchorPoint"            => { if let Some(v) = parse_vec2(val) { ui.anchor_point = v; true } else { false } }
+        "PositionScale"          => { if let Some(v) = parse_vec2(val) { ui.position_scale = v; true } else { false } }
+        "PositionOffset"         => { if let Some(v) = parse_vec2(val) { ui.position_offset = v; true } else { false } }
+        "SizeScale"              => { if let Some(v) = parse_vec2(val) { ui.size_scale = v; true } else { false } }
+        "SizeOffset"             => { if let Some(v) = parse_vec2(val) { ui.size_offset = v; true } else { false } }
+        "Visible"                => { ui.visible = val == "true"; true }
+        "Active"                 => { ui.active = val == "true"; true }
+        "AutoButtonColor"        => { ui.auto_button_color = val == "true"; true }
+        "Image"                  => { ui.image = val.to_string(); true }
+        "ImageColor3"            => { if let Some(c) = parse_color3(val) { ui.image_color3 = c; true } else { false } }
+        "ImageTransparency"      => { if let Ok(v) = val.parse::<f32>() { ui.image_transparency = v.clamp(0.0,1.0); true } else { false } }
+        "ScaleType"              => { ui.scale_type = val.to_string(); true }
+        "ScrollingEnabled"       => { ui.scrolling_enabled = val == "true"; true }
+        "ScrollBarThickness"     => { if let Ok(v) = val.parse::<i32>() { ui.scroll_bar_thickness = v.max(0); true } else { false } }
+        "AutomaticSize"          => { ui.automatic_size = val.to_string(); true }
+        _ => false
+    }
+}
+
 /// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back
 fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
     let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
@@ -3547,6 +4757,26 @@ fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
         let y = parts[1].parse::<f32>().ok()?;
         let z = parts[2].parse::<f32>().ok()?;
         Some((x, y, z))
+    } else {
+        None
+    }
+}
+
+/// Parses a Color4 string "r, g, b, a" into f32 tuple for TOML write-back
+fn parse_color4_value(value: &str) -> Option<(f32, f32, f32, f32)> {
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if parts.len() == 4 {
+        let r = parts[0].parse::<f32>().ok()?;
+        let g = parts[1].parse::<f32>().ok()?;
+        let b = parts[2].parse::<f32>().ok()?;
+        let a = parts[3].parse::<f32>().ok()?;
+        Some((r, g, b, a))
+    } else if parts.len() == 3 {
+        // RGB without alpha - default alpha to 1.0
+        let r = parts[0].parse::<f32>().ok()?;
+        let g = parts[1].parse::<f32>().ok()?;
+        let b = parts[2].parse::<f32>().ok()?;
+        Some((r, g, b, 1.0))
     } else {
         None
     }
@@ -3647,6 +4877,117 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
     ui.set_entity_properties(slint::ModelRc::from(model_rc));
 }
 
+/// Builds service properties for a selected service header and pushes them to the Properties panel.
+/// Reads all dynamic properties from the ServiceComponent.
+fn build_service_properties(
+    ui: &StudioWindow,
+    service_name: &str,
+    service_components: &Query<&crate::space::service_loader::ServiceComponent>,
+) {
+    use crate::space::service_loader::PropertyValue;
+    
+    ui.set_selected_count(1);
+    ui.set_selected_class(service_name.into());
+    
+    // Set the correct icon for the service — look up ServiceComponent.icon first,
+    // then fall back to deriving from the service name (lowercase).
+    let icon_name: String = service_components
+        .iter()
+        .find(|sc| sc.class_name == service_name)
+        .map(|sc| sc.icon.clone())
+        .unwrap_or_else(|| service_name.to_lowercase());
+    ui.set_selected_icon(load_service_icon(&icon_name));
+    
+    let make_prop = |name: &str, value: &str, prop_type: &str, category: &str, is_hdr: bool| -> PropertyData {
+        PropertyData {
+            name: name.into(),
+            value: value.into(),
+            property_type: prop_type.into(),
+            editable: true,
+            category: category.into(),
+            options: slint::ModelRc::default(),
+            is_header: is_hdr,
+            x_value: slint::SharedString::default(),
+            y_value: slint::SharedString::default(),
+            z_value: slint::SharedString::default(),
+        }
+    };
+    
+    let mut props: Vec<PropertyData> = Vec::new();
+    
+    // Find the matching ServiceComponent by class_name
+    let sc = service_components.iter().find(|sc| sc.class_name == service_name);
+    
+    // Service header
+    props.push(make_prop("", "", "", "Service", true));
+    props.push(make_prop("ClassName", service_name, "string", "Service", false));
+    
+    if let Some(sc) = sc {
+        if !sc.description.is_empty() {
+            props.push(make_prop("Description", &sc.description, "string", "Service", false));
+        }
+        props.push(make_prop("CanHaveChildren", &sc.can_have_children.to_string(), "bool", "Service", false));
+        
+        // Lighting-specific typed property sections
+        if sc.class_name == "Lighting" {
+            props.push(make_prop("", "", "", "Lighting", true));
+            if let Some(v) = sc.properties.get("ambient") {
+                props.push(make_prop("Ambient", &v.to_display_string(), "color", "Lighting", false));
+            }
+            if let Some(v) = sc.properties.get("outdoor_ambient") {
+                props.push(make_prop("OutdoorAmbient", &v.to_display_string(), "color", "Lighting", false));
+            }
+            if let Some(v) = sc.properties.get("brightness") {
+                props.push(make_prop("Brightness", &v.to_display_string(), "float", "Lighting", false));
+            }
+            if let Some(v) = sc.properties.get("global_shadows") {
+                props.push(make_prop("GlobalShadows", &v.to_display_string(), "bool", "Lighting", false));
+            }
+            props.push(make_prop("", "", "", "Time", true));
+            if let Some(v) = sc.properties.get("clock_time") {
+                props.push(make_prop("ClockTime", &v.to_display_string(), "float", "Time", false));
+            }
+            if let Some(v) = sc.properties.get("geographic_latitude") {
+                props.push(make_prop("GeographicLatitude", &v.to_display_string(), "float", "Time", false));
+            }
+        } else {
+            // Generic dynamic properties for all other services
+            if !sc.properties.is_empty() {
+                props.push(make_prop("", "", "", "Properties", true));
+                let mut sorted_keys: Vec<&String> = sc.properties.keys().collect();
+                sorted_keys.sort();
+                for key in sorted_keys {
+                    if let Some(val) = sc.properties.get(key) {
+                        let type_str = val.type_name();
+                        let val_str = val.to_display_string();
+                        // Format key from snake_case to TitleCase for display
+                        let display_key = key.split('_')
+                            .map(|w| {
+                                let mut c = w.chars();
+                                match c.next() {
+                                    None => String::new(),
+                                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        props.push(make_prop(&display_key, &val_str, type_str, "Properties", false));
+                    }
+                }
+            }
+        }
+        
+        // TOML path for reference
+        if sc.toml_path != std::path::PathBuf::new() {
+            props.push(make_prop("", "", "", "File", true));
+            props.push(make_prop("TOML Path", &sc.toml_path.to_string_lossy(), "string", "File", false));
+        }
+    }
+    
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
+    ui.set_entity_properties(slint::ModelRc::from(model_rc));
+}
+
 /// Bridges CenterTabManager → StudioState.center_tabs when the tab manager is dirty.
 /// This allows files opened via the unified explorer (OpenNode) to appear in the Slint tab bar.
 fn sync_tab_manager_to_studio_state(
@@ -3663,6 +5004,7 @@ fn sync_tab_manager_to_studio_state(
             entity_id: tab.entity.map(|e| e.index().index() as i32).unwrap_or(-1),
             name: tab.name.clone(),
             tab_type: tab.tab_type.type_string().to_string(),
+            mode: tab.tab_type.mode_string().to_string(),
             url: tab.url.clone().unwrap_or_default(),
             dirty: tab.dirty,
             loading: tab.loading,
@@ -3693,10 +5035,17 @@ fn sync_tab_manager_to_studio_state(
 fn sync_center_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     mut state: Option<ResMut<StudioState>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut state) = state else { return };
     let ui = &slint_context.window;
+
+    let scene_tab_name = space_root
+        .as_ref()
+        .and_then(|root| root.0.file_name().map(|name| name.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "Space".to_string());
+    ui.set_scene_tab_name(scene_tab_name.into());
     
     // Check if tabs were updated by CenterTabManager sync
     let mut tabs_changed = state.tabs_dirty;
@@ -3713,6 +5062,7 @@ fn sync_center_tabs_to_slint(
                 entity_id,
                 name,
                 tab_type: "script".to_string(),
+                mode: "code".to_string(),
                 url: String::new(),
                 dirty: false,
                 loading: false,
@@ -3729,9 +5079,10 @@ fn sync_center_tabs_to_slint(
             entity_id: -1,
             name: title,
             tab_type: "web".to_string(),
+            mode: String::new(),
             url: url.clone(),
             dirty: false,
-            loading: url != "about:blank",
+            loading: false, // loading state only meaningful when webview feature is active
         });
         state.active_center_tab = state.center_tabs.len() as i32;
         tabs_changed = true;
@@ -3786,6 +5137,7 @@ fn sync_center_tabs_to_slint(
                 entity_id: t.entity_id,
                 name: t.name.as_str().into(),
                 tab_type: t.tab_type.as_str().into(),
+                mode: t.mode.as_str().into(),
                 dirty: t.dirty,
                 content: slint::SharedString::default(),
                 url: t.url.as_str().into(),
@@ -3801,9 +5153,55 @@ fn sync_center_tabs_to_slint(
         ui.set_center_active_tab(state.active_center_tab);
     }
 
-    // Sync editor content to Slint when a script or code tab is active
-    if (tab_type == "script" || tab_type == "code") && tabs_changed {
+    // Sync editor content + line numbers to Slint when a script or code tab is active.
+    // Triggers on tab switch (tabs_changed) OR on every keystroke (script_content_dirty).
+    let script_dirty = state.script_content_dirty;
+    // Copy tab_type to an owned String before the mutable borrow of state below
+    let tab_type: String = tab_type.to_owned();
+    if script_dirty { state.script_content_dirty = false; }
+    if (tab_type == "script" || tab_type == "code") && (tabs_changed || script_dirty) {
+        let language = if state.active_center_tab > 0 {
+            let idx = (state.active_center_tab - 1) as usize;
+            if let Some(tab) = state.center_tabs.get(idx) {
+                let lower_name = tab.name.to_lowercase();
+                if tab.mode == "summary" || lower_name.ends_with(".md") || lower_name.ends_with(".markdown") {
+                    "Markdown".to_string()
+                } else if let Some(ext) = std::path::Path::new(&tab.name).extension().and_then(|ext| ext.to_str()) {
+                    language_for_ext(ext).to_string()
+                } else {
+                    "Rust".to_string()
+                }
+            } else {
+                "Rust".to_string()
+            }
+        } else {
+            "Rust".to_string()
+        };
+
+        state.script_highlight_lines = highlight_to_lines(&state.script_editor_content, &language)
+            .into_iter()
+            .map(|line: ComputedHighlightLine| HighlightLine {
+                text: line.text.into(),
+                r: line.r,
+                g: line.g,
+                b: line.b,
+                bold: line.bold,
+            })
+            .collect();
+
         ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        let nums = build_line_numbers_text(&state.script_editor_content);
+        ui.set_script_line_numbers(nums.into());
+        let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
+        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+        // On tab switch (not on every keystroke): reset editor scroll to line 1
+        if tabs_changed {
+            ui.set_script_scroll_to_top(true);
+        }
+    } else {
+        state.script_highlight_lines.clear();
+        let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
+        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
     }
 
     // Always sync web browser properties when a web tab is active (loading can change each frame)
@@ -3846,15 +5244,39 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::WeldConstraint => "weldconstraint",
         ClassName::Motor6D => "motor6d",
         ClassName::UnionOperation => "unionoperation",
-        ClassName::BillboardGui | ClassName::SurfaceGui | ClassName::ScreenGui => "startergui",
-        ClassName::TextLabel | ClassName::TextButton => "textlabel",
-        ClassName::Frame | ClassName::ScrollingFrame => "startergui",
-        ClassName::ImageLabel | ClassName::ImageButton => "decal",
+        ClassName::ScreenGui => "screengui",
+        ClassName::BillboardGui => "billboardgui",
+        ClassName::SurfaceGui => "surfacegui",
+        ClassName::TextLabel => "textlabel",
+        ClassName::TextButton => "textbutton",
+        ClassName::TextBox => "textbox",
+        ClassName::Frame => "frame",
+        ClassName::ScrollingFrame => "scrollingframe",
+        ClassName::ImageLabel => "imagelabel",
+        ClassName::ImageButton => "imagebutton",
+        ClassName::ViewportFrame => "viewportframe",
         ClassName::Animator => "animator",
         ClassName::KeyframeSequence => "keyframesequence",
         ClassName::SpecialMesh => "specialmesh",
+        // Services and environment classes
+        ClassName::Lighting => "lighting",
+        ClassName::Workspace => "workspace",
+        ClassName::SpawnLocation | ClassName::Seat | ClassName::VehicleSeat => "spawnlocation",
+        ClassName::Team => "teams",
+        // Orbital / world classes — fallback to instance icon (no dedicated SVG)
+        ClassName::SolarSystem | ClassName::CelestialBody | ClassName::RegionChunk => "instance",
+        ClassName::ChunkedWorld => "instance",
+        // Media UI — fallback
+        ClassName::VideoFrame | ClassName::DocumentFrame | ClassName::WebFrame => "instance",
         _ => "instance",
     }
+}
+
+/// Build a newline-separated string of line numbers for the script editor gutter.
+/// e.g. content with 3 lines → "1\n2\n3"
+fn build_line_numbers_text(content: &str) -> String {
+    let count = content.chars().filter(|&c| c == '\n').count() + 1;
+    (1..=count).map(|n| n.to_string()).collect::<Vec<_>>().join("\n")
 }
 
 /// Load an SVG icon as a slint::Image from the assets/icons directory

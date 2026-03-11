@@ -12,12 +12,17 @@ export component PublishDialog inherits Rectangle {
     in-out property <string> description: "";
     in-out property <string> genre: "All";
     in-out property <bool> is-public: true;
+    in-out property <bool> open-source: false;
+    in-out property <bool> studio-editable: false;
+    in property <string> publish-target: "Cloudflare bucket";
+    in property <string> sync-status: "Local-first";
     in property <bool> is-publishing: false;
     in property <string> error-message: "";
     in property <bool> is-update: false;
+    in property <bool> is-as-new: false;
     
     // Callbacks
-    callback on-publish();
+    callback on-publish(string, string, string, bool, bool, bool, bool);
     callback on-close();
     
     width: 100%;
@@ -32,7 +37,7 @@ export component PublishDialog inherits Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 500px;
-        height: 480px;
+        height: 560px;
         background: Theme.dialog-background;
         border-radius: 8px;
         drop-shadow-blur: 20px;
@@ -49,7 +54,7 @@ export component PublishDialog inherits Rectangle {
             // Header
             HorizontalBox {
                 Text {
-                    text: root.is-update ? "Update Experience" : "Publish Experience";
+                    text: root.is-as-new ? "Publish As New Experience" : root.is-update ? "Update Experience" : "Publish Experience";
                     color: Theme.text-primary;
                     font-size: 20px;
                     font-weight: 600;
@@ -158,6 +163,49 @@ export component PublishDialog inherits Rectangle {
                 }
             }
             
+            // Publish options
+            VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    spacing: 8px;
+
+                    CheckBox {
+                        text: "Open Source";
+                        checked <=> root.open-source;
+                    }
+
+                    Text {
+                        text: "Allow source access and reuse";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+
+                    CheckBox {
+                        text: "Studio Editable";
+                        checked <=> root.studio-editable;
+                    }
+
+                    Text {
+                        text: "Allow Studio download and editing";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "Target: " + root.publish-target + " • Sync: " + root.sync-status;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                }
+            }
+
             // Error message
             if root.error-message != "": Rectangle {
                 height: 36px;
@@ -209,11 +257,21 @@ export component PublishDialog inherits Rectangle {
                     
                     TouchArea {
                         enabled: !root.is-publishing && root.experience-name != "";
-                        clicked => { root.on-publish(); }
+                        clicked => {
+                            root.on-publish(
+                                root.experience-name,
+                                root.description,
+                                root.genre,
+                                root.is-public,
+                                root.open-source,
+                                root.studio-editable,
+                                root.is-as-new,
+                            );
+                        }
                     }
                     
                     Text {
-                        text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
+                        text: root.is-publishing ? "Publishing..." : root.is-as-new ? "Publish As New" : root.is-update ? "Update" : "Publish";
                         color: root.is-publishing ? Theme.text-secondary : white;
                         font-weight: 500;
                         horizontal-alignment: center;

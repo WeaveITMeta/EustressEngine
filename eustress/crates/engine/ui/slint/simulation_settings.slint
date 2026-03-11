@@ -1,0 +1,1109 @@
+// ============================================================================
+// Eustress Engine Studio - Simulation Settings Dialog
+// Configure initial conditions, step time, recording, and result outputs
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, LineEdit, CheckBox, ComboBox, Slider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// ── Shared sub-components ────────────────────────────────────────────────────
+
+// Section header with left accent bar and label
+component SimSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+// Hint text row beneath a field
+component SimHint inherits Rectangle {
+    in property <string> text: "";
+    height: 16px;
+    background: transparent;
+    Text {
+        x: 0px;
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width;
+    }
+}
+
+// Compact input field: fixed label + editable input + optional unit
+component SimField inherits Rectangle {
+    in property <string> label: "";
+    in-out property <string> value: "";
+    in property <string> unit: "";
+    callback changed(string);
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        Text {
+            width: 148px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 120px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+
+            LineEdit {
+                x: 0px; y: 0px;
+                width: 100%; height: 100%;
+                text: root.value;
+                edited(t) => { root.value = t; root.changed(t); }
+            }
+        }
+
+        if root.unit != "": Text {
+            width: 44px;
+            text: root.unit;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Compact toggle row with optional hint
+component SimToggle inherits Rectangle {
+    in property <string> label: "";
+    in property <string> hint: "";
+    in-out property <bool> value: false;
+    callback changed(bool);
+
+    height: root.hint != "" ? 44px : 28px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 2px;
+        alignment: start;
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            height: 28px;
+
+            Text {
+                width: 148px;
+                text: root.label;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+
+            // Toggle pill
+            Rectangle {
+                width: 36px;
+                height: 18px;
+                border-radius: 9px;
+                background: root.value ? Theme.accent-blue : #333344;
+                y: (28px - self.height) / 2;
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.value = !root.value;
+                        root.changed(root.value);
+                    }
+                }
+
+                Rectangle {
+                    x: root.value ? 18px : 2px;
+                    y: 2px;
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 7px;
+                    background: white;
+                    animate x { duration: 120ms; easing: ease-out; }
+                }
+            }
+
+            Text {
+                text: root.value ? "On" : "Off";
+                color: root.value ? Theme.text-primary : Theme.text-secondary;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.hint != "": Text {
+            x: 156px;
+            text: root.hint;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            wrap: word-wrap;
+            width: 340px;
+        }
+    }
+}
+
+// Compact dropdown row
+component SimCombo inherits Rectangle {
+    in property <string> label: "";
+    in property <[string]> options: [];
+    in-out property <int> current: 0;
+    callback changed(int);
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        Text {
+            width: 148px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        ComboBox {
+            width: 200px;
+            model: root.options;
+            current-index: root.current;
+            selected(v) => { root.current = root.options.length > 0 ? root.current : 0; root.changed(root.current); }
+        }
+    }
+}
+
+// ── Watchpoint row — polished table row ──────────────────────────────────────
+component WatchpointRow inherits Rectangle {
+    in property <string> name: "";
+    in property <string> label: "";
+    in property <string> unit: "";
+    callback remove();
+
+    height: 32px;
+    background: wpt-touch.has-hover ? #1a1a2e : transparent;
+    border-radius: 3px;
+
+    wpt-touch := TouchArea { }
+
+    Rectangle {
+        x: 0px; y: 0px;
+        width: 3px; height: parent.height;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+        opacity: 0.6;
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 0px;
+        alignment: start;
+
+        Text {
+            width: 130px;
+            text: root.name;
+            color: Theme.text-primary;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            width: 160px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            width: 54px;
+            height: 18px;
+            background: #1e2a3a;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #2a3a4a;
+
+            Text {
+                width: 100%;
+                text: root.unit;
+                color: Theme.accent-blue;
+                font-size: 10px;
+                font-family: "Consolas";
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        // Remove button
+        Rectangle {
+            width: 24px; height: 24px;
+            border-radius: 4px;
+            background: rm-touch.has-hover ? #3d1515 : transparent;
+
+            rm-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+
+            Text {
+                text: "×";
+                color: rm-touch.has-hover ? #ef5350 : #666688;
+                font-size: 15px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ── Watchpoint data struct ────────────────────────────────────────────────────
+export struct WatchpointData {
+    name: string,
+    label: string,
+    unit: string,
+    interval: int,
+    enabled: bool,
+}
+
+// ── Result output data struct ─────────────────────────────────────────────────
+export struct SimOutputBinding {
+    instance-name: string,
+    property-name: string,
+    watchpoint: string,
+    format: string,
+}
+
+// ── Main dialog ───────────────────────────────────────────────────────────────
+export component SimulationSettingsDialog inherits Rectangle {
+    // ── Display state ──
+    in-out property <int> active-tab: 0;  // 0=Conditions, 1=Step, 2=Recording, 3=Results
+
+    // ── Initial Conditions ──
+    in-out property <string> time-scale-preset: "Realtime";
+    in-out property <string> custom-time-scale: "1.0";
+    in-out property <string> tick-rate: "60";
+    in-out property <string> max-ticks-per-frame: "10";
+    in-out property <bool> auto-start: false;
+
+    // ── Step Settings ──
+    in-out property <string> step-duration: "1.0";
+    in-out property <string> run-until-time: "";
+    in-out property <string> run-until-tick: "";
+
+    // ── Recording ──
+    in-out property <bool> recording-enabled: true;
+    in-out property <string> output-dir: "recordings";
+    in-out property <string> export-format: "JSON + CSV";
+    in-out property <bool> auto-export: true;
+    in-out property <[WatchpointData]> watchpoints: [];
+    in-out property <string> new-wp-name: "";
+    in-out property <string> new-wp-label: "";
+    in-out property <string> new-wp-unit: "";
+
+    // ── UI Results Bindings ──
+    in-out property <[SimOutputBinding]> output-bindings: [];
+    in-out property <string> new-bind-instance: "";
+    in-out property <string> new-bind-property: "Text";
+    in-out property <string> new-bind-watchpoint: "";
+    in-out property <string> new-bind-format: "{:.2}";
+
+    // ── Callbacks ──
+    callback on-close();
+    callback on-save();               // Save to simulation.toml (also applies)
+    callback on-add-watchpoint();
+    callback on-remove-watchpoint(int);
+    callback on-add-output-binding();
+    callback on-remove-output-binding(int);
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    TouchArea { clicked => { root.on-close(); } }
+
+    // ── Modal card ──
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 600px;
+        height: 530px;
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ── centered icon + title, close X top-right ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                // Centered icon + text block
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    width: parent.width;
+                    height: parent.height;
+                    padding-top: 0px;
+                    padding-bottom: 0px;
+
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        
+                        Image {
+                            width: 100%;
+                            height: 100%;
+                            source: @image-url("../../assets/icons/ui/sim-settings.svg");
+                            image-fit: contain;
+                        }
+                    }
+
+                    Text {
+                        text: "Simulation Settings";
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Close X — top-right, standard OS position
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-close(); }
+                    }
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Tab bar ──
+            Rectangle {
+                height: 36px;
+                background: #0f0f1a;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 4px;
+                    alignment: start;
+
+                    for tab-def[i] in [
+                        { name: "Conditions" },
+                        { name: "Step" },
+                        { name: "Recording" },
+                        { name: "Results" },
+                    ] : Rectangle {
+                        width: tab-t.preferred-width + 24px;
+                        height: 36px;
+
+                        Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            width: parent.width;
+                            background: root.active-tab == i ? Theme.accent-blue : transparent;
+                        }
+
+                        tab-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.active-tab = i; }
+                        }
+
+                        tab-t := Text {
+                            text: tab-def.name;
+                            color: root.active-tab == i ? Theme.text-primary : Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: root.active-tab == i ? 600 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content area ──
+            Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
+                clip: true;
+
+                // ════════════════════════════════════════════════════════
+                // TAB 0 — Initial Conditions
+                // ════════════════════════════════════════════════════════
+                if root.active-tab == 0: ScrollView {
+                    width: 100%; height: 100%;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+                        width: 560px;
+
+                        SimSection { title: "TIME COMPRESSION"; }
+
+                        SimCombo {
+                            label: "Preset";
+                            options: [
+                                "Realtime (1×)",
+                                "1 min / sec (60×)",
+                                "1 hr / sec (3,600×)",
+                                "1 day / sec (86,400×)",
+                                "1 week / sec (604,800×)",
+                                "1 month / sec (2.63M×)",
+                                "1 year / sec (31.5M×)",
+                                "Custom",
+                            ];
+                        }
+
+                        SimField {
+                            label: "Custom Time Scale";
+                            value <=> root.custom-time-scale;
+                            unit: "×";
+                        }
+
+                        Rectangle { height: 8px; }
+                        SimSection { title: "ENGINE"; }
+
+                        SimField {
+                            label: "Tick Rate";
+                            value <=> root.tick-rate;
+                            unit: "Hz";
+                        }
+
+                        SimHint { text: "Simulation ticks per real-world second. Higher values increase accuracy at the cost of CPU load."; }
+
+                        Rectangle { height: 4px; }
+
+                        SimField {
+                            label: "Max Ticks / Frame";
+                            value <=> root.max-ticks-per-frame;
+                            unit: "ticks";
+                        }
+
+                        SimHint { text: "Maximum simulation ticks allowed per rendered frame. Prevents spiral-of-death when the sim outruns the renderer."; }
+
+                        Rectangle { height: 8px; }
+                        SimSection { title: "STARTUP"; }
+
+                        SimToggle {
+                            label: "Auto-start on Play";
+                            value <=> root.auto-start;
+                            hint: "When enabled, the simulation begins running automatically as soon as Play mode starts. Disable to start manually via the Run button or sim.start() in Rune.";
+                        }
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
+                // TAB 1 — Step Settings
+                // ════════════════════════════════════════════════════════
+                if root.active-tab == 1: ScrollView {
+                    width: 100%; height: 100%;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+                        width: 560px;
+
+                        SimSection { title: "MANUAL STEP"; }
+
+                        SimField {
+                            label: "Step Duration";
+                            value <=> root.step-duration;
+                            unit: "sim-s";
+                        }
+
+                        SimHint { text: "Simulated seconds advanced per sim.step() call or Step button press. Default: 1.0 simulated second per step."; }
+
+                        Rectangle { height: 12px; }
+                        SimSection { title: "AUTO-STOP CONDITIONS"; }
+
+                        SimField {
+                            label: "Run Until Sim Time";
+                            value <=> root.run-until-time;
+                            unit: "sim-s";
+                        }
+
+                        SimHint { text: "Stop the simulation automatically when simulated time reaches this value. Leave blank to run indefinitely."; }
+
+                        Rectangle { height: 4px; }
+
+                        SimField {
+                            label: "Run Until Tick";
+                            value <=> root.run-until-tick;
+                            unit: "ticks";
+                        }
+
+                        SimHint { text: "Stop automatically after this many total simulation ticks. Leave blank to run indefinitely."; }
+
+                        Rectangle { height: 12px; }
+                        SimSection { title: "RUNE API REFERENCE"; }
+
+                        Rectangle {
+                            height: 84px;
+                            background: #0b0b16;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: #252535;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                spacing: 3px;
+
+                                Text {
+                                    text: "sim.set_time_scale(3600.0);   // 1 hr / simulated-sec";
+                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                }
+                                Text {
+                                    text: "sim.run_until_time(86400.0);  // stop at 24 h";
+                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                }
+                                Text {
+                                    text: "sim.step_n(100);              // advance 100 ticks";
+                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                }
+                                Text {
+                                    text: "sim.run_hours(24.0);          // run 24 simulated hours";
+                                    color: #7ec8e3; font-size: 10px; font-family: "Consolas";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
+                // TAB 2 — Recording
+                // ════════════════════════════════════════════════════════
+                if root.active-tab == 2: VerticalLayout {
+                    padding: 0px;
+                    spacing: 0px;
+
+                    // Output settings
+                    ScrollView {
+                        width: 100%;
+                        height: 190px;
+
+                        VerticalLayout {
+                            padding: 20px;
+                            spacing: 4px;
+                            alignment: start;
+                            width: 560px;
+
+                            SimSection { title: "OUTPUT"; }
+
+                            SimToggle {
+                                label: "Enable Recording";
+                                value <=> root.recording-enabled;
+                            }
+
+                            SimField {
+                                label: "Output Directory";
+                                value <=> root.output-dir;
+                            }
+
+                            SimCombo {
+                                label: "Export Format";
+                                options: ["JSON", "CSV", "JSON + CSV", "Binary (.simdata)"];
+                                current: 2;
+                            }
+
+                            SimToggle {
+                                label: "Auto-export on Stop";
+                                value <=> root.auto-export;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border-color; }
+
+                    // Watchpoints section header
+                    Rectangle {
+                        height: 32px;
+                        background: #0f0f1a;
+
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 10px;
+                            alignment: start;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "WATCHPOINTS";
+                                color: Theme.text-secondary;
+                                font-size: 9px;
+                                font-weight: 700;
+                                letter-spacing: 0.8px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "Variable name · Display label · Unit";
+                                color: Theme.text-disabled;
+                                font-size: 9px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border-color; }
+
+                    // Watchpoint column headers
+                    Rectangle {
+                        height: 22px;
+                        background: #0c0c17;
+
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 8px;
+
+                            Text { width: 130px; text: "Name"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
+                            Text { width: 160px; text: "Label"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
+                            Text { width: 60px; text: "Unit"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.4px; vertical-alignment: center; }
+                        }
+                    }
+
+                    // Watchpoints list
+                    ScrollView {
+                        width: 100%;
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 2px;
+                            alignment: start;
+
+                            for wp[i] in root.watchpoints: WatchpointRow {
+                                name: wp.name;
+                                label: wp.label;
+                                unit: wp.unit;
+                                remove => { root.on-remove-watchpoint(i); }
+                            }
+
+                            if root.watchpoints.length == 0: Rectangle {
+                                height: 48px;
+                                Text {
+                                    text: "No watchpoints defined. Add a variable below to record simulation data.";
+                                    color: Theme.text-disabled;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    width: parent.width - 40px;
+                                    x: 20px;
+                                }
+                            }
+                        }
+                    }
+
+                    // Add watchpoint form
+                    Rectangle { height: 1px; background: Theme.border-color; }
+                    Rectangle {
+                        height: 50px;
+                        background: #0d0d18;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 12px;
+                            padding-bottom: 12px;
+                            spacing: 8px;
+                            alignment: center;
+                            height: parent.height;
+
+                            Rectangle {
+                                width: 110px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "variable_name";
+                                    text <=> root.new-wp-name;
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "Display label";
+                                    text <=> root.new-wp-label;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 64px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "unit";
+                                    text <=> root.new-wp-unit;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 80px; height: 28px;
+                                border-radius: 4px;
+                                background: add-wp-ta.has-hover ? #1a3a5a : Theme.button-background;
+                                border-width: 1px;
+                                border-color: add-wp-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+
+                                add-wp-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.on-add-watchpoint(); }
+                                }
+
+                                Text {
+                                    text: "+ Add";
+                                    color: add-wp-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ════════════════════════════════════════════════════════
+                // TAB 3 — Results / UI Bindings
+                // ════════════════════════════════════════════════════════
+                if root.active-tab == 3: VerticalLayout {
+                    padding: 0px;
+                    spacing: 0px;
+
+                    // Explainer
+                    Rectangle {
+                        height: 48px;
+                        background: #0b0b16;
+
+                        HorizontalLayout {
+                            padding: 12px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            // Info icon accent
+                            Rectangle {
+                                width: 3px;
+                                height: 24px;
+                                background: Theme.accent-blue;
+                                border-radius: 1.5px;
+                            }
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "Bind watchpoint variables to UI instance properties. Values are updated each sim tick via the Rune on_tick() hook.";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border-color; }
+
+                    // Column headers
+                    Rectangle {
+                        height: 26px;
+                        background: #0f0f1a;
+
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 12px;
+                            spacing: 0px;
+                            alignment: start;
+
+                            Text { width: 140px; text: "Instance"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
+                            Text { width: 90px; text: "Property"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
+                            Text { width: 120px; text: "Watchpoint"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
+                            Text { horizontal-stretch: 1; text: "Format"; color: Theme.text-disabled; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
+                        }
+                    }
+
+                    Rectangle { height: 1px; background: Theme.border-color; }
+
+                    // Bindings list
+                    ScrollView {
+                        width: 100%;
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+                            spacing: 2px;
+                            alignment: start;
+
+                            for bind[i] in root.output-bindings: Rectangle {
+                                height: 32px;
+                                background: bind-hover.has-hover ? #1a1a2e : transparent;
+                                border-radius: 3px;
+
+                                bind-hover := TouchArea { }
+
+                                Rectangle {
+                                    x: 0px; y: 0px;
+                                    width: 3px; height: parent.height;
+                                    border-radius: 1.5px;
+                                    background: #66bb6a;
+                                    opacity: 0.6;
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 12px; padding-right: 8px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    Text { width: 140px; text: bind.instance-name; color: Theme.text-primary; font-size: 11px; font-weight: 600; vertical-alignment: center; overflow: elide; }
+                                    Text { width: 90px; text: bind.property-name; color: Theme.accent-blue; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                                    Text { width: 120px; text: bind.watchpoint; color: #66bb6a; font-size: 11px; vertical-alignment: center; overflow: elide; }
+                                    Text { horizontal-stretch: 1; text: bind.format; color: Theme.text-secondary; font-size: 10px; font-family: "Consolas"; vertical-alignment: center; }
+
+                                    Rectangle {
+                                        width: 24px; height: 24px;
+                                        border-radius: 4px;
+                                        background: rm2-touch.has-hover ? #3d1515 : transparent;
+
+                                        rm2-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.on-remove-output-binding(i); }
+                                        }
+
+                                        Text { text: "×"; color: rm2-touch.has-hover ? #ef5350 : #666688; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+
+                            if root.output-bindings.length == 0: Rectangle {
+                                height: 52px;
+                                Text {
+                                    text: "No bindings defined. Use the form below to bind a watchpoint variable to a UI instance property.";
+                                    color: Theme.text-disabled;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                    width: parent.width - 40px;
+                                    x: 20px;
+                                }
+                            }
+                        }
+                    }
+
+                    // Add binding form
+                    Rectangle { height: 1px; background: Theme.border-color; }
+                    Rectangle {
+                        height: 50px;
+                        background: #0d0d18;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            padding-top: 12px;
+                            padding-bottom: 12px;
+                            spacing: 8px;
+                            alignment: center;
+                            height: parent.height;
+
+                            Rectangle {
+                                width: 120px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "Instance name";
+                                    text <=> root.new-bind-instance;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 80px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "Property";
+                                    text <=> root.new-bind-property;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 100px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "watchpoint";
+                                    text <=> root.new-bind-watchpoint;
+                                }
+                            }
+
+                            Rectangle {
+                                width: 80px; height: 26px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    placeholder-text: "{:.2}";
+                                    text <=> root.new-bind-format;
+                                }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Rectangle {
+                                width: 80px; height: 28px;
+                                border-radius: 4px;
+                                background: add-bind-ta.has-hover ? #1a3a5a : Theme.button-background;
+                                border-width: 1px;
+                                border-color: add-bind-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+
+                                add-bind-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.on-add-output-binding(); }
+                                }
+
+                                Text {
+                                    text: "+ Bind";
+                                    color: add-bind-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Footer — Save only (auto-applies on save) ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: end;
+
+                    // Save button
+                    Rectangle {
+                        width: 80px;
+                        height: 32px;
+                        border-radius: 5px;
+                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        border-width: 1px;
+                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+
+                        save-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-save(); }
+                        }
+
+                        Text {
+                            text: "Save";
+                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

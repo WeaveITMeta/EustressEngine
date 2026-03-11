@@ -45,6 +45,9 @@ export component ExplorerPanel inherits Rectangle {
     callback on-context-menu(length, length);
     callback on-search-changed(string);
     callback on-rename-node(int, string, string);
+    callback on-add-service();  // (+) button to add a new service
+    callback on-expand-all();   // Expand all tree nodes
+    callback on-collapse-all(); // Collapse all tree nodes
     
     background: Theme.panel-background;
     
@@ -52,19 +55,129 @@ export component ExplorerPanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
         
-        // Search bar
+        // Search bar + toolbar buttons
         Rectangle {
             height: 30px;
             background: Theme.header-background;
             
             HorizontalLayout {
                 padding: 4px;
+                spacing: 4px;
+                
+                // Search icon (decorative, inside the search area)
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/search.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
                 
                 search-input := LineEdit {
                     horizontal-stretch: 1;
                     placeholder-text: "Search...";
                     text <=> root.search-text;
                     edited(text) => { root.on-search-changed(text); }
+                }
+                
+                // Filter / clear search button (visible when search has text)
+                if root.search-text != "": Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: clear-btn-ta.has-hover ? Theme.button-hover : transparent;
+                    
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/close.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    
+                    clear-btn-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.search-text = "";
+                            root.on-search-changed("");
+                        }
+                    }
+                }
+                
+                // Expand All button
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: expand-all-ta.has-hover ? Theme.button-hover : transparent;
+                    
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/expand-all.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    
+                    expand-all-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-expand-all(); }
+                    }
+                }
+                
+                // Collapse All button
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: collapse-all-ta.has-hover ? Theme.button-hover : transparent;
+                    
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/collapse-all.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    
+                    collapse-all-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-collapse-all(); }
+                    }
+                }
+                
+                // (+) Add Service button
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: add-btn-ta.has-hover ? Theme.button-hover : transparent;
+                    
+                    Text {
+                        text: "+";
+                        color: Theme.text-primary;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    
+                    add-btn-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-add-service(); }
+                    }
                 }
             }
         }

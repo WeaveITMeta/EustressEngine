@@ -127,9 +127,11 @@ export component IconButton inherits Rectangle {
     width: root.label != "" ? (label-measure.preferred-width > 34px ? label-measure.preferred-width + 10px : 44px) : 36px;
     height: root.label != "" ? 52px : 36px;
     
-    // Hidden text for width measurement
+    // Hidden text for width measurement — positioned absolutely so it doesn't affect layout
     label-measure := Text {
         visible: false;
+        x: 0px; y: 0px;
+        width: 0px; height: 0px;
         text: root.label;
         font-size: 10px;
     }
@@ -326,6 +328,8 @@ export component TreeItem inherits Rectangle {
                 root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
+        // Allow scroll events to bubble up to parent ScrollView
+        scroll-event(e) => { return reject; }
     }
     
     // Expand/collapse arrow
@@ -336,6 +340,7 @@ export component TreeItem inherits Rectangle {
         height: 22px;
         mouse-cursor: pointer;
         clicked => { root.toggle-expanded(); }
+        scroll-event(e) => { return reject; }
     }
     
     if root.expandable: Image {
@@ -394,30 +399,37 @@ export component LogEntry inherits Rectangle {
         image-fit: contain;
     }
     
-    // Timestamp
-    Text {
+    // Timestamp — read-only selectable
+    TextInput {
         x: 28px;
-        y: 0px;
+        y: 2px;
         width: 70px;
-        height: 20px;
+        height: 16px;
         text: root.timestamp;
         color: Theme.text-secondary;
         font-size: 10px;
-        vertical-alignment: center;
+        read-only: true;
+        single-line: true;
+        wrap: no-wrap;
+        selection-background-color: #264f78;
+        selection-foreground-color: #ffffff;
     }
-    
-    // Message
-    Text {
+
+    // Message — read-only selectable so users can copy log lines
+    TextInput {
         x: 102px;
-        y: 0px;
+        y: 2px;
         width: root.width - 110px;
-        height: 20px;
+        height: 16px;
         text: root.message;
         color: root.level == "error" ? Theme.output-error :
                root.level == "warning" ? Theme.output-warning :
                root.level == "debug" ? Theme.output-debug : Theme.output-info;
         font-size: 12px;
-        vertical-alignment: center;
-        overflow: elide;
+        read-only: true;
+        single-line: true;
+        wrap: no-wrap;
+        selection-background-color: #264f78;
+        selection-foreground-color: #ffffff;
     }
 }

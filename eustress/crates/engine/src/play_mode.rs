@@ -1476,8 +1476,11 @@ impl Plugin for PlayModePlugin {
             .add_message::<EmbeddedServerStateChanged>()
             
             // Systems (always run) - split into groups to avoid tuple size limits
+            // handle_play_mode_ui_buttons must run after drain_slint_actions sets
+            // the play_solo_requested / pause_requested / stop_requested flags.
             .add_systems(Update, (
-                handle_play_mode_ui_buttons,  // Handle ribbon button clicks
+                handle_play_mode_ui_buttons  // Handle ribbon button clicks
+                    .after(crate::ui::slint_ui::SlintSystems::Drain),
                 play_mode_shortcuts,
                 handle_start_play,
                 handle_stop_play,

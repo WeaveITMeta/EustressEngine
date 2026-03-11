@@ -5,6 +5,9 @@
 
 use bevy::prelude::*;
 use crate::classes::*;
+// Re-export to disambiguate Font: bevy::prelude::Font vs crate::classes::Font
+#[allow(unused_imports)]
+use crate::classes::Font as EcsFont;
 
 // ============================================================================
 // PropertyAccess Implementation for Instance
@@ -1237,6 +1240,53 @@ impl PropertyAccess for BillboardGui {
     }
 }
 
+// ── helpers shared by all UI PropertyAccess impls ──────────────────────────
+// These macros must be defined before any impl that uses them.
+macro_rules! layout_get {
+    ($s:expr, $name:expr) => {
+        match $name {
+            "AnchorPoint"    => Some(PropertyValue::Vector2($s.anchor_point)),
+            "PositionScale"  => Some(PropertyValue::Vector2($s.position_scale)),
+            "PositionOffset" => Some(PropertyValue::Vector2($s.position_offset)),
+            "SizeScale"      => Some(PropertyValue::Vector2($s.size_scale)),
+            "SizeOffset"     => Some(PropertyValue::Vector2($s.size_offset)),
+            _ => None,
+        }
+    };
+}
+macro_rules! layout_set {
+    ($s:expr, $name:expr, $value:expr) => {
+        match ($name, $value) {
+            ("AnchorPoint",    PropertyValue::Vector2(v)) => { $s.anchor_point    = v; Ok(()) }
+            ("PositionScale",  PropertyValue::Vector2(v)) => { $s.position_scale  = v; Ok(()) }
+            ("PositionOffset", PropertyValue::Vector2(v)) => { $s.position_offset = v; Ok(()) }
+            ("SizeScale",      PropertyValue::Vector2(v)) => { $s.size_scale      = v; Ok(()) }
+            ("SizeOffset",     PropertyValue::Vector2(v)) => { $s.size_offset     = v; Ok(()) }
+            _ => Err(format!("Unknown property: {}", $name)),
+        }
+    };
+}
+macro_rules! pd {
+    ($n:expr, $t:expr, $c:expr) => {
+        PropertyDescriptor { name: $n.to_string(), property_type: $t.to_string(), read_only: false, category: $c.to_string() }
+    };
+    ($n:expr, $t:expr, $c:expr, ro) => {
+        PropertyDescriptor { name: $n.to_string(), property_type: $t.to_string(), read_only: true, category: $c.to_string() }
+    };
+}
+macro_rules! layout_list {
+    () => {
+        vec![
+            pd!("AnchorPoint",    "vec2", "Layout"),
+            pd!("PositionScale",  "vec2", "Layout"),
+            pd!("PositionOffset", "vec2", "Layout"),
+            pd!("SizeScale",      "vec2", "Layout"),
+            pd!("SizeOffset",     "vec2", "Layout"),
+        ]
+    };
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 // ============================================================================
 // PropertyAccess Implementation for TextLabel
 // ============================================================================
@@ -1244,88 +1294,119 @@ impl PropertyAccess for BillboardGui {
 impl PropertyAccess for TextLabel {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
         match name {
-            "Text" => Some(PropertyValue::String(self.text.clone())),
-            "RichText" => Some(PropertyValue::Bool(self.rich_text)),
-            "TextScaled" => Some(PropertyValue::Bool(self.text_scaled)),
-            "TextWrapped" => Some(PropertyValue::Bool(self.text_wrapped)),
-            "Font" => Some(PropertyValue::String(format!("{:?}", self.font))),
-            "FontSize" => Some(PropertyValue::Float(self.font_size)),
-            "LineHeight" => Some(PropertyValue::Float(self.line_height)),
-            "TextColor3" => Some(PropertyValue::Color3(self.text_color3)),
-            "TextTransparency" => Some(PropertyValue::Float(self.text_transparency)),
-            "TextStrokeColor3" => Some(PropertyValue::Color3(self.text_stroke_color3)),
+            "Text"                   => Some(PropertyValue::String(self.text.clone())),
+            "RichText"               => Some(PropertyValue::Bool(self.rich_text)),
+            "TextScaled"             => Some(PropertyValue::Bool(self.text_scaled)),
+            "TextWrapped"            => Some(PropertyValue::Bool(self.text_wrapped)),
+            "Font"                   => Some(PropertyValue::String(format!("{:?}", self.font))),
+            "FontSize"               => Some(PropertyValue::Float(self.font_size)),
+            "LineHeight"             => Some(PropertyValue::Float(self.line_height)),
+            "TextColor3"             => Some(PropertyValue::Color3(self.text_color3)),
+            "TextTransparency"       => Some(PropertyValue::Float(self.text_transparency)),
+            "TextStrokeColor3"       => Some(PropertyValue::Color3(self.text_stroke_color3)),
             "TextStrokeTransparency" => Some(PropertyValue::Float(self.text_stroke_transparency)),
-            "BackgroundColor3" => Some(PropertyValue::Color3(self.background_color3)),
+            "TextXAlignment"         => Some(PropertyValue::Enum(format!("{:?}", self.text_x_alignment))),
+            "TextYAlignment"         => Some(PropertyValue::Enum(format!("{:?}", self.text_y_alignment))),
+            "BackgroundColor3"       => Some(PropertyValue::Color3(self.background_color3)),
             "BackgroundTransparency" => Some(PropertyValue::Float(self.background_transparency)),
-            "BorderColor3" => Some(PropertyValue::Color3(self.border_color3)),
-            "BorderSizePixel" => Some(PropertyValue::Int(self.border_size_pixel)),
-            "Size" => Some(PropertyValue::Vector2(self.size)),
-            "Position" => Some(PropertyValue::Vector2(self.position)),
-            "Active" => Some(PropertyValue::Bool(self.active)),
-            "Visible" => Some(PropertyValue::Bool(self.visible)),
+            "BorderColor3"           => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"        => Some(PropertyValue::Int(self.border_size_pixel)),
+            "Size"                   => Some(PropertyValue::Vector2(self.size)),
+            "Position"               => Some(PropertyValue::Vector2(self.position)),
+            "AnchorPoint"            => Some(PropertyValue::Vector2(self.anchor_point)),
+            "Rotation"               => Some(PropertyValue::Float(self.rotation)),
+            "ZIndex"                 => Some(PropertyValue::Int(self.z_index)),
+            "AutomaticSize"          => Some(PropertyValue::Enum(format!("{:?}", self.automatic_size))),
+            "ClipsDescendants"       => Some(PropertyValue::Bool(self.clips_descendants)),
+            "Active"                 => Some(PropertyValue::Bool(self.active)),
+            "Visible"                => Some(PropertyValue::Bool(self.visible)),
             _ => None,
         }
     }
     
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
         match (name, value) {
-            ("Text", PropertyValue::String(v)) => { self.text = v; Ok(()) }
-            ("RichText", PropertyValue::Bool(v)) => { self.rich_text = v; Ok(()) }
-            ("TextScaled", PropertyValue::Bool(v)) => { self.text_scaled = v; Ok(()) }
-            ("TextWrapped", PropertyValue::Bool(v)) => { self.text_wrapped = v; Ok(()) }
-            ("Font", PropertyValue::String(v)) => {
+            ("Text",                   PropertyValue::String(v)) => { self.text = v; Ok(()) }
+            ("RichText",               PropertyValue::Bool(v))   => { self.rich_text = v; Ok(()) }
+            ("TextScaled",             PropertyValue::Bool(v))   => { self.text_scaled = v; Ok(()) }
+            ("TextWrapped",            PropertyValue::Bool(v))   => { self.text_wrapped = v; Ok(()) }
+            ("Font",                   PropertyValue::String(v)) => {
                 self.font = match v.as_str() {
-                    "SourceSans" => crate::classes::Font::SourceSans,
-                    "RobotoMono" => crate::classes::Font::RobotoMono,
-                    "GothamBold" => crate::classes::Font::GothamBold,
-                    "GothamLight" => crate::classes::Font::GothamLight,
-                    "Fantasy" => crate::classes::Font::Fantasy,
-                    "Bangers" => crate::classes::Font::Bangers,
-                    "Merriweather" => crate::classes::Font::Merriweather,
-                    "Nunito" => crate::classes::Font::Nunito,
-                    "Ubuntu" => crate::classes::Font::Ubuntu,
-                    _ => return Err(format!("Unknown font: {}", v)),
+                    "SourceSans"   => EcsFont::SourceSans,
+                    "RobotoMono"   => EcsFont::RobotoMono,
+                    "GothamBold"   => EcsFont::GothamBold,
+                    "GothamLight"  => EcsFont::GothamLight,
+                    "Fantasy"      => EcsFont::Fantasy,
+                    "Bangers"      => EcsFont::Bangers,
+                    "Merriweather" => EcsFont::Merriweather,
+                    "Nunito"       => EcsFont::Nunito,
+                    "Ubuntu"       => EcsFont::Ubuntu,
+                    _              => EcsFont::SourceSans,
                 };
                 Ok(())
             }
-            ("FontSize", PropertyValue::Float(v)) => { self.font_size = v.max(1.0); Ok(()) }
-            ("LineHeight", PropertyValue::Float(v)) => { self.line_height = v.max(0.1); Ok(()) }
-            ("TextColor3", PropertyValue::Color3(v)) => { self.text_color3 = v; Ok(()) }
-            ("TextTransparency", PropertyValue::Float(v)) => { self.text_transparency = v.clamp(0.0, 1.0); Ok(()) }
-            ("TextStrokeColor3", PropertyValue::Color3(v)) => { self.text_stroke_color3 = v; Ok(()) }
-            ("TextStrokeTransparency", PropertyValue::Float(v)) => { self.text_stroke_transparency = v.clamp(0.0, 1.0); Ok(()) }
-            ("BackgroundColor3", PropertyValue::Color3(v)) => { self.background_color3 = v; Ok(()) }
-            ("BackgroundTransparency", PropertyValue::Float(v)) => { self.background_transparency = v.clamp(0.0, 1.0); Ok(()) }
-            ("BorderColor3", PropertyValue::Color3(v)) => { self.border_color3 = v; Ok(()) }
-            ("BorderSizePixel", PropertyValue::Int(v)) => { self.border_size_pixel = v.max(0); Ok(()) }
-            ("Size", PropertyValue::Vector2(v)) => { self.size = v; Ok(()) }
-            ("Position", PropertyValue::Vector2(v)) => { self.position = v; Ok(()) }
-            ("Active", PropertyValue::Bool(v)) => { self.active = v; Ok(()) }
-            ("Visible", PropertyValue::Bool(v)) => { self.visible = v; Ok(()) }
+            ("FontSize",               PropertyValue::Float(v))  => { self.font_size = v.max(1.0); Ok(()) }
+            ("LineHeight",             PropertyValue::Float(v))  => { self.line_height = v.max(0.1); Ok(()) }
+            ("TextColor3",             PropertyValue::Color3(v)) => { self.text_color3 = v; Ok(()) }
+            ("TextTransparency",       PropertyValue::Float(v))  => { self.text_transparency = v.clamp(0.0,1.0); Ok(()) }
+            ("TextStrokeColor3",       PropertyValue::Color3(v)) => { self.text_stroke_color3 = v; Ok(()) }
+            ("TextStrokeTransparency", PropertyValue::Float(v))  => { self.text_stroke_transparency = v.clamp(0.0,1.0); Ok(()) }
+            ("TextXAlignment",         PropertyValue::Enum(s))   => {
+                self.text_x_alignment = match s.as_str() { "Left" => TextXAlignment::Left, "Right" => TextXAlignment::Right, _ => TextXAlignment::Center };
+                Ok(())
+            }
+            ("TextYAlignment",         PropertyValue::Enum(s))   => {
+                self.text_y_alignment = match s.as_str() { "Top" => TextYAlignment::Top, "Bottom" => TextYAlignment::Bottom, _ => TextYAlignment::Center };
+                Ok(())
+            }
+            ("BackgroundColor3",       PropertyValue::Color3(v)) => { self.background_color3 = v; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(v))  => { self.background_transparency = v.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(v)) => { self.border_color3 = v; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(v))    => { self.border_size_pixel = v.max(0); Ok(()) }
+            ("Size",                   PropertyValue::Vector2(v))=> { self.size = v; Ok(()) }
+            ("Position",               PropertyValue::Vector2(v))=> { self.position = v; Ok(()) }
+            ("AnchorPoint",            PropertyValue::Vector2(v))=> { self.anchor_point = v; Ok(()) }
+            ("Rotation",               PropertyValue::Float(v))  => { self.rotation = v; Ok(()) }
+            ("ZIndex",                 PropertyValue::Int(v))    => { self.z_index = v; Ok(()) }
+            ("AutomaticSize",          PropertyValue::Enum(s))   => {
+                self.automatic_size = match s.as_str() { "X" => AutomaticSize::X, "Y" => AutomaticSize::Y, "XY" => AutomaticSize::XY, _ => AutomaticSize::None };
+                Ok(())
+            }
+            ("ClipsDescendants",       PropertyValue::Bool(v))   => { self.clips_descendants = v; Ok(()) }
+            ("Active",                 PropertyValue::Bool(v))   => { self.active = v; Ok(()) }
+            ("Visible",                PropertyValue::Bool(v))   => { self.visible = v; Ok(()) }
             _ => Err(format!("Unknown property: {}", name)),
         }
     }
     
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
         vec![
-            PropertyDescriptor { name: "Text".to_string(), property_type: "string".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "RichText".to_string(), property_type: "bool".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "TextScaled".to_string(), property_type: "bool".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "TextWrapped".to_string(), property_type: "bool".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "Font".to_string(), property_type: "Font".to_string(), read_only: false, category: "Font".to_string() },
-            PropertyDescriptor { name: "FontSize".to_string(), property_type: "float".to_string(), read_only: false, category: "Font".to_string() },
-            PropertyDescriptor { name: "LineHeight".to_string(), property_type: "float".to_string(), read_only: false, category: "Font".to_string() },
-            PropertyDescriptor { name: "TextColor3".to_string(), property_type: "Color3".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "TextTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "TextStrokeColor3".to_string(), property_type: "Color3".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "TextStrokeTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BackgroundColor3".to_string(), property_type: "Color3".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BackgroundTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BorderColor3".to_string(), property_type: "Color3".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BorderSizePixel".to_string(), property_type: "int".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "Size".to_string(), property_type: "Vector2".to_string(), read_only: false, category: "Data".to_string() },
-            PropertyDescriptor { name: "Position".to_string(), property_type: "Vector2".to_string(), read_only: false, category: "Data".to_string() },
-            PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
+            pd!("Text",                   "string", "Text"),
+            pd!("RichText",               "bool",   "Text"),
+            pd!("TextScaled",             "bool",   "Text"),
+            pd!("TextWrapped",            "bool",   "Text"),
+            pd!("Font",                   "enum",   "Font"),
+            pd!("FontSize",               "float",  "Font"),
+            pd!("LineHeight",             "float",  "Font"),
+            pd!("TextColor3",             "Color3", "Text"),
+            pd!("TextTransparency",       "float",  "Text"),
+            pd!("TextStrokeColor3",       "Color3", "Text"),
+            pd!("TextStrokeTransparency", "float",  "Text"),
+            pd!("TextXAlignment",         "enum",   "Text"),
+            pd!("TextYAlignment",         "enum",   "Text"),
+            pd!("BackgroundColor3",       "Color3", "Appearance"),
+            pd!("BackgroundTransparency", "float",  "Appearance"),
+            pd!("BorderColor3",           "Color3", "Appearance"),
+            pd!("BorderSizePixel",        "int",    "Appearance"),
+            pd!("ZIndex",                 "int",    "Appearance"),
+            pd!("ClipsDescendants",       "bool",   "Behavior"),
+            pd!("AutomaticSize",          "enum",   "Behavior"),
+            pd!("Active",                 "bool",   "Behavior"),
+            pd!("Visible",                "bool",   "Behavior"),
+            pd!("Position",               "vec2",   "Layout"),
+            pd!("Size",                   "vec2",   "Layout"),
+            pd!("AnchorPoint",            "vec2",   "Layout"),
+            pd!("Rotation",               "float",  "Transform"),
         ]
     }
 }
@@ -1587,101 +1668,297 @@ impl PropertyAccess for ScreenGui {
 impl PropertyAccess for Frame {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
         match name {
-            "Visible" => Some(PropertyValue::Bool(self.visible)),
-            "ZIndex" => Some(PropertyValue::Int(self.z_index)),
-            "BackgroundTransparency" => Some(PropertyValue::Float(self.background_transparency)),
-            "BorderSizePixel" => Some(PropertyValue::Int(self.border_size_pixel)),
-            "ClipsDescendants" => Some(PropertyValue::Bool(self.clips_descendants)),
-            "Rotation" => Some(PropertyValue::Float(self.rotation)),
-            "LayoutOrder" => Some(PropertyValue::Int(self.layout_order)),
-            _ => None
+            "Visible"               => Some(PropertyValue::Bool(self.visible)),
+            "BackgroundColor3"      => Some(PropertyValue::Color3(self.background_color3)),
+            "BackgroundTransparency"=> Some(PropertyValue::Float(self.background_transparency)),
+            "BorderColor3"          => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"       => Some(PropertyValue::Int(self.border_size_pixel)),
+            "BorderMode"            => Some(PropertyValue::Enum(format!("{:?}", self.border_mode))),
+            "ClipsDescendants"      => Some(PropertyValue::Bool(self.clips_descendants)),
+            "ZIndex"                => Some(PropertyValue::Int(self.z_index)),
+            "LayoutOrder"           => Some(PropertyValue::Int(self.layout_order)),
+            "Rotation"              => Some(PropertyValue::Float(self.rotation)),
+            _ => layout_get!(self, name),
         }
     }
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
         match (name, value) {
-            ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }
-            ("ZIndex", PropertyValue::Int(i)) => { self.z_index = i; Ok(()) }
-            ("BackgroundTransparency", PropertyValue::Float(f)) => { self.background_transparency = f.clamp(0.0, 1.0); Ok(()) }
-            ("BorderSizePixel", PropertyValue::Int(i)) => { self.border_size_pixel = i.max(0); Ok(()) }
-            ("ClipsDescendants", PropertyValue::Bool(b)) => { self.clips_descendants = b; Ok(()) }
-            ("Rotation", PropertyValue::Float(f)) => { self.rotation = f; Ok(()) }
-            ("LayoutOrder", PropertyValue::Int(i)) => { self.layout_order = i; Ok(()) }
-            _ => Err(format!("Unknown property: {}", name))
+            ("Visible",                PropertyValue::Bool(b))    => { self.visible = b; Ok(()) }
+            ("BackgroundColor3",       PropertyValue::Color3(c))  => { self.background_color3 = c; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(f))   => { self.background_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(c))  => { self.border_color3 = c; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(i))     => { self.border_size_pixel = i.max(0); Ok(()) }
+            ("BorderMode",             PropertyValue::Enum(s))    => {
+                self.border_mode = match s.as_str() { "Middle" => BorderMode::Middle, "Inset" => BorderMode::Inset, _ => BorderMode::Outline };
+                Ok(())
+            }
+            ("ClipsDescendants",       PropertyValue::Bool(b))    => { self.clips_descendants = b; Ok(()) }
+            ("ZIndex",                 PropertyValue::Int(i))     => { self.z_index = i; Ok(()) }
+            ("LayoutOrder",            PropertyValue::Int(i))     => { self.layout_order = i; Ok(()) }
+            ("Rotation",               PropertyValue::Float(f))   => { self.rotation = f; Ok(()) }
+            (n, v) => layout_set!(self, n, v),
         }
     }
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
-        vec![
-            PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
-            PropertyDescriptor { name: "ZIndex".to_string(), property_type: "int".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BackgroundTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BorderSizePixel".to_string(), property_type: "int".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "ClipsDescendants".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
-            PropertyDescriptor { name: "Rotation".to_string(), property_type: "float".to_string(), read_only: false, category: "Transform".to_string() },
-            PropertyDescriptor { name: "LayoutOrder".to_string(), property_type: "int".to_string(), read_only: false, category: "Layout".to_string() },
-        ]
+        let mut v = vec![
+            pd!("Visible",                "bool",  "Behavior"),
+            pd!("BackgroundColor3",       "Color3","Appearance"),
+            pd!("BackgroundTransparency", "float", "Appearance"),
+            pd!("BorderColor3",           "Color3","Appearance"),
+            pd!("BorderSizePixel",        "int",   "Appearance"),
+            pd!("BorderMode",             "enum",  "Appearance"),
+            pd!("ClipsDescendants",       "bool",  "Behavior"),
+            pd!("ZIndex",                 "int",   "Appearance"),
+            pd!("LayoutOrder",            "int",   "Layout"),
+            pd!("Rotation",               "float", "Transform"),
+        ];
+        v.extend(layout_list!());
+        v
     }
 }
 
 impl PropertyAccess for ScrollingFrame {
-    fn get_property(&self, name: &str) -> Option<PropertyValue> { match name { "Visible" => Some(PropertyValue::Bool(self.visible)), "ScrollingEnabled" => Some(PropertyValue::Bool(self.scrolling_enabled)), _ => None } }
-    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> { match (name, value) { ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }, ("ScrollingEnabled", PropertyValue::Bool(b)) => { self.scrolling_enabled = b; Ok(()) }, _ => Err(format!("Unknown: {}", name)) } }
-    fn list_properties(&self) -> Vec<PropertyDescriptor> { vec![PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() }] }
+    fn get_property(&self, name: &str) -> Option<PropertyValue> {
+        match name {
+            "Visible"               => Some(PropertyValue::Bool(self.visible)),
+            "BackgroundColor3"      => Some(PropertyValue::Color3(self.background_color3)),
+            "BackgroundTransparency"=> Some(PropertyValue::Float(self.background_transparency)),
+            "BorderColor3"          => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"       => Some(PropertyValue::Int(self.border_size_pixel)),
+            "BorderMode"            => Some(PropertyValue::Enum(format!("{:?}", self.border_mode))),
+            "ZIndex"                => Some(PropertyValue::Int(self.z_index)),
+            "LayoutOrder"           => Some(PropertyValue::Int(self.layout_order)),
+            "Rotation"              => Some(PropertyValue::Float(self.rotation)),
+            "ScrollingEnabled"      => Some(PropertyValue::Bool(self.scrolling_enabled)),
+            "ScrollBarThickness"    => Some(PropertyValue::Int(self.scroll_bar_thickness)),
+            _ => layout_get!(self, name),
+        }
+    }
+    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
+        match (name, value) {
+            ("Visible",                PropertyValue::Bool(b))    => { self.visible = b; Ok(()) }
+            ("BackgroundColor3",       PropertyValue::Color3(c))  => { self.background_color3 = c; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(f))   => { self.background_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(c))  => { self.border_color3 = c; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(i))     => { self.border_size_pixel = i.max(0); Ok(()) }
+            ("BorderMode",             PropertyValue::Enum(s))    => {
+                self.border_mode = match s.as_str() { "Middle" => BorderMode::Middle, "Inset" => BorderMode::Inset, _ => BorderMode::Outline };
+                Ok(())
+            }
+            ("ZIndex",                 PropertyValue::Int(i))     => { self.z_index = i; Ok(()) }
+            ("LayoutOrder",            PropertyValue::Int(i))     => { self.layout_order = i; Ok(()) }
+            ("Rotation",               PropertyValue::Float(f))   => { self.rotation = f; Ok(()) }
+            ("ScrollingEnabled",       PropertyValue::Bool(b))    => { self.scrolling_enabled = b; Ok(()) }
+            ("ScrollBarThickness",     PropertyValue::Int(i))     => { self.scroll_bar_thickness = i.max(0); Ok(()) }
+            (n, v) => layout_set!(self, n, v),
+        }
+    }
+    fn list_properties(&self) -> Vec<PropertyDescriptor> {
+        let mut v = vec![
+            pd!("Visible",                "bool",  "Behavior"),
+            pd!("BackgroundColor3",       "Color3","Appearance"),
+            pd!("BackgroundTransparency", "float", "Appearance"),
+            pd!("BorderColor3",           "Color3","Appearance"),
+            pd!("BorderSizePixel",        "int",   "Appearance"),
+            pd!("BorderMode",             "enum",  "Appearance"),
+            pd!("ZIndex",                 "int",   "Appearance"),
+            pd!("LayoutOrder",            "int",   "Layout"),
+            pd!("Rotation",               "float", "Transform"),
+            pd!("ScrollingEnabled",       "bool",  "Behavior"),
+            pd!("ScrollBarThickness",     "int",   "Appearance"),
+        ];
+        v.extend(layout_list!());
+        v
+    }
 }
 
 impl PropertyAccess for ImageLabel {
-    fn get_property(&self, name: &str) -> Option<PropertyValue> { match name { "Visible" => Some(PropertyValue::Bool(self.visible)), "Image" => Some(PropertyValue::String(self.image.clone())), _ => None } }
-    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> { match (name, value) { ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }, ("Image", PropertyValue::String(s)) => { self.image = s; Ok(()) }, _ => Err(format!("Unknown: {}", name)) } }
-    fn list_properties(&self) -> Vec<PropertyDescriptor> { vec![PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() }] }
+    fn get_property(&self, name: &str) -> Option<PropertyValue> {
+        match name {
+            "Visible"               => Some(PropertyValue::Bool(self.visible)),
+            "Image"                 => Some(PropertyValue::String(self.image.clone())),
+            "ImageColor3"           => Some(PropertyValue::Color3(self.image_color3)),
+            "ImageTransparency"     => Some(PropertyValue::Float(self.image_transparency)),
+            "BackgroundColor3"      => Some(PropertyValue::Color3(self.background_color3)),
+            "BackgroundTransparency"=> Some(PropertyValue::Float(self.background_transparency)),
+            "BorderColor3"          => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"       => Some(PropertyValue::Int(self.border_size_pixel)),
+            "ZIndex"                => Some(PropertyValue::Int(self.z_index)),
+            "LayoutOrder"           => Some(PropertyValue::Int(self.layout_order)),
+            "Rotation"              => Some(PropertyValue::Float(self.rotation)),
+            _ => layout_get!(self, name),
+        }
+    }
+    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
+        match (name, value) {
+            ("Visible",                PropertyValue::Bool(b))    => { self.visible = b; Ok(()) }
+            ("Image",                  PropertyValue::String(s))  => { self.image = s; Ok(()) }
+            ("ImageColor3",            PropertyValue::Color3(c))  => { self.image_color3 = c; Ok(()) }
+            ("ImageTransparency",      PropertyValue::Float(f))   => { self.image_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BackgroundColor3",       PropertyValue::Color3(c))  => { self.background_color3 = c; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(f))   => { self.background_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(c))  => { self.border_color3 = c; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(i))     => { self.border_size_pixel = i.max(0); Ok(()) }
+            ("ZIndex",                 PropertyValue::Int(i))     => { self.z_index = i; Ok(()) }
+            ("LayoutOrder",            PropertyValue::Int(i))     => { self.layout_order = i; Ok(()) }
+            ("Rotation",               PropertyValue::Float(f))   => { self.rotation = f; Ok(()) }
+            (n, v) => layout_set!(self, n, v),
+        }
+    }
+    fn list_properties(&self) -> Vec<PropertyDescriptor> {
+        let mut v = vec![
+            pd!("Visible",                "bool",  "Behavior"),
+            pd!("Image",                  "string","Image"),
+            pd!("ImageColor3",            "Color3","Image"),
+            pd!("ImageTransparency",      "float", "Image"),
+            pd!("BackgroundColor3",       "Color3","Appearance"),
+            pd!("BackgroundTransparency", "float", "Appearance"),
+            pd!("BorderColor3",           "Color3","Appearance"),
+            pd!("BorderSizePixel",        "int",   "Appearance"),
+            pd!("ZIndex",                 "int",   "Appearance"),
+            pd!("LayoutOrder",            "int",   "Layout"),
+            pd!("Rotation",               "float", "Transform"),
+        ];
+        v.extend(layout_list!());
+        v
+    }
 }
 
 impl PropertyAccess for TextButton {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
         match name {
-            "Visible" => Some(PropertyValue::Bool(self.visible)),
-            "Active" => Some(PropertyValue::Bool(self.active)),
-            "Text" => Some(PropertyValue::String(self.text.clone())),
-            "FontSize" => Some(PropertyValue::Float(self.font_size)),
-            "TextTransparency" => Some(PropertyValue::Float(self.text_transparency)),
-            "BackgroundTransparency" => Some(PropertyValue::Float(self.background_transparency)),
-            "BorderSizePixel" => Some(PropertyValue::Int(self.border_size_pixel)),
-            "ZIndex" => Some(PropertyValue::Int(self.z_index)),
-            "AutoButtonColor" => Some(PropertyValue::Bool(self.auto_button_color)),
-            _ => None
+            "Visible"               => Some(PropertyValue::Bool(self.visible)),
+            "Active"                => Some(PropertyValue::Bool(self.active)),
+            "AutoButtonColor"       => Some(PropertyValue::Bool(self.auto_button_color)),
+            "Text"                  => Some(PropertyValue::String(self.text.clone())),
+            "FontSize"              => Some(PropertyValue::Float(self.font_size)),
+            "TextColor3"            => Some(PropertyValue::Color3(self.text_color3)),
+            "TextTransparency"      => Some(PropertyValue::Float(self.text_transparency)),
+            "TextStrokeColor3"      => Some(PropertyValue::Color3(self.text_stroke_color3)),
+            "TextStrokeTransparency"=> Some(PropertyValue::Float(self.text_stroke_transparency)),
+            "TextXAlignment"        => Some(PropertyValue::Enum(format!("{:?}", self.text_x_alignment))),
+            "TextYAlignment"        => Some(PropertyValue::Enum(format!("{:?}", self.text_y_alignment))),
+            "BackgroundColor3"      => Some(PropertyValue::Color3(self.background_color3)),
+            "BackgroundTransparency"=> Some(PropertyValue::Float(self.background_transparency)),
+            "BorderColor3"          => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"       => Some(PropertyValue::Int(self.border_size_pixel)),
+            "ZIndex"                => Some(PropertyValue::Int(self.z_index)),
+            "LayoutOrder"           => Some(PropertyValue::Int(self.layout_order)),
+            "Rotation"              => Some(PropertyValue::Float(self.rotation)),
+            _ => layout_get!(self, name),
         }
     }
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
         match (name, value) {
-            ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }
-            ("Active", PropertyValue::Bool(b)) => { self.active = b; Ok(()) }
-            ("Text", PropertyValue::String(s)) => { self.text = s; Ok(()) }
-            ("FontSize", PropertyValue::Float(f)) => { self.font_size = f.max(1.0); Ok(()) }
-            ("TextTransparency", PropertyValue::Float(f)) => { self.text_transparency = f.clamp(0.0, 1.0); Ok(()) }
-            ("BackgroundTransparency", PropertyValue::Float(f)) => { self.background_transparency = f.clamp(0.0, 1.0); Ok(()) }
-            ("BorderSizePixel", PropertyValue::Int(i)) => { self.border_size_pixel = i.max(0); Ok(()) }
-            ("ZIndex", PropertyValue::Int(i)) => { self.z_index = i; Ok(()) }
-            ("AutoButtonColor", PropertyValue::Bool(b)) => { self.auto_button_color = b; Ok(()) }
-            _ => Err(format!("Unknown property: {}", name))
+            ("Visible",                PropertyValue::Bool(b))    => { self.visible = b; Ok(()) }
+            ("Active",                 PropertyValue::Bool(b))    => { self.active = b; Ok(()) }
+            ("AutoButtonColor",        PropertyValue::Bool(b))    => { self.auto_button_color = b; Ok(()) }
+            ("Text",                   PropertyValue::String(s))  => { self.text = s; Ok(()) }
+            ("FontSize",               PropertyValue::Float(f))   => { self.font_size = f.max(1.0); Ok(()) }
+            ("TextColor3",             PropertyValue::Color3(c))  => { self.text_color3 = c; Ok(()) }
+            ("TextTransparency",       PropertyValue::Float(f))   => { self.text_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("TextStrokeColor3",       PropertyValue::Color3(c))  => { self.text_stroke_color3 = c; Ok(()) }
+            ("TextStrokeTransparency", PropertyValue::Float(f))   => { self.text_stroke_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("TextXAlignment",         PropertyValue::Enum(s))    => {
+                self.text_x_alignment = match s.as_str() { "Left" => TextXAlignment::Left, "Right" => TextXAlignment::Right, _ => TextXAlignment::Center };
+                Ok(())
+            }
+            ("TextYAlignment",         PropertyValue::Enum(s))    => {
+                self.text_y_alignment = match s.as_str() { "Top" => TextYAlignment::Top, "Bottom" => TextYAlignment::Bottom, _ => TextYAlignment::Center };
+                Ok(())
+            }
+            ("BackgroundColor3",       PropertyValue::Color3(c))  => { self.background_color3 = c; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(f))   => { self.background_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(c))  => { self.border_color3 = c; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(i))     => { self.border_size_pixel = i.max(0); Ok(()) }
+            ("ZIndex",                 PropertyValue::Int(i))     => { self.z_index = i; Ok(()) }
+            ("LayoutOrder",            PropertyValue::Int(i))     => { self.layout_order = i; Ok(()) }
+            ("Rotation",               PropertyValue::Float(f))   => { self.rotation = f; Ok(()) }
+            (n, v) => layout_set!(self, n, v),
         }
     }
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
-        vec![
-            PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
-            PropertyDescriptor { name: "Active".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
-            PropertyDescriptor { name: "Text".to_string(), property_type: "string".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "FontSize".to_string(), property_type: "float".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "TextTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Text".to_string() },
-            PropertyDescriptor { name: "BackgroundTransparency".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "BorderSizePixel".to_string(), property_type: "int".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "ZIndex".to_string(), property_type: "int".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "AutoButtonColor".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
-        ]
+        let mut v = vec![
+            pd!("Visible",                "bool",  "Behavior"),
+            pd!("Active",                 "bool",  "Behavior"),
+            pd!("AutoButtonColor",        "bool",  "Behavior"),
+            pd!("Text",                   "string","Text"),
+            pd!("FontSize",               "float", "Text"),
+            pd!("TextColor3",             "Color3","Text"),
+            pd!("TextTransparency",       "float", "Text"),
+            pd!("TextStrokeColor3",       "Color3","Text"),
+            pd!("TextStrokeTransparency", "float", "Text"),
+            pd!("TextXAlignment",         "enum",  "Text"),
+            pd!("TextYAlignment",         "enum",  "Text"),
+            pd!("BackgroundColor3",       "Color3","Appearance"),
+            pd!("BackgroundTransparency", "float", "Appearance"),
+            pd!("BorderColor3",           "Color3","Appearance"),
+            pd!("BorderSizePixel",        "int",   "Appearance"),
+            pd!("ZIndex",                 "int",   "Appearance"),
+            pd!("LayoutOrder",            "int",   "Layout"),
+            pd!("Rotation",               "float", "Transform"),
+        ];
+        v.extend(layout_list!());
+        v
     }
 }
 
 impl PropertyAccess for ImageButton {
-    fn get_property(&self, name: &str) -> Option<PropertyValue> { match name { "Visible" => Some(PropertyValue::Bool(self.visible)), "Image" => Some(PropertyValue::String(self.image.clone())), _ => None } }
-    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> { match (name, value) { ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }, ("Image", PropertyValue::String(s)) => { self.image = s; Ok(()) }, _ => Err(format!("Unknown: {}", name)) } }
-    fn list_properties(&self) -> Vec<PropertyDescriptor> { vec![PropertyDescriptor { name: "Visible".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() }] }
+    fn get_property(&self, name: &str) -> Option<PropertyValue> {
+        match name {
+            "Visible"               => Some(PropertyValue::Bool(self.visible)),
+            "Active"                => Some(PropertyValue::Bool(self.active)),
+            "AutoButtonColor"       => Some(PropertyValue::Bool(self.auto_button_color)),
+            "Image"                 => Some(PropertyValue::String(self.image.clone())),
+            "ImageColor3"           => Some(PropertyValue::Color3(self.image_color3)),
+            "ImageTransparency"     => Some(PropertyValue::Float(self.image_transparency)),
+            "BackgroundColor3"      => Some(PropertyValue::Color3(self.background_color3)),
+            "BackgroundTransparency"=> Some(PropertyValue::Float(self.background_transparency)),
+            "BorderColor3"          => Some(PropertyValue::Color3(self.border_color3)),
+            "BorderSizePixel"       => Some(PropertyValue::Int(self.border_size_pixel)),
+            "ZIndex"                => Some(PropertyValue::Int(self.z_index)),
+            "LayoutOrder"           => Some(PropertyValue::Int(self.layout_order)),
+            "Rotation"              => Some(PropertyValue::Float(self.rotation)),
+            _ => layout_get!(self, name),
+        }
+    }
+    fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
+        match (name, value) {
+            ("Visible",                PropertyValue::Bool(b))    => { self.visible = b; Ok(()) }
+            ("Active",                 PropertyValue::Bool(b))    => { self.active = b; Ok(()) }
+            ("AutoButtonColor",        PropertyValue::Bool(b))    => { self.auto_button_color = b; Ok(()) }
+            ("Image",                  PropertyValue::String(s))  => { self.image = s; Ok(()) }
+            ("ImageColor3",            PropertyValue::Color3(c))  => { self.image_color3 = c; Ok(()) }
+            ("ImageTransparency",      PropertyValue::Float(f))   => { self.image_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BackgroundColor3",       PropertyValue::Color3(c))  => { self.background_color3 = c; Ok(()) }
+            ("BackgroundTransparency", PropertyValue::Float(f))   => { self.background_transparency = f.clamp(0.0,1.0); Ok(()) }
+            ("BorderColor3",           PropertyValue::Color3(c))  => { self.border_color3 = c; Ok(()) }
+            ("BorderSizePixel",        PropertyValue::Int(i))     => { self.border_size_pixel = i.max(0); Ok(()) }
+            ("ZIndex",                 PropertyValue::Int(i))     => { self.z_index = i; Ok(()) }
+            ("LayoutOrder",            PropertyValue::Int(i))     => { self.layout_order = i; Ok(()) }
+            ("Rotation",               PropertyValue::Float(f))   => { self.rotation = f; Ok(()) }
+            (n, v) => layout_set!(self, n, v),
+        }
+    }
+    fn list_properties(&self) -> Vec<PropertyDescriptor> {
+        let mut v = vec![
+            pd!("Visible",                "bool",  "Behavior"),
+            pd!("Active",                 "bool",  "Behavior"),
+            pd!("AutoButtonColor",        "bool",  "Behavior"),
+            pd!("Image",                  "string","Image"),
+            pd!("ImageColor3",            "Color3","Image"),
+            pd!("ImageTransparency",      "float", "Image"),
+            pd!("BackgroundColor3",       "Color3","Appearance"),
+            pd!("BackgroundTransparency", "float", "Appearance"),
+            pd!("BorderColor3",           "Color3","Appearance"),
+            pd!("BorderSizePixel",        "int",   "Appearance"),
+            pd!("ZIndex",                 "int",   "Appearance"),
+            pd!("LayoutOrder",            "int",   "Layout"),
+            pd!("Rotation",               "float", "Transform"),
+        ];
+        v.extend(layout_list!());
+        v
+    }
 }
 
 impl PropertyAccess for VideoFrame {

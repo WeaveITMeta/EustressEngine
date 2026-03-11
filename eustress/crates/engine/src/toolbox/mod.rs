@@ -79,6 +79,72 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
     ]
 }
 
+/// Insert a mesh instance by creating a .glb.toml file in a specific target directory.
+/// Use this when you already know the directory (e.g. selected folder's path).
+pub fn insert_mesh_instance_at(
+    target_dir: &PathBuf,
+    mesh_id: &str,
+    position: [f32; 3],
+    instance_name: Option<String>,
+) -> Result<PathBuf, String> {
+    let catalog = get_mesh_catalog();
+    let mesh = catalog.iter()
+        .find(|m| m.id == mesh_id)
+        .ok_or_else(|| format!("Mesh '{}' not found in catalog", mesh_id))?;
+
+    let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Generate unique name within target_dir
+    let instance_name = {
+        let test_path = target_dir.join(format!("{}.glb.toml", base_name));
+        if !test_path.exists() {
+            base_name.clone()
+        } else {
+            let mut found = format!("{}_{}", base_name, now.len()); // fallback
+            for i in 1..1000usize {
+                let candidate = format!("{}{}", base_name, i);
+                if !target_dir.join(format!("{}.glb.toml", candidate)).exists() {
+                    found = candidate;
+                    break;
+                }
+            }
+            found
+        }
+    };
+
+    fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create directory {:?}: {}", target_dir, e))?;
+
+    let instance = crate::space::instance_loader::InstanceDefinition {
+        asset: crate::space::instance_loader::AssetReference {
+            mesh: mesh.mesh_path.to_string(),
+            scene: "Scene0".to_string(),
+        },
+        transform: crate::space::instance_loader::TransformData {
+            position,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: mesh.default_size,
+        },
+        properties: crate::space::instance_loader::InstanceProperties::default(),
+        metadata: crate::space::instance_loader::InstanceMetadata {
+            class_name: "Part".to_string(),
+            archivable: true,
+            created: now.clone(),
+            last_modified: now,
+        },
+        material: None,
+        thermodynamic: None,
+        electrochemical: None,
+        ui: None,
+    };
+
+    let toml_path = target_dir.join(format!("{}.glb.toml", instance_name));
+    crate::space::instance_loader::write_instance_definition(&toml_path, &instance)?;
+    info!("📦 Toolbox: Created instance file {:?}", toml_path);
+    Ok(toml_path)
+}
+
 /// Insert a mesh instance by creating a .glb.toml file in the Workspace folder
 pub fn insert_mesh_instance(
     space_root: &PathBuf,
@@ -118,6 +184,7 @@ pub fn insert_mesh_instance(
         material: None,
         thermodynamic: None,
         electrochemical: None,
+        ui: None,
     };
     
     // Write to Workspace folder

@@ -77,19 +77,19 @@ This is **user-created game UI** — defined in TOML, rendered by Slint at runti
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Bevy Window                               │
+│                        Bevy Window                              │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    3D Viewport (Bevy)                      │  │
-│  │                                                            │  │
+│  │                    3D Viewport (Bevy)                     │  │
+│  │                                                           │  │
 │  │  ┌──────────────────────────────────────────────────────┐ │  │
-│  │  │              Slint Overlay (Transparent)              │ │  │
+│  │  │              Slint Overlay (Transparent)             │ │  │
 │  │  │  ┌─────────┐ ┌────────────────────┐ ┌──────────────┐ │ │  │
 │  │  │  │Explorer │ │     Viewport       │ │  Properties  │ │ │  │
 │  │  │  │  Panel  │ │   (transparent)    │ │    Panel     │ │ │  │
 │  │  │  └─────────┘ └────────────────────┘ └──────────────┘ │ │  │
-│  │  │  ┌──────────────────────────────────────────────────┐ │ │  │
-│  │  │  │                  Output Console                   │ │ │  │
-│  │  │  └──────────────────────────────────────────────────┘ │ │  │
+│  │  │  ┌──────────────────────────────────────────────────┐│ │  │
+│  │  │  │                  Output Console                   │ │  │  
+│  │  │  └──────────────────────────────────────────────────┘│ │  │
 │  │  └──────────────────────────────────────────────────────┘ │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -148,14 +148,14 @@ User-created UI is defined in TOML files, not `.slint` files. We need to:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Game Window                               │
+│                        Game Window                              │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    3D World (Bevy)                         │  │
-│  │                                                            │  │
+│  │                    3D World (Bevy)                        │  │
+│  │                                                           │  │
 │  │  ┌──────────────────────────────────────────────────────┐ │  │
-│  │  │           Runtime UI Overlay (Slint)                  │ │  │
+│  │  │           Runtime UI Overlay (Slint)                 │ │  │
 │  │  │  ┌────────────────────────────────────────────────┐  │ │  │
-│  │  │  │  ScreenGui: HUD                                 │  │ │  │
+│  │  │  │  ScreenGui: HUD                                │  │ │  │
 │  │  │  │  ┌─────────────┐  ┌──────────────────────────┐ │  │ │  │
 │  │  │  │  │ HealthBar   │  │        Minimap           │ │  │ │  │
 │  │  │  │  │ ██████░░░░  │  │     [map image]          │ │  │ │  │
@@ -528,21 +528,21 @@ fn get_class_icon(class_name: &str) -> slint::Image {
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Studio Mode                              │
-│                                                                  │
+│                         Studio Mode                             │
+│                                                                 │
 │  1. User creates ScreenGui in Explorer (right-click → Insert)   │
 │     └─→ Creates StarterGui/MyHUD/_instance.toml                 │
-│                                                                  │
-│  2. User adds Frame child                                        │
+│                                                                 │
+│  2. User adds Frame child                                       │
 │     └─→ Creates StarterGui/MyHUD/HealthBar.frame.toml           │
-│                                                                  │
-│  3. User edits properties in Properties panel                    │
+│                                                                 │
+│  3. User edits properties in Properties panel                   │
 │     └─→ Writes to TOML file                                     │
-│                                                                  │
-│  4. File watcher detects change                                  │
+│                                                                 │
+│  4. File watcher detects change                                 │
 │     └─→ Triggers UI rebuild                                     │
-│                                                                  │
-│  5. Runtime UI re-renders with new properties                    │
+│                                                                 │
+│  5. Runtime UI re-renders with new properties                   │
 │     └─→ User sees change immediately in viewport                │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -553,19 +553,19 @@ A drag-and-drop UI editor inside Studio:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  UI Editor Tab                                                   │
+│  UI Editor Tab                                                  │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  ┌─────────┐                                              │  │
-│  │  │ Toolbox │  ┌────────────────────────────────────────┐ │  │
-│  │  │ ─────── │  │                                        │ │  │
-│  │  │ [Frame] │  │         Canvas (ScreenGui)             │ │  │
-│  │  │ [Text]  │  │                                        │ │  │
-│  │  │ [Image] │  │    ┌──────────────────────┐           │ │  │
-│  │  │ [Button]│  │    │   Selected Frame     │           │ │  │
-│  │  │ [Input] │  │    │   (drag handles)     │           │ │  │
-│  │  │ [Scroll]│  │    └──────────────────────┘           │ │  │
-│  │  │         │  │                                        │ │  │
-│  │  └─────────┘  └────────────────────────────────────────┘ │  │
+│  │  │ Toolbox │  ┌────────────────────────────────────────┐  │  │
+│  │  │ ─────── │  │                                        │  │  │
+│  │  │ [Frame] │  │         Canvas (ScreenGui)             │  │  │
+│  │  │ [Text]  │  │                                        │  │  │
+│  │  │ [Image] │  │    ┌──────────────────────┐            │  │  │
+│  │  │ [Button]│  │    │   Selected Frame     │            │  │  │
+│  │  │ [Input] │  │    │   (drag handles)     │            │  │  │
+│  │  │ [Scroll]│  │    └──────────────────────┘            │  │  │
+│  │  │         │  │                                        │  │  │
+│  │  └─────────┘  └────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```

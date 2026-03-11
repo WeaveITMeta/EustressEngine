@@ -583,12 +583,11 @@ export component AdvancedTabBar inherits Rectangle {
 export component PerformanceOverlay inherits Rectangle {
     in-out property <float> fps: 60.0;
     in-out property <float> frame-time-ms: 16.67;
-    in-out property <float> memory-mb: 0.0;
     in-out property <int> entity-count: 0;
     in-out property <bool> show-detailed: false;
     
     width: root.show-detailed ? 200px : 80px;
-    height: root.show-detailed ? 140px : 28px;
+    height: root.show-detailed ? 112px : 28px;
     background: Theme.overlay-background;
     border-radius: 4px;
     border-width: 1px;
@@ -629,16 +628,6 @@ export component PerformanceOverlay inherits Rectangle {
             Text { text: "Frame:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
             Text { 
                 text: Math.round(root.frame-time-ms * 100) / 100 + "ms"; 
-                color: Theme.text-primary;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-        }
-        
-        HorizontalLayout {
-            Text { text: "Memory:"; color: Theme.text-secondary; horizontal-stretch: 1; font-size: 13px; vertical-alignment: center; }
-            Text { 
-                text: Math.round(root.memory-mb) + " MB"; 
                 color: Theme.text-primary;
                 font-size: 13px;
                 vertical-alignment: center;

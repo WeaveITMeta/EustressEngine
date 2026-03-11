@@ -322,15 +322,35 @@ pub fn LearnPage() -> impl IntoView {
                 </div>
                 
                 <div class="docs-grid">
-                    <a href="/docs/getting-started" class="doc-card">
+                    <a href="/docs/getting-started" class="doc-card featured">
                         <img src="/assets/icons/rocket.svg" alt="Getting Started" class="doc-icon" />
                         <h3>"Getting Started"</h3>
                         <p>"Set up your environment and create your first place"</p>
+                    </a>
+                    <a href="/docs/philosophy" class="doc-card featured">
+                        <img src="/assets/icons/brain.svg" alt="Philosophy" class="doc-icon" />
+                        <h3>"Philosophy"</h3>
+                        <p>"File-system-first, IDE agnostic, no vendor lock-in"</p>
                     </a>
                     <a href="/docs/scripting" class="doc-card">
                         <img src="/assets/icons/code.svg" alt="Scripting" class="doc-icon" />
                         <h3>"Scripting"</h3>
                         <p>"Learn to code behavior with Soul and the Eustress API"</p>
+                    </a>
+                    <a href="/docs/ui" class="doc-card">
+                        <img src="/assets/icons/template.svg" alt="UI" class="doc-icon" />
+                        <h3>"UI Systems"</h3>
+                        <p>"TOML definitions, Slint components, Rune scripting API"</p>
+                    </a>
+                    <a href="/docs/simulation" class="doc-card featured">
+                        <img src="/assets/icons/physics.svg" alt="Simulation" class="doc-icon" />
+                        <h3>"Simulation"</h3>
+                        <p>"Time compression, watchpoints, breakpoints, data recording"</p>
+                    </a>
+                    <a href="/docs/realism" class="doc-card featured">
+                        <img src="/assets/icons/sparkles.svg" alt="Realism" class="doc-icon" />
+                        <h3>"Realism Platform"</h3>
+                        <p>"STEM, manufacturing, supply chain, business simulation"</p>
                     </a>
                     <a href="/docs/building" class="doc-card">
                         <img src="/assets/icons/cube.svg" alt="Building" class="doc-icon" />
@@ -351,11 +371,6 @@ pub fn LearnPage() -> impl IntoView {
                         <img src="/assets/icons/audio.svg" alt="Audio" class="doc-icon" />
                         <h3>"Audio"</h3>
                         <p>"Add music, sound effects, and spatial audio"</p>
-                    </a>
-                    <a href="/docs/ui" class="doc-card">
-                        <img src="/assets/icons/template.svg" alt="UI" class="doc-icon" />
-                        <h3>"UI Systems"</h3>
-                        <p>"Create menus, HUDs, and interactive interfaces"</p>
                     </a>
                     <a href="/docs/publishing" class="doc-card">
                         <img src="/assets/icons/upload.svg" alt="Publishing" class="doc-icon" />

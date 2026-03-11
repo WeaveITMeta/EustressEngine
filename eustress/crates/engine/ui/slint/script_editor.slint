@@ -6,12 +6,23 @@
 import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+// One highlighted line: Rust pre-joins all tokens for the line into a single
+// text string and picks the dominant (first non-whitespace token) color.
+export struct HighlightLine {
+    text: string,  // full line text
+    r: float,      // foreground color [0..1]
+    g: float,
+    b: float,
+    bold: bool,    // true for headings, keywords, etc.
+}
+
 // Center tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
 // Tab data model for the center tabbed viewer
 export struct CenterTab {
     entity-id: int,      // Entity ID for script tabs (-1 for web/scene)
     name: string,        // Display name / page title
-    tab-type: string,    // "scene", "script", "web"
+    tab-type: string,    // "scene", "script", "web", "code"
+    mode: string,        // SoulScript mode: "summary" (md preview) or "code" (editor), "" for others
     dirty: bool,         // Unsaved changes indicator
     content: string,     // Script content or HTML
     url: string,         // URL for web tabs
@@ -100,121 +111,182 @@ export component ScriptEditor inherits Rectangle {
     in-out property <string> current-content: "";
     in property <int> cursor-line: 1;
     in property <int> cursor-column: 1;
-    in property <bool> show-tab-bar: true; // Set false when embedded with external tab bar
-    
+    in property <bool> show-tab-bar: true;
+    // Pre-computed line number string pushed from Rust (e.g. "1\n2\n3\n...N")
+    in property <string> line-numbers-text: "1";
+    // Set to true by Rust after loading new tab content; resets editor scroll to line 1.
+    // Slint watches this and calls set-selection-offsets(0,0) on the TextEdit.
+    in-out property <bool> scroll-to-top-trigger: false;
+    // Syntax-highlighted lines pushed from Rust on every content change.
+    // One entry per source line. Empty = highlighting inactive (plain TextEdit).
+    in property <[HighlightLine]> highlight-lines: [];
+    in property <bool> has-highlights: false;
+
     // Callbacks
     callback on-tab-selected(int);
     callback on-tab-closed(int);
     callback on-content-changed(string);
     callback on-save();
     callback on-build();
-    
+    callback on-toggle-mode(int);   // Toggle summary/code for tab at index
+
+    // Derived: active tab mode ("summary" | "code" | "")
+    property <string> active-mode: root.tabs.length > 0 && root.active-tab < root.tabs.length
+        ? root.tabs[root.active-tab].mode
+        : "";
+    property <bool> is-soul-script: root.active-mode == "summary" || root.active-mode == "code";
+    property <bool> is-summary: root.active-mode == "summary";
+
     background: Theme.panel-background;
-    
+
     VerticalBox {
         padding: 0px;
         spacing: 0px;
-        
-        // Tab bar (hidden when external tab bar is used)
+
+        // Tab bar
         if root.show-tab-bar: Rectangle {
             height: 32px;
             background: Theme.background-secondary;
-            
+
             HorizontalBox {
                 padding-left: 4px;
                 spacing: 2px;
-                
+
                 for tab[index] in root.tabs: EditorTab {
                     name: tab.name;
                     dirty: tab.dirty;
                     active: index == root.active-tab;
-                    
+
                     clicked => { root.on-tab-selected(index); }
                     close => { root.on-tab-closed(index); }
                 }
-                
+
                 Rectangle { horizontal-stretch: 1; }
             }
         }
-        
+
         // Toolbar
         Rectangle {
             height: 32px;
             background: Theme.header-background;
-            
+
             HorizontalBox {
                 padding-left: 8px;
                 padding-right: 8px;
                 spacing: 8px;
-                
-                // Save button
-                Rectangle {
-                    width: 60px;
+
+                // Summary / Code mode toggle pill (only for SoulScript tabs)
+                if root.is-soul-script: Rectangle {
+                    width: 140px;
                     height: 24px;
-                    background: Theme.button-background;
                     border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-save(); }
-                    }
-                    
-                    HorizontalBox {
-                        padding: 4px;
-                        spacing: 4px;
-                        
-                        Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/save.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
+                    background: Theme.background-secondary;
+
+                    HorizontalLayout {
+                        padding: 2px;
+                        spacing: 2px;
+
+                        // Summary button
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 3px;
+                            background: root.is-summary ? Theme.button-primary : transparent;
+
+                            summary-ta := TouchArea {
+                                clicked => {
+                                    if !root.is-summary {
+                                        root.on-toggle-mode(root.active-tab);
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "Summary";
+                                font-size: 11px;
+                                color: root.is-summary ? white : Theme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
-                        
-                        Text {
-                            text: "Save";
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            vertical-alignment: center;
+
+                        // Code button
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 3px;
+                            background: !root.is-summary && root.is-soul-script ? Theme.button-primary : transparent;
+
+                            code-ta := TouchArea {
+                                clicked => {
+                                    if root.is-summary {
+                                        root.on-toggle-mode(root.active-tab);
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: "Code";
+                                font-size: 11px;
+                                color: !root.is-summary && root.is-soul-script ? white : Theme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
-                
-                // Build button
-                Rectangle {
+
+                // Build button — immediately right of the Code toggle, only in code mode
+                if !root.is-summary && root.is-soul-script: Rectangle {
                     width: 70px;
                     height: 24px;
                     background: Theme.button-primary;
                     border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-build(); }
-                    }
-                    
+
+                    TouchArea { clicked => { root.on-build(); } }
+
                     HorizontalBox {
                         padding: 4px;
                         spacing: 4px;
-                        
                         Image {
-                            width: 14px;
-                            height: 14px;
+                            width: 14px; height: 14px;
                             source: @image-url("../../assets/icons/ui/build.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
+                            image-fit: contain; vertical-alignment: center;
                         }
-                        
                         Text {
-                            text: "Build";
-                            color: white;
-                            font-size: 12px;
-                            vertical-alignment: center;
+                            text: "Build"; color: white;
+                            font-size: 12px; vertical-alignment: center;
                         }
                     }
                 }
-                
+
+                // Spacer pushes Save + Ln/Col to the far right
                 Rectangle { horizontal-stretch: 1; }
-                
-                // Cursor position
-                Text {
+
+                // Save button — far right, only in code mode
+                if !root.is-summary: Rectangle {
+                    width: 60px;
+                    height: 24px;
+                    background: Theme.button-background;
+                    border-radius: 4px;
+
+                    TouchArea { clicked => { root.on-save(); } }
+
+                    HorizontalBox {
+                        padding: 4px;
+                        spacing: 4px;
+                        Image {
+                            width: 14px; height: 14px;
+                            source: @image-url("../../assets/icons/ui/save.svg");
+                            image-fit: contain; vertical-alignment: center;
+                        }
+                        Text {
+                            text: "Save"; color: Theme.text-primary;
+                            font-size: 12px; vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Cursor position — rightmost, code mode only
+                if !root.is-summary: Text {
                     text: "Ln " + root.cursor-line + ", Col " + root.cursor-column;
                     color: Theme.text-secondary;
                     font-size: 11px;
@@ -222,67 +294,149 @@ export component ScriptEditor inherits Rectangle {
                 }
             }
         }
-        
-        // Editor area
+
+        // Empty state
         if root.tabs.length == 0: Rectangle {
             vertical-stretch: 1;
             background: Theme.viewport-background;
-            
+
             VerticalBox {
                 alignment: center;
-                
+
                 Image {
-                    width: 48px;
-                    height: 48px;
+                    width: 48px; height: 48px;
                     source: @image-url("../../assets/icons/ui/new-file.svg");
                     image-fit: contain;
                     horizontal-alignment: center;
                 }
-                
+
                 Text {
-                    text: "No scripts open";
+                    text: "No files open";
                     color: Theme.text-secondary;
                     horizontal-alignment: center;
                 }
-                
+
                 Text {
-                    text: "Double-click a Soul script in the Explorer to edit";
+                    text: "Double-click a .rune, .soul, or .md file in the Explorer";
                     color: Theme.text-disabled;
                     font-size: 12px;
                     horizontal-alignment: center;
                 }
             }
         }
-        
-        if root.tabs.length > 0: Rectangle {
+
+        // Summary / Markdown preview mode
+        if root.tabs.length > 0 && root.is-summary: ScrollView {
             vertical-stretch: 1;
-            background: Theme.viewport-background;
-            
-            HorizontalBox {
-                // Line numbers
-                Rectangle {
-                    width: 50px;
-                    background: Theme.background-secondary;
-                    
-                    // Line numbers would be rendered here
-                    Text {
-                        text: "1\n2\n3\n4\n5";
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        font-family: "Consolas";
-                        horizontal-alignment: right;
-                        padding-right: 8px;
-                        padding-top: 4px;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 2px;
+                alignment: start;
+
+                // When highlights are available, render each line with its color
+                if root.has-highlights: VerticalLayout {
+                    spacing: 2px;
+                    alignment: start;
+                    for hl in root.highlight-lines: Text {
+                        text: hl.text;
+                        color: rgba(hl.r, hl.g, hl.b, 1.0);
+                        font-size: hl.bold ? 15px : 14px;
+                        font-weight: hl.bold ? 700 : 400;
+                        wrap: word-wrap;
                     }
                 }
-                
-                // Code editor
-                TextEdit {
+
+                // Fallback: plain text when no highlight data is available
+                if !root.has-highlights: Text {
+                    text: root.current-content;
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Code mode — text editor with synchronized line number gutter.
+        // The gutter shows a 3px colored left-accent strip per line derived
+        // from the dominant token color when highlight-lines are available.
+        if root.tabs.length > 0 && !root.is-summary: Rectangle {
+            vertical-stretch: 1;
+            background: Theme.viewport-background;
+
+            HorizontalLayout {
+                spacing: 0px;
+
+                // Line numbers gutter — fixed 52px column
+                Rectangle {
+                    width: 52px;
+                    background: Theme.background-secondary;
+                    clip: true;
+
+                    // Colored accent strips (one per line, 18px tall) when highlights active
+                    if root.has-highlights: Rectangle {
+                        x: 0; y: 5px;
+                        width: 3px;
+                        height: 100%;
+                        clip: true;
+
+                        VerticalLayout {
+                            spacing: 0px;
+                            alignment: start;
+                            for hl in root.highlight-lines: Rectangle {
+                                height: 18px;
+                                width: 3px;
+                                background: rgba(hl.r, hl.g, hl.b, 0.55);
+                            }
+                        }
+                    }
+
+                    // Line number text
+                    Rectangle {
+                        x: 0; y: 0;
+                        width: 100%; height: 100%;
+                        background: transparent;
+
+                        Text {
+                            x: 0px;
+                            y: 5px;
+                            width: parent.width - 10px;
+                            height: parent.height - 10px;
+                            text: root.line-numbers-text;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            font-family: "Consolas";
+                            horizontal-alignment: right;
+                            vertical-alignment: top;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+
+                // Separator
+                Rectangle {
+                    width: 1px;
+                    background: #2a2a2a;
+                }
+
+                // Code editor — fills remaining width
+                editor-area := TextEdit {
                     horizontal-stretch: 1;
                     text <=> root.current-content;
                     font-size: 13px;
-                    
+                    font-family: "Consolas";
+                    wrap: no-wrap;
+
                     edited(text) => { root.on-content-changed(text); }
+                }
+
+                // Invisible sentinel: watches scroll-to-top-trigger, jumps to line 1
+                if root.scroll-to-top-trigger: TouchArea {
+                    width: 0px; height: 0px;
+                    init => {
+                        editor-area.set-selection-offsets(0, 0);
+                        root.scroll-to-top-trigger = false;
+                    }
                 }
             }
         }

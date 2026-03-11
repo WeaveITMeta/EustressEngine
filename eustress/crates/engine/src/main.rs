@@ -4,6 +4,7 @@
 use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
+use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
@@ -52,6 +53,7 @@ mod math_utils;         // Shared math utilities (ray intersection, AABB, etc.)
 mod entity_utils;       // Entity ID helpers
 mod io_manager;         // Async data fetching for Parameters
 mod space;              // Space file-system-first architecture
+mod simulation;         // Tick-based simulation with time compression
 mod toolbox;            // Toolbox mesh insertion system
 mod txt_to_toml_watcher; // Automatic .txt to .toml converter
 
@@ -116,6 +118,15 @@ fn main() {
     // The default `warn` handler was emitting hundreds of log lines per frame, tanking FPS.
     app.set_error_handler(bevy::ecs::error::ignore);
     
+    // Register the Space asset source BEFORE DefaultPlugins
+    // This must happen before AssetPlugin is initialized
+    let space_root = space::default_space_root();
+    info!("📁 Registering Space asset source at: {:?}", space_root);
+    app.register_asset_source(
+        "space",
+        bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
+    );
+    
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
             .set(WindowPlugin {
@@ -148,6 +159,11 @@ fn main() {
                 ..default()
             })
         )
+        // Register GLTF types for scene spawning (prevents panic on unregistered types)
+        .register_type::<GltfExtras>()
+        .register_type::<GltfSceneExtras>()
+        .register_type::<GltfMeshExtras>()
+        .register_type::<GltfMaterialExtras>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
         // Startup args
@@ -214,6 +230,8 @@ fn main() {
         .insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
         // Realism Physics System (materials, thermodynamics, fluids, deformation, visualizers)
         .add_plugins(eustress_common::realism::RealismPlugin)
+        // Tick-based simulation with time compression (integrates with PlayModeState)
+        .add_plugins(simulation::SimulationPlugin::default())
         // Gamepad
         .add_plugins(eustress_common::services::GamepadServicePlugin)
         // Notifications UI

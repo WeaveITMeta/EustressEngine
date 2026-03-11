@@ -98,8 +98,8 @@ impl Default for EditorSettings {
             surface_snap_enabled: true,
             angle_snap: 15.0,
             show_grid: true,
-            // Grid spacing based on SI standard gravity: 9.807m
-            grid_size: 9.807,
+            // Grid spacing based on SI standard gravity: 9.80665m
+            grid_size: 9.80665,
             auto_save_interval: 300.0, // 5 minutes
             auto_save_enabled: true,
         }

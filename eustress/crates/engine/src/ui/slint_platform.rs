@@ -266,6 +266,11 @@ pub fn update_slint_texture_size(
     }
 }
 
+/// Tracks the last known cursor position so drag/scroll events keep working
+/// when the cursor leaves the window boundary (Slint cancels drags if PointerMoved stops).
+#[derive(Resource, Default)]
+pub struct LastCursorPosition(pub slint::LogicalPosition);
+
 /// System to forward Bevy input events to Slint
 pub fn forward_input_to_slint(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -273,67 +278,75 @@ pub fn forward_input_to_slint(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut mouse_wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut cursor_moved: MessageReader<bevy::input::mouse::MouseMotion>,
+    mut last_cursor: ResMut<LastCursorPosition>,
 ) {
     with_platform(|platform| {
         platform.with_window(|window| {
-            // Get cursor position
+            // Update last known position when cursor is inside the window
             if let Ok(bevy_window) = windows.get_single() {
                 if let Some(cursor_pos) = bevy_window.cursor_position() {
-                    let logical_pos = slint::LogicalPosition::new(
+                    last_cursor.0 = slint::LogicalPosition::new(
                         cursor_pos.x as f32,
                         cursor_pos.y as f32,
                     );
-                    
-                    // Forward mouse moved events
-                    for _ in cursor_moved.read() {
-                        window.dispatch_event(SlintWindowEvent::PointerMoved {
-                            position: logical_pos,
-                        });
-                    }
-                    
-                    // Forward mouse button events
-                    if mouse_button.just_pressed(MouseButton::Left) {
-                        window.dispatch_event(SlintWindowEvent::PointerPressed {
-                            position: logical_pos,
-                            button: PointerEventButton::Left,
-                        });
-                    }
-                    if mouse_button.just_released(MouseButton::Left) {
-                        window.dispatch_event(SlintWindowEvent::PointerReleased {
-                            position: logical_pos,
-                            button: PointerEventButton::Left,
-                        });
-                    }
-                    if mouse_button.just_pressed(MouseButton::Right) {
-                        window.dispatch_event(SlintWindowEvent::PointerPressed {
-                            position: logical_pos,
-                            button: PointerEventButton::Right,
-                        });
-                    }
-                    if mouse_button.just_released(MouseButton::Right) {
-                        window.dispatch_event(SlintWindowEvent::PointerReleased {
-                            position: logical_pos,
-                            button: PointerEventButton::Right,
-                        });
-                    }
                 }
+            }
+
+            // Always use last known position — keeps drag/scroll alive when
+            // the cursor moves outside the window boundary.
+            let logical_pos = last_cursor.0;
+
+            // Forward mouse moved events regardless of cursor being inside window
+            // so that drag operations (scrollbar grabs, etc.) are not cancelled.
+            for _ in cursor_moved.read() {
+                window.dispatch_event(SlintWindowEvent::PointerMoved {
+                    position: logical_pos,
+                });
+            }
+
+            // Forward mouse button events
+            if mouse_button.just_pressed(MouseButton::Left) {
+                window.dispatch_event(SlintWindowEvent::PointerPressed {
+                    position: logical_pos,
+                    button: PointerEventButton::Left,
+                });
+            }
+            if mouse_button.just_released(MouseButton::Left) {
+                window.dispatch_event(SlintWindowEvent::PointerReleased {
+                    position: logical_pos,
+                    button: PointerEventButton::Left,
+                });
+            }
+            if mouse_button.just_pressed(MouseButton::Right) {
+                window.dispatch_event(SlintWindowEvent::PointerPressed {
+                    position: logical_pos,
+                    button: PointerEventButton::Right,
+                });
+            }
+            if mouse_button.just_released(MouseButton::Right) {
+                window.dispatch_event(SlintWindowEvent::PointerReleased {
+                    position: logical_pos,
+                    button: PointerEventButton::Right,
+                });
+            }
+
+            // Forward scroll with actual cursor position so Slint routes it
+            // to the widget under the cursor (toolbox, explorer, etc.)
+            // rather than always targeting the widget at (0, 0).
+            for event in mouse_wheel.read() {
+                window.dispatch_event(SlintWindowEvent::PointerScrolled {
+                    position: logical_pos,
+                    delta_x: event.x * 20.0,
+                    delta_y: event.y * 20.0,
+                });
+            }
                 
-                // Forward scroll events
-                for event in mouse_wheel.read() {
-                    window.dispatch_event(SlintWindowEvent::PointerScrolled {
-                        position: slint::LogicalPosition::new(0.0, 0.0), // Position would need to be tracked
-                        delta_x: event.x * 20.0, // Convert to logical pixels
-                        delta_y: event.y * 20.0,
+            // Forward keyboard events
+            for key in keyboard.get_just_pressed() {
+                if let Some(slint_key) = convert_key_code(*key) {
+                    window.dispatch_event(SlintWindowEvent::KeyPressed {
+                        text: slint_key,
                     });
-                }
-                
-                // Forward keyboard events
-                for key in keyboard.get_just_pressed() {
-                    if let Some(slint_key) = convert_key_code(*key) {
-                        window.dispatch_event(SlintWindowEvent::KeyPressed {
-                            text: slint_key,
-                        });
-                    }
                 }
             }
         });

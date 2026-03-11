@@ -18,13 +18,38 @@ use std::path::{Path, PathBuf};
 // Tab Type Enum
 // ============================================================================
 
+/// Display mode for a SoulScript tab
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SoulScriptMode {
+    /// Rendered markdown / documentation view (default for .md)
+    Summary,
+    /// Raw code editor view (default for .rune / .soul)
+    Code,
+}
+
+impl SoulScriptMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SoulScriptMode::Summary => "summary",
+            SoulScriptMode::Code => "code",
+        }
+    }
+
+    pub fn toggled(&self) -> Self {
+        match self {
+            SoulScriptMode::Summary => SoulScriptMode::Code,
+            SoulScriptMode::Code => SoulScriptMode::Summary,
+        }
+    }
+}
+
 /// Discriminator for center tab content type
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CenterTabType {
     /// 3D Scene viewport (always pinned, index 0)
     Scene,
-    /// Soul Script editor (Monaco-backed for syntax highlighting)
-    SoulScript,
+    /// Soul Script editor/preview — .soul and .rune open in Code mode, .md opens in Summary mode
+    SoulScript { mode: SoulScriptMode },
     /// Entity parameters / data source editor
     ParametersEditor,
     /// Code file editor (Monaco-backed, any supported language)
@@ -52,10 +77,18 @@ pub enum DocumentType {
 
 impl CenterTabType {
     /// Slint-compatible string identifier for tab type routing
+    /// Returns the mode string for SoulScript tabs ("summary" or "code"), empty for others
+    pub fn mode_string(&self) -> &'static str {
+        match self {
+            CenterTabType::SoulScript { mode } => mode.as_str(),
+            _ => "",
+        }
+    }
+
     pub fn type_string(&self) -> &'static str {
         match self {
             CenterTabType::Scene => "scene",
-            CenterTabType::SoulScript => "script",
+            CenterTabType::SoulScript { .. } => "script",
             CenterTabType::ParametersEditor => "parameters",
             CenterTabType::CodeEditor { .. } => "code",
             CenterTabType::Document { .. } => "document",
@@ -69,7 +102,7 @@ impl CenterTabType {
     pub fn icon_name(&self) -> &'static str {
         match self {
             CenterTabType::Scene => "viewport",
-            CenterTabType::SoulScript => "script",
+            CenterTabType::SoulScript { .. } => "script",
             CenterTabType::ParametersEditor => "settings",
             CenterTabType::CodeEditor { .. } => "code",
             CenterTabType::Document { doc_type } => match doc_type {
@@ -138,7 +171,7 @@ impl Default for CenterTabManager {
         // Scene tab is always present and pinned
         let scene_tab = CenterTabEntry {
             id: 0,
-            name: "Space1".to_string(),
+            name: "Space".to_string(),
             tab_type: CenterTabType::Scene,
             entity: None,
             file_path: None,
@@ -164,7 +197,8 @@ impl CenterTabManager {
 
     /// Open a Soul Script tab (or focus existing)
     pub fn open_soul_script(&mut self, entity: Entity, name: &str, source: &str) -> usize {
-        if let Some(idx) = self.find_tab_by_entity(entity, &CenterTabType::SoulScript) {
+        let soul_type = CenterTabType::SoulScript { mode: SoulScriptMode::Code };
+        if let Some(idx) = self.find_tab_by_entity(entity, &soul_type) {
             self.active_tab = idx;
             self.dirty = true;
             return idx;
@@ -173,7 +207,7 @@ impl CenterTabManager {
         self.push_tab(CenterTabEntry {
             id,
             name: name.to_string(),
-            tab_type: CenterTabType::SoulScript,
+            tab_type: soul_type,
             entity: Some(entity),
             file_path: None,
             url: None,
@@ -182,6 +216,16 @@ impl CenterTabManager {
             loading: false,
             content: source.to_string(),
         })
+    }
+
+    /// Toggle the Summary/Code mode for a tab by index
+    pub fn toggle_mode(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            if let CenterTabType::SoulScript { ref mut mode } = tab.tab_type {
+                *mode = mode.toggled();
+                self.dirty = true;
+            }
+        }
     }
 
     /// Open a parameters editor tab (or focus existing)
@@ -223,7 +267,7 @@ impl CenterTabManager {
 
         // Read file content for code/text tabs
         let content = match &tab_type {
-            CenterTabType::CodeEditor { .. } | CenterTabType::SoulScript => {
+            CenterTabType::CodeEditor { .. } | CenterTabType::SoulScript { .. } => {
                 std::fs::read_to_string(path).unwrap_or_default()
             }
             CenterTabType::Document { doc_type: DocumentType::Text | DocumentType::Markdown } => {
@@ -402,8 +446,9 @@ pub fn route_file_to_tab_type(path: &Path) -> CenterTabType {
         .to_lowercase();
 
     match ext.as_str() {
-        // Soul scripts
-        "soul" => CenterTabType::SoulScript,
+        // Soul scripts: .rune and .soul open in Code mode, .md opens in Summary (markdown preview)
+        "soul" | "rune" => CenterTabType::SoulScript { mode: SoulScriptMode::Code },
+        "md" | "markdown" => CenterTabType::SoulScript { mode: SoulScriptMode::Summary },
 
         // Code files (Monaco editor)
         "rs" => CenterTabType::CodeEditor { language: "rust".into() },
@@ -437,7 +482,7 @@ pub fn route_file_to_tab_type(path: &Path) -> CenterTabType {
         "docx" | "doc" => CenterTabType::Document { doc_type: DocumentType::Docx },
         "pptx" | "ppt" => CenterTabType::Document { doc_type: DocumentType::Pptx },
         "xlsx" | "xls" => CenterTabType::Document { doc_type: DocumentType::Xlsx },
-        "md" | "markdown" => CenterTabType::CodeEditor { language: "markdown".into() },
+        // .md is now routed to SoulScript Summary above — skip here
         "txt" | "log" | "cfg" | "ini" | "env" => CenterTabType::CodeEditor { language: "plaintext".into() },
 
         // Images

@@ -26,6 +26,9 @@ pub struct InstanceDefinition {
     /// Optional electrochemical state (dynamic on any class)
     #[serde(default)]
     pub electrochemical: Option<TomlElectrochemicalState>,
+    /// Optional UI class properties (TextLabel, TextButton, Frame, ImageLabel, etc.)
+    #[serde(default)]
+    pub ui: Option<UiInstanceProperties>,
 }
 
 /// Reference to a shared mesh asset
@@ -272,6 +275,205 @@ impl TomlThermodynamicState {
     }
 }
 
+// ============================================================================
+// UI class properties — covers TextLabel, TextButton, Frame, ImageLabel,
+// TextBox, ScrollingFrame. Stored under [ui] in the .glb.toml file.
+// ============================================================================
+
+/// Universal UI-element properties stored under [ui] in the instance TOML.
+/// All UI classes share layout/appearance fields; class-specific fields use
+/// serde(default) so missing keys are silently zero/false.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiInstanceProperties {
+    // ---- Text (TextLabel / TextButton / TextBox) ----
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub rich_text: bool,
+    #[serde(default)]
+    pub text_scaled: bool,
+    #[serde(default)]
+    pub text_wrapped: bool,
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+    #[serde(default)]
+    pub line_height: f32,
+    #[serde(default = "default_font")]
+    pub font: String,
+    #[serde(default)]
+    pub text_color3: [f32; 3],
+    #[serde(default)]
+    pub text_transparency: f32,
+    #[serde(default)]
+    pub text_stroke_color3: [f32; 3],
+    #[serde(default = "default_one")]
+    pub text_stroke_transparency: f32,
+    #[serde(default = "default_text_x_alignment")]
+    pub text_x_alignment: String,   // "Left" | "Center" | "Right"
+    #[serde(default = "default_text_y_alignment")]
+    pub text_y_alignment: String,   // "Top" | "Center" | "Bottom"
+    // ---- Appearance (all UI elements) ----
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default = "default_white")]
+    pub background_color3: [f32; 3],
+    #[serde(default)]
+    pub background_transparency: f32,
+    #[serde(default)]
+    pub border_color3: [f32; 3],
+    #[serde(default)]
+    pub border_size_pixel: i32,
+    #[serde(default = "default_border_mode")]
+    pub border_mode: String,        // "Outline" | "Middle" | "Inset"
+    #[serde(default)]
+    pub clips_descendants: bool,
+    #[serde(default = "default_one_i32")]
+    pub z_index: i32,
+    #[serde(default)]
+    pub layout_order: i32,
+    #[serde(default)]
+    pub rotation: f32,
+    // ---- Layout / UDim2 (position + size) ----
+    #[serde(default)]
+    pub anchor_point: [f32; 2],
+    #[serde(default)]
+    pub position_scale: [f32; 2],
+    #[serde(default)]
+    pub position_offset: [f32; 2],
+    #[serde(default)]
+    pub size_scale: [f32; 2],
+    #[serde(default = "default_size_offset")]
+    pub size_offset: [f32; 2],
+    // ---- Behavior ----
+    #[serde(default = "default_true")]
+    pub active: bool,
+    #[serde(default = "default_true")]
+    pub auto_button_color: bool,
+    // ---- Image (ImageLabel / ImageButton) ----
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub image_color3: [f32; 3],
+    #[serde(default)]
+    pub image_transparency: f32,
+    #[serde(default = "default_scale_type")]
+    pub scale_type: String,         // "Stretch" | "Slice" | "Tile" | "Fit" | "Crop"
+    // ---- ScrollingFrame ----
+    #[serde(default = "default_true")]
+    pub scrolling_enabled: bool,
+    #[serde(default)]
+    pub scroll_bar_thickness: i32,
+    // ---- AutomaticSize ----
+    #[serde(default = "default_automatic_size")]
+    pub automatic_size: String,     // "None" | "X" | "Y" | "XY"
+}
+
+fn default_font_size() -> f32 { 14.0 }
+fn default_font() -> String { "SourceSans".to_string() }
+fn default_text_x_alignment() -> String { "Center".to_string() }
+fn default_text_y_alignment() -> String { "Center".to_string() }
+fn default_white() -> [f32; 3] { [1.0, 1.0, 1.0] }
+fn default_one_i32() -> i32 { 1 }
+fn default_border_mode() -> String { "Outline".to_string() }
+fn default_scale_type() -> String { "Stretch".to_string() }
+fn default_automatic_size() -> String { "None".to_string() }
+fn default_size_offset() -> [f32; 2] { [100.0, 100.0] }
+
+impl Default for UiInstanceProperties {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            rich_text: false,
+            text_scaled: false,
+            text_wrapped: false,
+            font_size: default_font_size(),
+            line_height: 0.0,
+            font: default_font(),
+            text_color3: [0.0, 0.0, 0.0],
+            text_transparency: 0.0,
+            text_stroke_color3: [0.0, 0.0, 0.0],
+            text_stroke_transparency: 1.0,
+            text_x_alignment: default_text_x_alignment(),
+            text_y_alignment: default_text_y_alignment(),
+            visible: true,
+            background_color3: default_white(),
+            background_transparency: 0.0,
+            border_color3: [0.0, 0.0, 0.0],
+            border_size_pixel: 0,
+            border_mode: default_border_mode(),
+            clips_descendants: false,
+            z_index: 1,
+            layout_order: 0,
+            rotation: 0.0,
+            anchor_point: [0.0, 0.0],
+            position_scale: [0.0, 0.0],
+            position_offset: [0.0, 0.0],
+            size_scale: [0.0, 0.0],
+            size_offset: default_size_offset(),
+            active: true,
+            auto_button_color: true,
+            image: String::new(),
+            image_color3: [1.0, 1.0, 1.0],
+            image_transparency: 0.0,
+            scale_type: default_scale_type(),
+            scrolling_enabled: true,
+            scroll_bar_thickness: 12,
+            automatic_size: default_automatic_size(),
+        }
+    }
+}
+
+impl UiInstanceProperties {
+    /// Convert the stored font string to the ECS Font enum
+    fn to_font(&self) -> eustress_common::classes::Font {
+        use eustress_common::classes::Font;
+        match self.font.as_str() {
+            "RobotoMono"  => Font::RobotoMono,
+            "GothamBold"  => Font::GothamBold,
+            "GothamLight" => Font::GothamLight,
+            "Fantasy"     => Font::Fantasy,
+            "Bangers"     => Font::Bangers,
+            "Merriweather"=> Font::Merriweather,
+            "Nunito"      => Font::Nunito,
+            "Ubuntu"      => Font::Ubuntu,
+            _             => Font::SourceSans,
+        }
+    }
+    fn to_x_align(&self) -> eustress_common::classes::TextXAlignment {
+        use eustress_common::classes::TextXAlignment;
+        match self.text_x_alignment.as_str() {
+            "Left"  => TextXAlignment::Left,
+            "Right" => TextXAlignment::Right,
+            _       => TextXAlignment::Center,
+        }
+    }
+    fn to_y_align(&self) -> eustress_common::classes::TextYAlignment {
+        use eustress_common::classes::TextYAlignment;
+        match self.text_y_alignment.as_str() {
+            "Top"    => TextYAlignment::Top,
+            "Bottom" => TextYAlignment::Bottom,
+            _        => TextYAlignment::Center,
+        }
+    }
+    fn to_auto_size(&self) -> eustress_common::classes::AutomaticSize {
+        use eustress_common::classes::AutomaticSize;
+        match self.automatic_size.as_str() {
+            "X"  => AutomaticSize::X,
+            "Y"  => AutomaticSize::Y,
+            "XY" => AutomaticSize::XY,
+            _    => AutomaticSize::None,
+        }
+    }
+    fn to_border_mode(&self) -> eustress_common::classes::BorderMode {
+        use eustress_common::classes::BorderMode;
+        match self.border_mode.as_str() {
+            "Middle" => BorderMode::Middle,
+            "Inset"  => BorderMode::Inset,
+            _        => BorderMode::Outline,
+        }
+    }
+}
+
 /// Electrochemical state as it appears in .glb.toml [electrochemical] section
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TomlElectrochemicalState {
@@ -409,6 +611,9 @@ pub fn spawn_instance(
     let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
     let absolute_mesh_path = toml_dir.join(&instance.asset.mesh);
     
+    info!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
+        name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
+    
     // Build material from properties
     let [r, g, b, a] = instance.properties.color;
     let transparency = instance.properties.transparency;
@@ -444,74 +649,32 @@ pub fn spawn_instance(
     let transform = Transform::from(instance.transform);
     
     if is_custom_mesh && absolute_mesh_path.exists() {
-        // ── Custom GLB mesh: load the full GLTF scene ──
-        // Use the "space://" asset source which is registered to the Space root directory
-        // Convert the absolute mesh path to a path relative to the Space root
-        let space_root = super::default_space_root();
+        // Check for Draco compression before loading
+        if super::draco_decoder::is_draco_compressed(&absolute_mesh_path) {
+            super::draco_decoder::warn_draco_file(&absolute_mesh_path);
+            // Fall through to primitive mesh rendering as fallback
+        } else {
+            // ── Custom GLB mesh: load the mesh directly (bypasses scene spawner) ──
+            // Use the "space://" asset source which is registered to the Space root directory
+            // Convert the absolute mesh path to a path relative to the Space root
+            let space_root = super::default_space_root();
         let relative_mesh_path = absolute_mesh_path
             .strip_prefix(&space_root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| absolute_mesh_path.to_string_lossy().replace('\\', "/"));
         
-        let scene_path = format!("space://{}#Scene0", relative_mesh_path);
-        info!("Loading mesh from: {}", scene_path);
-        let scene_handle: Handle<Scene> = asset_server.load(scene_path);
+        // Load mesh and material directly instead of using SceneRoot (avoids unregistered type panic)
+        let mesh_path = format!("space://{}#Mesh0/Primitive0", relative_mesh_path);
+        let material_path = format!("space://{}#Material0", relative_mesh_path);
+        info!("🔧 Loading mesh from: {} (absolute: {:?}, space_root: {:?})", mesh_path, absolute_mesh_path, space_root);
+        let mesh_handle: Handle<Mesh> = asset_server.load(mesh_path);
+        let material_handle: Handle<StandardMaterial> = asset_server.load(material_path);
         
-        let mut entity_commands = commands.spawn((
-            SceneRoot(scene_handle),
-            transform,
-            eustress_common::classes::Instance {
-                name: name.clone(),
-                class_name,
-                archivable: instance.metadata.archivable,
-                id: 0,
-                ai: false,
-            },
-            base_part,
-            eustress_common::classes::Part { shape: part_shape },
-            eustress_common::default_scene::PartEntityMarker {
-                part_id: name.clone(),
-            },
-            InstanceFile {
-                toml_path: toml_path.clone(),
-                mesh_path: absolute_mesh_path,
-                name: name.clone(),
-            },
-            Name::new(name.clone()),
-        ));
-        
-        // Attach realism components if present in TOML
-        if let Some(ref mat) = instance.material {
-            entity_commands.insert(mat.to_component());
-            info!("  + MaterialProperties: {}", mat.name);
-        }
-        if let Some(ref thermo) = instance.thermodynamic {
-            entity_commands.insert(thermo.to_component());
-            info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
-        }
-        if let Some(ref echem) = instance.electrochemical {
-            entity_commands.insert(echem.to_component());
-            info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
-        }
-        
-        let entity = entity_commands.id();
-        info!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
-        entity
-    } else {
-        // ── Primitive mesh: load from engine assets/parts/ ──
-        let glb_path = if let Some((_, asset_path, _)) = primitive {
-            *asset_path
-        } else {
-            "parts/block.glb" // fallback
-        };
-        let mesh_handle: Handle<Mesh> = asset_server.load(
-            format!("{}#Mesh0/Primitive0", glb_path)
-        );
-        
-        let mut entity_commands = commands.spawn((
+        let entity = commands.spawn((
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
             transform,
+            Visibility::default(),
             eustress_common::classes::Instance {
                 name: name.clone(),
                 class_name,
@@ -522,7 +685,7 @@ pub fn spawn_instance(
             base_part,
             eustress_common::classes::Part { shape: part_shape },
             eustress_common::default_scene::PartEntityMarker {
-                part_id: name.clone(),
+                part_id: String::new(), // filled in below
             },
             InstanceFile {
                 toml_path: toml_path.clone(),
@@ -530,114 +693,279 @@ pub fn spawn_instance(
                 name: name.clone(),
             },
             Name::new(name.clone()),
-        ));
-        
+        )).id();
+        let part_id = format!("{}v{}", entity.index(), entity.generation());
+        let mut ec = commands.entity(entity);
+        ec.insert(eustress_common::default_scene::PartEntityMarker { part_id });
         // Attach realism components if present in TOML
         if let Some(ref mat) = instance.material {
-            entity_commands.insert(mat.to_component());
+            ec.insert(mat.to_component());
             info!("  + MaterialProperties: {}", mat.name);
         }
         if let Some(ref thermo) = instance.thermodynamic {
-            entity_commands.insert(thermo.to_component());
+            ec.insert(thermo.to_component());
             info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
         }
         if let Some(ref echem) = instance.electrochemical {
-            entity_commands.insert(echem.to_component());
+            ec.insert(echem.to_component());
             info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
         }
-        
-        let entity = entity_commands.id();
-        info!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
-        entity
+        // Attach UI ECS component if this is a UI class
+        attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+        info!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        return entity;
+        }
     }
-}
-
-/// Recursively collect all .glb.toml files from a directory
-fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    
+    // Fallback to primitive mesh (either Draco-compressed or no custom mesh)
+    // ── Primitive mesh: load from engine assets/parts/ ──
+    let glb_path = if let Some((_, asset_path, _)) = primitive {
+        *asset_path
+    } else {
+        "parts/block.glb" // fallback
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_toml_files(&path, out);
-        } else if path.to_string_lossy().ends_with(".glb.toml") {
-            out.push(path);
+    let mesh_handle: Handle<Mesh> = asset_server.load(
+        format!("{}#Mesh0/Primitive0", glb_path)
+    );
+    
+    let entity = commands.spawn((
+        Mesh3d(mesh_handle),
+        MeshMaterial3d(material_handle),
+        transform,
+        Visibility::default(),
+        eustress_common::classes::Instance {
+            name: name.clone(),
+            class_name,
+            archivable: instance.metadata.archivable,
+            id: 0,
+            ai: false,
+        },
+        base_part,
+        eustress_common::classes::Part { shape: part_shape },
+        eustress_common::default_scene::PartEntityMarker {
+            part_id: String::new(), // filled in below
+        },
+        InstanceFile {
+            toml_path: toml_path.clone(),
+            mesh_path: absolute_mesh_path,
+            name: name.clone(),
+        },
+        Name::new(name.clone()),
+    )).id();
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    let mut ec = commands.entity(entity);
+    ec.insert(eustress_common::default_scene::PartEntityMarker { part_id });
+    // Attach realism components if present in TOML
+    if let Some(ref mat) = instance.material {
+        ec.insert(mat.to_component());
+        info!("  + MaterialProperties: {}", mat.name);
+    }
+    if let Some(ref thermo) = instance.thermodynamic {
+        ec.insert(thermo.to_component());
+        info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
+    }
+    if let Some(ref echem) = instance.electrochemical {
+        ec.insert(echem.to_component());
+        info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+    }
+    // Attach UI ECS component if this is a UI class
+    attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+    info!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+    entity
+}
+
+/// Insert the appropriate ECS UI component onto an entity based on class name and [ui] data.
+/// If no [ui] section is present, component defaults are used.
+pub fn attach_ui_component(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: eustress_common::classes::ClassName,
+    ui: Option<&UiInstanceProperties>,
+) {
+    use eustress_common::classes::{
+        ClassName, TextLabel, TextButton, TextBox, Frame, ImageLabel, ImageButton, ScrollingFrame,
+    };
+    let ui_defaults = UiInstanceProperties::default();
+    let u = ui.unwrap_or(&ui_defaults);
+
+    match class_name {
+        ClassName::TextLabel => {
+            ec.insert(TextLabel {
+                text: u.text.clone(),
+                rich_text: u.rich_text,
+                text_scaled: u.text_scaled,
+                text_wrapped: u.text_wrapped,
+                max_visible_graphemes: -1,
+                font: u.to_font(),
+                font_size: u.font_size,
+                line_height: if u.line_height > 0.0 { u.line_height } else { 1.0 },
+                text_color3: u.text_color3,
+                text_transparency: u.text_transparency,
+                text_stroke_color3: u.text_stroke_color3,
+                text_stroke_transparency: u.text_stroke_transparency,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                text_x_alignment: u.to_x_align(),
+                text_y_alignment: u.to_y_align(),
+                position: u.position_offset,
+                size: u.size_offset,
+                anchor_point: u.anchor_point,
+                rotation: u.rotation,
+                z_index: u.z_index,
+                active: u.active,
+                visible: u.visible,
+                clips_descendants: u.clips_descendants,
+                border_size_pixel: u.border_size_pixel,
+                automatic_size: u.to_auto_size(),
+                ..Default::default()
+            });
         }
+        ClassName::TextButton => {
+            ec.insert(TextButton {
+                text: u.text.clone(),
+                font_size: u.font_size,
+                text_color3: u.text_color3,
+                text_transparency: u.text_transparency,
+                text_stroke_color3: u.text_stroke_color3,
+                text_stroke_transparency: u.text_stroke_transparency,
+                text_x_alignment: u.to_x_align(),
+                text_y_alignment: u.to_y_align(),
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                z_index: u.z_index,
+                layout_order: u.layout_order,
+                rotation: u.rotation,
+                anchor_point: u.anchor_point,
+                position_scale: u.position_scale,
+                position_offset: u.position_offset,
+                size_scale: u.size_scale,
+                size_offset: u.size_offset,
+                visible: u.visible,
+                active: u.active,
+                auto_button_color: u.auto_button_color,
+                ..Default::default()
+            });
+        }
+        ClassName::TextBox => {
+            ec.insert(TextBox {
+                text: u.text.clone(),
+                font_size: u.font_size,
+                text_color3: u.text_color3,
+                text_transparency: u.text_transparency,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                z_index: u.z_index,
+                visible: u.visible,
+                ..Default::default()
+            });
+        }
+        ClassName::Frame => {
+            ec.insert(Frame {
+                visible: u.visible,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                border_mode: u.to_border_mode(),
+                clips_descendants: u.clips_descendants,
+                z_index: u.z_index,
+                layout_order: u.layout_order,
+                rotation: u.rotation,
+                anchor_point: u.anchor_point,
+                position_scale: u.position_scale,
+                position_offset: u.position_offset,
+                size_scale: u.size_scale,
+                size_offset: u.size_offset,
+            });
+        }
+        ClassName::ImageLabel => {
+            ec.insert(ImageLabel {
+                image: u.image.clone(),
+                image_color3: u.image_color3,
+                image_transparency: u.image_transparency,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                z_index: u.z_index,
+                layout_order: u.layout_order,
+                rotation: u.rotation,
+                anchor_point: u.anchor_point,
+                position_scale: u.position_scale,
+                position_offset: u.position_offset,
+                size_scale: u.size_scale,
+                size_offset: u.size_offset,
+                visible: u.visible,
+                ..Default::default()
+            });
+        }
+        ClassName::ImageButton => {
+            ec.insert(ImageButton {
+                image: u.image.clone(),
+                image_color3: u.image_color3,
+                image_transparency: u.image_transparency,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                z_index: u.z_index,
+                layout_order: u.layout_order,
+                rotation: u.rotation,
+                anchor_point: u.anchor_point,
+                position_scale: u.position_scale,
+                position_offset: u.position_offset,
+                size_scale: u.size_scale,
+                size_offset: u.size_offset,
+                visible: u.visible,
+                active: u.active,
+                auto_button_color: u.auto_button_color,
+                ..Default::default()
+            });
+        }
+        ClassName::ScrollingFrame => {
+            ec.insert(ScrollingFrame {
+                visible: u.visible,
+                background_color3: u.background_color3,
+                background_transparency: u.background_transparency,
+                border_color3: u.border_color3,
+                border_size_pixel: u.border_size_pixel,
+                z_index: u.z_index,
+                layout_order: u.layout_order,
+                rotation: u.rotation,
+                anchor_point: u.anchor_point,
+                position_scale: u.position_scale,
+                position_offset: u.position_offset,
+                size_scale: u.size_scale,
+                size_offset: u.size_offset,
+                scrolling_enabled: u.scrolling_enabled,
+                scroll_bar_thickness: u.scroll_bar_thickness,
+                ..Default::default()
+            });
+        }
+        _ => {}
     }
 }
 
-/// System to load all .glb.toml instance files from Workspace (recursive)
-pub fn load_instance_files_system(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut registry: ResMut<super::file_loader::SpaceFileRegistry>,
-    space_root_res: Res<super::SpaceRoot>,
-) {
-    let space_root = &space_root_res.0;
-    
-    if !space_root.exists() {
-        warn!("Space path does not exist: {:?}", space_root);
-        return;
-    }
-    
-    // Recursively scan Workspace for .glb.toml files
-    let workspace_path = space_root.join("Workspace");
-    if !workspace_path.exists() {
-        return;
-    }
-    
-    let mut toml_files = Vec::new();
-    collect_toml_files(&workspace_path, &mut toml_files);
-    
-    for path in toml_files {
-        // Load instance definition
-        match load_instance_definition(&path) {
-            Ok(instance) => {
-                let entity = spawn_instance(
-                    &mut commands,
-                    &asset_server,
-                    &mut materials,
-                    path.clone(),
-                    instance,
-                );
-                
-                // Register in SpaceFileRegistry
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("Unknown")
-                    .trim_end_matches(".glb")
-                    .to_string();
-                
-                registry.register(
-                    path.clone(),
-                    entity,
-                    super::file_loader::FileMetadata {
-                        path: path.clone(),
-                        file_type: super::file_loader::FileType::Toml,
-                        service: "Workspace".to_string(),
-                        name,
-                        size: 0,
-                        modified: std::time::SystemTime::now(),
-                        children: Vec::new(),
-                    },
-                );
-            }
-            Err(e) => {
-                error!("Failed to load instance file {:?}: {}", path, e);
-            }
-        }
-    }
-}
+// NOTE: Instance loading is handled by SpaceFileLoaderPlugin (file_loader.rs)
+// which properly creates folder hierarchy with parent-child relationships.
+// The load_instance_files_system was removed to avoid duplicate loading.
 
 /// System to write instance changes back to .glb.toml files
 pub fn write_instance_changes_system(
     instances: Query<(&Transform, &InstanceFile), Changed<Transform>>,
+    mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
     for (transform, instance_file) in instances.iter() {
+        // Skip if file was recently written (prevents hot-reload loop)
+        // This happens when hot-reload inserts a Transform, triggering Changed<Transform>
+        if recently_written.was_recently_written(&instance_file.toml_path) {
+            continue;
+        }
+        
         // Load current instance definition
         let mut instance = match load_instance_definition(&instance_file.toml_path) {
             Ok(inst) => inst,
@@ -652,6 +980,9 @@ pub fn write_instance_changes_system(
         
         // Update last_modified timestamp
         instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+        
+        // Mark file as recently written to prevent hot-reload loop
+        recently_written.mark_written(instance_file.toml_path.clone());
         
         // Write back to file
         if let Err(e) = write_instance_definition(&instance_file.toml_path, &instance) {

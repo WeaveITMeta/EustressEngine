@@ -1,0 +1,19 @@
+# Players Service - Manages player spawning and configuration
+# This is a data-driven service definition - any properties defined here
+# will be displayed and editable in the Properties panel
+
+[service]
+class_name = "Players"
+icon = "players"
+description = "Manages player spawning, respawning, and character configuration"
+can_have_children = true
+
+# Player configuration
+max_players = 50
+respawn_time = 5.0
+character_auto_loads = true
+
+[metadata]
+id = "players-service"
+created = ""
+last_modified = ""

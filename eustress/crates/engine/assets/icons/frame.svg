@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Outer container border -->
+  <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" stroke="#4fc1ff" stroke-width="1.2" fill="none"/>
+  <!-- Inner content area -->
+  <rect x="3.5" y="3.5" width="9" height="9" rx="0.5" fill="#4fc1ff" fill-opacity="0.12"/>
+</svg>

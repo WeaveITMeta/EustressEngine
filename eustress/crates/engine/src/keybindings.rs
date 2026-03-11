@@ -372,11 +372,19 @@ fn dispatch_keyboard_shortcuts(
 /// Uses Option wrappers to prevent silent skip from error handler.
 fn handle_menu_action_events(
     mut events: MessageReader<crate::ui::MenuActionEvent>,
+    mut commands: Commands,
     studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut undo_events: MessageWriter<crate::commands::UndoCommandEvent>,
     mut redo_events: MessageWriter<crate::commands::RedoCommandEvent>,
     mut frame_events: MessageWriter<crate::camera_controller::FrameSelectionEvent>,
-    selected_query: Query<(&GlobalTransform, Option<&eustress_common::classes::BasePart>), With<crate::selection_box::SelectionBox>>,
+    // Read selection directly from SelectionSyncManager to avoid ordering dependency
+    // on sync_selection_boxes (which adds SelectionBox component one frame later).
+    selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    // Query all entities that could be selected — look up by stable ID at focus time.
+    entity_query: Query<(Entity, &GlobalTransform, Option<&eustress_common::classes::BasePart>),
+        Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
+    // Query Instance to detect Camera class deletion for camera respawn.
+    instance_query: Query<&eustress_common::classes::Instance>,
 ) {
     let Some(mut studio_state) = studio_state else { return };
 
@@ -404,31 +412,42 @@ fn handle_menu_action_events(
             Action::ToggleCommandBar => { /* Handled by Slint UI directly */ }
 
             // Focus camera on selection (F key)
+            // Reads from SelectionSyncManager directly so it works even on the same
+            // frame an Explorer-click selection happens (no SelectionBox yet).
             Action::FocusSelection => {
-                // Calculate bounds of all selected entities
+                // Get the set of currently selected IDs
+                let selected_ids: std::collections::HashSet<String> = selection_manager
+                    .as_ref()
+                    .map(|sm| sm.0.read().get_selected().into_iter().collect())
+                    .unwrap_or_default();
+
                 let mut min = Vec3::splat(f32::MAX);
                 let mut max = Vec3::splat(f32::MIN);
                 let mut has_selection = false;
-                
-                for (transform, base_part) in selected_query.iter() {
-                    let pos = transform.translation();
-                    // Use BasePart size if available, otherwise assume 1 unit
-                    let half_size = base_part
-                        .map(|bp| bp.size * 0.5)
-                        .unwrap_or(Vec3::splat(0.5));
-                    
-                    min = min.min(pos - half_size);
-                    max = max.max(pos + half_size);
-                    has_selection = true;
+
+                if !selected_ids.is_empty() {
+                    for (entity, transform, base_part) in entity_query.iter() {
+                        // Build the stable ID string for this entity
+                        let id = format!("{}v{}", entity.index(), entity.generation());
+                        if !selected_ids.contains(&id) { continue; }
+
+                        let pos = transform.translation();
+                        let half_size = base_part
+                            .map(|bp| bp.size * 0.5)
+                            .unwrap_or(Vec3::splat(0.5));
+                        min = min.min(pos - half_size);
+                        max = max.max(pos + half_size);
+                        has_selection = true;
+                    }
                 }
-                
+
                 if has_selection {
                     frame_events.write(crate::camera_controller::FrameSelectionEvent {
                         target_bounds: Some((min, max)),
                     });
                     info!("📷 Focus on selection: bounds ({:?} to {:?})", min, max);
                 } else {
-                    // No selection - frame entire scene
+                    // No selection or ID mismatch — frame entire scene
                     frame_events.write(crate::camera_controller::FrameSelectionEvent {
                         target_bounds: None,
                     });
@@ -440,6 +459,63 @@ fn handle_menu_action_events(
             Action::SnapMode1 | Action::SnapMode2 | Action::SnapModeOff => {
                 // Snapping is handled by editor_settings; these events are consumed
                 // by the editor_settings system if it listens for them.
+            }
+
+            // Delete selected entities; respawn default camera at origin if Camera class deleted
+            Action::Delete => {
+                let selected_ids: std::collections::HashSet<String> = selection_manager
+                    .as_ref()
+                    .map(|sm| sm.0.read().get_selected().into_iter().collect())
+                    .unwrap_or_default();
+
+                if selected_ids.is_empty() {
+                    info!("🗑️ Delete: nothing selected");
+                } else {
+                    let mut camera_deleted = false;
+                    for (entity, _, _) in entity_query.iter() {
+                        let id = format!("{}v{}", entity.index(), entity.generation());
+                        if !selected_ids.contains(&id) { continue; }
+                        // Check if this is a Camera class entity before despawning
+                        if instance_query.get(entity)
+                            .map(|inst| inst.class_name == eustress_common::classes::ClassName::Camera)
+                            .unwrap_or(false)
+                        {
+                            camera_deleted = true;
+                        }
+                        commands.entity(entity).despawn();
+                        info!("🗑️ Deleted entity {:?} ({})", entity, id);
+                    }
+                    // Clear selection after delete
+                    if let Some(ref sm) = selection_manager {
+                        sm.0.write().clear();
+                    }
+                    // Respawn a default camera at origin so the viewport is never left without one
+                    if camera_deleted {
+                        use bevy::core_pipeline::tonemapping::Tonemapping;
+                        use eustress_common::classes::{Instance, ClassName};
+                        commands.spawn((
+                            Camera3d::default(),
+                            Tonemapping::Reinhard,
+                            Transform::from_xyz(10.0, 8.0, 10.0)
+                                .looking_at(Vec3::ZERO, Vec3::Y),
+                            Projection::Perspective(PerspectiveProjection {
+                                fov: 70.0_f32.to_radians(),
+                                near: 0.1,
+                                far: 10000.0,
+                                ..default()
+                            }),
+                            Instance {
+                                name: "Camera".to_string(),
+                                class_name: ClassName::Camera,
+                                archivable: true,
+                                id: 0,
+                                ..Default::default()
+                            },
+                            Name::new("Camera"),
+                        ));
+                        info!("📷 Camera deleted — respawned default camera at origin");
+                    }
+                }
             }
 
             // Other actions are consumed by their respective systems

@@ -1,7 +1,7 @@
 //! # Electrochemistry Laws
 //!
-//! Fundamental electrochemical equations for battery simulation.
-//! Designed for V-Cell (solid-state Na-S) but general-purpose.
+//! Fundamental electrochemical equations for general-purpose simulation.
+//! Chemistry-agnostic implementations of core electrochemical principles.
 //!
 //! ## Table of Contents
 //!
@@ -10,11 +10,9 @@
 //! 3. **Ohmic Losses** — IR drop, ASR, terminal voltage
 //! 4. **Ionic Transport** — Arrhenius conductivity, Nernst-Planck, Nernst-Einstein
 //! 5. **Heat Generation** — Ohmic, entropic, reaction heat
-//! 6. **Na-S Specific** — OCV curve, sulfur utilization, volume expansion
-//! 7. **Cycle Degradation** — Power-law capacity fade
-//! 8. **State Functions** — SOC, DOD, C-rate, Ragone
-//! 9. **NASICON Conductivity** — Sc-doped ASR and limiting current
-//! 10. **Dendrite Risk** — Sand's time, Monroe-Newman critical current
+//! 6. **Cycle Degradation** — Power-law capacity fade
+//! 7. **State Functions** — SOC, DOD, C-rate, Ragone
+//! 8. **Dendrite Risk** — Sand's time, Monroe-Newman critical current
 
 use crate::realism::constants;
 
@@ -125,22 +123,15 @@ pub fn round_trip_efficiency(v_discharge: f32, v_charge: f32) -> f32 {
 // ============================================================================
 
 /// Arrhenius conductivity: `σ(T) = σ₀ exp(-E_a / RT)`
+///
+/// # Arguments
+/// * `sigma0` — Pre-exponential factor (S/m or S/cm depending on use)
+/// * `e_act` — Activation energy (J/mol)
+/// * `temperature` — Temperature (K)
 #[inline]
 pub fn arrhenius_conductivity(sigma0: f32, e_act: f32, temperature: f32) -> f32 {
     if temperature <= 0.0 { return 0.0; }
     sigma0 * (-(e_act / (constants::R_F32 * temperature))).exp()
-}
-
-/// Sc-NASICON conductivity at temperature (S/cm).
-///
-/// σ₀ = 1500 S/cm, E_a = 21,224 J/mol → target 10⁻² S/cm at 298.15 K
-#[inline]
-pub fn sc_nasicon_conductivity(temperature: f32) -> f32 {
-    arrhenius_conductivity(
-        constants::sc_nasicon::ARRHENIUS_PREFACTOR,
-        constants::sc_nasicon::ACTIVATION_ENERGY_J_MOL,
-        temperature,
-    )
 }
 
 /// Nernst-Einstein diffusivity: `D = σRT / (z²F²c)` (m²/s)
@@ -178,7 +169,12 @@ pub fn reaction_heat(current: f32, eta_ct: f32) -> f32 {
     current * eta_ct.abs()
 }
 
-/// Entropic heat: `Q = -T I (dE/dT)` (W). Na-S: dE/dT ≈ -1.5e-4 V/K
+/// Entropic heat: `Q = -T I (dE/dT)` (W)
+///
+/// # Arguments
+/// * `temperature` — Temperature (K)
+/// * `current` — Operating current (A)
+/// * `de_dt` — Entropy coefficient dE/dT (V/K), chemistry-specific
 #[inline]
 pub fn entropic_heat(temperature: f32, current: f32, de_dt: f32) -> f32 {
     -temperature * current * de_dt
@@ -200,50 +196,7 @@ pub fn steady_state_temp_rise(heat_rate: f32, r_thermal: f32) -> f32 {
 }
 
 // ============================================================================
-// 6. Na-S Specific — OCV, Sulfur Utilization, Volume Expansion
-// ============================================================================
-
-/// Na-S OCV vs SOC — piecewise linear two-plateau model.
-///
-/// - Upper plateau (SOC 0.60–0.90): ~2.10–2.35 V — S₈ → Na₂S₄
-/// - Lower plateau (SOC 0.05–0.25): ~1.50–1.85 V — Na₂S₄ → Na₂S
-pub fn na_s_ocv(soc: f32) -> f32 {
-    let s = soc.clamp(0.0, 1.0);
-    if s >= 0.90      { 2.35 + (s - 0.90) * (2.80 - 2.35) / 0.10 }
-    else if s >= 0.60 { 2.10 + (s - 0.60) * (2.35 - 2.10) / 0.30 }
-    else if s >= 0.25 { 1.85 + (s - 0.25) * (2.10 - 1.85) / 0.35 }
-    else if s >= 0.05 { 1.50 + (s - 0.05) * (1.85 - 1.50) / 0.20 }
-    else              { 1.20 + s * (1.50 - 1.20) / 0.05 }
-}
-
-/// Temperature-corrected Na-S OCV: `OCV(T) = OCV(25°C) + (T - 298.15) × dE/dT`
-#[inline]
-pub fn na_s_ocv_temp_corrected(soc: f32, temperature: f32) -> f32 {
-    na_s_ocv(soc) + (temperature - 298.15) * constants::na_s::ENTROPY_COEFFICIENT
-}
-
-/// Sulfur utilization: `u = Q_delivered / (m_S × 1672 mAh/g)`
-#[inline]
-pub fn sulfur_utilization(capacity_delivered_mah: f32, sulfur_mass_g: f32) -> f32 {
-    if sulfur_mass_g <= 0.0 { return 0.0; }
-    (capacity_delivered_mah / (sulfur_mass_g * constants::na_s::SULFUR_CAPACITY_MAH_G))
-        .clamp(0.0, 1.0)
-}
-
-/// V-Cell gravimetric energy density (Wh/kg)
-pub fn na_s_energy_density(mass_active_g: f32, mass_total_g: f32, utilization: f32) -> f32 {
-    if mass_total_g <= 0.0 { return 0.0; }
-    constants::na_s::THEORETICAL_ENERGY_DENSITY * (mass_active_g / mass_total_g) * utilization
-}
-
-/// Sulfur volume expansion at DOD: linear 0% (charged) → 80% (discharged)
-#[inline]
-pub fn sulfur_volume_expansion(soc: f32) -> f32 {
-    (1.0 - soc).clamp(0.0, 1.0) * constants::na_s::SULFUR_VOLUME_EXPANSION
-}
-
-// ============================================================================
-// 7. Cycle Degradation — Power-Law Capacity Fade
+// 6. Cycle Degradation — Power-Law Capacity Fade
 // ============================================================================
 
 /// Capacity retention: `Q(N)/Q₀ = 1 - α × N^β`
@@ -258,29 +211,8 @@ pub fn cycles_to_retention(target_retention: f32, alpha: f32, beta: f32) -> f32 
     ((1.0 - target_retention.clamp(0.0, 1.0)) / alpha).powf(1.0 / beta)
 }
 
-/// V-Cell degradation parameters `(α, β)` by C-rate.
-///
-/// | C-rate | Cycles to 80% |
-/// |--------|---------------|
-/// | 0.5C   | ~10,000       |
-/// | 1C     | ~8,000        |
-/// | 2C     | ~5,000        |
-/// | 4C+    | ~3,000        |
-pub fn vcell_degradation_params(c_rate: f32) -> (f32, f32) {
-    if c_rate <= 0.5 { (2.0e-5, 0.80) }
-    else if c_rate <= 1.0 { (3.5e-5, 0.82) }
-    else if c_rate <= 2.0 { (6.0e-5, 0.85) }
-    else { (1.2e-4, 0.88) }
-}
-
-/// V-Cell capacity at given cycle count and C-rate (convenience wrapper).
-pub fn vcell_capacity_at_cycle(initial_capacity: f32, cycle_count: f32, c_rate: f32) -> f32 {
-    let (alpha, beta) = vcell_degradation_params(c_rate);
-    initial_capacity * capacity_retention_power_law(cycle_count, alpha, beta)
-}
-
 // ============================================================================
-// 8. State Functions — SOC, DOD, C-rate, Energy
+// 7. State Functions — SOC, DOD, C-rate, Energy
 // ============================================================================
 
 /// Coulomb-counting SOC: `SOC = SOC₀ - Q_out / Q_nom`
@@ -324,41 +256,37 @@ pub fn current_from_c_rate(c_rate_val: f32, capacity_ah: f32) -> f32 {
 
 /// Ragone energy density (Peukert): `E(C) = E_1C / C^(n-1)`
 ///
-/// Peukert exponent ≈ 1.15 for solid-state Na-S
+/// # Arguments
+/// * `energy_1c` — Energy density at 1C rate (Wh/kg or Wh/L)
+/// * `c_rate_val` — Current C-rate
+/// * `peukert_exp` — Peukert exponent (chemistry-specific, typically 1.0–1.3)
 pub fn ragone_energy_density(energy_1c: f32, c_rate_val: f32, peukert_exp: f32) -> f32 {
     if c_rate_val <= 0.0 { return energy_1c; }
     energy_1c / c_rate_val.powf(peukert_exp - 1.0)
 }
 
-// ============================================================================
-// 9. NASICON Conductivity — ASR and Limiting Current
-// ============================================================================
-
-/// Sc-NASICON ASR at temperature — conductivity in S/cm converted to SI for ASR (Ω·m²).
-pub fn sc_nasicon_asr(thickness_m: f32, temperature: f32) -> f32 {
-    let sigma_s_m = sc_nasicon_conductivity(temperature) * 100.0; // S/cm → S/m
-    electrolyte_asr(thickness_m, sigma_s_m)
-}
-
-/// V-Cell electrolyte resistance (Ω) at temperature for a given electrode area.
-///
-/// Assumes 30 μm Sc-NASICON membrane.
-pub fn vcell_electrolyte_resistance(temperature: f32, electrode_area: f32) -> f32 {
-    let asr = sc_nasicon_asr(30.0e-6, temperature);
-    cell_resistance_from_asr(asr, electrode_area)
-}
-
 /// Ionic limiting current density (A/m²) before transport limitation.
 ///
 /// `j_lim = σ V_T / (thickness × τ)` where τ = tortuosity
-pub fn nasicon_limiting_current(temperature: f32, tortuosity: f32) -> f32 {
-    let sigma_s_m = sc_nasicon_conductivity(temperature) * 100.0;
+///
+/// # Arguments
+/// * `conductivity_s_m` — Ionic conductivity (S/m)
+/// * `temperature` — Temperature (K)
+/// * `thickness` — Electrolyte thickness (m)
+/// * `tortuosity` — Tortuosity factor (≥1.0)
+pub fn ionic_limiting_current(
+    conductivity_s_m: f32,
+    temperature: f32,
+    thickness: f32,
+    tortuosity: f32,
+) -> f32 {
+    if thickness <= 0.0 || tortuosity < 1.0 { return 0.0; }
     let v_t = thermal_voltage(temperature);
-    (sigma_s_m * v_t) / (30.0e-6 * tortuosity.max(1.0))
+    (conductivity_s_m * v_t) / (thickness * tortuosity.max(1.0))
 }
 
 // ============================================================================
-// 10. Dendrite Risk — Sand's Time, Monroe-Newman Critical Current
+// 8. Dendrite Risk — Sand's Time, Monroe-Newman Critical Current
 // ============================================================================
 
 /// Sand's time — time (s) to dendrite penetration under constant current.
@@ -374,22 +302,28 @@ pub fn sands_time(diffusivity: f32, concentration: f32, current_density: f32) ->
 
 /// Monroe-Newman critical current density for solid electrolytes (A/m²).
 ///
-/// `j_crit = 2 G_e δ / (F V_m,Na)` — above this, dendrites are thermodynamically favored.
+/// `j_crit = 2 G_e δ / (F V_m)` — above this, dendrites are thermodynamically favored.
 ///
-/// * `shear_modulus_e` — electrolyte shear modulus (Pa), Sc-NASICON ≈ 32 GPa
-/// * `interlayer_thickness` — ALD Al₂O₃ interlayer (m), V-Cell ≈ 5 nm
-pub fn monroe_newman_critical_current(shear_modulus_e: f32, interlayer_thickness: f32) -> f32 {
-    let vm_na = 23.78e-6; // m³/mol — Na molar volume
-    (2.0 * shear_modulus_e * interlayer_thickness) / (constants::FARADAY_F32 * vm_na)
+/// # Arguments
+/// * `shear_modulus` — Electrolyte shear modulus (Pa)
+/// * `interlayer_thickness` — Protective interlayer thickness (m)
+/// * `molar_volume` — Metal molar volume (m³/mol)
+pub fn monroe_newman_critical_current(
+    shear_modulus: f32,
+    interlayer_thickness: f32,
+    molar_volume: f32,
+) -> f32 {
+    if molar_volume <= 0.0 { return 0.0; }
+    (2.0 * shear_modulus * interlayer_thickness) / (constants::FARADAY_F32 * molar_volume)
 }
 
-/// V-Cell dendrite risk factor: operating j / j_critical.
+/// Dendrite risk factor: operating current density / critical current density.
 ///
 /// Returns 0.0 = safe, ≥1.0 = dendrite risk exceeded.
-pub fn vcell_dendrite_risk(current_density: f32, _temperature: f32) -> f32 {
-    let j_crit = monroe_newman_critical_current(32.0e9, 5.0e-9);
-    if j_crit <= 0.0 { return 1.0; }
-    (current_density / j_crit).max(0.0)
+#[inline]
+pub fn dendrite_risk(current_density: f32, critical_current: f32) -> f32 {
+    if critical_current <= 0.0 { return 1.0; }
+    (current_density / critical_current).max(0.0)
 }
 
 // ============================================================================
@@ -404,9 +338,15 @@ mod tests {
 
     #[test]
     fn nernst_standard_conditions() {
-        // At Q=1.0, E = E°
-        let e = nernst_potential(2.23, 2.0, 298.15, 1.0);
-        assert!((e - 2.23).abs() < EPSILON);
+        let e = nernst_potential(1.5, 2.0, 298.15, 1.0);
+        assert!((e - 1.5).abs() < EPSILON);
+    }
+
+    #[test]
+    fn nernst_activity_shift() {
+        let e_std = nernst_potential(1.0, 1.0, 298.15, 1.0);
+        let e_high = nernst_potential(1.0, 1.0, 298.15, 10.0);
+        assert!(e_high < e_std, "Higher Q should lower potential");
     }
 
     #[test]
@@ -416,26 +356,10 @@ mod tests {
     }
 
     #[test]
-    fn nasicon_conductivity_increases_with_temp() {
-        let s25 = sc_nasicon_conductivity(298.15);
-        let s80 = sc_nasicon_conductivity(353.15);
-        assert!(s80 > s25, "σ must increase with T: {s25} vs {s80}");
-        assert!(s25 > 1e-4, "σ at 25°C must exceed 1e-4 S/cm, got {s25}");
-    }
-
-    #[test]
-    fn ocv_full_range() {
-        assert!((na_s_ocv(1.0) - 2.80).abs() < 0.02);
-        assert!((na_s_ocv(0.0) - 1.20).abs() < 0.02);
-    }
-
-    #[test]
-    fn ocv_monotone() {
-        let pts = [0.0, 0.05, 0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0];
-        for w in pts.windows(2) {
-            assert!(na_s_ocv(w[0]) < na_s_ocv(w[1]),
-                "OCV not monotone: SOC {}->{}", w[0], w[1]);
-        }
+    fn arrhenius_increases_with_temp() {
+        let s25 = arrhenius_conductivity(1000.0, 20000.0, 298.15);
+        let s80 = arrhenius_conductivity(1000.0, 20000.0, 353.15);
+        assert!(s80 > s25, "Conductivity must increase with T");
     }
 
     #[test]
@@ -444,41 +368,69 @@ mod tests {
     }
 
     #[test]
-    fn vcell_10k_cycles_half_c() {
-        let (a, b) = vcell_degradation_params(0.5);
-        let ret = capacity_retention_power_law(10_000.0, a, b);
-        assert!((ret - 0.80).abs() < 0.03, "Expected ~80%, got {ret:.3}");
-    }
-
-    #[test]
-    fn sulfur_util_95pct() {
-        let u = sulfur_utilization(1_588.4, 1.0);
-        assert!((u - 0.95).abs() < 0.01, "Expected 0.95, got {u}");
+    fn retention_degrades_with_cycles() {
+        let ret_1k = capacity_retention_power_law(1000.0, 1e-4, 0.8);
+        let ret_5k = capacity_retention_power_law(5000.0, 1e-4, 0.8);
+        assert!(ret_5k < ret_1k, "More cycles should degrade capacity");
     }
 
     #[test]
     fn soc_coulomb_counting() {
-        let soc = state_of_charge(1.0, 101.25, 202.5);
+        let soc = state_of_charge(1.0, 50.0, 100.0);
         assert!((soc - 0.50).abs() < 0.01);
     }
 
     #[test]
     fn butler_volmer_zero_eta() {
-        // At η=0, j must be 0
         let j = butler_volmer_current(100.0, 0.0, 0.5, 0.5, 298.15);
         assert!(j.abs() < EPSILON);
     }
 
     #[test]
-    fn dendrite_risk_low_current() {
-        // At 0.1 mA/cm² = 1.0 A/m², risk should be very low
-        let risk = vcell_dendrite_risk(1.0, 298.15);
-        assert!(risk < 0.01, "Low current should give negligible risk: {risk}");
+    fn butler_volmer_symmetric_positive_eta() {
+        let j = butler_volmer_symmetric(10.0, 0.1, 298.15);
+        assert!(j > 0.0, "Positive eta should give positive current");
+    }
+
+    #[test]
+    fn dendrite_risk_ratio() {
+        let risk = dendrite_risk(50.0, 100.0);
+        assert!((risk - 0.5).abs() < EPSILON);
+    }
+
+    #[test]
+    fn dendrite_risk_exceeds_critical() {
+        let risk = dendrite_risk(150.0, 100.0);
+        assert!(risk >= 1.0, "Should exceed critical");
     }
 
     #[test]
     fn round_trip_eff() {
         let eff = round_trip_efficiency(1.95, 2.40);
         assert!((eff - 0.8125).abs() < 0.01);
+    }
+
+    #[test]
+    fn c_rate_calculation() {
+        let c = c_rate(100.0, 100.0);
+        assert!((c - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn ohmic_heat_calculation() {
+        let q = ohmic_heat(10.0, 0.01);
+        assert!((q - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn terminal_voltage_discharge() {
+        let v = terminal_voltage(3.7, 0.1, 0.05, 0.02, true);
+        assert!((v - 3.53).abs() < 0.01);
+    }
+
+    #[test]
+    fn terminal_voltage_charge() {
+        let v = terminal_voltage(3.7, 0.1, 0.05, 0.02, false);
+        assert!((v - 3.87).abs() < 0.01);
     }
 }

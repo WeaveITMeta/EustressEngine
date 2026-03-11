@@ -23,6 +23,8 @@ pub mod slint_ui;
 pub mod slint_native;
 pub mod floating_windows;
 pub mod runtime_ui;
+pub mod rune_bindings;
+pub mod rune_ecs_bindings;
 
 // Core modules that don't depend on egui
 mod file_dialogs;
@@ -34,6 +36,7 @@ pub mod webview;
 pub mod file_icons;
 pub mod center_tabs;
 pub mod monaco_bridge;
+pub mod highlight;
 
 // Re-exports
 pub use file_dialogs::{SceneFile, FileEvent, pick_open_file, pick_save_file};
@@ -46,6 +49,8 @@ pub use spawn_events::{
 pub use menu_events::MenuActionEvent;
 pub use world_view::{UIWorldSnapshot, UIActionQueue, UIAction, WorldViewPlugin};
 pub use runtime_ui::{RuntimeUIPlugin, RuntimeUIManager, UIEvent, GuiElement};
+pub use rune_bindings::{UIBindings, RuneUIBindingsPlugin};
+pub use rune_ecs_bindings::{ECSBindings, RuneECSBindingsPlugin};
 
 // ============================================================================
 // Bevy Resource Wrappers

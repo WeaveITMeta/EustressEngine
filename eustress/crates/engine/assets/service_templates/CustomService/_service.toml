@@ -1,0 +1,35 @@
+# Custom Service Example - Demonstrates fully data-driven services
+# ANY folder with a _service.toml file becomes a service automatically
+# ANY properties defined here will be displayed and editable in the Properties panel
+
+[service]
+class_name = "MyCustomService"
+icon = "folder"  # Use any icon from assets/icons/{name}.svg
+description = "A custom service with arbitrary properties"
+can_have_children = true
+
+# You can define ANY properties you want - they're all dynamic!
+# Supported types: bool, int, float, string, vec3 (3 floats), color (4 floats)
+
+# Example string property
+api_endpoint = "https://api.example.com"
+
+# Example boolean property
+enabled = true
+
+# Example integer property
+max_connections = 100
+
+# Example float property
+timeout_seconds = 30.0
+
+# Example vec3 property (3 floats)
+spawn_offset = [0.0, 5.0, 0.0]
+
+# Example color property (4 floats: RGBA)
+highlight_color = [1.0, 0.5, 0.0, 1.0]
+
+[metadata]
+id = "custom-service"
+created = ""
+last_modified = ""

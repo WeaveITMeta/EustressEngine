@@ -1,0 +1,26 @@
+# Lighting Service - Controls global lighting and atmosphere
+# This is a data-driven service definition - any properties defined here
+# will be displayed and editable in the Properties panel
+
+[service]
+class_name = "Lighting"
+icon = "lighting"
+description = "Controls global lighting, shadows, and atmospheric effects"
+can_have_children = true
+
+# Ambient lighting
+ambient = [0.5, 0.5, 0.5, 1.0]
+outdoor_ambient = [0.7, 0.7, 0.7, 1.0]
+brightness = 1.0
+
+# Shadows
+global_shadows = true
+
+# Time of day
+clock_time = 14.0
+geographic_latitude = 41.7
+
+[metadata]
+id = "lighting-service"
+created = ""
+last_modified = ""

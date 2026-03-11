@@ -138,10 +138,12 @@ impl WebViewManager {
     /// Refresh a WebView
     pub fn refresh(&mut self, tab_index: usize) {
         if let Some(view) = self.views.get_mut(&tab_index) {
-            view.loading = true;
             #[cfg(feature = "webview")]
-            if let Some(ref webview) = view.webview {
-                let _ = webview.evaluate_script("window.location.reload()");
+            {
+                view.loading = true;
+                if let Some(ref webview) = view.webview {
+                    let _ = webview.evaluate_script("window.location.reload()");
+                }
             }
             let _ = view;
         }
@@ -197,7 +199,9 @@ fn sync_webviews(
             if let Some(tab) = state.center_tabs.get_mut(idx) {
                 tab.url = url.clone();
                 tab.name = url;
-                tab.loading = true;
+                // Only set loading when webview feature is active and can actually clear it
+                #[cfg(feature = "webview")]
+                { tab.loading = true; }
             }
         }
     }

@@ -551,7 +551,7 @@ fn calculate_assembly_mass(entity: Entity, snapshot: &UIWorldSnapshot) -> Option
 }
 
 /// System to extract World state into UIWorldSnapshot
-/// Runs BEFORE UI systems
+/// Runs BEFORE UI systems — throttled to every 5 frames to reduce per-frame overhead
 pub fn extract_world_snapshot(
     mut snapshot: ResMut<UIWorldSnapshot>,
     query: Query<(
@@ -569,7 +569,12 @@ pub fn extract_world_snapshot(
         Option<&crate::classes::TextLabel>,
     )>,
     selection_manager: Option<Res<BevySelectionManager>>,
+    perf: Option<Res<crate::ui::UIPerformance>>,
 ) {
+    // Throttle: only update every 5 frames — Properties and Explorer are both throttled further
+    if let Some(ref p) = perf {
+        if p.frame_counter % 5 != 0 { return; }
+    }
     let Some(selection_manager) = selection_manager else { return };
     // Clear previous snapshot
     snapshot.entities.clear();
@@ -746,10 +751,42 @@ pub fn apply_ui_actions(
                 expanded.select_service(service);
             }
             UIAction::Delete(entities) => {
+                // Check before despawn whether a Camera class entity is being deleted
+                let camera_deleted = entities.iter().any(|e| {
+                    instance_query.get(*e)
+                        .map(|inst| inst.class_name == ClassName::Camera)
+                        .unwrap_or(false)
+                });
                 for entity in entities {
                     commands.entity(entity).despawn();
                 }
                 selection_manager.0.write().clear();
+                // Respawn a default camera at origin so the viewport is never left camerless
+                if camera_deleted {
+                    use bevy::core_pipeline::tonemapping::Tonemapping;
+                    use eustress_common::classes::{Instance, ClassName};
+                    commands.spawn((
+                        Camera3d::default(),
+                        Tonemapping::Reinhard,
+                        Transform::from_xyz(10.0, 8.0, 10.0)
+                            .looking_at(Vec3::ZERO, Vec3::Y),
+                        Projection::Perspective(PerspectiveProjection {
+                            fov: 70.0_f32.to_radians(),
+                            near: 0.1,
+                            far: 10000.0,
+                            ..default()
+                        }),
+                        Instance {
+                            name: "Camera".to_string(),
+                            class_name: ClassName::Camera,
+                            archivable: true,
+                            id: 0,
+                            ..Default::default()
+                        },
+                        Name::new("Camera"),
+                    ));
+                    info!("📷 Camera deleted — respawned default camera at origin");
+                }
             }
             UIAction::SpawnPart { part_type, position } => {
                 // Spawn the part via SpawnPartEvent (file-system-first: .glb meshes)

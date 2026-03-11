@@ -546,6 +546,7 @@ fn eustress_camera_controls(
     time: Res<Time>,
     mut cam_query: Query<(&mut EustressCamera, &Transform, &Camera, &GlobalTransform), With<Camera3d>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
     let (mut cam, transform, camera, global_transform) = match cam_query.single_mut() {
         Ok(c) => c,
@@ -556,7 +557,17 @@ fn eustress_camera_controls(
         return;
     }
     
-    // TODO: Check Slint UI focus state to block input when UI has focus
+    // Check if cursor is inside the 3D viewport (not over Explorer or Properties panels).
+    // ViewportBounds is in physical pixels from top-left, matching window.cursor_position().
+    let cursor_in_viewport = if let (Some(vb), Ok(window)) = (viewport_bounds.as_deref(), windows.single()) {
+        window.cursor_position().map(|pos| {
+            pos.x >= vb.x && pos.x <= vb.x + vb.width
+                && pos.y >= vb.y && pos.y <= vb.y + vb.height
+        }).unwrap_or(true)
+    } else {
+        true // No bounds known yet — allow input
+    };
+    
     let ui_wants_keyboard = false;
     let ui_wants_pointer = false;
     
@@ -634,8 +645,14 @@ fn eustress_camera_controls(
         cam.distance = cam.distance.clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
     }
 
-    // Zoom (Mouse Wheel) - zoom TOWARD the mouse cursor position
-    // This provides intuitive zoom behavior like in Blender/Maya
+    // Zoom (Mouse Wheel) - only when cursor is inside the 3D viewport.
+    // Blocked when mouse is over Explorer or Properties panels so they can scroll freely.
+    if scroll_delta != 0.0 && !cursor_in_viewport {
+        // Cursor is over a panel — discard zoom, let Slint handle the scroll
+        scroll_delta = 0.0;
+    }
+    
+    // Zoom TOWARD the mouse cursor position (Blender-style)
     if scroll_delta != 0.0 {
         // Get cursor position for zoom-toward-cursor
         let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());

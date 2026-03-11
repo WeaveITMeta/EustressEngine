@@ -141,12 +141,43 @@ pub enum FileChangeType {
     Removed,
 }
 
+/// Resource to track files recently written by the engine (to avoid hot-reload loops)
+#[derive(Resource, Default)]
+pub struct RecentlyWrittenFiles {
+    /// Map of file path to the time it was written
+    pub files: std::collections::HashMap<PathBuf, std::time::Instant>,
+}
+
+impl RecentlyWrittenFiles {
+    /// Mark a file as recently written
+    pub fn mark_written(&mut self, path: PathBuf) {
+        self.files.insert(path, std::time::Instant::now());
+    }
+    
+    /// Check if a file was recently written (within the last 2 seconds)
+    /// Extended window to prevent hot-reload loops when Transform changes trigger writes
+    pub fn was_recently_written(&self, path: &Path) -> bool {
+        if let Some(time) = self.files.get(path) {
+            time.elapsed() < std::time::Duration::from_millis(2000)
+        } else {
+            false
+        }
+    }
+    
+    /// Clean up old entries (older than 2 seconds)
+    pub fn cleanup(&mut self) {
+        let cutoff = std::time::Duration::from_secs(2);
+        self.files.retain(|_, time| time.elapsed() < cutoff);
+    }
+}
+
 /// System to process file change events and hot-reload
 pub fn process_file_changes(
     watcher: Option<Res<SpaceFileWatcher>>,
     mut registry: ResMut<SpaceFileRegistry>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut recently_written: ResMut<RecentlyWrittenFiles>,
     // Query for entities loaded from files
     file_entities: Query<(Entity, &super::file_loader::LoadedFromFile)>,
     // Query for Soul scripts
@@ -156,11 +187,26 @@ pub fn process_file_changes(
         return;
     };
     
+    // Clean up old entries from recently written files
+    recently_written.cleanup();
+    
     let events = watcher.poll_events();
     
     for event in events {
+        // Skip files that were recently written by the engine (prevents hot-reload loops)
+        if recently_written.was_recently_written(&event.path) {
+            debug!("Skipping hot-reload for recently written file: {:?}", event.path);
+            continue;
+        }
+        
         match event.change_type {
             FileChangeType::Modified => {
+                // Mark as recently written BEFORE hot-reload to prevent write-back loop
+                // When we hot-reload and insert Transform, it triggers Changed<Transform>,
+                // which would trigger write_instance_changes_system. By marking it here,
+                // that system will skip writing this file.
+                recently_written.mark_written(event.path.clone());
+                
                 handle_file_modified(
                     &event,
                     &mut registry,
@@ -228,6 +274,52 @@ fn handle_file_modified(
                         
                         info!("🔄 Hot-reloaded glTF model: {:?}", event.path);
                         break;
+                    }
+                }
+            }
+        }
+        
+        FileType::Toml => {
+            // Hot-reload TOML instance file (.glb.toml, .part.toml, etc.)
+            let path_str = event.path.to_string_lossy();
+            if path_str.ends_with(".glb.toml") 
+                || path_str.ends_with(".part.toml") 
+                || path_str.ends_with(".model.toml")
+                || path_str.ends_with(".instance.toml") 
+            {
+                if let Some(entity) = registry.get_entity(&event.path) {
+                    // Reload the TOML and update ECS components
+                    match std::fs::read_to_string(&event.path) {
+                        Ok(toml_content) => {
+                            match toml::from_str::<crate::space::instance_loader::InstanceDefinition>(&toml_content) {
+                                Ok(instance_def) => {
+                                    // Update transform
+                                    let transform: Transform = instance_def.transform.into();
+                                    commands.entity(entity).insert(transform);
+                                    
+                                    // Update realism components if present (use to_component() methods)
+                                    if let Some(ref mat) = instance_def.material {
+                                        commands.entity(entity).insert(mat.to_component());
+                                    }
+                                    
+                                    if let Some(ref thermo) = instance_def.thermodynamic {
+                                        commands.entity(entity).insert(thermo.to_component());
+                                    }
+                                    
+                                    if let Some(ref echem) = instance_def.electrochemical {
+                                        commands.entity(entity).insert(echem.to_component());
+                                    }
+                                    
+                                    info!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
+                                }
+                                Err(e) => {
+                                    error!("Failed to parse TOML instance {:?}: {}", event.path, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to read TOML instance {:?}: {}", event.path, e);
+                        }
                     }
                 }
             }

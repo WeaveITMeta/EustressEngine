@@ -17,10 +17,11 @@ pub fn part_selection_system(
     mouse_button: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    // Query parts with PartEntity, PartEntityMarker, OR Instance component (any works for selection)
-    // Mesh3d is optional to support SceneRoot entities (TOML-spawned instances) that have BasePart for bounds
-    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, Option<&Mesh3d>, Option<&BasePart>, Option<&ChildOf>)>,
+    camera_query: Query<(&Camera, &GlobalTransform, &Projection)>,
+    // Query selectable parts: must have PartEntityMarker OR (Instance + BasePart) so Folders,
+    // Services, Scripts, and UI entities are excluded from raycasting entirely.
+    part_entities_query: Query<(Entity, Option<&PartEntity>, Option<&PartEntityMarker>, Option<&Instance>, &GlobalTransform, Option<&Mesh3d>, Option<&BasePart>, Option<&ChildOf>),
+        Or<(With<PartEntityMarker>, With<PartEntity>, (With<BasePart>, With<Instance>))>>,
     // Query for children to calculate accurate group bounds (matching move_tool.rs)
     children_query: Query<&Children>,
     // Query for child transforms/baseparts
@@ -34,6 +35,7 @@ pub fn part_selection_system(
     scale_state: Res<crate::scale_tool::ScaleToolState>,
     rotate_state: Res<crate::rotate_tool::RotateToolState>,
     _studio_state: Res<crate::ui::StudioState>,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     // Only trigger on left click press
@@ -41,14 +43,7 @@ pub fn part_selection_system(
         return;
     }
     
-    // TODO: Check Slint UI focus state to block input when UI has focus
-    
-    // Check if Shift or Ctrl is pressed for multi-select
-    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    let multi_select_modifier = shift_pressed || ctrl_pressed;
-    
+    // Check if click is within the viewport bounds (not on UI panels)
     let window = match windows.single() {
         Ok(w) => w,
         Err(_) => return,
@@ -59,7 +54,26 @@ pub fn part_selection_system(
         None => return,
     };
     
-    let (camera, camera_transform) = match camera_query.single() {
+    // Block selection if click is outside the 3D viewport area
+    if let Some(vb) = viewport_bounds.as_ref() {
+        if vb.width > 0.0 && vb.height > 0.0 {
+            let in_viewport = cursor_position.x >= vb.x 
+                && cursor_position.x <= vb.x + vb.width
+                && cursor_position.y >= vb.y 
+                && cursor_position.y <= vb.y + vb.height;
+            if !in_viewport {
+                return; // Click is on UI, not viewport
+            }
+        }
+    }
+    
+    // Check if Shift or Ctrl is pressed for multi-select
+    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    let multi_select_modifier = shift_pressed || ctrl_pressed;
+    
+    let (camera, camera_transform, projection) = match camera_query.single() {
         Ok(ct) => ct,
         Err(_) => return,
     };
@@ -115,13 +129,17 @@ pub fn part_selection_system(
             
             if count > 0 {
                 let center = (bounds_min + bounds_max) * 0.5;
-                let selection_size = bounds_max - bounds_min;
-                let avg_size = selection_size.max_element();
                 
-                // Match handle length from move_tool.rs
-                let handle_length = (avg_size * 0.6).max(1.0) + 1.5;
+                // MUST match move_tool.rs camera_scale_factor exactly!
+                let fov = match projection {
+                    Projection::Perspective(p) => p.fov,
+                    _ => std::f32::consts::FRAC_PI_4,
+                };
+                let cam_dist = (center - camera_transform.translation()).length().max(0.1);
+                let scale = cam_dist * (fov * 0.5).tan() * 0.16;
+                let handle_length = scale * 1.0;
                 
-                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::splat(avg_size), handle_length, &camera_transform) {
+                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::ONE, handle_length, &camera_transform) {
                     return; // Clicking move handle, abort selection
                 }
             }
@@ -130,18 +148,38 @@ pub fn part_selection_system(
     
     // Check Rotate Tool handles
     if rotate_state.active {
-        for (_entity, global_transform, basepart) in selected_query.iter() {
+        // Compute combined bounding box of all selected entities (matching rotate_tool.rs)
+        let mut rot_bmin = Vec3::splat(f32::MAX);
+        let mut rot_bmax = Vec3::splat(f32::MIN);
+        let mut rot_count = 0;
+        for (entity, global_transform, basepart) in selected_query.iter() {
             let t = global_transform.compute_transform();
+            let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
+            let (mn, mx) = crate::math_utils::calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
+            rot_bmin = rot_bmin.min(mn);
+            rot_bmax = rot_bmax.max(mx);
+            rot_count += 1;
             
-            // Match radius calculation from rotate_tool.rs
-            let part_size = if let Some(bp) = basepart {
-                bp.size.max_element()
-            } else {
-                t.scale.max_element()
-            };
-            let radius = (part_size * 0.6).max(2.0).min(50.0);
-            
-            if crate::rotate_tool::is_clicking_rotate_handle(&ray, t.translation, radius, &camera_transform) {
+            // Include children in bounds (matching rotate_tool.rs)
+            if let Ok(children) = children_query.get(entity) {
+                for child in children.iter() {
+                    if let Ok((child_global, child_bp)) = child_transform_query.get(child) {
+                        let child_t = child_global.compute_transform();
+                        let child_size = child_bp.map(|bp| bp.size).unwrap_or(child_t.scale);
+                        let (c_min, c_max) = crate::math_utils::calculate_rotated_aabb(child_t.translation, child_size * 0.5, child_t.rotation);
+                        rot_bmin = rot_bmin.min(c_min);
+                        rot_bmax = rot_bmax.max(c_max);
+                        rot_count += 1;
+                    }
+                }
+            }
+        }
+        if rot_count > 0 {
+            let rot_center = (rot_bmin + rot_bmax) * 0.5;
+            let rot_extent = rot_bmax - rot_bmin;
+            // Use same radius calculation as rotate_tool.rs
+            let radius = crate::rotate_tool::compute_ring_radius(rot_center, rot_extent, &camera_transform, projection);
+            if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, radius, &camera_transform) {
                 return; // Clicking rotate handle, abort selection
             }
         }
@@ -152,14 +190,20 @@ pub fn part_selection_system(
         for (_entity, global_transform, basepart) in selected_query.iter() {
             let t = global_transform.compute_transform();
             
-            // Match handle logic from scale_tool.rs
             let part_size = if let Some(bp) = basepart {
                 bp.size
             } else {
                 t.scale
             };
             
-            let handle_length = (part_size.max_element() * 0.4) + 0.4;
+            // MUST match scale_tool.rs camera-distance-based handle length
+            let fov_s = match projection {
+                Projection::Perspective(p) => p.fov,
+                _ => std::f32::consts::FRAC_PI_4,
+            };
+            let dist_s = (t.translation - camera_transform.translation()).length().max(0.1);
+            let scale_s = dist_s * (fov_s * 0.5).tan() * 0.16;
+            let handle_length = scale_s * 0.9;
             
             if crate::scale_tool::is_clicking_scale_handle(&ray, t.translation, t.rotation, part_size, handle_length) {
                 return; // Clicking scale handle, abort selection
@@ -172,6 +216,23 @@ pub fn part_selection_system(
         // Entity ID format must match: "indexVgeneration" e.g. "68v0"
         let entity_id = entity_to_id_string(entity);
         
+        // Skip non-Part class names — Folder, ScreenGui, Service, Script etc. are not selectable
+        // even if they have an Instance component. Only Part/MeshPart/BasePart-carrying classes
+        // should receive 3D click selection.
+        if let Some(inst) = instance {
+            match inst.class_name {
+                crate::classes::ClassName::Folder
+                | crate::classes::ClassName::Model
+                | crate::classes::ClassName::ScreenGui
+                | crate::classes::ClassName::Frame
+                | crate::classes::ClassName::SoulScript
+                | crate::classes::ClassName::Workspace
+                | crate::classes::ClassName::Lighting
+                | crate::classes::ClassName::Camera => continue,
+                _ => {}
+            }
+        }
+
         let part_id = if let Some(pe) = part_entity {
             if !pe.part_id.is_empty() {
                 pe.part_id.clone()
@@ -231,8 +292,8 @@ pub fn part_selection_system(
     }
     
     // Update selection
-    if let Some((part_id, _, _hit_entity, parent_model)) = closest_hit {
-        // Hit part: part_id
+    if let Some((part_id, distance, _hit_entity, parent_model)) = closest_hit {
+        info!("[select] hit part_id='{}' dist={:.2}", part_id, distance);
         
         // Hit a part - check if we should allow selection changes
         // Only block if a tool is ACTIVELY DRAGGING (not just active/visible)
@@ -249,36 +310,28 @@ pub fn part_selection_system(
         // Alt+Click = select the individual part (bypass parent selection)
         // Normal Click = select the parent Model if the part is a child of one
         let selection_id = if alt_pressed {
-            // Alt held: select the individual part directly
-            // Alt+Click: Selecting individual part
             part_id.clone()
         } else if let Some(model_entity) = parent_model {
-            // Part has a parent Model - select the Model instead
             let model_id = entity_to_id_string(model_entity);
-            // Selecting parent Model
+            info!("[select] selecting parent Model id='{}'", model_id);
             model_id
         } else {
-            // No parent Model - select the part itself
             part_id.clone()
         };
         
         let sel = selection_manager.0.write();
         
         if multi_select_modifier {
-            // Shift+Click or Ctrl+Click: Toggle part in selection (multi-select)
-            // Works even when tools are active!
             if sel.is_selected(&selection_id) {
                 sel.remove_from_selection(&selection_id);
-                // Removed from selection
+                info!("[select] removed '{}' from selection", selection_id);
             } else {
                 sel.add_to_selection(selection_id.clone());
-                // Added to selection
+                info!("[select] added '{}' to selection", selection_id);
             }
         } else {
-            // Normal click: Replace selection
-            // Only if no tool is being actively used
             sel.select(selection_id.clone());
-            // Selected
+            info!("[select] selected '{}'", selection_id);
         }
     } else {
         // Clicked on empty space - check if we should deselect

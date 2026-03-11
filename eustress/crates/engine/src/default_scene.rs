@@ -11,18 +11,32 @@ pub struct DefaultScenePlugin;
 impl Plugin for DefaultScenePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_default_scene);
-        app.add_systems(Update, diagnose_scene_once.run_if(bevy::time::common_conditions::once_after_real_delay(std::time::Duration::from_secs(3))));
+        app.add_systems(Update, diagnose_scene_once.run_if(bevy::time::common_conditions::once_after_real_delay(std::time::Duration::from_secs(6))));
     }
 }
 
 /// One-shot diagnostic: dump all Camera3d and Mesh3d entities after 3 seconds
 fn diagnose_scene_once(
     cameras: Query<(Entity, &Transform, &Camera), With<Camera3d>>,
-    meshes: Query<(Entity, &Transform, &Name), With<Mesh3d>>,
+    meshes: Query<(Entity, &Transform, Option<&Name>), With<Mesh3d>>,
+    scene_roots: Query<(Entity, &SceneRoot, Option<&Name>, &Transform)>,
+    instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    children_query: Query<&Children>,
     all_entities: Query<(Entity, Option<&Name>)>,
+    asset_server: Res<AssetServer>,
 ) {
     info!("=== SCENE DIAGNOSTIC (3s after startup) ===");
     info!("Total entities: {}", all_entities.iter().count());
+    info!("Instance entities: {}", instances.iter().count());
+    info!("SceneRoot entities: {}", scene_roots.iter().count());
+    for (entity, scene_root, name, transform) in scene_roots.iter().take(5) {
+        let child_count = children_query.get(entity).map(|c| c.len()).unwrap_or(0);
+        let load_state = asset_server.get_load_state(scene_root.0.id());
+        let dep_load_state = asset_server.get_recursive_dependency_load_state(scene_root.0.id());
+        let asset_path = asset_server.get_path(scene_root.0.id());
+        info!("  SceneRoot {:?} '{}': pos={}, children={}, load_state={:?}, dep_state={:?}, path={:?}",
+            entity, name.map(|n| n.as_str()).unwrap_or("unnamed"), transform.translation, child_count, load_state, dep_load_state, asset_path);
+    }
     info!("Camera3d entities: {}", cameras.iter().count());
     for (entity, transform, camera) in cameras.iter() {
         info!("  Camera {:?}: pos={} order={} viewport={:?}",
@@ -31,7 +45,7 @@ fn diagnose_scene_once(
     info!("Mesh3d entities: {}", meshes.iter().count());
     for (entity, transform, name) in meshes.iter() {
         info!("  Mesh {:?} '{}': pos={}",
-            entity, name, transform.translation);
+            entity, name.map(|n| n.as_str()).unwrap_or("unnamed"), transform.translation);
     }
     info!("=== END SCENE DIAGNOSTIC ===");
 }
@@ -85,60 +99,11 @@ pub fn setup_default_scene(
     // SPAWN DEFAULT SCENE - Only if NOT loading a scene file
     // =========================================================================
     
+    // NOTE: Instance loading is handled by SpaceFileLoaderPlugin (file_loader.rs)
+    // which properly creates folder hierarchy with parent-child relationships.
+    // Do NOT load instances here to avoid duplicates.
     if !loading_scene_file {
-        // FILE-SYSTEM-FIRST: Load all default parts from Space/Workspace
-        // Uses .glb.toml instance definitions that reference shared mesh assets
-        let space_root = crate::space::default_space_root();
-        let workspace_path = space_root.join("Workspace");
-        
-        // Scan entire Workspace directory and load every .glb.toml instance file
-        let mut loaded_count = 0;
-        let mut baseplate_loaded = false;
-
-        if workspace_path.exists() {
-            // Collect and sort entries for deterministic load order (Baseplate first)
-            // Recursively scan all subdirectories for .glb.toml files
-            let mut toml_paths: Vec<std::path::PathBuf> = Vec::new();
-            collect_toml_files_recursive(&workspace_path, &mut toml_paths);
-
-            // Sort: Baseplate first, then alphabetically
-            toml_paths.sort_by(|a, b| {
-                let a_name = a.file_name().unwrap_or_default().to_string_lossy();
-                let b_name = b.file_name().unwrap_or_default().to_string_lossy();
-                if a_name.starts_with("Baseplate") { std::cmp::Ordering::Less }
-                else if b_name.starts_with("Baseplate") { std::cmp::Ordering::Greater }
-                else { a_name.cmp(&b_name) }
-            });
-
-            for toml_path in toml_paths {
-                let name = toml_path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .trim_end_matches(".glb.toml")
-                    .to_string();
-
-                match crate::space::instance_loader::load_instance_definition(&toml_path) {
-                    Ok(instance) => {
-                        crate::space::instance_loader::spawn_instance(
-                            &mut commands, &asset_server, &mut materials, toml_path, instance,
-                        );
-                        if name == "Baseplate" { baseplate_loaded = true; }
-                        loaded_count += 1;
-                    }
-                    Err(e) => {
-                        println!("⚠️ Failed to load {}.glb.toml: {}", name, e);
-                    }
-                }
-            }
-        }
-
-        // File-system-first: No programmatic fallback - Baseplate only appears if TOML exists
-        if !baseplate_loaded {
-            println!("ℹ️ No Baseplate.glb.toml found in Workspace/ (file-system-first: use Toolbox to add parts)");
-        }
-
-        println!("✅ Default scene ready — loaded {} instance(s) from Workspace/", loaded_count);
+        println!("✅ Default scene ready — instances loaded by SpaceFileLoaderPlugin");
     } else {
         println!("⏭️ Skipping default scene content (loading scene file)");
     }
@@ -184,10 +149,10 @@ pub fn setup_default_scene(
     println!("☀️ Sun and Moon are spawned by SharedLightingPlugin with DirectionalLight");
 }
 
-/// Grid rendering system - 9.8x9.8 grid spacing
+/// Grid rendering system - 9.80665m tessellation (SI standard gravity)
 pub fn draw_grid(mut gizmos: Gizmos) {
     let grid_size = 20;
-    let grid_spacing = 0.98; // 9.8 / 10 = 0.98 per cell
+    let grid_spacing = 9.80665 / 10.0; // 9.80665 / 10 = 0.980665 per cell
     let color_major = Color::srgba(0.3, 0.3, 0.3, 0.8);
     let color_minor = Color::srgba(0.2, 0.2, 0.2, 0.5);
     
@@ -217,21 +182,4 @@ pub fn draw_grid(mut gizmos: Gizmos) {
 }
 
 // Skybox is now created by SharedLightingPlugin from eustress_common
-
-/// Recursively collect all .glb.toml files from a directory and its subdirectories
-fn collect_toml_files_recursive(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip meshes/ directories (they contain .glb files, not .glb.toml)
-            if path.file_name().map(|n| n == "meshes").unwrap_or(false) {
-                continue;
-            }
-            collect_toml_files_recursive(&path, results);
-        } else if path.to_string_lossy().ends_with(".glb.toml") {
-            results.push(path);
-        }
-    }
-}
+// Instance loading is handled by SpaceFileLoaderPlugin (file_loader.rs)

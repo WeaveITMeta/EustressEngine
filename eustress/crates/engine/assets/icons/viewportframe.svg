@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Outer frame border -->
+  <rect x="1.5" y="1.5" width="13" height="13" rx="1.5" stroke="#4fc1ff" stroke-width="1.2" fill="none"/>
+  <!-- Inner viewport area -->
+  <rect x="3" y="3" width="10" height="10" rx="0.5" fill="#4fc1ff" fill-opacity="0.06"/>
+  <!-- 3D cube inside viewport -->
+  <!-- Front face -->
+  <rect x="5" y="6.5" width="5" height="4.5" fill="#4fc1ff" fill-opacity="0.2" stroke="#4fc1ff" stroke-width="0.8"/>
+  <!-- Top face -->
+  <path d="M5 6.5 L7 4.5 L12 4.5 L10 6.5 Z" fill="#4fc1ff" fill-opacity="0.3" stroke="#4fc1ff" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Right face -->
+  <path d="M10 6.5 L12 4.5 L12 9 L10 11 Z" fill="#4fc1ff" fill-opacity="0.15" stroke="#4fc1ff" stroke-width="0.8" stroke-linejoin="round"/>
+</svg>

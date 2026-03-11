@@ -177,13 +177,13 @@ pub fn free_camera_system(
             velocity -= Vec3::Y;
         }
 
-        // Apply speed multiplier (Shift = fast, Ctrl = slow)
+        // Apply speed multiplier (Shift = slow/precise, Ctrl = even slower)
         let mut speed_multiplier = 1.0;
         if keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight) {
-            speed_multiplier = 2.0;
+            speed_multiplier = 0.5; // 50% slower for fine-grain control
         }
         if keyboard_input.pressed(KeyCode::ControlLeft) || keyboard_input.pressed(KeyCode::ControlRight) {
-            speed_multiplier = 0.5;
+            speed_multiplier = 0.25; // 25% for even more precision
         }
 
         // Move camera

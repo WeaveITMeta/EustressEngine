@@ -8,7 +8,6 @@
 /// - Properties panel edits actual files on disk, not just in-memory ECS
 
 use bevy::prelude::*;
-use bevy::asset::io::AssetSourceBuilder;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 
@@ -53,6 +52,9 @@ pub enum FileType {
     Slint,          // .slint
     Html,           // .html
     
+    // GUI Elements (StarterGui)
+    GuiElement,     // .textlabel, .textbutton, .frame, .imagelabel, .imagebutton, .scrollingframe
+    
     // Data
     Json,           // .json
     Toml,           // .toml
@@ -86,6 +88,9 @@ impl FileType {
             "tif" | "tiff" | "geotiff" => Some(Self::GeoTiff),
             "slint" => Some(Self::Slint),
             "html" => Some(Self::Html),
+            // GUI elements
+            "textlabel" | "textbutton" | "frame" | "imagelabel" | "imagebutton" | 
+            "scrollingframe" | "textbox" | "viewportframe" => Some(Self::GuiElement),
             "json" => Some(Self::Json),
             "toml" => Some(Self::Toml),
             "ron" => Some(Self::Ron),
@@ -122,6 +127,17 @@ impl FileType {
         if path_str.ends_with(".mat.toml") {
             return Some(Self::Material);
         }
+        // GUI element compound extensions (.textlabel.toml, .textbutton.toml, .frame.toml, etc.)
+        // Must be checked BEFORE the plain .toml catch-all below
+        if path_str.ends_with(".textlabel.toml") || path_str.ends_with(".textbutton.toml")
+            || path_str.ends_with(".frame.toml") || path_str.ends_with(".imagelabel.toml")
+            || path_str.ends_with(".imagebutton.toml") || path_str.ends_with(".scrollingframe.toml")
+            || path_str.ends_with(".textbox.toml") || path_str.ends_with(".viewportframe.toml")
+            || path_str.ends_with(".screengui.toml")
+        {
+            return Some(Self::GuiElement);
+        }
+        
         // Plain .toml files (config, settings, etc.) - don't spawn entities
         if path_str.ends_with(".toml") {
             return None; // Ignore plain .toml files - they're config, not instances
@@ -148,8 +164,11 @@ impl FileType {
             // SoundService: Audio files spawn as Sound entities
             (Self::Ogg | Self::Mp3 | Self::Wav | Self::Flac, "SoundService") => true,
             
-            // StarterGui: UI files don't spawn in 3D world
-            (Self::Slint | Self::Html, "StarterGui") => false,
+            // StarterGui: GUI elements spawn as UI entities
+            (Self::GuiElement | Self::Toml, "StarterGui") => true,
+            
+            // Scripts in any service folder
+            (Self::Soul | Self::Rune, _) => true,
             
             // Default: don't spawn
             _ => false,
@@ -342,7 +361,7 @@ fn discover_services(space_path: &Path) -> Vec<String> {
 
 /// Spawn a single file entry as an ECS entity, optionally parented to `parent_entity`.
 /// Returns the spawned entity if one was created.
-fn spawn_file_entry(
+pub fn spawn_file_entry(
     commands: &mut Commands,
     asset_server: &Res<AssetServer>,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -372,36 +391,70 @@ fn spawn_file_entry(
 
     let entity = match file_meta.file_type {
         FileType::Toml => {
-            match super::instance_loader::load_instance_definition(&file_meta.path) {
-                Ok(instance) => {
-                    let e = super::instance_loader::spawn_instance(
-                        commands,
-                        asset_server,
-                        materials,
-                        file_meta.path.clone(),
-                        instance,
-                    );
-                    registry.register(file_meta.path.clone(), e, file_meta.clone());
-                    e
+            // Check if this is a _service.toml file (service marker)
+            let is_service = file_meta.path.file_name()
+                .map(|n| n.to_string_lossy().ends_with("_service.toml"))
+                .unwrap_or(false);
+            
+            if is_service {
+                // Load as service entity
+                match super::service_loader::load_service_definition(&file_meta.path) {
+                    Ok(service_def) => {
+                        let e = super::service_loader::spawn_service(
+                            commands,
+                            file_meta.path.clone(),
+                            service_def,
+                        );
+                        registry.register(file_meta.path.clone(), e, file_meta.clone());
+                        e
+                    }
+                    Err(err) => {
+                        error!("Failed to load service file {:?}: {}", file_meta.path, err);
+                        return None;
+                    }
                 }
-                Err(err) => {
-                    error!("Failed to load instance file {:?}: {}", file_meta.path, err);
-                    return None;
+            } else {
+                // Load as instance entity
+                match super::instance_loader::load_instance_definition(&file_meta.path) {
+                    Ok(instance) => {
+                        let e = super::instance_loader::spawn_instance(
+                            commands,
+                            asset_server,
+                            materials,
+                            file_meta.path.clone(),
+                            instance,
+                        );
+                        registry.register(file_meta.path.clone(), e, file_meta.clone());
+                        e
+                    }
+                    Err(err) => {
+                        error!("Failed to load instance file {:?}: {}", file_meta.path, err);
+                        return None;
+                    }
                 }
             }
         }
 
         FileType::Gltf => {
+            // Check for Draco compression before loading
+            if super::draco_decoder::is_draco_compressed(&file_meta.path) {
+                super::draco_decoder::warn_draco_file(&file_meta.path);
+                return None; // Skip loading Draco-compressed files
+            }
+            
             // Use space:// asset source for GLB files in the Space directory
             let space_root = super::default_space_root();
             let relative_path = file_meta.path
                 .strip_prefix(&space_root)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_else(|_| file_meta.path.to_string_lossy().replace('\\', "/"));
-            let scene_handle = asset_server.load(format!("space://{}#Scene0", relative_path));
+            let asset_path = format!("space://{}#Scene0", relative_path);
+            info!("🔧 Loading GLTF: {} (from {:?})", asset_path, file_meta.path);
+            let scene_handle = asset_server.load(asset_path);
             let e = commands.spawn((
                 SceneRoot(scene_handle),
                 Transform::default(),
+                Visibility::default(),
                 eustress_common::classes::Instance {
                     name: file_meta.name.clone(),
                     class_name: eustress_common::classes::ClassName::Part,
@@ -462,8 +515,89 @@ fn spawn_file_entry(
         }
 
         FileType::Rune => {
-            debug!("Skipping .rune file (compiled bytecode): {:?}", file_meta.path);
-            return None;
+            // Load .rune files as SoulScript entities (Rune is the scripting language)
+            match std::fs::read_to_string(&file_meta.path) {
+                Ok(rune_source) => {
+                    let e = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: file_meta.name.clone(),
+                            class_name: eustress_common::classes::ClassName::SoulScript,
+                            archivable: true,
+                            id: 0,
+                            ai: false,
+                        },
+                        crate::soul::SoulScriptData {
+                            source: rune_source,
+                            dirty: false,
+                            ast: None,
+                            generated_code: None,
+                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                            errors: Vec::new(),
+                        },
+                        LoadedFromFile {
+                            path: file_meta.path.clone(),
+                            file_type: file_meta.file_type,
+                            service: file_meta.service.clone(),
+                        },
+                        Name::new(file_meta.name.clone()),
+                    )).id();
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("📜 Loaded Rune script {} from {:?}", file_meta.name, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("❌ Failed to read Rune script {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
+        }
+
+        FileType::GuiElement => {
+            // Load GUI element files (.textlabel.toml, .frame.toml, etc.) as UI entities.
+            // path.extension() returns "toml" for compound paths, so extract the
+            // second-to-last stem segment (e.g. "Panel.frame.toml" → stem "Panel.frame" → ext "frame").
+            let gui_ext = file_meta.path
+                .file_stem()  // "Panel.frame"
+                .and_then(|s| std::path::Path::new(s).extension())  // "frame"
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let class_name = match gui_ext {
+                "textlabel" => eustress_common::classes::ClassName::TextLabel,
+                "textbutton" => eustress_common::classes::ClassName::TextButton,
+                "frame" | "screengui" => eustress_common::classes::ClassName::Frame,
+                "imagelabel" => eustress_common::classes::ClassName::ImageLabel,
+                "imagebutton" => eustress_common::classes::ClassName::ImageButton,
+                "scrollingframe" => eustress_common::classes::ClassName::ScrollingFrame,
+                "textbox" => eustress_common::classes::ClassName::TextBox,
+                "viewportframe" => eustress_common::classes::ClassName::ViewportFrame,
+                _ => eustress_common::classes::ClassName::Frame, // Default to Frame
+            };
+            // Name is everything before the first dot (e.g. "Panel" from "Panel.frame.toml")
+            let display_name = file_meta.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.splitn(2, '.').next())
+                .unwrap_or(&file_meta.name)
+                .to_string();
+            
+            let e = commands.spawn((
+                eustress_common::classes::Instance {
+                    name: display_name.clone(),
+                    class_name,
+                    archivable: true,
+                    id: 0,
+                    ai: false,
+                },
+                LoadedFromFile {
+                    path: file_meta.path.clone(),
+                    file_type: file_meta.file_type,
+                    service: file_meta.service.clone(),
+                },
+                Name::new(display_name.clone()),
+            )).id();
+            registry.register(file_meta.path.clone(), e, file_meta.clone());
+            info!("🖼️ Loaded GUI element {} ({:?}) from {:?}", display_name, class_name, file_meta.path);
+            e
         }
 
         FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
@@ -487,7 +621,7 @@ fn spawn_file_entry(
 
 /// Spawn a Directory entry as a Folder entity, then spawn all its children
 /// parented to that Folder.  Recurses for nested subdirectories.
-fn spawn_directory_entry(
+pub fn spawn_directory_entry(
     commands: &mut Commands,
     asset_server: &Res<AssetServer>,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -508,11 +642,32 @@ fn spawn_directory_entry(
         return;
     }
 
-    // Spawn the Folder entity
+    // Check for _instance.toml — it may declare a richer class (e.g. ScreenGui)
+    let instance_toml_path = dir_meta.path.join("_instance.toml");
+    let class_name = if instance_toml_path.exists() {
+        std::fs::read_to_string(&instance_toml_path)
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+            .and_then(|v| v.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .map(|cn| match cn.as_str() {
+                "ScreenGui"      => eustress_common::classes::ClassName::ScreenGui,
+                "Frame"          => eustress_common::classes::ClassName::Frame,
+                "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,
+                "BillboardGui"   => eustress_common::classes::ClassName::BillboardGui,
+                "SurfaceGui"     => eustress_common::classes::ClassName::SurfaceGui,
+                "Model"          => eustress_common::classes::ClassName::Model,
+                _                => eustress_common::classes::ClassName::Folder,
+            })
+            .unwrap_or(eustress_common::classes::ClassName::Folder)
+    } else {
+        eustress_common::classes::ClassName::Folder
+    };
+
+    // Spawn the Folder / ScreenGui / Model entity
     let folder_entity = commands.spawn((
         eustress_common::classes::Instance {
             name: dir_meta.name.clone(),
-            class_name: eustress_common::classes::ClassName::Folder,
+            class_name,
             archivable: true,
             id: 0,
             ai: false,
@@ -599,18 +754,13 @@ pub struct SpaceFileLoaderPlugin;
 
 impl Plugin for SpaceFileLoaderPlugin {
     fn build(&self, app: &mut App) {
-        // Register the Space directory as a custom asset source
-        // This allows loading assets with "space://path/to/asset.glb" syntax
-        let space_root = super::default_space_root();
-        info!("📁 Registering Space asset source at: {:?}", space_root);
-        
-        app.register_asset_source(
-            "space",
-            AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
-        );
+        // Note: The "space://" asset source is registered in main.rs BEFORE DefaultPlugins
+        // This must happen before AssetPlugin is initialized, so we can't do it here.
         
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
+            .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
+            .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .add_systems(Startup, (
                 load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,
@@ -618,6 +768,7 @@ impl Plugin for SpaceFileLoaderPlugin {
             .add_systems(Update, (
                 super::file_watcher::process_file_changes,
                 super::instance_loader::write_instance_changes_system,
+                super::space_ops::apply_space_rescan,
             ));
     }
 }

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Main frame -->
+  <rect x="1.5" y="1.5" width="11" height="13" rx="1.5" stroke="#4fc1ff" stroke-width="1.2" fill="none"/>
+  <!-- Inner content area -->
+  <rect x="3" y="3" width="8" height="10" rx="0.5" fill="#4fc1ff" fill-opacity="0.1"/>
+  <!-- Scroll bar track -->
+  <rect x="13" y="1.5" width="1.5" height="13" rx="0.75" fill="#4fc1ff" fill-opacity="0.2"/>
+  <!-- Scroll bar thumb -->
+  <rect x="13" y="4" width="1.5" height="4" rx="0.75" fill="#4fc1ff" fill-opacity="0.8"/>
+  <!-- Content lines -->
+  <line x1="4" y1="5.5" x2="9.5" y2="5.5" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round" stroke-opacity="0.7"/>
+  <line x1="4" y1="7.5" x2="9.5" y2="7.5" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round" stroke-opacity="0.7"/>
+  <line x1="4" y1="9.5" x2="7.5" y2="9.5" stroke="#4fc1ff" stroke-width="0.9" stroke-linecap="round" stroke-opacity="0.7"/>
+</svg>

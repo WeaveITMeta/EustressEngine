@@ -182,18 +182,21 @@ pub fn spawn_baseplate(
         ..default()
     });
     
-    commands.spawn((
+    let entity = commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::from_xyz(0.0, -0.5, 0.0),
         instance,
         base_part,
         part,
-        PartEntityMarker { part_id: "Baseplate".to_string() },
+        PartEntityMarker { part_id: String::new() }, // filled in below
         Name::new("Baseplate"),
         Attributes::new(),
         Tags::new(),
-    )).id()
+    )).id();
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    commands.entity(entity).insert(PartEntityMarker { part_id });
+    entity
 }
 
 /// Spawn the welcome cube - green 1.96133x1.96133x1.96133 cube at origin (Space Grade Ready)
@@ -242,18 +245,21 @@ pub fn spawn_welcome_cube(
         ..default()
     });
     
-    commands.spawn((
+    let entity = commands.spawn((
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::from_xyz(0.0, 0.980665, 0.0),
         instance,
         base_part,
         part,
-        PartEntityMarker { part_id: "Welcome Cube".to_string() },
+        PartEntityMarker { part_id: String::new() }, // filled in below
         Name::new("Welcome Cube"),
         Attributes::new(),
         Tags::new(),
-    )).id()
+    )).id();
+    let part_id = format!("{}v{}", entity.index(), entity.generation());
+    commands.entity(entity).insert(PartEntityMarker { part_id });
+    entity
 }
 
 /// Spawn the complete default scene (baseplate + welcome cube)
@@ -349,18 +355,21 @@ fn spawn_scene_entity(
                 ..default()
             });
             
-            commands.spawn((
+            let bevy_entity = commands.spawn((
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(material_handle),
                 transform,
                 instance,
                 base_part,
                 part,
-                PartEntityMarker { part_id: entity.name.clone() },
+                PartEntityMarker { part_id: String::new() }, // filled in below
                 Name::new(entity.name.clone()),
                 Attributes::new(),
                 Tags::new(),
-            )).id()
+            )).id();
+            let part_id = format!("{}v{}", bevy_entity.index(), bevy_entity.generation());
+            commands.entity(bevy_entity).insert(PartEntityMarker { part_id });
+            bevy_entity
         }
         EntityClass::Folder => {
             commands.spawn((

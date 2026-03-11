@@ -832,6 +832,61 @@ pub fn render_cross_scene_modal(
     }
 }
 
+/// System that consumes `pending_paste` flag from StudioState and fires a PasteEvent
+/// with the mouse cursor's world-space position (raycast against surfaces or ground plane).
+/// This bridges the keybinding (Ctrl+V) path to the actual paste logic.
+pub fn consume_pending_paste(
+    mut studio_state: ResMut<crate::ui::StudioState>,
+    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    spatial_query: avian3d::prelude::SpatialQuery,
+    mut paste_events: MessageWriter<PasteEvent>,
+) {
+    if !studio_state.pending_paste {
+        return;
+    }
+    studio_state.pending_paste = false;
+
+    // Try to get cursor position and camera for raycast
+    let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
+    let camera_data = cameras.single().ok();
+
+    let target_position = match (cursor_pos, camera_data) {
+        (Some(cursor), Some((camera, cam_transform))) => {
+            if let Ok(ray) = camera.viewport_to_world(cam_transform, cursor) {
+                // First try physics raycast to find a surface under the cursor
+                let physics_hit = crate::math_utils::find_surface_with_physics(
+                    &spatial_query,
+                    &ray,
+                    &[], // Don't exclude any entities for paste placement
+                );
+
+                if let Some((hit_point, normal, _entity)) = physics_hit {
+                    // Place on the surface, offset half the default part height (0.5) along the normal
+                    Some(hit_point + normal * 0.5)
+                } else {
+                    // Fallback: intersect with ground plane (Y=0)
+                    crate::math_utils::ray_plane_intersection(
+                        ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y,
+                    ).map(|t| {
+                        let hit = ray.origin + *ray.direction * t;
+                        // Small Y offset to avoid z-fighting
+                        hit + Vec3::new(0.0, 0.5, 0.0)
+                    })
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    paste_events.write(PasteEvent {
+        mode: PasteMode::Normal,
+        target_position,
+    });
+}
+
 // ============================================================================
 // Plugin
 // ============================================================================
@@ -849,6 +904,7 @@ impl Plugin for ClipboardPlugin {
             .add_message::<DuplicateEvent>()
             .add_message::<PasteCompletedEvent>()
             .add_systems(Update, (
+                consume_pending_paste,
                 handle_copy_event,
                 handle_paste_event,
                 handle_duplicate_event,

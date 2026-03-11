@@ -173,7 +173,7 @@ fn handle_select_drag(
     studio_state: Option<Res<StudioState>>,
     input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     // Support both PartEntity (legacy) and Instance (modern) components
     mut selected_query: Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<SelectionBox>>,
     all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<SelectionBox>>,
@@ -208,7 +208,7 @@ fn handle_select_drag(
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
-    let Ok((camera, camera_transform)) = cameras.single() else { return; };
+    let Ok((camera, camera_transform, projection)) = cameras.single() else { return; };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return; };
     
     if mouse.just_pressed(MouseButton::Left) {
@@ -232,19 +232,18 @@ fn handle_select_drag(
             
             if count > 0 {
                 let center = (bounds_min + bounds_max) * 0.5;
-                let selection_size = bounds_max - bounds_min;
-                let avg_size = selection_size.max_element();
                 
-                // MUST match move_tool.rs handle_length calculation exactly!
-                let base_handle_length = if avg_size < 1.0 {
-                    (avg_size * 1.2).max(0.3)
-                } else {
-                    (avg_size * 0.6).max(1.0)
+                // MUST match move_tool.rs camera_scale_factor exactly!
+                let fov = match projection {
+                    Projection::Perspective(p) => p.fov,
+                    _ => std::f32::consts::FRAC_PI_4,
                 };
-                let handle_length = base_handle_length + 0.5;
+                let cam_dist = (center - camera_transform.translation()).length().max(0.1);
+                let scale = cam_dist * (fov * 0.5).tan() * 0.16;
+                let handle_length = scale * 1.0;
                 
                 // Check if clicking on move handle - let move_tool handle it
-                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::splat(avg_size), handle_length, &camera_transform) {
+                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::ONE, handle_length, &camera_transform) {
                     return;
                 }
                 
@@ -261,29 +260,43 @@ fn handle_select_drag(
             // Not clicking on handle or selected part - continue to allow selecting new objects
         }
         
-        // Check Scale tool handles (per-entity)
+        // Check Scale tool handles (per-entity, camera-distance-based)
         if scale_state.active && studio_state.current_tool == Tool::Scale {
             for (_entity, _, global_transform, _, _, basepart_opt) in selected_query.iter() {
                 let t = global_transform.compute_transform();
                 let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-                // MUST match scale_tool.rs handle_length calculation exactly!
-                let scale_handle_length = (size.max_element() * 0.4) + 0.4;
+                // MUST match scale_tool.rs camera-distance-based handle_length exactly!
+                let scale_fov = match projection {
+                    Projection::Perspective(p) => p.fov,
+                    _ => std::f32::consts::FRAC_PI_4,
+                };
+                let scale_dist = (t.translation - camera_transform.translation()).length().max(0.1);
+                let scale_s = scale_dist * (scale_fov * 0.5).tan() * 0.16;
+                let scale_handle_length = scale_s * 0.9;
                 if crate::scale_tool::is_clicking_scale_handle(&ray, t.translation, t.rotation, size, scale_handle_length) {
-                    // Clicking on scale handle - don't start drag, let scale tool handle it
                     return;
                 }
             }
         }
         
-        // Check Rotate tool handles (per-entity)
+        // Check Rotate tool handles (group bounding box, matching rotate_tool.rs)
         if rotate_state.active && studio_state.current_tool == Tool::Rotate {
+            let mut rot_bmin = Vec3::splat(f32::MAX);
+            let mut rot_bmax = Vec3::splat(f32::MIN);
+            let mut rot_cnt = 0;
             for (_entity, _, global_transform, _, _, basepart_opt) in selected_query.iter() {
                 let t = global_transform.compute_transform();
                 let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-                // MUST match rotate_tool.rs radius calculation exactly!
-                let rotate_radius = (size.max_element() * 0.6).max(2.0).min(50.0);
-                if crate::rotate_tool::is_clicking_rotate_handle(&ray, t.translation, rotate_radius, &camera_transform) {
-                    // Clicking on rotate handle - don't start drag, let rotate tool handle it
+                let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
+                rot_bmin = rot_bmin.min(mn);
+                rot_bmax = rot_bmax.max(mx);
+                rot_cnt += 1;
+            }
+            if rot_cnt > 0 {
+                let rot_center = (rot_bmin + rot_bmax) * 0.5;
+                let rot_extent = rot_bmax - rot_bmin;
+                let rotate_radius = crate::rotate_tool::compute_ring_radius(rot_center, rot_extent, &camera_transform, projection);
+                if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, rotate_radius, &camera_transform) {
                     return;
                 }
             }
@@ -533,6 +546,8 @@ fn handle_select_drag(
     }
     
     // R and T key rotation while dragging (works with or without Ctrl)
+    // IMPORTANT: After applying rotation, update initial_positions/initial_rotations
+    // so the drag loop doesn't overwrite the rotation on the next frame.
     if state.dragging && state.dragged_entity.is_some() {
         // Check for R key
         let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
@@ -561,6 +576,9 @@ fn handle_select_drag(
                 let relative_pos = transform.translation - group_center;
                 transform.translation = group_center + rotation * relative_pos;
                 transform.rotate_y(90.0_f32.to_radians());
+                // Update cached state so drag loop doesn't revert this rotation
+                state.initial_positions.insert(entity, transform.translation);
+                state.initial_rotations.insert(entity, transform.rotation);
             }
         }
         
@@ -577,6 +595,9 @@ fn handle_select_drag(
                 }
                 if is_descendant { continue; }
                 transform.rotate_z(90.0_f32.to_radians());
+                // Update cached state so drag loop doesn't revert this rotation
+                state.initial_positions.insert(entity, transform.translation);
+                state.initial_rotations.insert(entity, transform.rotation);
             }
         }
     }

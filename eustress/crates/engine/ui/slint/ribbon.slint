@@ -134,8 +134,14 @@ export component Ribbon inherits Rectangle {
     in-out property <bool> show-assets: false;
     in-out property <bool> show-collaboration: false;
     in-out property <bool> show-command-bar: false;
+
+    // Account and sync state
+    in property <string> account-name: "Guest";
+    in property <string> account-status: "Logged out";
+    in property <string> sync-status: "Local-first";
     
     // File callbacks
+    callback on-new-universe();
     callback on-new-scene();
     callback on-open-scene();
     callback on-save-scene();
@@ -165,6 +171,7 @@ export component Ribbon inherits Rectangle {
     callback on-play-with-character();
     callback on-pause();
     callback on-stop();
+    callback on-show-simulation-settings();
     
     // View callbacks
     callback on-focus-selection();
@@ -225,9 +232,8 @@ export component Ribbon inherits Rectangle {
             
             HorizontalLayout {
                 padding-left: 4px;
-                padding-right: 4px;
+                padding-right: 8px;
                 spacing: 0px;
-                alignment: start;
                 
                 // ── FILE ──
                 Rectangle {
@@ -257,10 +263,11 @@ export component Ribbon inherits Rectangle {
                                 padding-top: 4px;
                                 padding-bottom: 4px;
                                 
-                                DropdownItem { label: "New Scene"; shortcut: "Ctrl+N"; clicked => { root.on-new-scene(); } }
-                                DropdownItem { label: "Open Scene..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
-                                DropdownItem { label: "Save Scene"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
-                                DropdownItem { label: "Save As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
+                                DropdownItem { label: "New Universe..."; shortcut: "Ctrl+Shift+N"; clicked => { root.on-new-universe(); } }
+                                DropdownItem { label: "New Space"; shortcut: "Ctrl+N"; clicked => { root.on-new-scene(); } }
+                                DropdownItem { label: "Open Space..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
+                                DropdownItem { label: "Save Space"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
+                                DropdownItem { label: "Save Space As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Publish..."; shortcut: "Ctrl+P"; clicked => { root.on-publish(); } }
                                 DropdownItem { label: "Publish As..."; clicked => { root.on-publish-as(); } }
@@ -822,18 +829,75 @@ export component Ribbon inherits Rectangle {
                     }
                 }
                 
+                // Spacer pushes status badges to the right
                 Rectangle { horizontal-stretch: 1; }
                 
                 // Unsaved indicator
                 if root.has-unsaved-changes: Rectangle {
-                    width: 70px;
+                    width: 60px;
+                    height: 20px;
+                    background: #3d2a1a;
+                    border-radius: 4px;
                     
                     Text {
                         text: "Unsaved";
-                        color: Theme.text-warning;
+                        color: #ffb74d;
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+                }
+                
+                // 8px gap before sync badge
+                Rectangle { width: 8px; }
+                
+                // Sync status badge
+                Rectangle {
+                    width: 80px;
+                    height: 20px;
+                    background: #1a2e1a;
+                    border-radius: 4px;
+
+                    Text {
+                        text: root.sync-status;
+                        color: #81c784;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // 8px gap before account badge
+                Rectangle { width: 8px; }
+
+                // Account badge
+                Rectangle {
+                    width: 120px;
+                    height: 20px;
+                    background: Theme.background-secondary;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 0px;
+
+                        Text {
+                            text: root.account-name;
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Text {
+                            text: root.account-status;
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
@@ -848,7 +912,7 @@ export component Ribbon inherits Rectangle {
             HorizontalLayout {
                 x: 6px;
                 y: 1px;
-                width: 112px;
+                width: 142px;
                 height: 20px;
                 spacing: 2px;
                 
@@ -911,7 +975,7 @@ export component Ribbon inherits Rectangle {
                     height: 20px;
                     background: stop-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 3px;
-                    
+
                     stop-touch := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { if root.play-state != "stopped" { root.on-stop(); } }
@@ -920,6 +984,24 @@ export component Ribbon inherits Rectangle {
                         x: 5px; y: 2px; width: 16px; height: 16px;
                         source: @image-url("../../assets/icons/ui/stop.svg");
                         image-fit: contain; colorize: #ef5350;
+                    }
+                }
+
+                // Simulation Settings
+                Rectangle {
+                    width: 26px;
+                    height: 20px;
+                    background: sim-cfg-touch.has-hover ? Theme.button-hover : transparent;
+                    border-radius: 3px;
+
+                    sim-cfg-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-show-simulation-settings(); }
+                    }
+                    Image {
+                        x: 5px; y: 2px; width: 16px; height: 16px;
+                        source: @image-url("../../assets/icons/ui/sim-settings.svg");
+                        image-fit: contain;
                     }
                 }
             }
@@ -980,9 +1062,9 @@ export component Ribbon inherits Rectangle {
                 // ── FILE group ──
                 ToolGroup {
                     label: "File";
-                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; tooltip: "New Scene (Ctrl+N)"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open Scene (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; tooltip: "Save Scene (Ctrl+S)"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; tooltip: "New Space (Ctrl+N)"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open Space (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; tooltip: "Save Space (Ctrl+S)"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
                 }
                 GroupDivider {}
                 

@@ -16,17 +16,31 @@ use eustress_common::classes::ClassName;
 // Runtime UI Plugin
 // ============================================================================
 
+/// Marker component: this entity has already had Bevy UI nodes spawned for it.
+/// Prevents re-spawning every frame.
+#[derive(Component, Debug, Clone)]
+pub struct BevyGuiSpawned;
+
 /// Plugin for managing user-created runtime UI
 pub struct RuntimeUIPlugin;
 
 impl Plugin for RuntimeUIPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RuntimeUIManager>()
+            .init_resource::<ShowDevelopmentUIState>()
             .add_systems(Update, (
                 watch_ui_files,
                 process_ui_events,
+                spawn_bevy_gui_from_loaded_entities,
+                sync_development_ui_visibility,
             ));
     }
+}
+
+/// Cached state so sync_development_ui_visibility only runs when the value changes
+#[derive(Resource, Default)]
+struct ShowDevelopmentUIState {
+    last_value: Option<bool>,
 }
 
 // ============================================================================
@@ -639,6 +653,205 @@ pub fn load_gui_tree(folder_path: &Path) -> Result<GuiElement, RuntimeUIError> {
     element.children.sort_by_key(|c| c.z_index);
     
     Ok(element)
+}
+
+// ============================================================================
+// Bevy UI Spawner
+// ============================================================================
+
+/// Spawn Bevy UI Node hierarchy for every ScreenGui entity under StarterGui
+/// that hasn't been spawned yet. Runs once per entity (guarded by BevyGuiSpawned).
+///
+/// Architecture:
+///   ScreenGui entity (loaded by file_loader, class=ScreenGui/Frame)
+///     └─ child TOML entities (TextLabel, TextButton, Frame, etc.)
+///
+/// Each entity gets a Bevy Node + BackgroundColor + optional Text spawned on it.
+/// The Slint overlay sits above this layer (camera order), so runtime game UI
+/// appears beneath the editor chrome.
+fn spawn_bevy_gui_from_loaded_entities(
+    mut commands: Commands,
+    // All loaded GUI entities that haven't been given Bevy UI nodes yet
+    unspawned: Query<
+        (Entity, &crate::space::file_loader::LoadedFromFile, &eustress_common::classes::Instance),
+        Without<BevyGuiSpawned>,
+    >,
+    // StarterGui service component to read ShowDevelopmentUI
+    service_components: Query<&crate::space::service_loader::ServiceComponent>,
+) {
+    use eustress_common::classes::ClassName;
+    use crate::space::service_loader::PropertyValue;
+
+    // Read ShowDevelopmentUI from the StarterGui service (defaults to false if not set)
+    let show_development_ui = service_components
+        .iter()
+        .find(|sc| sc.class_name == "StarterGui")
+        .and_then(|sc| sc.properties.get("ShowDevelopmentUI"))
+        .map(|v| matches!(v, PropertyValue::Bool(true)))
+        .unwrap_or(false);
+
+    for (entity, loaded, instance) in &unspawned {
+        // Stamp BevyGuiSpawned on ALL GUI-related class names so the query
+        // never re-processes them and causes flicker.
+        // ScreenGui/BillboardGui/SurfaceGui are container roots — stamp them
+        // too even though they don't get Bevy Node components.
+        let is_container = matches!(
+            instance.class_name,
+            ClassName::ScreenGui | ClassName::BillboardGui | ClassName::SurfaceGui
+        );
+        let is_gui = matches!(
+            instance.class_name,
+            ClassName::Frame
+            | ClassName::TextLabel
+            | ClassName::TextButton
+            | ClassName::TextBox
+            | ClassName::ImageLabel
+            | ClassName::ImageButton
+            | ClassName::ScrollingFrame
+            | ClassName::ViewportFrame
+        );
+
+        if is_container {
+            // Stamp the marker so the system doesn't re-query every frame
+            commands.entity(entity).insert(BevyGuiSpawned);
+            continue;
+        }
+
+        if !is_gui {
+            continue;
+        }
+
+        // Read the TOML to get layout/style data
+        let Ok(toml_str) = std::fs::read_to_string(&loaded.path) else { continue };
+        let Ok(data) = toml::from_str::<toml::Value>(&toml_str) else { continue };
+
+        let gui = data.get("gui");
+
+        // Position (pixels from top-left)
+        let pos_x = gui.and_then(|g| g.get("position"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_float())
+            .unwrap_or(0.0) as f32;
+        let pos_y = gui.and_then(|g| g.get("position"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.get(1))
+            .and_then(|v| v.as_float())
+            .unwrap_or(0.0) as f32;
+
+        // Size
+        let width = gui.and_then(|g| g.get("size"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_float())
+            .unwrap_or(100.0) as f32;
+        let height = gui.and_then(|g| g.get("size"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.get(1))
+            .and_then(|v| v.as_float())
+            .unwrap_or(30.0) as f32;
+
+        // Background color [r, g, b, a]
+        let bg_r = gui.and_then(|g| g.get("background_color")).and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+        let bg_g = gui.and_then(|g| g.get("background_color")).and_then(|v| v.as_array()).and_then(|a| a.get(1)).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+        let bg_b = gui.and_then(|g| g.get("background_color")).and_then(|v| v.as_array()).and_then(|a| a.get(2)).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+        let bg_a = gui.and_then(|g| g.get("background_color")).and_then(|v| v.as_array()).and_then(|a| a.get(3)).and_then(|v| v.as_float()).unwrap_or(0.0) as f32;
+        let bg = bevy::prelude::Color::srgba(bg_r, bg_g, bg_b, bg_a);
+
+        let visible = gui.and_then(|g| g.get("visible"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        // Elements under StarterGui are only shown when ShowDevelopmentUI is true
+        let is_starter_gui = loaded.service == "StarterGui";
+        let visibility = if visible && (!is_starter_gui || show_development_ui) {
+            bevy::prelude::Visibility::Visible
+        } else {
+            bevy::prelude::Visibility::Hidden
+        };
+
+        // Build the Bevy Node with absolute positioning
+        let node = bevy::prelude::Node {
+            position_type: bevy::prelude::PositionType::Absolute,
+            left: bevy::prelude::Val::Px(pos_x),
+            top: bevy::prelude::Val::Px(pos_y),
+            width: bevy::prelude::Val::Px(width),
+            height: bevy::prelude::Val::Px(height),
+            ..Default::default()
+        };
+
+        let bg_color = bevy::prelude::BackgroundColor(bg);
+
+        commands.entity(entity).insert((node, bg_color, visibility, BevyGuiSpawned));
+
+        // For text-bearing elements, insert Text components
+        if matches!(instance.class_name, ClassName::TextLabel | ClassName::TextButton | ClassName::TextBox) {
+            let text_section = data.get("text");
+            let text_str = text_section
+                .and_then(|t| t.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let font_size = text_section
+                .and_then(|t| t.get("font_size"))
+                .and_then(|v| v.as_float())
+                .unwrap_or(14.0) as f32;
+            let tc_r = text_section.and_then(|t| t.get("text_color")).and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+            let tc_g = text_section.and_then(|t| t.get("text_color")).and_then(|v| v.as_array()).and_then(|a| a.get(1)).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+            let tc_b = text_section.and_then(|t| t.get("text_color")).and_then(|v| v.as_array()).and_then(|a| a.get(2)).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+            let tc_a = text_section.and_then(|t| t.get("text_color")).and_then(|v| v.as_array()).and_then(|a| a.get(3)).and_then(|v| v.as_float()).unwrap_or(1.0) as f32;
+            let text_color = bevy::prelude::Color::srgba(tc_r, tc_g, tc_b, tc_a);
+
+            commands.entity(entity).insert((
+                bevy::prelude::Text::new(text_str),
+                bevy::prelude::TextColor(text_color),
+                bevy::prelude::TextFont {
+                    font_size,
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+}
+
+/// Watches ShowDevelopmentUI on StarterGui and updates Visibility of all
+/// already-spawned StarterGui child entities so toggling the property
+/// takes effect immediately without requiring a restart.
+fn sync_development_ui_visibility(
+    mut last_state: ResMut<ShowDevelopmentUIState>,
+    service_components: Query<&crate::space::service_loader::ServiceComponent>,
+    spawned: Query<
+        (Entity, &crate::space::file_loader::LoadedFromFile, &mut Visibility),
+        With<BevyGuiSpawned>,
+    >,
+    mut commands: Commands,
+) {
+    use crate::space::service_loader::PropertyValue;
+
+    let show = service_components
+        .iter()
+        .find(|sc| sc.class_name == "StarterGui")
+        .and_then(|sc| sc.properties.get("ShowDevelopmentUI"))
+        .map(|v| matches!(v, PropertyValue::Bool(true)))
+        .unwrap_or(false);
+
+    // Only update when value actually changed
+    if last_state.last_value == Some(show) {
+        return;
+    }
+    last_state.last_value = Some(show);
+
+    let new_vis = if show {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+
+    for (entity, loaded, _vis) in &spawned {
+        if loaded.service == "StarterGui" {
+            commands.entity(entity).insert(new_vis);
+        }
+    }
 }
 
 // ============================================================================

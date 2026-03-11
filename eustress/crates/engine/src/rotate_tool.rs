@@ -72,17 +72,12 @@ fn draw_rotate_gizmos(
 ) {
     if !state.active || query.is_empty() { return; }
 
-    // Compute group center
-    let center = compute_group_center(&query, &children_query, &child_transforms);
+    // Compute group bounding box and center
+    let (center, bbox_extent) = compute_group_center_and_extent(&query, &children_query, &child_transforms);
 
-    // Camera-distance-scaled radius
+    // Camera-distance-scaled radius, incorporating object bounding extent
     let Ok((_, cam_gt, projection)) = cameras.single() else { return };
-    let fov = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
-    let dist = (center - cam_gt.translation()).length().max(0.1);
-    let radius = dist * (fov * 0.5).tan() * 0.55;
+    let radius = compute_ring_radius(center, bbox_extent, cam_gt, projection);
 
     let yellow = Color::srgba(1.0, 1.0, 0.0, 1.0);
     const SEGS: usize = 64;
@@ -183,8 +178,7 @@ fn handle_rotate_interaction(
             bmin = bmin.min(mn); bmax = bmax.max(mx);
         }
         let center = (bmin + bmax) * 0.5;
-        let dist = (center - camera_transform.translation()).length().max(0.1);
-        let radius = dist * (fov * 0.5).tan() * 0.55;
+        let radius = compute_ring_radius(center, (bmax - bmin), camera_transform, projection);
 
         if let Some(axis) = detect_ring_hit(&ray, center, radius) {
             state.dragged_axis = Some(axis);
@@ -273,6 +267,28 @@ fn handle_rotate_interaction(
 // 5. Public Helpers
 // ============================================================================
 
+/// Compute the ring radius for rotation gizmos given group center, bounding extent,
+/// camera transform, and projection. Ensures the ring wraps around the object
+/// while maintaining a minimum screen-space presence at distance.
+pub fn compute_ring_radius(
+    center: Vec3,
+    bbox_extent: Vec3,
+    cam_gt: &GlobalTransform,
+    projection: &Projection,
+) -> f32 {
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => std::f32::consts::FRAC_PI_4,
+    };
+    let dist = (center - cam_gt.translation()).length().max(0.1);
+    // Camera-distance minimum so the ring is always visible
+    let cam_radius = dist * (fov * 0.5).tan() * 0.18;
+    // Object bounding sphere radius (half diagonal of bounding box)
+    let object_radius = bbox_extent.length() * 0.5;
+    // Use the larger of the two, with some padding so the ring wraps outside the object
+    (object_radius * 1.15).max(cam_radius)
+}
+
 /// Check if the ray hits any rotation ring. Used by part_selection to avoid
 /// deselecting when clicking a ring handle.
 pub fn is_clicking_rotate_handle(
@@ -327,12 +343,12 @@ fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
     to_hit.dot(t2).atan2(to_hit.dot(t1))
 }
 
-/// Compute the world-space center of the combined AABB of all selected entities.
-fn compute_group_center(
+/// Compute the world-space center and extent of the combined AABB of all selected entities.
+fn compute_group_center_and_extent(
     query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
     children_query: &Query<&Children>,
     child_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
-) -> Vec3 {
+) -> (Vec3, Vec3) {
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);
     let mut cnt = 0;
@@ -355,7 +371,11 @@ fn compute_group_center(
         }
     }
 
-    if cnt == 0 { Vec3::ZERO } else { (bmin + bmax) * 0.5 }
+    if cnt == 0 {
+        (Vec3::ZERO, Vec3::ONE)
+    } else {
+        ((bmin + bmax) * 0.5, bmax - bmin)
+    }
 }
 
 fn is_descendant(
