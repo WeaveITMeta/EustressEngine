@@ -20,6 +20,88 @@ export struct PropertyData {
     x-value: string,
     y-value: string,
     z-value: string,
+    // Help tooltip text from TOML description field (empty = no icon shown)
+    description: string,
+    // URL path for the /learn documentation link (e.g. "/learn/atmosphere#density")
+    learn-url: string,
+}
+
+// Help icon button — shown left of property label when description is present.
+// Displays a tooltip on hover; on click opens the /learn documentation page.
+// Color: grey by default, turns blue (accent) when description has a learn-url.
+component HelpIcon inherits Rectangle {
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+
+    callback open-learn-url(string);
+
+    width: show-help-icons && description != "" ? 18px : 0px;
+    height: 18px;
+    visible: show-help-icons && description != "";
+
+    // Tooltip popup — shown on hover
+    if tip-area.has-hover && description != "": Rectangle {
+        // Position above-right of the icon
+        x: 20px;
+        y: -6px;
+        width: min(240px, description.character-count * 7px + 16px);
+        height: 28px;
+        z: 1000;
+        background: #1a1a2e;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: learn-url != "" ? Theme.accent-blue : #444444;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #00000080;
+
+        Text {
+            x: 8px;
+            y: 0px;
+            width: parent.width - 16px;
+            height: parent.height;
+            text: description;
+            color: Theme.text-primary;
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    tip-area := TouchArea {
+        mouse-cursor: learn-url != "" ? pointer : default;
+        clicked => {
+            if root.learn-url != "" {
+                root.open-learn-url(root.learn-url);
+            }
+        }
+    }
+
+    // Icon circle — grey when no URL, blue when has URL
+    Rectangle {
+        width: 14px;
+        height: 14px;
+        x: 2px;
+        y: 2px;
+        border-radius: 7px;
+        background: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
+                  : tip-area.has-hover ? #3a3a3a
+                  : learn-url != "" ? #1e4a7a
+                  : #2a2a2a;
+        border-width: 1px;
+        border-color: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
+                    : learn-url != "" ? Theme.accent-blue
+                    : #444444;
+
+        Text {
+            text: "?";
+            color: learn-url != "" ? white : Theme.text-secondary;
+            font-size: 9px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
 }
 
 // Collapsible section header - polished with gradient and better typography
@@ -89,8 +171,12 @@ component PropRow inherits Rectangle {
     in property <string> value: "";
     in property <string> prop-type: "string";
     in property <bool> editable: true;
-    
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+
     callback value-changed(string);
+    callback open-learn-url(string);
     
     height: 28px;
     background: touch.has-hover ? #1a1a1a : transparent;
@@ -101,9 +187,17 @@ component PropRow inherits Rectangle {
     }
     
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 8px;
         padding-right: 10px;
-        spacing: 12px;
+        spacing: 4px;
+
+        // Help icon — only takes space when description is present
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
         
         // Label with better typography
         Text {
@@ -151,6 +245,9 @@ component Vec3Row inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "0, 0, 0"; // "x, y, z" format
     in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
     
     // Parsed values (split from value string)
     in property <string> x-value: "0";
@@ -158,6 +255,7 @@ component Vec3Row inherits Rectangle {
     in property <string> z-value: "0";
     
     callback value-changed(string);
+    callback open-learn-url(string);
     
     height: 28px;
     background: touch.has-hover ? #1a1a1a : transparent;
@@ -168,9 +266,16 @@ component Vec3Row inherits Rectangle {
     }
     
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 8px;
         padding-right: 10px;
-        spacing: 6px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
         
         // Label
         Text {
@@ -333,8 +438,12 @@ component RotationVec3Row inherits Rectangle {
     in property <string> x-value: "0";
     in property <string> y-value: "0";
     in property <string> z-value: "0";
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
 
     callback value-changed(string);
+    callback open-learn-url(string);
 
     height: 28px;
     background: touch.has-hover ? #1a1a1a : transparent;
@@ -345,9 +454,16 @@ component RotationVec3Row inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 8px;
         padding-right: 10px;
         spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
 
         // Label
         Text {
@@ -510,8 +626,12 @@ component ColorRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "#808080";
     in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
     
     callback value-changed(string);
+    callback open-learn-url(string);
     
     height: 28px;
     background: touch.has-hover ? #1a1a1a : transparent;
@@ -522,9 +642,16 @@ component ColorRow inherits Rectangle {
     }
     
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 8px;
         padding-right: 10px;
-        spacing: 10px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
         
         // Label
         Text {
@@ -589,8 +716,12 @@ component BoolRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "false";
     in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
     
     callback value-changed(string);
+    callback open-learn-url(string);
     
     height: 28px;
     background: touch.has-hover ? #1a1a1a : transparent;
@@ -607,9 +738,16 @@ component BoolRow inherits Rectangle {
     }
     
     HorizontalLayout {
-        padding-left: 14px;
+        padding-left: 8px;
         padding-right: 10px;
-        spacing: 10px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
         
         // Label
         Text {
@@ -660,9 +798,15 @@ export component PropertiesPanel inherits Rectangle {
     in property <string> selected-class: "";
     in property <image> selected-icon;   // SVG icon for the selected class
     in property <[PropertyData]> properties: [];
+    // Show help (?) icons next to properties that have a description field
+    in property <bool> show-help-icons: true;
+    // Whether help icon clicks open in the tabbed viewer (true) or system browser (false)
+    in property <bool> help-opens-in-tab: false;
     
     // Callbacks
     callback on-property-changed(string, string);
+    // Fired when a help icon with a learn-url is clicked
+    callback on-open-learn-url(string);
     
     background: Theme.panel-background;
     
@@ -823,7 +967,11 @@ export component PropertiesPanel inherits Rectangle {
                         y-value: prop.y-value;
                         z-value: prop.z-value;
                         editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
 
                     // Rotation property — degrees with +/- buttons, supports negatives
@@ -834,7 +982,11 @@ export component PropertiesPanel inherits Rectangle {
                         y-value: prop.y-value;
                         z-value: prop.z-value;
                         editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
                     
                     // Color property
@@ -842,7 +994,11 @@ export component PropertiesPanel inherits Rectangle {
                         label: prop.name;
                         value: prop.value;
                         editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
                     
                     // Bool property
@@ -850,7 +1006,11 @@ export component PropertiesPanel inherits Rectangle {
                         label: prop.name;
                         value: prop.value;
                         editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
                     
                     // String / float / int / enum — generic row
@@ -859,7 +1019,11 @@ export component PropertiesPanel inherits Rectangle {
                         value: prop.value;
                         prop-type: prop.property-type;
                         editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
                 }
             }

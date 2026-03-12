@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::space::SpaceFileRegistry;
 
 /// Actions that can be bound to keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -336,6 +337,15 @@ fn dispatch_keyboard_shortcuts(
         return;
     }
 
+    // Backspace also triggers Delete (secondary binding not in HashMap)
+    if keys.just_pressed(KeyCode::Backspace) {
+        let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+        if !ctrl && !alt {
+            menu_events.write(crate::ui::MenuActionEvent::new(Action::Delete));
+        }
+    }
+
     // All other actions → dispatch as MenuActionEvent
     let actions = [
         Action::Undo, Action::Redo,
@@ -385,6 +395,9 @@ fn handle_menu_action_events(
         Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
     // Query Instance to detect Camera class deletion for camera respawn.
     instance_query: Query<&eustress_common::classes::Instance>,
+    // Query InstanceFile to delete TOML from disk when entity is deleted
+    instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
+    mut file_registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
 ) {
     let Some(mut studio_state) = studio_state else { return };
 
@@ -481,6 +494,20 @@ fn handle_menu_action_events(
                             .unwrap_or(false)
                         {
                             camera_deleted = true;
+                        }
+                        // Delete the TOML file on disk and unregister from file registry
+                        if let Ok(inst_file) = instance_file_query.get(entity) {
+                            let toml_path = inst_file.toml_path.clone();
+                            if toml_path.exists() {
+                                if let Err(e) = std::fs::remove_file(&toml_path) {
+                                    error!("❌ Failed to delete TOML file {:?}: {}", toml_path, e);
+                                } else {
+                                    info!("🗑️ Deleted TOML file {:?}", toml_path);
+                                }
+                            }
+                            if let Some(ref mut registry) = file_registry {
+                                registry.unregister_file(&toml_path);
+                            }
                         }
                         commands.entity(entity).despawn();
                         info!("🗑️ Deleted entity {:?} ({})", entity, id);

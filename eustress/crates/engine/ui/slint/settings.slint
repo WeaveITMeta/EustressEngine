@@ -26,6 +26,10 @@ export component SettingsDialog inherits Rectangle {
     in-out property <bool> snap-to-grid: true;
     in-out property <float> grid-size: 1.0;
     in-out property <bool> dark-theme: true;
+    // Show help (?) icons in the Properties panel next to documented properties
+    in-out property <bool> show-help-icons: true;
+    // Open /learn links in the tabbed viewer instead of the system browser
+    in-out property <bool> help-opens-in-tab: false;
     
     // Graphics settings
     in-out property <string> render-quality: "High";
@@ -44,6 +48,9 @@ export component SettingsDialog inherits Rectangle {
     callback on-save();
     callback on-reset-defaults();
     callback on-rebind-key(string); // action name
+    // Fired immediately when the help icon settings change (no need to hit Save)
+    callback on-help-icons-changed(bool);
+    callback on-help-opens-in-tab-changed(bool);
     
     width: 100%;
     height: 100%;
@@ -234,6 +241,28 @@ export component SettingsDialog inherits Rectangle {
                         CheckBox {
                             text: "Dark theme";
                             checked <=> root.dark-theme;
+                        }
+
+                        Rectangle { height: 8px; }
+
+                        // Properties panel section
+                        Text {
+                            text: "Properties Panel";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+
+                        CheckBox {
+                            text: "Show Help Icons (? tooltip next to documented properties)";
+                            checked <=> root.show-help-icons;
+                            toggled => { root.on-help-icons-changed(root.show-help-icons); }
+                        }
+
+                        CheckBox {
+                            text: "Open Help links in Tabbed Viewer (instead of system browser)";
+                            checked <=> root.help-opens-in-tab;
+                            toggled => { root.on-help-opens-in-tab-changed(root.help-opens-in-tab); }
                         }
                     }
                 }

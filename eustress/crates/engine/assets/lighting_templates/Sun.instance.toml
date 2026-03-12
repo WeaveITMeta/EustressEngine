@@ -1,0 +1,35 @@
+# Sun — Solar body with dynamic lighting and time-of-day
+# Auto-created with each Space in Lighting/ folder.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+
+[metadata]
+class_name = "Star"
+archivable = true
+
+[Appearance]
+TextureId = { type = "string", value = "", description = "Asset ID for sun texture" }
+Scale = { type = "float", value = 1.0, min = 0.1, max = 10.0, description = "Sun size scale" }
+Color = { type = "Color3", value = [1.0, 0.95, 0.8], description = "Sun color tint" }
+Brightness = { type = "float", value = 1.0, min = 0.0, max = 5.0, description = "Sun brightness" }
+
+[Position]
+AngularSize = { type = "float", value = 0.53, min = 0.1, max = 10.0, description = "Angular size in degrees" }
+Azimuth = { type = "float", value = 135.0, min = 0.0, max = 360.0, description = "Azimuth angle in degrees" }
+Elevation = { type = "float", value = 45.0, min = -90.0, max = 90.0, description = "Elevation angle in degrees" }
+AutoRotate = { type = "bool", value = true, description = "Auto-rotate based on time of day" }
+
+[Lighting]
+CastLight = { type = "bool", value = true, description = "Sun casts directional light" }
+LightIntensity = { type = "float", value = 1.0, min = 0.0, max = 5.0, description = "Sunlight intensity" }
+LightColor = { type = "Color3", value = [1.0, 0.95, 0.85], description = "Sunlight color" }
+ShadowSoftness = { type = "float", value = 0.2, min = 0.0, max = 1.0, description = "Shadow edge softness" }
+
+[TimeOfDay]
+SunriseTime = { type = "float", value = 6.0, min = 0.0, max = 24.0, description = "Sunrise hour" }
+SunsetTime = { type = "float", value = 18.0, min = 0.0, max = 24.0, description = "Sunset hour" }
+TransitionDuration = { type = "float", value = 1.0, min = 0.1, max = 4.0, description = "Sunrise/sunset transition duration in hours" }
+
+[Advanced]
+CoronaIntensity = { type = "float", value = 1.0, min = 0.0, max = 3.0, description = "Sun corona glow intensity" }
+LensFlareIntensity = { type = "float", value = 0.5, min = 0.0, max = 2.0, description = "Lens flare intensity" }
+GodRaysIntensity = { type = "float", value = 0.3, min = 0.0, max = 2.0, description = "Volumetric light shaft intensity" }

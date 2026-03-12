@@ -1,0 +1,16 @@
+# StarterPack Service — Tools and items given to players on spawn
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "StarterPack"
+icon = "starterpack"
+description = "Tools placed here are given to every player when they spawn"
+can_have_children = true
+
+[properties]
+# No configurable properties — StarterPack is purely a container
+
+[metadata]
+id = "starterpack-service"
+created = ""
+last_modified = ""

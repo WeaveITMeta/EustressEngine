@@ -18,7 +18,7 @@ use avian3d::prelude::*;
 use crate::selection_box::SelectionBox;
 use crate::rendering::PartEntity;
 use crate::classes::{BasePart, Instance};
-use crate::ui::{StudioState, Tool, BevySelectionManager};
+use crate::ui::{StudioState, Tool, BevySelectionManager, SlintUIFocus};
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
     align_to_surface, ray_intersects_part, ray_intersects_part_rotated,
@@ -169,8 +169,9 @@ fn debug_drag_gizmos(
 /// - Physics-based surface snapping via Avian3D
 /// - Grid snapping when enabled
 fn handle_select_drag(
-    state: Option<ResMut<SelectToolState>>,
+    mut state: ResMut<SelectToolState>,
     studio_state: Option<Res<StudioState>>,
+    ui_focus: Option<Res<SlintUIFocus>>,
     input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>),
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
@@ -184,13 +185,12 @@ fn handle_select_drag(
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
 ) {
-    let Some(mut state) = state else { return };
+    let Some(studio_state) = studio_state else { return };
     let (mouse, keys) = input;
     let (children_query, parent_query) = hierarchy_queries;
     let (editor_settings, mut undo_stack) = settings_and_undo;
     let (move_state, scale_state, rotate_state) = tool_states;
     // Active with Select, Move, Scale, or Rotate tools
-    let Some(studio_state) = studio_state else { return };
     let drag_enabled = matches!(
         studio_state.current_tool,
         Tool::Select | Tool::Move | Tool::Scale | Tool::Rotate
@@ -204,7 +204,12 @@ fn handle_select_drag(
         return;
     }
     
-    // TODO: Check Slint UI focus state to block input when UI has focus
+    // Block input when Slint UI has focus (mouse is over UI panels)
+    if let Some(ui_focus) = ui_focus {
+        if ui_focus.has_focus {
+            return;
+        }
+    }
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -711,6 +716,7 @@ fn handle_box_selection(
     mut box_state: ResMut<BoxSelectionState>,
     select_state: Option<Res<SelectToolState>>,
     studio_state: Option<Res<StudioState>>,
+    ui_focus: Option<Res<SlintUIFocus>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -738,7 +744,12 @@ fn handle_box_selection(
         return;
     }
     
-    // TODO: Check Slint UI focus state to block input when UI has focus
+    // Block input when Slint UI has focus (mouse is over UI panels)
+    if let Some(ui_focus) = ui_focus {
+        if ui_focus.has_focus {
+            return;
+        }
+    }
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
@@ -894,11 +905,63 @@ fn handle_box_selection(
     }
 }
 
-/// System to render the box selection rectangle
-/// TODO: Implement with Bevy gizmos or Slint overlay
+/// System to render the box selection rectangle using Bevy gizmos
 fn render_box_selection(
-    _box_state: Res<BoxSelectionState>,
+    box_state: Res<BoxSelectionState>,
+    mut gizmos: Gizmos,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
-    // Box selection rendering will be handled by Slint UI overlay
-    // The selection logic still works, just the visual rectangle is not drawn
+    if !box_state.active {
+        return;
+    }
+    
+    let Ok(window) = windows.single() else { return; };
+    let window_size: Vec2 = window.physical_size().as_vec2();
+    
+    // Convert screen space to NDC (Normalized Device Coordinates)
+    // Screen space: (0,0) = top-left, (width, height) = bottom-right
+    // NDC: (-1, -1) = bottom-left, (1, 1) = top-right
+    let start_ndc = Vec2::new(
+        (box_state.start_pos.x / window_size.x) * 2.0 - 1.0,
+        1.0 - (box_state.start_pos.y / window_size.y) * 2.0,
+    );
+    let current_ndc = Vec2::new(
+        (box_state.current_pos.x / window_size.x) * 2.0 - 1.0,
+        1.0 - (box_state.current_pos.y / window_size.y) * 2.0,
+    );
+    
+    // Calculate rectangle corners in NDC
+    let min_x = start_ndc.x.min(current_ndc.x);
+    let max_x = start_ndc.x.max(current_ndc.x);
+    let min_y = start_ndc.y.min(current_ndc.y);
+    let max_y = start_ndc.y.max(current_ndc.y);
+    
+    // Draw rectangle outline in 2D screen space using gizmos
+    // Use a bright cyan color for the selection box (Roblox-style)
+    let selection_color = Color::srgba(0.35, 0.75, 1.0, 0.8);
+    let fill_color = Color::srgba(0.35, 0.75, 1.0, 0.15);
+    
+    // Draw filled rectangle (semi-transparent)
+    gizmos.rect_2d(
+        Isometry2d::from_translation(Vec2::new(
+            (min_x + max_x) * 0.5,
+            (min_y + max_y) * 0.5,
+        )),
+        Vec2::new(max_x - min_x, max_y - min_y),
+        fill_color,
+    );
+    
+    // Draw outline (solid)
+    let corners = [
+        Vec2::new(min_x, min_y),
+        Vec2::new(max_x, min_y),
+        Vec2::new(max_x, max_y),
+        Vec2::new(min_x, max_y),
+    ];
+    
+    for i in 0..4 {
+        let start = corners[i];
+        let end = corners[(i + 1) % 4];
+        gizmos.line_2d(start, end, selection_color);
+    }
 }

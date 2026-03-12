@@ -13,11 +13,17 @@ use avian3d::prelude::{Collider, RigidBody};
 use crate::rendering::PartEntity;
 use eustress_common::{Attributes, Tags};
 
-/// Instance definition loaded from .glb.toml file
+/// Instance definition loaded from .glb.toml or .instance.toml file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceDefinition {
-    pub asset: AssetReference,
+    /// Mesh reference — optional for non-visual instances (lighting, sky, atmosphere)
+    #[serde(default)]
+    pub asset: Option<AssetReference>,
+    /// World transform — optional for non-visual instances
+    #[serde(default)]
     pub transform: TransformData,
+    /// Standard part properties (color, anchored, etc.) — all defaulted
+    #[serde(default)]
     pub properties: InstanceProperties,
     pub metadata: InstanceMetadata,
     /// Optional realism material properties (dynamic on any class)
@@ -32,6 +38,10 @@ pub struct InstanceDefinition {
     /// Optional UI class properties (TextLabel, TextButton, Frame, ImageLabel, etc.)
     #[serde(default)]
     pub ui: Option<UiInstanceProperties>,
+    /// All unknown top-level sections (e.g. [Appearance], [Position], [Lighting]) captured
+    /// via flatten so rich-schema .instance.toml files work without hardcoded field names.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, toml::Value>,
 }
 
 /// Reference to a shared mesh asset
@@ -568,6 +578,38 @@ pub fn write_instance_definition(
     Ok(())
 }
 
+/// Convert a raw `toml::Value` (the `value` field extracted from a rich-schema
+/// `{ type = "...", value = ..., description = "..." }` inline table) into an
+/// `AttributeValue` suitable for storage in the ECS `Attributes` component.
+fn rich_toml_value_to_attribute(v: &toml::Value) -> Option<eustress_common::AttributeValue> {
+    match v {
+        toml::Value::Boolean(b) => Some(eustress_common::AttributeValue::Bool(*b)),
+        toml::Value::Integer(i) => Some(eustress_common::AttributeValue::Int(*i)),
+        toml::Value::Float(f)   => Some(eustress_common::AttributeValue::Number(*f)),
+        toml::Value::String(s)  => Some(eustress_common::AttributeValue::String(s.clone())),
+        toml::Value::Array(arr) => {
+            let floats: Vec<f64> = arr.iter().filter_map(|item| match item {
+                toml::Value::Float(f)   => Some(*f),
+                toml::Value::Integer(i) => Some(*i as f64),
+                _ => None,
+            }).collect();
+            match floats.len() {
+                2 => Some(eustress_common::AttributeValue::Vector2(
+                    Vec2::new(floats[0] as f32, floats[1] as f32),
+                )),
+                3 => Some(eustress_common::AttributeValue::Vector3(
+                    Vec3::new(floats[0] as f32, floats[1] as f32, floats[2] as f32),
+                )),
+                4 => Some(eustress_common::AttributeValue::Color(
+                    Color::srgba(floats[0] as f32, floats[1] as f32, floats[2] as f32, floats[3] as f32),
+                )),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Known primitive mesh filenames that map to engine asset parts
 const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
     ("block", "parts/block.glb", eustress_common::classes::PartType::Block),
@@ -580,6 +622,7 @@ const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
 
 /// Spawn entity from instance definition, loading actual GLB meshes.
 ///
+/// - **No asset** (`asset: None`): spawns a non-visual entity (Atmosphere, Sky, Moon, etc.)
 /// - **Primitives** (block.glb, ball.glb, etc.): loaded from engine `assets/parts/`
 /// - **Custom meshes** (V-Cell, user models): resolved relative to the .glb.toml
 ///   file's parent directory and loaded as a GLTF scene via AssetServer
@@ -592,16 +635,77 @@ pub fn spawn_instance(
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
-    // Extract instance name from filename (strip .glb.toml → name)
+    // Extract instance name from filename (e.g. "Atmosphere" from "Atmosphere.instance.toml")
     let name = toml_path
-        .file_stem()
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
-        .trim_end_matches(".glb")
+        .split('.')
+        .next()
+        .unwrap_or("Unknown")
         .to_string();
-    
+
+    // Parse class name early — needed for the no-mesh branch too
+    let class_name = eustress_common::classes::ClassName::from_str(
+        &instance.metadata.class_name
+    ).unwrap_or(eustress_common::classes::ClassName::Part);
+
+    // ── No mesh: spawn a non-visual Instance entity (Atmosphere, Sky, Moon, Star, etc.) ──
+    if instance.asset.is_none() {
+        // Parse rich-schema sections: each entry in `extra` is either a flat value
+        // OR a named section (Table) whose entries are { type, value, description } inline tables.
+        // Both cases are stored in Attributes for the Properties panel to display.
+        let mut attrs = Attributes::new();
+        for (_section_name, section_val) in &instance.extra {
+            // Each top-level entry under [extra] is a section table (e.g. [Appearance])
+            if let toml::Value::Table(props) = section_val {
+                for (prop_key, prop_val) in props {
+                    // Rich schema: { type = "...", value = ..., description = "..." }
+                    let raw_value = if let toml::Value::Table(inline) = prop_val {
+                        inline.get("value").cloned().unwrap_or(prop_val.clone())
+                    } else {
+                        prop_val.clone()
+                    };
+                    let attr_val = rich_toml_value_to_attribute(&raw_value);
+                    if let Some(av) = attr_val {
+                        attrs.set(prop_key, av);
+                    }
+                }
+            } else {
+                // Flat value at section level
+                if let Some(av) = rich_toml_value_to_attribute(section_val) {
+                    attrs.set(_section_name, av);
+                }
+            }
+        }
+
+        let entity = commands.spawn((
+            eustress_common::classes::Instance {
+                name: name.clone(),
+                class_name,
+                archivable: instance.metadata.archivable,
+                id: 0,
+                ai: false,
+            },
+            Transform::from(instance.transform),
+            Visibility::default(),
+            Tags::new(),
+            attrs,
+            InstanceFile {
+                toml_path: toml_path.clone(),
+                mesh_path: PathBuf::new(),
+                name: name.clone(),
+            },
+            Name::new(name.clone()),
+        )).id();
+        info!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        return entity;
+    }
+
+    // ── Has mesh: resolve and load GLB ────────────────────────────────────────
+    let asset_ref = instance.asset.as_ref().unwrap();
     // Resolve the mesh path: check if it's a known primitive or a custom GLB
-    let mesh_ref = instance.asset.mesh.to_lowercase();
+    let mesh_ref = asset_ref.mesh.to_lowercase();
     let primitive = PRIMITIVE_MESHES.iter().find(|(hint, _, _)| {
         let fname = mesh_ref.rsplit('/').next().unwrap_or(&mesh_ref);
         fname.contains(hint)
@@ -616,7 +720,7 @@ pub fn spawn_instance(
     
     // Determine the absolute path for the GLB mesh file
     let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
-    let absolute_mesh_path = toml_dir.join(&instance.asset.mesh);
+    let absolute_mesh_path = toml_dir.join(&asset_ref.mesh);
     
     info!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
         name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
@@ -633,11 +737,6 @@ pub fn spawn_instance(
         reflectance: instance.properties.reflectance,
         ..default()
     });
-    
-    // Parse class name (legacy "AdvancedPart" maps to Part via ClassName::from_str)
-    let class_name = eustress_common::classes::ClassName::from_str(
-        &instance.metadata.class_name
-    ).unwrap_or(eustress_common::classes::ClassName::Part);
     
     let scale = Vec3::from_array(instance.transform.scale);
     

@@ -1,0 +1,20 @@
+# Atmosphere — Atmospheric scattering and sky rendering
+# Auto-created with each Space in Lighting/ folder.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+
+[metadata]
+class_name = "Atmosphere"
+archivable = true
+
+[Appearance]
+Density = { type = "float", value = 0.5, min = 0.0, max = 1.0, description = "Atmospheric density" }
+Color = { type = "Color3", value = [0.776, 0.863, 1.0], description = "Atmosphere color" }
+Decay = { type = "Color3", value = [0.439, 0.506, 0.635], description = "Atmospheric decay color" }
+Glare = { type = "float", value = 0.0, min = 0.0, max = 2.0, description = "Sun glare intensity" }
+Haze = { type = "float", value = 0.0, min = 0.0, max = 5.0, description = "Horizon haze" }
+
+[Scattering]
+Offset = { type = "float", value = 0.0, min = -1.0, max = 1.0, description = "Scattering altitude offset" }
+RayleighCoefficient = { type = "Vector3", value = [5.8, 13.5, 33.1], description = "Rayleigh scattering RGB coefficients" }
+MieCoefficient = { type = "float", value = 21.0, min = 0.0, max = 100.0, description = "Mie scattering coefficient" }
+MieDirectionalFactor = { type = "float", value = 0.8, min = 0.0, max = 1.0, description = "Mie forward scattering" }

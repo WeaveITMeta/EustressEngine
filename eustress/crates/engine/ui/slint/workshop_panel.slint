@@ -1,0 +1,790 @@
+// ============================================================================
+// Eustress Engine Studio - Workshop Panel
+// Conversational ideation interface for product creation (System 0)
+//
+// Table of Contents:
+//   1. Data Structures — ChatMessage, MCP command card, pipeline step
+//   2. ChatBubble — message display (user, system, MCP command, approval gate)
+//   3. MpcCommandCard — inline MCP endpoint display with approve/edit/skip
+//   4. PipelineStep — compact step status indicator
+//   5. WorkshopPanel — main panel with chat scroll, input, pipeline sidebar
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, Button, LineEdit, TextEdit } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// ============================================================================
+// 1. Data Structures
+// ============================================================================
+
+// A single message in the ideation conversation
+export struct ChatMessage {
+    id: int,
+    role: string,           // "user" | "system" | "mcp" | "approval" | "artifact" | "error"
+    content: string,        // Message text (markdown-ish)
+    timestamp: string,      // Display timestamp
+    mcp-endpoint: string,   // For role="mcp": the MCP endpoint being called
+    mcp-method: string,     // For role="mcp": GET/POST
+    mcp-status: string,     // For role="mcp": "pending" | "approved" | "running" | "done" | "skipped" | "error"
+    artifact-path: string,  // For role="artifact": file path of generated artifact
+    artifact-type: string,  // For role="artifact": "patent" | "sota" | "requirements" | "mesh" | "toml" | "readme" | "catalog"
+}
+
+// Pipeline step status for the compact sidebar
+export struct PipelineStepData {
+    index: int,
+    label: string,
+    status: string,         // "waiting" | "active" | "done" | "error" | "skipped"
+    artifact-count: int,    // Number of files generated in this step
+}
+
+// ============================================================================
+// 2. ChatBubble — renders a single conversation message
+// ============================================================================
+
+component ChatBubble inherits Rectangle {
+    in property <string> role: "system";
+    in property <string> content: "";
+    in property <string> timestamp: "";
+    in property <string> mcp-endpoint: "";
+    in property <string> mcp-method: "";
+    in property <string> mcp-status: "pending";
+    in property <string> artifact-path: "";
+    in property <string> artifact-type: "";
+
+    callback approve-mcp(int);
+    callback skip-mcp(int);
+    callback edit-mcp(int);
+    callback open-artifact(string);
+
+    in property <int> message-id: 0;
+
+    // User messages align right, everything else left
+    height: bubble.preferred-height + 8px;
+
+    HorizontalLayout {
+        padding-left: root.role == "user" ? 40px : 8px;
+        padding-right: root.role == "user" ? 8px : 40px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+
+        bubble := Rectangle {
+            background: root.role == "user" ? #1a5276 :
+                        root.role == "mcp" ? #2c2c3e :
+                        root.role == "approval" ? #3e2c1a :
+                        root.role == "artifact" ? #1a3e2c :
+                        root.role == "error" ? #4a2020 :
+                        Theme.background-tertiary;
+            border-radius: 8px;
+            border-width: root.role == "mcp" ? 1px : 0px;
+            border-color: root.role == "mcp" ? #4a4a6a : transparent;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+
+                // Role label (not for user messages)
+                if root.role != "user": Text {
+                    text: root.role == "system" ? "Workshop" :
+                          root.role == "mcp" ? "MCP Command" :
+                          root.role == "approval" ? "Approval Required" :
+                          root.role == "artifact" ? "Artifact Generated" :
+                          "Error";
+                    color: root.role == "mcp" ? #8888cc :
+                           root.role == "approval" ? #cc8844 :
+                           root.role == "artifact" ? #44cc88 :
+                           root.role == "error" ? #cc4444 :
+                           Theme.accent-blue;
+                    font-size: 10px;
+                    font-weight: 600;
+                }
+
+                // MCP endpoint badge (for MCP commands)
+                if root.role == "mcp": Rectangle {
+                    height: 28px;
+                    background: #1a1a2e;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        // Method badge
+                        Rectangle {
+                            width: 40px;
+                            height: 20px;
+                            background: root.mcp-method == "POST" ? #2d5a27 : #27455a;
+                            border-radius: 3px;
+
+                            Text {
+                                text: root.mcp-method;
+                                color: white;
+                                font-size: 9px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Endpoint path
+                        Text {
+                            text: root.mcp-endpoint;
+                            color: #aaaadd;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Message content
+                Text {
+                    text: root.content;
+                    color: root.role == "error" ? #ff8888 : Theme.text-primary;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                // Artifact file path (clickable)
+                if root.role == "artifact": Rectangle {
+                    height: 24px;
+                    background: #0a2a1a;
+                    border-radius: 4px;
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.open-artifact(root.artifact-path); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+
+                        Image {
+                            width: 12px;
+                            height: 12px;
+                            source: @image-url("../../assets/icons/ui/new-file.svg");
+                            image-fit: contain;
+                            colorize: #44cc88;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.artifact-path;
+                            color: #44cc88;
+                            font-size: 11px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                // Approval buttons (for MCP commands pending approval)
+                if root.role == "mcp" && root.mcp-status == "pending": HorizontalLayout {
+                    spacing: 6px;
+                    padding-top: 4px;
+
+                    // Approve button
+                    Rectangle {
+                        width: 70px;
+                        height: 26px;
+                        background: approve-touch.has-hover ? #2d7d46 : #245a36;
+                        border-radius: 4px;
+
+                        approve-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.approve-mcp(root.message-id); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 4px;
+
+                            Image {
+                                width: 12px;
+                                height: 12px;
+                                source: @image-url("../../assets/icons/ui/check.svg");
+                                image-fit: contain;
+                                colorize: white;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "Run";
+                                color: white;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Edit button (lets user modify before running)
+                    Rectangle {
+                        width: 60px;
+                        height: 26px;
+                        background: edit-touch.has-hover ? #5a5a2d : #3e3e20;
+                        border-radius: 4px;
+
+                        edit-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.edit-mcp(root.message-id); }
+                        }
+
+                        Text {
+                            text: "Edit";
+                            color: #cccc88;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Skip button
+                    Rectangle {
+                        width: 60px;
+                        height: 26px;
+                        background: skip-touch.has-hover ? #5a2d2d : #3e2020;
+                        border-radius: 4px;
+
+                        skip-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.skip-mcp(root.message-id); }
+                        }
+
+                        Text {
+                            text: "Skip";
+                            color: #cc8888;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // MCP status indicator (after approval)
+                if root.role == "mcp" && root.mcp-status != "pending": HorizontalLayout {
+                    spacing: 4px;
+                    padding-top: 2px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        width: 8px;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: root.mcp-status == "running" ? Theme.accent-blue :
+                                        root.mcp-status == "done" ? Theme.accent-green :
+                                        root.mcp-status == "skipped" ? Theme.text-secondary :
+                                        root.mcp-status == "error" ? Theme.accent-red :
+                                        Theme.accent-blue;
+                        }
+                    }
+
+                    Text {
+                        text: root.mcp-status == "running" ? "Running..." :
+                              root.mcp-status == "done" ? "Complete" :
+                              root.mcp-status == "skipped" ? "Skipped" :
+                              root.mcp-status == "approved" ? "Queued" :
+                              root.mcp-status == "error" ? "Failed" : "";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Timestamp
+                Text {
+                    text: root.timestamp;
+                    color: Theme.text-disabled;
+                    font-size: 9px;
+                    horizontal-alignment: root.role == "user" ? right : left;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. PipelineStep — compact step indicator in sidebar
+// ============================================================================
+
+component PipelineStep inherits Rectangle {
+    in property <int> index: 0;
+    in property <string> label: "";
+    in property <string> status: "waiting";
+    in property <int> artifact-count: 0;
+
+    height: 28px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        // Status dot
+        VerticalLayout {
+            alignment: center;
+            width: 10px;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: root.status == "done" ? Theme.accent-green :
+                            root.status == "active" ? Theme.accent-blue :
+                            root.status == "error" ? Theme.accent-red :
+                            root.status == "skipped" ? Theme.text-disabled :
+                            #333344;
+            }
+        }
+
+        // Step label
+        Text {
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.status == "active" ? Theme.text-primary :
+                   root.status == "done" ? Theme.text-success :
+                   root.status == "error" ? Theme.text-error :
+                   Theme.text-secondary;
+            font-size: 11px;
+            font-weight: root.status == "active" ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // Artifact count badge
+        if root.artifact-count > 0: Rectangle {
+            width: 18px;
+            height: 16px;
+            background: #1a3e2c;
+            border-radius: 8px;
+
+            Text {
+                text: root.artifact-count;
+                color: #44cc88;
+                font-size: 9px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 4. WorkshopPanel — main conversational ideation panel
+// ============================================================================
+
+export component WorkshopPanel inherits Rectangle {
+    // ---- Properties ----
+    in property <[ChatMessage]> messages: [];
+    in-out property <string> input-text: "";
+    in property <[PipelineStepData]> pipeline-steps: [];
+    in property <string> pipeline-state: "idle";    // "idle" | "running" | "paused" | "complete" | "error"
+    in property <string> product-name: "";
+    in property <int> total-artifacts: 0;
+    in property <string> estimated-cost: "$0.00";
+    in property <bool> api-key-valid: false;
+
+    // ---- Callbacks ----
+    callback on-send-message(string);               // User sends a message
+    callback on-approve-mcp(int);                   // User approves an MCP command by message id
+    callback on-skip-mcp(int);                      // User skips an MCP command
+    callback on-edit-mcp(int);                      // User wants to edit before running
+    callback on-open-artifact(string);              // User clicks an artifact path
+    callback on-start-pipeline();                   // Start the ideation pipeline
+    callback on-pause-pipeline();                   // Pause to let user review
+    callback on-resume-pipeline();                  // Resume after pause/edit
+    callback on-cancel-pipeline();                  // Cancel the whole thing
+    callback on-configure-api();                    // Open Soul Settings for API key
+    callback on-optimize-and-build();               // Hand off to Systems 1-8
+
+    background: Theme.panel-background;
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // Header
+        PanelHeader {
+            title: "Workshop";
+        }
+
+        // API key warning (if not configured)
+        if !root.api-key-valid: Rectangle {
+            height: 56px;
+            background: #3e3e20;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                alignment: center;
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    alignment: center;
+
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/info.svg");
+                        image-fit: contain;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "Soul Service API key required";
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 70px;
+                        height: 22px;
+                        background: Theme.button-background;
+                        border-radius: 4px;
+
+                        TouchArea {
+                            clicked => { root.on-configure-api(); }
+                        }
+
+                        Text {
+                            text: "Configure";
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pipeline status bar (compact, always visible when running)
+        if root.pipeline-state != "idle": Rectangle {
+            height: 32px;
+            background: root.pipeline-state == "complete" ? #1a3e2c :
+                        root.pipeline-state == "error" ? #4a2020 :
+                        root.pipeline-state == "paused" ? #3e3e20 :
+                        #1a1a3e;
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                // Status dot
+                VerticalLayout {
+                    alignment: center;
+                    width: 8px;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.pipeline-state == "running" ? Theme.accent-blue :
+                                    root.pipeline-state == "complete" ? Theme.accent-green :
+                                    root.pipeline-state == "paused" ? #cccc44 :
+                                    Theme.accent-red;
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.pipeline-state == "running" ? "Creating " + root.product-name + "..." :
+                          root.pipeline-state == "complete" ? root.product-name + " ready" :
+                          root.pipeline-state == "paused" ? "Waiting for your input..." :
+                          "Pipeline error";
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                // Cost estimate
+                Text {
+                    text: "~" + root.estimated-cost;
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                // Artifact count
+                Text {
+                    text: root.total-artifacts + " files";
+                    color: #44cc88;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // Pipeline step sidebar (collapsible — shown when pipeline is active)
+        if root.pipeline-state != "idle" && root.pipeline-steps.length > 0: Rectangle {
+            min-height: root.pipeline-steps.length * 28px + 8px;
+            max-height: 200px;
+            background: Theme.background-secondary;
+
+            ScrollView {
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+
+                    for step in root.pipeline-steps: PipelineStep {
+                        index: step.index;
+                        label: step.label;
+                        status: step.status;
+                        artifact-count: step.artifact-count;
+                    }
+                }
+            }
+        }
+
+        // Chat messages area
+        if root.messages.length == 0: Rectangle {
+            vertical-stretch: 1;
+            background: Theme.panel-background;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 8px;
+
+                Image {
+                    width: 40px;
+                    height: 40px;
+                    source: @image-url("../../assets/icons/ui/sparkle.svg");
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    opacity: 0.5;
+                }
+
+                Text {
+                    text: "Workshop";
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Describe your product idea.\nThe system will guide you through\npatent, validation, meshes, and TOML\ngeneration — step by step.";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+
+                // Quick start examples
+                Rectangle {
+                    height: 80px;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+
+                        Text {
+                            text: "Try:";
+                            color: Theme.text-disabled;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                        }
+
+                        // Example 1
+                        Rectangle {
+                            height: 24px;
+                            background: example1-touch.has-hover ? #ffffff08 : transparent;
+                            border-radius: 4px;
+
+                            example1-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.input-text = "Solid-state sodium-sulfur battery, 15k cycle life, 900 Wh/kg"; }
+                            }
+
+                            Text {
+                                text: "\"Solid-state sodium-sulfur battery, 15k cycle life\"";
+                                color: Theme.accent-blue;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Example 2
+                        Rectangle {
+                            height: 24px;
+                            background: example2-touch.has-hover ? #ffffff08 : transparent;
+                            border-radius: 4px;
+
+                            example2-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.input-text = "Gravity drive using Element 115 stable island isotope"; }
+                            }
+
+                            Text {
+                                text: "\"Gravity drive using Element 115 stable island isotope\"";
+                                color: Theme.accent-blue;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.messages.length > 0: ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 0px;
+
+                for msg in root.messages: ChatBubble {
+                    role: msg.role;
+                    content: msg.content;
+                    timestamp: msg.timestamp;
+                    mcp-endpoint: msg.mcp-endpoint;
+                    mcp-method: msg.mcp-method;
+                    mcp-status: msg.mcp-status;
+                    artifact-path: msg.artifact-path;
+                    artifact-type: msg.artifact-type;
+                    message-id: msg.id;
+
+                    approve-mcp(id) => { root.on-approve-mcp(id); }
+                    skip-mcp(id) => { root.on-skip-mcp(id); }
+                    edit-mcp(id) => { root.on-edit-mcp(id); }
+                    open-artifact(path) => { root.on-open-artifact(path); }
+                }
+            }
+        }
+
+        // "Optimize & Build" handoff button (shown when ideation is complete)
+        if root.pipeline-state == "complete": Rectangle {
+            height: 44px;
+            background: #1a3e2c;
+
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 8px;
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    background: optimize-touch.has-hover ? #2d7d46 : #245a36;
+                    border-radius: 4px;
+
+                    optimize-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-optimize-and-build(); }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 6px;
+
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/play.svg");
+                            image-fit: contain;
+                            colorize: white;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Optimize & Build (Systems 1-8)";
+                            color: white;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Input area (always visible)
+        Rectangle {
+            height: 64px;
+            background: Theme.background-secondary;
+
+            // Top separator
+            Rectangle {
+                y: 0px;
+                height: 1px;
+                background: Theme.border-color;
+            }
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    // Text input
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.background-tertiary;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: input-area.has-focus ? Theme.accent-blue : Theme.border-color;
+
+                        input-area := TextInput {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height;
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            text <=> root.input-text;
+                            single-line: true;
+
+                            accepted => {
+                                if root.input-text != "" {
+                                    root.on-send-message(root.input-text);
+                                    root.input-text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    // Send button
+                    Rectangle {
+                        width: 36px;
+                        height: 36px;
+                        background: root.input-text != "" ? (send-touch.has-hover ? #2d7d46 : Theme.button-primary) : Theme.button-background;
+                        border-radius: 6px;
+
+                        send-touch := TouchArea {
+                            mouse-cursor: root.input-text != "" ? pointer : default;
+                            enabled: root.input-text != "";
+                            clicked => {
+                                root.on-send-message(root.input-text);
+                                root.input-text = "";
+                            }
+                        }
+
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("../../assets/icons/ui/play.svg");
+                            image-fit: contain;
+                            colorize: root.input-text != "" ? white : Theme.text-disabled;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            // Rotated to point upward (send arrow)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

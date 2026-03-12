@@ -475,6 +475,16 @@ pub struct ExplorerDragSelect {
     pub start: Option<Vec2>,
 }
 
+/// Resource tracking whether Slint UI currently has focus (mouse is over UI panels)
+/// Used to prevent viewport input when user is interacting with UI
+#[derive(Resource, Default)]
+pub struct SlintUIFocus {
+    /// True if mouse is over any Slint UI panel (Explorer, Properties, etc.)
+    pub has_focus: bool,
+    /// Last known cursor position over UI
+    pub last_ui_position: Option<Vec2>,
+}
+
 #[derive(Resource)]
 pub struct UIPerformance {
     pub frame_times: Vec<f32>,

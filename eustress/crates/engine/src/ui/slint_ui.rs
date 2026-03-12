@@ -28,6 +28,7 @@ use crate::ui::highlight::{highlight_to_lines, language_for_ext, HighlightLine a
 use super::file_dialogs::{SceneFile, FileEvent, PublishRequest};
 use super::spawn_events::SpawnEventsPlugin;
 use super::menu_events::MenuActionEvent;
+use super::{SlintUIFocus};
 use super::world_view::{WorldViewPlugin, UIWorldSnapshot};
 
 // Include Slint modules - this creates StudioWindow type
@@ -412,6 +413,26 @@ pub enum SlintAction {
     CloseRequested,
     // Force exit — skip unsaved check (used after exit confirmation dialog)
     ForceExit,
+
+    // Help icons — open /learn documentation URL
+    // Destination: tabbed viewer or system browser depending on help-opens-in-tab setting
+    OpenLearnUrl(String),
+
+    // Settings changed — sync bool settings that affect other panels
+    ShowHelpIconsChanged(bool),
+    HelpOpensInTabChanged(bool),
+    
+    // Workshop Panel (System 0: Ideation)
+    WorkshopSendMessage(String),
+    WorkshopApproveMcp(i32),
+    WorkshopSkipMcp(i32),
+    WorkshopEditMcp(i32),
+    WorkshopOpenArtifact(String),
+    WorkshopStartPipeline,
+    WorkshopPausePipeline,
+    WorkshopResumePipeline,
+    WorkshopCancelPipeline,
+    WorkshopOptimizeAndBuild,
 }
 
 /// Shared action queue between Slint callbacks and Bevy systems
@@ -534,6 +555,10 @@ pub struct StudioState {
     pub pending_web_back: bool,
     pub pending_web_forward: bool,
     pub pending_web_refresh: bool,
+
+    // Properties panel settings (from File > Settings)
+    pub show_help_icons: bool,
+    pub help_opens_in_tab: bool,
 }
 
 /// Data for a single center tab (script or web)
@@ -614,6 +639,8 @@ impl Default for StudioState {
             pending_web_back: false,
             pending_web_forward: false,
             pending_web_refresh: false,
+            show_help_icons: true,
+            help_opens_in_tab: false,
         }
     }
 }
@@ -1019,6 +1046,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<UnifiedExplorerState>()
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
+            .init_resource::<SlintUIFocus>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
             .init_resource::<crate::soul::SoulServiceSettings>()
@@ -1057,6 +1085,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
+            // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
+            .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -1250,6 +1280,16 @@ fn setup_slint_overlay(world: &mut World) {
     // Properties
     let q = queue.clone();
     ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
+
+    // Help icon — open /learn URL (tabbed viewer or system browser per settings)
+    let q = queue.clone();
+    ui.on_open_learn_url(move |url| q.push(SlintAction::OpenLearnUrl(url.to_string())));
+
+    // Help icon settings changed from Settings dialog — push action so StudioState updates
+    let q = queue.clone();
+    ui.on_help_icons_changed(move |val| q.push(SlintAction::ShowHelpIconsChanged(val)));
+    let q = queue.clone();
+    ui.on_help_opens_in_tab_changed(move |val| q.push(SlintAction::HelpOpensInTabChanged(val)));
     
     // Command bar
     let q = queue.clone();
@@ -1381,10 +1421,32 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_force_exit(move || q.push(SlintAction::ForceExit));
     
+    // Workshop Panel (System 0: Ideation)
+    let q = queue.clone();
+    ui.on_workshop_send_message(move |text| q.push(SlintAction::WorkshopSendMessage(text.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_approve_mcp(move |id| q.push(SlintAction::WorkshopApproveMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_skip_mcp(move |id| q.push(SlintAction::WorkshopSkipMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_edit_mcp(move |id| q.push(SlintAction::WorkshopEditMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_open_artifact(move |path| q.push(SlintAction::WorkshopOpenArtifact(path.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_start_pipeline(move || q.push(SlintAction::WorkshopStartPipeline));
+    let q = queue.clone();
+    ui.on_workshop_pause_pipeline(move || q.push(SlintAction::WorkshopPausePipeline));
+    let q = queue.clone();
+    ui.on_workshop_resume_pipeline(move || q.push(SlintAction::WorkshopResumePipeline));
+    let q = queue.clone();
+    ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
+    let q = queue.clone();
+    ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
+    
     // Store queue as Bevy resource
     world.insert_resource(queue);
     
-    info!("✅ Slint StudioWindow configured with {} callbacks wired", 50);
+    info!("✅ Slint StudioWindow configured with {} callbacks wired", 60);
     
     // Create Bevy texture for Slint to render into.
     // Uses Rgba8UnormSrgb for correct sRGB gamma (prevents washed-out colors).
@@ -1733,6 +1795,13 @@ struct DrainEventWriters<'w> {
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
     terrain_toggle: MessageWriter<'w, super::spawn_events::ToggleTerrainEditEvent>,
     terrain_brush: MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>,
+    // Workshop Panel (System 0: Ideation)
+    workshop_send: MessageWriter<'w, crate::workshop::WorkshopSendMessageEvent>,
+    workshop_approve: MessageWriter<'w, crate::workshop::WorkshopApproveMcpEvent>,
+    workshop_skip: MessageWriter<'w, crate::workshop::WorkshopSkipMcpEvent>,
+    workshop_edit: MessageWriter<'w, crate::workshop::WorkshopEditMcpEvent>,
+    workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
+    workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
 }
 
 /// Bundled mutable resources for drain_slint_actions
@@ -1750,6 +1819,8 @@ struct DrainResources<'w> {
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
     /// Shared selection state — updated on Explorer node clicks so F-to-focus works
     selection_manager: Option<Res<'w, BevySelectionManager>>,
+    /// Workshop pipeline resource for cancel/pause/resume actions
+    workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -2823,6 +2894,106 @@ fn drain_slint_actions(
                     out.info(format!("> {}", cmd));
                 }
             }
+
+            // Help icons — open /learn documentation URL
+            SlintAction::OpenLearnUrl(url) => {
+                let help_opens_in_tab = res.state.as_ref().map(|s| s.help_opens_in_tab).unwrap_or(false);
+                if help_opens_in_tab {
+                    // Open in the tabbed viewer (same as OpenWebTab)
+                    if let Some(ref mut s) = res.state { s.pending_open_web = Some(url.clone()); }
+                } else {
+                    // Open in system browser using cross-platform std::process::Command
+                    let full_url = if url.starts_with("http") {
+                        url.clone()
+                    } else {
+                        format!("https://eustress.dev{}", url)
+                    };
+                    #[cfg(target_os = "windows")]
+                    let result = std::process::Command::new("cmd")
+                        .args(["/c", "start", "", &full_url])
+                        .spawn();
+                    #[cfg(target_os = "macos")]
+                    let result = std::process::Command::new("open").arg(&full_url).spawn();
+                    #[cfg(target_os = "linux")]
+                    let result = std::process::Command::new("xdg-open").arg(&full_url).spawn();
+                    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+                    let result: Result<_, std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
+                    if let Err(e) = result {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Failed to open browser: {}", e));
+                        }
+                    }
+                }
+            }
+
+            // Settings toggles that affect other panels
+            SlintAction::ShowHelpIconsChanged(val) => {
+                if let Some(ref mut s) = res.state { s.show_help_icons = val; }
+            }
+            SlintAction::HelpOpensInTabChanged(val) => {
+                if let Some(ref mut s) = res.state { s.help_opens_in_tab = val; }
+            }
+            
+            // Workshop Panel (System 0: Ideation) — dispatch to Bevy messages
+            SlintAction::WorkshopSendMessage(text) => {
+                events.workshop_send.write(crate::workshop::WorkshopSendMessageEvent { content: text });
+            }
+            SlintAction::WorkshopApproveMcp(id) => {
+                events.workshop_approve.write(crate::workshop::WorkshopApproveMcpEvent { message_id: id as u32 });
+            }
+            SlintAction::WorkshopSkipMcp(id) => {
+                events.workshop_skip.write(crate::workshop::WorkshopSkipMcpEvent { message_id: id as u32 });
+            }
+            SlintAction::WorkshopEditMcp(id) => {
+                events.workshop_edit.write(crate::workshop::WorkshopEditMcpEvent { message_id: id as u32 });
+            }
+            SlintAction::WorkshopOpenArtifact(path) => {
+                events.workshop_open_artifact.write(crate::workshop::WorkshopOpenArtifactEvent { path });
+            }
+            SlintAction::WorkshopStartPipeline => {
+                // Start pipeline is implicit — happens when user sends first message
+                info!("Workshop: Start pipeline requested");
+            }
+            SlintAction::WorkshopPausePipeline => {
+                if let Some(ref mut pipeline) = res.workshop_pipeline {
+                    if pipeline.state == crate::workshop::IdeationState::Conversing {
+                        pipeline.state = crate::workshop::IdeationState::Paused;
+                    }
+                }
+            }
+            SlintAction::WorkshopResumePipeline => {
+                if let Some(ref mut pipeline) = res.workshop_pipeline {
+                    if pipeline.state == crate::workshop::IdeationState::Paused {
+                        pipeline.state = crate::workshop::IdeationState::Conversing;
+                    }
+                }
+            }
+            SlintAction::WorkshopCancelPipeline => {
+                if let Some(ref mut pipeline) = res.workshop_pipeline {
+                    let _ = crate::workshop::persistence::save_session(pipeline);
+                    pipeline.reset();
+                    info!("Workshop: Pipeline cancelled, session reset");
+                }
+            }
+            SlintAction::WorkshopOptimizeAndBuild => {
+                let opt_event = res.workshop_pipeline.as_ref().and_then(|p| {
+                    if p.state == crate::workshop::IdeationState::Complete {
+                        p.output_dir.as_ref().map(|dir| {
+                            crate::workshop::OptimizeAndBuildEvent {
+                                product_name: p.product_name.clone(),
+                                brief_path: dir.join("ideation_brief.toml"),
+                                output_dir: dir.clone(),
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                });
+                if let Some(evt) = opt_event {
+                    events.workshop_optimize.write(evt);
+                    info!("Workshop: Optimize & Build fired for Systems 1-8");
+                }
+            }
             
             // Toolbox insertion - file-system-first: create .glb.toml → spawn inline
             SlintAction::InsertPart(part_type_str) => {
@@ -2971,6 +3142,92 @@ fn drain_slint_actions(
             // Context menu
             SlintAction::ContextAction(action) => {
                 match action.as_str() {
+                    // File-specific actions
+                    "open" => {
+                        // Open file in appropriate editor (handled by OpenNode action)
+                        if let Some(ref es) = res.explorer_state {
+                            if let SelectedItem::File(ref path) = es.selected {
+                                info!("Opening file: {}", path.display());
+                                // File opening is handled by the OpenNode action
+                            }
+                        }
+                    }
+                    "open-with" => {
+                        info!("Open With... dialog not yet implemented");
+                    }
+                    "show-in-explorer" => {
+                        if let Some(ref es) = res.explorer_state {
+                            if let SelectedItem::File(ref path) = es.selected {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use std::process::Command;
+                                    let _ = Command::new("explorer")
+                                        .args(["/select,", &path.to_string_lossy()])
+                                        .spawn();
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    use std::process::Command;
+                                    let _ = Command::new("open")
+                                        .args(["-R", &path.to_string_lossy()])
+                                        .spawn();
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    use std::process::Command;
+                                    if let Some(parent) = path.parent() {
+                                        let _ = Command::new("xdg-open")
+                                            .arg(parent)
+                                            .spawn();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "copy-path" => {
+                        if let Some(ref es) = res.explorer_state {
+                            if let SelectedItem::File(ref path) = es.selected {
+                                #[cfg(feature = "clipboard")]
+                                {
+                                    use arboard::Clipboard;
+                                    if let Ok(mut clipboard) = Clipboard::new() {
+                                        let _ = clipboard.set_text(path.to_string_lossy().to_string());
+                                        info!("Copied path to clipboard: {}", path.display());
+                                    }
+                                }
+                                #[cfg(not(feature = "clipboard"))]
+                                info!("Clipboard feature not enabled");
+                            }
+                        }
+                    }
+                    "copy-relative-path" => {
+                        if let Some(ref es) = res.explorer_state {
+                            if let SelectedItem::File(ref path) = es.selected {
+                                let relative = path.strip_prefix(&es.project_root)
+                                    .unwrap_or(path);
+                                #[cfg(feature = "clipboard")]
+                                {
+                                    use arboard::Clipboard;
+                                    if let Ok(mut clipboard) = Clipboard::new() {
+                                        let _ = clipboard.set_text(relative.to_string_lossy().to_string());
+                                        info!("Copied relative path to clipboard: {}", relative.display());
+                                    }
+                                }
+                                #[cfg(not(feature = "clipboard"))]
+                                info!("Clipboard feature not enabled");
+                            }
+                        }
+                    }
+                    "properties" => {
+                        if let Some(ref es) = res.explorer_state {
+                            if let SelectedItem::File(ref path) = es.selected {
+                                info!("File properties for: {}", path.display());
+                                // TODO: Show file properties dialog with size, modified date, etc.
+                            }
+                        }
+                    }
+                    
+                    // Entity/file common actions
                     "cut" => {
                         events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
                         events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete));
@@ -3164,10 +3421,10 @@ fn drain_slint_actions(
 
                         let now = chrono::Utc::now().to_rfc3339();
                         let instance = crate::space::instance_loader::InstanceDefinition {
-                            asset: crate::space::instance_loader::AssetReference {
+                            asset: Some(crate::space::instance_loader::AssetReference {
                                 mesh: String::new(),
                                 scene: String::new(),
-                            },
+                            }),
                             transform: crate::space::instance_loader::TransformData::default(),
                             properties: crate::space::instance_loader::InstanceProperties::default(),
                             metadata: crate::space::instance_loader::InstanceMetadata {
@@ -3180,6 +3437,7 @@ fn drain_slint_actions(
                             thermodynamic: None,
                             electrochemical: None,
                             ui: None,
+                            extra: std::collections::HashMap::new(),
                         };
 
                         let _ = std::fs::create_dir_all(&write_dir);
@@ -3341,6 +3599,9 @@ fn sync_bevy_to_slint(
         ui.set_show_network_panel(state.show_network_panel);
         ui.set_show_terrain_editor(state.show_terrain_editor);
         ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+        // Sync help icon settings to Properties panel (read from StudioState)
+        ui.set_show_help_icons(state.show_help_icons);
+        ui.set_help_opens_in_tab(state.help_opens_in_tab);
     }
     
     // Sync EditorSettings → Slint (snap/grid state)
@@ -3409,6 +3670,73 @@ fn sync_bevy_to_slint(
         let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
         ui.set_output_logs(slint::ModelRc::from(model_rc));
     }
+    
+    // Workshop Panel sync is handled by the dedicated sync_workshop_to_slint system
+    // (runs on its own schedule to avoid adding workshop as a parameter here)
+}
+
+/// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
+/// Throttled: only runs when pipeline is dirty (has unsent changes).
+fn sync_workshop_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
+    global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(pipeline) = pipeline else { return };
+    let ui = &slint_context.window;
+    
+    // Push pipeline state string
+    ui.set_workshop_pipeline_state(pipeline.state_string().into());
+    ui.set_workshop_product_name(pipeline.product_name.clone().into());
+    ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
+    ui.set_workshop_estimated_cost(pipeline.format_cost().into());
+    
+    // Check API key validity
+    let api_key_valid = match (&global_settings, &space_settings) {
+        (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
+        _ => false,
+    };
+    ui.set_workshop_api_key_valid(api_key_valid);
+    
+    // Push chat messages to Slint model
+    let messages: Vec<ChatMessage> = pipeline.messages.iter().map(|msg| {
+        ChatMessage {
+            id: msg.id as i32,
+            role: msg.role.to_slint_string().into(),
+            content: msg.content.clone().into(),
+            timestamp: msg.timestamp.clone().into(),
+            mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
+            mcp_method: msg.mcp_method.clone().unwrap_or_default().into(),
+            mcp_status: msg.mcp_status.as_ref()
+                .map(|s| s.to_slint_string().to_string())
+                .unwrap_or_default()
+                .into(),
+            artifact_path: msg.artifact_path.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+                .into(),
+            artifact_type: msg.artifact_type.as_ref()
+                .map(|t| t.to_slint_string().to_string())
+                .unwrap_or_default()
+                .into(),
+        }
+    }).collect();
+    let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
+    ui.set_workshop_messages(slint::ModelRc::from(msg_model));
+    
+    // Push pipeline steps to Slint model
+    let steps: Vec<PipelineStepData> = pipeline.steps.iter().map(|step| {
+        PipelineStepData {
+            index: step.index as i32,
+            label: step.label.clone().into(),
+            status: step.status.to_slint_string().into(),
+            artifact_count: step.artifact_count as i32,
+        }
+    }).collect();
+    let steps_model = std::rc::Rc::new(slint::VecModel::from(steps));
+    ui.set_workshop_pipeline_steps(slint::ModelRc::from(steps_model));
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -4244,8 +4572,10 @@ fn sync_properties_to_slint(
             }
             
             // -- Asset section --
-            add_prop("Asset", "Mesh", toml_def.asset.mesh.clone(), "string", true);
-            add_prop("Asset", "Scene", toml_def.asset.scene.clone(), "string", true);
+            if let Some(ref asset) = toml_def.asset {
+                add_prop("Asset", "Mesh", asset.mesh.clone(), "string", true);
+                add_prop("Asset", "Scene", asset.scene.clone(), "string", true);
+            }
             
             // -- Transform section --
             add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}", 
@@ -4460,6 +4790,8 @@ fn sync_properties_to_slint(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            description: slint::SharedString::default(),
+            learn_url: slint::SharedString::default(),
         });
         
         // Insert properties in this category (sorted A-Z by name)
@@ -4486,6 +4818,8 @@ fn sync_properties_to_slint(
                     x_value: x_val.into(),
                     y_value: y_val.into(),
                     z_value: z_val.into(),
+                    description: slint::SharedString::default(),
+                    learn_url: slint::SharedString::default(),
                 });
             }
         }
@@ -4573,8 +4907,16 @@ fn update_toml_property(
         "Archivable" => { def.metadata.archivable = val == "true"; true }
         
         // Asset
-        "Mesh" => { def.asset.mesh = val.to_string(); true }
-        "Scene" => { def.asset.scene = val.to_string(); true }
+        "Mesh" => {
+            def.asset.get_or_insert_with(|| crate::space::instance_loader::AssetReference {
+                mesh: String::new(), scene: "Scene0".to_string(),
+            }).mesh = val.to_string(); true
+        }
+        "Scene" => {
+            def.asset.get_or_insert_with(|| crate::space::instance_loader::AssetReference {
+                mesh: String::new(), scene: "Scene0".to_string(),
+            }).scene = val.to_string(); true
+        }
         
         // Transform
         "Position" => {
@@ -4875,6 +5217,8 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            description: slint::SharedString::default(),
+            learn_url: slint::SharedString::default(),
         }
     };
 
@@ -4927,8 +5271,22 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
     ui.set_entity_properties(slint::ModelRc::from(model_rc));
 }
 
+/// Load service properties from TOML definition file
+fn load_service_properties_from_toml(service_name: &str) -> Option<toml::Value> {
+    let toml_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("service_properties")
+        .join(format!("{}.toml", service_name));
+    
+    if let Ok(content) = std::fs::read_to_string(&toml_path) {
+        toml::from_str(&content).ok()
+    } else {
+        None
+    }
+}
+
 /// Builds service properties for a selected service header and pushes them to the Properties panel.
-/// Reads all dynamic properties from the ServiceComponent.
+/// Reads properties from TOML definition files (Roblox-style) with fallback to ServiceComponent.
 fn build_service_properties(
     ui: &StudioWindow,
     service_name: &str,
@@ -4960,17 +5318,65 @@ fn build_service_properties(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            description: slint::SharedString::default(),
+            learn_url: slint::SharedString::default(),
         }
     };
     
     let mut props: Vec<PropertyData> = Vec::new();
     
-    // Find the matching ServiceComponent by class_name
-    let sc = service_components.iter().find(|sc| sc.class_name == service_name);
-    
-    // Service header
-    props.push(make_prop("", "", "", "Service", true));
-    props.push(make_prop("ClassName", service_name, "string", "Service", false));
+    // Try to load properties from TOML definition file first (Roblox-style)
+    if let Some(toml_data) = load_service_properties_from_toml(service_name) {
+        // Parse TOML sections and build properties
+        if let Some(table) = toml_data.as_table() {
+            for (section_name, section_value) in table.iter() {
+                if let Some(section_table) = section_value.as_table() {
+                    // Add section header
+                    props.push(make_prop("", "", "", section_name, true));
+                    
+                    // Add properties in this section
+                    for (prop_name, prop_value) in section_table.iter() {
+                        if let Some(prop_table) = prop_value.as_table() {
+                            let value_str = prop_table.get("value")
+                                .and_then(|v| match v {
+                                    toml::Value::String(s) => Some(s.clone()),
+                                    toml::Value::Integer(i) => Some(i.to_string()),
+                                    toml::Value::Float(f) => Some(f.to_string()),
+                                    toml::Value::Boolean(b) => Some(b.to_string()),
+                                    toml::Value::Array(arr) => Some(format!("{:?}", arr)),
+                                    _ => None,
+                                })
+                                .unwrap_or_default();
+                            
+                            let type_str = prop_table.get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("string");
+                            
+                            let readonly = prop_table.get("readonly")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            
+                            let description_str = prop_table.get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            let mut prop_data = make_prop(prop_name, &value_str, type_str, section_name, false);
+                            prop_data.editable = !readonly;
+                            prop_data.description = description_str.as_str().into();
+                            props.push(prop_data);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback: use ServiceComponent properties
+        let sc = service_components.iter().find(|sc| sc.class_name == service_name);
+        
+        // Service header
+        props.push(make_prop("", "", "", "Service", true));
+        props.push(make_prop("ClassName", service_name, "string", "Service", false));
     
     if let Some(sc) = sc {
         if !sc.description.is_empty() {
@@ -5033,6 +5439,7 @@ fn build_service_properties(
             props.push(make_prop("TOML Path", &sc.toml_path.to_string_lossy(), "string", "File", false));
         }
     }
+    } // Close fallback block
     
     let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
     ui.set_entity_properties(slint::ModelRc::from(model_rc));

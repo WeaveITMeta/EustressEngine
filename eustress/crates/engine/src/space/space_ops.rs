@@ -180,13 +180,27 @@ pub fn scaffold_new_space(
     write_file(&space_root.join("simulation.toml"), &simulation_toml())?;
 
     // ── Service folders ────────────────────────────────────────────────────
+    // Copy _service.toml from assets/service_templates/<Name>/ so all
+    // properties, icons, and descriptions are data-driven from the templates.
+    let svc_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("service_templates");
+
     for svc in SERVICE_FOLDERS {
         let svc_dir = space_root.join(svc.name);
         create_dir_all(&svc_dir)?;
-        write_file(
-            &svc_dir.join("_service.toml"),
-            &service_toml(svc.name, svc.class, svc.icon, svc.description),
-        )?;
+
+        let template_path = svc_template_dir.join(svc.name).join("_service.toml");
+        if let Ok(content) = std::fs::read_to_string(&template_path) {
+            write_file(&svc_dir.join("_service.toml"), &content)?;
+        } else {
+            // Fallback: generate minimal _service.toml so service is always discovered
+            warn!("⚠️ Service template not found for '{}' at {:?}, using fallback", svc.name, template_path);
+            write_file(
+                &svc_dir.join("_service.toml"),
+                &service_toml(svc.name, svc.class, svc.icon, svc.description),
+            )?;
+        }
     }
 
     // ── Workspace/Baseplate.part.toml ──────────────────────────────────────
@@ -195,17 +209,36 @@ pub fn scaffold_new_space(
         &baseplate_part_toml(),
     )?;
 
-    // ── Lighting/Sky.sky.toml ──────────────────────────────────────────────
+    // ── Workspace/WelcomeCube.part.toml ────────────────────────────────────
     write_file(
-        &space_root.join("Lighting").join("Sky.sky.toml"),
-        &sky_toml(),
+        &space_root.join("Workspace").join("WelcomeCube.part.toml"),
+        &welcome_cube_part_toml(),
     )?;
 
-    // ── Lighting/Atmosphere.atmosphere.toml ────────────────────────────────
-    write_file(
-        &space_root.join("Lighting").join("Atmosphere.atmosphere.toml"),
-        &atmosphere_toml(),
-    )?;
+    // ── Lighting children (.instance.toml — picked up by file loader) ───────
+    // Copy templates from assets/lighting_templates/ to Lighting/ folder.
+    // Files use .instance.toml extension so FileType::from_path returns Toml
+    // and the file loader spawns them as ECS entities with Instance components.
+    let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("lighting_templates");
+
+    let lighting_children = ["Atmosphere", "Moon", "Sky", "Sun", "Skybox"];
+    for child_name in &lighting_children {
+        let template_path = lighting_template_dir.join(format!("{}.instance.toml", child_name));
+        let target_path = space_root.join("Lighting").join(format!("{}.instance.toml", child_name));
+
+        if let Ok(content) = std::fs::read_to_string(&template_path) {
+            write_file(&target_path, &content)?;
+        } else {
+            warn!("⚠️ Lighting template not found: {:?}", template_path);
+            // Fallback: minimal instance toml so the entity still spawns
+            write_file(&target_path, &format!(
+                "# {} - Auto-generated fallback\n[metadata]\nclass_name = \"{}\"\narchivable = true\n\n[properties]\n",
+                child_name, child_name
+            ))?;
+        }
+    }
 
     info!(
         "✅ New Space '{}' scaffolded at {:?}",
@@ -312,10 +345,10 @@ pub fn save_space(world: &mut World) {
                 .to_string();
 
             let def = InstanceDefinition {
-                asset: AssetReference {
+                asset: Some(AssetReference {
                     mesh,
                     scene: "Scene0".to_string(),
-                },
+                }),
                 transform: TransformData {
                     position: [t.translation.x, t.translation.y, t.translation.z],
                     rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
@@ -343,6 +376,7 @@ pub fn save_space(world: &mut World) {
                 thermodynamic: None,
                 electrochemical: None,
                 ui: None,
+                extra: std::collections::HashMap::new(),
             };
 
             to_save.push((instance.name.clone(), toml_path, def));
@@ -762,23 +796,19 @@ fn baseplate_part_toml() -> String {
     let now = Utc::now().to_rfc3339();
     format!(
         r#"# EEP Part instance — Baseplate
-[instance]
-name = "Baseplate"
+[metadata]
 class_name = "Part"
 archivable = true
-ai = false
-
-[metadata]
-id = "baseplate-001"
 created = "{now}"
 last_modified = "{now}"
 
 [asset]
 mesh = "parts/block.glb"
+scene = "Scene0"
 
 [transform]
 position = [0.0, -0.5, 0.0]
-rotation = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
 scale = [512.0, 1.0, 512.0]
 
 [properties]
@@ -788,9 +818,37 @@ reflectance = 0.1
 anchored = true
 can_collide = true
 locked = true
+"#,
+        now = now,
+    )
+}
 
-[tags]
-values = ["baseplate", "static"]
+fn welcome_cube_part_toml() -> String {
+    let now = Utc::now().to_rfc3339();
+    format!(
+        r#"# EEP Part instance — Welcome Cube
+[metadata]
+class_name = "Part"
+archivable = true
+created = "{now}"
+last_modified = "{now}"
+
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[transform]
+position = [0.0, 2.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [4.0, 4.0, 4.0]
+
+[properties]
+color = [0.388, 0.706, 1.0, 1.0]
+transparency = 0.0
+reflectance = 0.2
+anchored = true
+can_collide = true
+locked = false
 "#,
         now = now,
     )

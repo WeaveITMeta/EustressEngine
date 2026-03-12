@@ -1,0 +1,28 @@
+# Moon — Lunar body with phases and night lighting
+# Auto-created with each Space in Lighting/ folder.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+
+[metadata]
+class_name = "Moon"
+archivable = true
+
+[Appearance]
+TextureId = { type = "string", value = "", description = "Asset ID for moon texture" }
+Scale = { type = "float", value = 1.0, min = 0.1, max = 10.0, description = "Moon size scale" }
+Color = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Moon color tint" }
+Brightness = { type = "float", value = 1.0, min = 0.0, max = 5.0, description = "Moon brightness" }
+
+[Phase]
+Phase = { type = "float", value = 0.5, min = 0.0, max = 1.0, description = "Moon phase (0=new, 0.5=full, 1=new)" }
+AutoPhase = { type = "bool", value = false, description = "Auto-advance moon phase over time" }
+PhaseCycleDuration = { type = "float", value = 2419200.0, min = 3600.0, description = "Phase cycle duration in seconds (default 28 days)" }
+
+[Position]
+AngularSize = { type = "float", value = 0.52, min = 0.1, max = 10.0, description = "Angular size in degrees" }
+Azimuth = { type = "float", value = 180.0, min = 0.0, max = 360.0, description = "Azimuth angle in degrees" }
+Elevation = { type = "float", value = 45.0, min = -90.0, max = 90.0, description = "Elevation angle in degrees" }
+
+[Lighting]
+CastLight = { type = "bool", value = true, description = "Moon casts ambient light" }
+LightIntensity = { type = "float", value = 0.1, min = 0.0, max = 1.0, description = "Moonlight intensity" }
+LightColor = { type = "Color3", value = [0.8, 0.85, 1.0], description = "Moonlight color (cool blue-white)" }

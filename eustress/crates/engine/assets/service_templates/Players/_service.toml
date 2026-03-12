@@ -1,6 +1,5 @@
-# Players Service - Manages player spawning and configuration
-# This is a data-driven service definition - any properties defined here
-# will be displayed and editable in the Properties panel
+# Players Service — Manages player connections and character settings
+# _service.toml marks this folder as a Service and defines all editable properties.
 
 [service]
 class_name = "Players"
@@ -8,10 +7,11 @@ icon = "players"
 description = "Manages player spawning, respawning, and character configuration"
 can_have_children = true
 
-# Player configuration
-max_players = 50
-respawn_time = 5.0
+[properties]
 character_auto_loads = true
+respawn_time = 5.0
+max_players = 12
+preferred_players = 12
 
 [metadata]
 id = "players-service"

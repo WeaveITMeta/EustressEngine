@@ -1,0 +1,16 @@
+# ServerScriptService — Container for server-side Soul scripts
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "ServerScriptService"
+icon = "soulservice"
+description = "Scripts placed here run on the server. Use SoulScript for game logic."
+can_have_children = true
+
+[properties]
+load_string_enabled = false
+
+[metadata]
+id = "serverscriptservice-service"
+created = ""
+last_modified = ""

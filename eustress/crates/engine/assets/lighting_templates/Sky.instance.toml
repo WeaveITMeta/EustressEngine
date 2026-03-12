@@ -1,0 +1,28 @@
+# Sky — Procedural or textured sky rendering
+# Auto-created with each Space in Lighting/ folder.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+
+[metadata]
+class_name = "Sky"
+archivable = true
+
+[Appearance]
+SkyMode = { type = "enum", value = "Procedural", options = ["Procedural", "Skybox", "Gradient"], description = "Sky rendering mode" }
+CelestialBodiesShown = { type = "bool", value = true, description = "Show sun, moon, and stars" }
+StarCount = { type = "int", value = 3000, min = 0, max = 10000, description = "Number of visible stars at night" }
+
+[ProceduralSky]
+SkyColor = { type = "Color3", value = [0.2, 0.5, 1.0], description = "Zenith sky color" }
+HorizonColor = { type = "Color3", value = [0.9, 0.7, 0.5], description = "Horizon sky color" }
+SunsetIntensity = { type = "float", value = 1.0, min = 0.0, max = 3.0, description = "Sunset/sunrise color intensity" }
+
+[Clouds]
+CloudCover = { type = "float", value = 0.5, min = 0.0, max = 1.0, description = "Cloud coverage fraction" }
+CloudColor = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Cloud color" }
+CloudDensity = { type = "float", value = 0.7, min = 0.0, max = 1.0, description = "Cloud opacity/density" }
+CloudSpeed = { type = "Vector2", value = [1.0, 0.5], description = "Cloud drift speed (X, Z axes)" }
+CloudAltitude = { type = "float", value = 2000.0, min = 100.0, max = 10000.0, description = "Cloud layer altitude in studs" }
+
+[Advanced]
+AtmosphericPerspectiveDistance = { type = "float", value = 10000.0, min = 100.0, description = "Distance at which atmospheric perspective fades objects" }
+AerialPerspectiveIntensity = { type = "float", value = 1.0, min = 0.0, max = 3.0, description = "Aerial perspective haze intensity" }

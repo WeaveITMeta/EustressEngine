@@ -42,7 +42,7 @@ export component ExplorerPanel inherits Rectangle {
     callback on-expand-node(int, string);
     callback on-collapse-node(int, string);
     callback on-open-node(int, string);
-    callback on-context-menu(length, length);
+    callback on-context-menu(length, length, int, string); // x, y, node-id, node-type
     callback on-search-changed(string);
     callback on-rename-node(int, string, string);
     callback on-add-service();  // (+) button to add a new service
@@ -216,7 +216,7 @@ export component ExplorerPanel inherits Rectangle {
                             root.on-expand-node(node.id, node.node-type);
                         }
                     }
-                    context-menu(x, y) => { root.on-context-menu(x, y); }
+                    context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
                 }
             }
         }

@@ -6,8 +6,11 @@ incremental = true
 jobs = 8
 
 [target.x86_64-pc-windows-msvc]
-# Use standard MSVC linker
-# linker = "rust-lld.exe"
+# rust-lld bundled with rustup — 2-4x faster than link.exe
+# Full absolute path so cargo finds it without PATH changes
+# linker-flavor=lld-link tells rustc to pass MSVC-style arguments to rust-lld
+linker = "C:\\Users\\miksu\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\bin\\rust-lld.exe"
+rustflags = ["-C", "linker-flavor=lld-link"]
 
 [profile.dev]
 # Minimal optimization for fast compile

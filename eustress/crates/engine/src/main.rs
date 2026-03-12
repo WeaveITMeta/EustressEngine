@@ -56,6 +56,7 @@ mod space;              // Space file-system-first architecture
 mod simulation;         // Tick-based simulation with time compression
 mod toolbox;            // Toolbox mesh insertion system
 mod txt_to_toml_watcher; // Automatic .txt to .toml converter
+mod workshop;           // Workshop Panel (System 0: Ideation)
 
 mod plugins;
 mod shaders;
@@ -88,6 +89,7 @@ use window_focus::WindowFocusPlugin;
 use startup::{StartupPlugin, StartupArgs};
 // ServicePropertiesPlugin removed - now handled by Slint UI
 use soul::EngineSoulPlugin;
+use workshop::WorkshopPlugin;
 use space::SpaceFileLoaderPlugin;
 
 fn main() {
@@ -248,6 +250,8 @@ fn main() {
         .add_plugins(seats::SeatPlugin)
         // Soul scripting
         .add_plugins(EngineSoulPlugin)
+        // Workshop (System 0: Ideation — conversational product creation)
+        .add_plugins(WorkshopPlugin)
         // Generative pipeline
         .add_plugins(generative_pipeline::GenerativePipelinePlugin)
         // VIGA

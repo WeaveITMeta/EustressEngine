@@ -921,6 +921,14 @@ Generate a complete, compilable Rust module with a Plugin implementation."#,
             .replace("{code}", code)
     }
     
+    /// Public API for Workshop module: call Claude with a custom system prompt
+    /// using Sonnet tier. Returns the raw text response or a string error.
+    /// Designed to be called from a background thread (no Bevy dependencies).
+    pub fn call_api_for_workshop(&self, prompt: &str, system_prompt: &str) -> Result<String, String> {
+        self.call_api_with_system(prompt, system_prompt, ModelTier::Sonnet)
+            .map_err(|e| e.to_string())
+    }
+    
     /// Call the Claude API (uses default system prompt)
     fn call_api(&self, prompt: &str, tier: ModelTier) -> Result<String, ClaudeError> {
         self.call_api_with_system(prompt, &self.system_prompt, tier)

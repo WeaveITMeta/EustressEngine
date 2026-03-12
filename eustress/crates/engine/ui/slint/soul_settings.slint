@@ -1,10 +1,189 @@
 // ============================================================================
 // Eustress Engine Studio - Soul Settings Dialog
 // Claude API configuration for Soul scripting
+// Unified with Simulation Settings theme
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, CheckBox, Button, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+
+// Section header with left accent bar and label (matches SimSection)
+component SoulSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+// Compact field row: label left, input right (matches SimField)
+component SoulField inherits Rectangle {
+    in property <string> label: "";
+    in-out property <string> value: "";
+    in property <string> unit: "";
+    in property <bool> is-password: false;
+    callback changed(string);
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        Text {
+            width: 148px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 200px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+
+            LineEdit {
+                x: 0px; y: 0px;
+                width: 100%; height: 100%;
+                text: root.value;
+                input-type: root.is-password ? password : text;
+                edited(t) => { root.value = t; root.changed(t); }
+            }
+        }
+
+        if root.unit != "": Text {
+            width: 44px;
+            text: root.unit;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Compact dropdown row (matches SimCombo)
+component SoulCombo inherits Rectangle {
+    in property <string> label: "";
+    in property <[string]> options: [];
+    in-out property <int> current: 0;
+    callback changed(int);
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+
+        Text {
+            width: 148px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        ComboBox {
+            width: 200px;
+            model: root.options;
+            current-index: root.current;
+            selected(v) => { root.changed(root.current); }
+        }
+    }
+}
+
+// Compact toggle row (matches SimToggle)
+component SoulToggle inherits Rectangle {
+    in property <string> label: "";
+    in-out property <bool> value: false;
+    callback changed(bool);
+
+    height: 28px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        height: 28px;
+
+        Text {
+            width: 148px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 36px;
+            height: 18px;
+            border-radius: 9px;
+            background: root.value ? Theme.accent-blue : #333344;
+            y: (28px - self.height) / 2;
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.value = !root.value;
+                    root.changed(root.value);
+                }
+            }
+
+            Rectangle {
+                x: root.value ? 18px : 2px;
+                y: 2px;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background: white;
+                animate x { duration: 120ms; easing: ease-out; }
+            }
+        }
+
+        Text {
+            text: root.value ? "On" : "Off";
+            color: root.value ? Theme.text-primary : Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Hint text (matches SimHint)
+component SoulHint inherits Rectangle {
+    in property <string> text: "";
+    height: 16px;
+    background: transparent;
+    Text {
+        x: 0px;
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width;
+    }
+}
 
 export component SoulSettingsDialog inherits Rectangle {
     // Properties
@@ -15,287 +194,276 @@ export component SoulSettingsDialog inherits Rectangle {
     in-out property <float> temperature: 0.7;
     in property <bool> api-key-valid: false;
     in property <string> error-message: "";
-    
+
     // Callbacks
     callback on-save();
     callback on-close();
     callback on-test-connection();
     callback on-clear-cache();
-    
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
-    TouchArea {
-        clicked => { root.on-close(); }
-    }
-    
+
+    TouchArea { clicked => { root.on-close(); } }
+
+    // ── Modal card ──
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
+        width: 600px;
         height: 480px;
-        background: Theme.dialog-background;
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        TouchArea {}
-        
-        VerticalBox {
-            padding: 24px;
-            spacing: 16px;
-            
-            // Header
-            HorizontalBox {
-                Text {
-                    text: "Soul Settings";
-                    color: Theme.text-primary;
-                    font-size: 20px;
-                    font-weight: 600;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ── centered icon + title, close X top-right ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                // Centered icon + text block
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    width: parent.width;
+                    height: parent.height;
+
+                    Image {
+                        width: 16px;
+                        height: 16px;
+                        source: @image-url("../../assets/icons/ui/brain.svg");
+                        image-fit: contain;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "Soul Settings";
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
                 }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
+
+                // Close X — top-right
                 Rectangle {
-                    width: 28px;
-                    height: 28px;
-                    background: close-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 4px;
-                    
-                    close-touch := TouchArea {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
-                    
-                    Image {
-                        width: 12px;
-                        height: 12px;
-                        source: @image-url("../../assets/icons/ui/close.svg");
-                        image-fit: contain;
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
-            }
-            
-            // API Key section
-            Text {
-                text: "Claude API Configuration";
-                color: Theme.text-secondary;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            
-            CheckBox {
-                text: "Use global API key";
-                checked <=> root.use-global-key;
-            }
-            
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "API Key";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
+
                 Rectangle {
-                    height: 36px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: root.api-key-valid ? Theme.accent-green : Theme.input-border;
-                    
-                    HorizontalBox {
-                        padding: 8px;
-                        
-                        LineEdit {
-                            horizontal-stretch: 1;
-                            text <=> root.api-key;
-                            input-type: password;
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content area ──
+            ScrollView {
+                vertical-stretch: 1;
+                width: 100%;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 4px;
+                    alignment: start;
+                    width: 560px;
+
+                    SoulSection { title: "API CONFIGURATION"; }
+
+                    SoulToggle {
+                        label: "Use Global API Key";
+                        value <=> root.use-global-key;
+                    }
+
+                    Rectangle { height: 4px; }
+
+                    SoulField {
+                        label: "API Key";
+                        value <=> root.api-key;
+                        is-password: true;
+                    }
+
+                    SoulHint { text: "Your BYOK (Bring Your Own Key) Anthropic API key. Stored locally, never transmitted to Eustress servers."; }
+
+                    if root.api-key-valid: Rectangle {
+                        height: 16px;
+                        background: transparent;
+                        HorizontalLayout {
+                            spacing: 4px;
+                            alignment: start;
+                            Text { text: "✓"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "API key validated"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
                         }
-                        
-                        if root.api-key-valid: Image {
-                            width: 16px;
-                            height: 16px;
-                            source: @image-url("../../assets/icons/ui/check.svg");
-                            image-fit: contain;
+                    }
+
+                    Rectangle { height: 8px; }
+                    SoulSection { title: "MODEL"; }
+
+                    SoulCombo {
+                        label: "Model";
+                        options: ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"];
+                    }
+
+                    SoulHint { text: "Sonnet is recommended for speed and cost. Opus produces higher quality at ~5× the cost."; }
+
+                    Rectangle { height: 8px; }
+                    SoulSection { title: "PARAMETERS"; }
+
+                    SoulField {
+                        label: "Max Tokens";
+                        value: root.max-tokens;
+                        unit: "tokens";
+                    }
+
+                    SoulHint { text: "Maximum number of tokens in each Claude response. Higher values allow longer outputs."; }
+
+                    Rectangle { height: 4px; }
+
+                    SoulField {
+                        label: "Temperature";
+                        value: root.temperature;
+                    }
+
+                    SoulHint { text: "Controls randomness. 0.0 = deterministic, 1.0 = creative. Default 0.7 balances accuracy and variety."; }
+
+                    // Error message
+                    if root.error-message != "": Rectangle {
+                        height: 28px;
+                        background: #2a1515;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: #4a2020;
+
+                        Text {
+                            x: 10px;
+                            text: root.error-message;
+                            color: Theme.text-error;
+                            font-size: 10px;
                             vertical-alignment: center;
                         }
                     }
-                }
-            }
-            
-            // Model selection
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Model";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
-                ComboBox {
-                    model: ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"];
-                    current-value <=> root.model;
-                }
-            }
-            
-            // Parameters
-            HorizontalBox {
-                spacing: 16px;
-                
-                VerticalBox {
-                    horizontal-stretch: 1;
-                    spacing: 4px;
-                    
-                    Text {
-                        text: "Max Tokens";
-                        color: Theme.text-secondary;
-                        font-size: 12px;
-                    }
-                    
-                    Rectangle {
-                        height: 36px;
-                        background: Theme.input-background;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: Theme.input-border;
-                        
-                        LineEdit {
-                            text: root.max-tokens;
+
+                    Rectangle { height: 8px; }
+                    SoulSection { title: "ACTIONS"; }
+
+                    // Action buttons row
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        height: 32px;
+
+                        Rectangle {
+                            width: 120px; height: 28px;
+                            border-radius: 4px;
+                            background: test-ta.has-hover ? #1a1a2e : Theme.button-background;
+                            border-width: 1px;
+                            border-color: test-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+
+                            test-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.on-test-connection(); }
+                            }
+
+                            Text {
+                                text: "Test Connection";
+                                color: test-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
+                                font-size: 11px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
-                    }
-                }
-                
-                VerticalBox {
-                    horizontal-stretch: 1;
-                    spacing: 4px;
-                    
-                    Text {
-                        text: "Temperature";
-                        color: Theme.text-secondary;
-                        font-size: 12px;
-                    }
-                    
-                    Rectangle {
-                        height: 36px;
-                        background: Theme.input-background;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: Theme.input-border;
-                        
-                        LineEdit {
-                            text: root.temperature;
+
+                        Rectangle {
+                            width: 100px; height: 28px;
+                            border-radius: 4px;
+                            background: cache-ta.has-hover ? #1a1a2e : Theme.button-background;
+                            border-width: 1px;
+                            border-color: cache-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+
+                            cache-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.on-clear-cache(); }
+                            }
+
+                            Text {
+                                text: "Clear Cache";
+                                color: cache-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
+                                font-size: 11px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
             }
-            
-            // Error message
-            if root.error-message != "": Rectangle {
-                height: 36px;
-                background: #4a2020;
-                border-radius: 4px;
-                
-                HorizontalBox {
-                    padding: 8px;
-                    
-                    Text {
-                        text: root.error-message;
-                        color: Theme.text-error;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                }
+
+            // ── Footer — Save only (matches Simulation Settings) ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
             }
-            
-            // Actions
-            HorizontalBox {
-                spacing: 8px;
-                
-                Rectangle {
-                    width: 120px;
-                    height: 32px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-test-connection(); }
-                    }
-                    
-                    Text {
-                        text: "Test Connection";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                Rectangle {
-                    width: 100px;
-                    height: 32px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-clear-cache(); }
-                    }
-                    
-                    Text {
-                        text: "Clear Cache";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-            
-            Rectangle { vertical-stretch: 1; }
-            
-            // Footer
-            HorizontalBox {
-                spacing: 8px;
-                alignment: end;
-                
-                Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-close(); }
-                    }
-                    
-                    Text {
-                        text: "Cancel";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-save(); }
-                    }
-                    
-                    Text {
-                        text: "Save";
-                        color: white;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: end;
+
+                    // Save button (green, matching Simulation Settings)
+                    Rectangle {
+                        width: 80px;
+                        height: 32px;
+                        border-radius: 5px;
+                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        border-width: 1px;
+                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+
+                        save-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-save(); }
+                        }
+
+                        Text {
+                            text: "Save";
+                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

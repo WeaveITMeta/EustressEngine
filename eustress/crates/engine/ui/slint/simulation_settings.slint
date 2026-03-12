@@ -388,16 +388,12 @@ export component SimulationSettingsDialog inherits Rectangle {
                     padding-top: 0px;
                     padding-bottom: 0px;
 
-                    Rectangle {
+                    Image {
                         width: 16px;
                         height: 16px;
-                        
-                        Image {
-                            width: 100%;
-                            height: 100%;
-                            source: @image-url("../../assets/icons/ui/sim-settings.svg");
-                            image-fit: contain;
-                        }
+                        source: @image-url("../../assets/icons/ui/sim-settings.svg");
+                        image-fit: contain;
+                        vertical-alignment: center;
                     }
 
                     Text {

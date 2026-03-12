@@ -1,6 +1,5 @@
-# Lighting Service - Controls global lighting and atmosphere
-# This is a data-driven service definition - any properties defined here
-# will be displayed and editable in the Properties panel
+# Lighting Service — Controls global lighting, shadows, and atmospheric effects
+# _service.toml marks this folder as a Service and defines all editable properties.
 
 [service]
 class_name = "Lighting"
@@ -8,17 +7,23 @@ icon = "lighting"
 description = "Controls global lighting, shadows, and atmospheric effects"
 can_have_children = true
 
-# Ambient lighting
-ambient = [0.5, 0.5, 0.5, 1.0]
-outdoor_ambient = [0.7, 0.7, 0.7, 1.0]
-brightness = 1.0
-
-# Shadows
-global_shadows = true
-
-# Time of day
+[properties]
+ambient = [0.0, 0.0, 0.0, 1.0]
+outdoor_ambient = [0.5, 0.5, 0.5, 1.0]
+brightness = 2.0
+color_shift_top = [0.0, 0.0, 0.0, 1.0]
+color_shift_bottom = [0.0, 0.0, 0.0, 1.0]
+shadow_softness = 0.2
+environment_diffuse_scale = 1.0
+environment_specular_scale = 1.0
 clock_time = 14.0
-geographic_latitude = 41.7
+geographic_latitude = 41.73
+fog_color = [0.75, 0.75, 0.75, 1.0]
+fog_end = 100000.0
+fog_start = 0.0
+global_shadows = true
+technology = "ShadowMap"
+exposure_compensation = 0.0
 
 [metadata]
 id = "lighting-service"

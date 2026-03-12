@@ -117,10 +117,10 @@ pub fn insert_mesh_instance_at(
         .map_err(|e| format!("Failed to create directory {:?}: {}", target_dir, e))?;
 
     let instance = crate::space::instance_loader::InstanceDefinition {
-        asset: crate::space::instance_loader::AssetReference {
+        asset: Some(crate::space::instance_loader::AssetReference {
             mesh: mesh.mesh_path.to_string(),
             scene: "Scene0".to_string(),
-        },
+        }),
         transform: crate::space::instance_loader::TransformData {
             position,
             rotation: [0.0, 0.0, 0.0, 1.0],
@@ -137,6 +137,7 @@ pub fn insert_mesh_instance_at(
         thermodynamic: None,
         electrochemical: None,
         ui: None,
+        extra: std::collections::HashMap::new(),
     };
 
     let toml_path = target_dir.join(format!("{}.glb.toml", instance_name));
@@ -165,10 +166,10 @@ pub fn insert_mesh_instance(
     // Build structured InstanceDefinition
     let now = Utc::now().to_rfc3339();
     let instance = InstanceDefinition {
-        asset: AssetReference {
+        asset: Some(AssetReference {
             mesh: mesh.mesh_path.to_string(),
             scene: "Scene0".to_string(),
-        },
+        }),
         transform: TransformData {
             position,
             rotation: [0.0, 0.0, 0.0, 1.0],
@@ -185,6 +186,7 @@ pub fn insert_mesh_instance(
         thermodynamic: None,
         electrochemical: None,
         ui: None,
+        extra: std::collections::HashMap::new(),
     };
     
     // Write to Workspace folder

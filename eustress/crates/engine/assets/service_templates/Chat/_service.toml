@@ -1,0 +1,18 @@
+# Chat Service — Manages in-game chat and communication
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "Chat"
+icon = "chat"
+description = "Manages in-game text communication between players"
+can_have_children = true
+
+[properties]
+bubble_chat_enabled = true
+load_default_chat = true
+filtering_enabled = true
+
+[metadata]
+id = "chat-service"
+created = ""
+last_modified = ""

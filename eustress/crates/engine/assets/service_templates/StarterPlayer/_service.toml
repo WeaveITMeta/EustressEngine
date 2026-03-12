@@ -1,0 +1,36 @@
+# StarterPlayer Service — Default player character and camera settings
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "StarterPlayer"
+icon = "starterplayer"
+description = "Defines default player character behavior and camera settings"
+can_have_children = true
+
+[properties]
+# Character
+auto_jump_enabled = true
+character_jump_height = 7.2
+character_max_slope_angle = 89.0
+character_use_jump_power = false
+character_walk_speed = 16.0
+health_display_distance = 100.0
+name_display_distance = 100.0
+
+# Camera
+camera_max_zoom_distance = 128.0
+camera_min_zoom_distance = 0.5
+camera_mode = "Classic"
+dev_camera_occlusion_mode = "Zoom"
+dev_computer_camera_movement_mode = "UserChoice"
+dev_touch_camera_movement_mode = "UserChoice"
+enable_mouse_lock_option = true
+
+# Loading
+load_character_appearance = true
+user_emotes_enabled = true
+
+[metadata]
+id = "starterplayer-service"
+created = ""
+last_modified = ""

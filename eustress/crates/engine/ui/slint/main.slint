@@ -21,7 +21,7 @@ import { AIGeneration } from "ai_generation.slint";
 import { PublishDialog } from "publish.slint";
 import { LoginDialog } from "login.slint";
 import { HistoryPanel } from "history_panel.slint";
-import { ContextMenu } from "context_menu.slint";
+import { ContextMenu, MenuItem } from "context_menu.slint";
 import { Theme } from "theme.slint";
 // Dock layout system
 import { LayoutPresetSelector, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
@@ -39,6 +39,7 @@ import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
+import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.slint";
 
 // ============================================================================
 // Main Studio Window Component
@@ -73,6 +74,7 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-script-editor: false;
     in-out property <bool> show-history: false;
     in-out property <bool> show-ai-generation: false;
+    in-out property <bool> show-workshop-panel: false;
     
     // HUD visibility (toggle all Eustress Engine UI, keep Bevy UI)
     in-out property <bool> show-hud: true;
@@ -131,6 +133,16 @@ export component StudioWindow inherits Window {
     in-out property <[WatchpointData]> sim-watchpoints: [];
     in-out property <[SimOutputBinding]> sim-output-bindings: [];
     
+    // Workshop Panel state (System 0: Ideation conversational interface)
+    in-out property <[ChatMessage]> workshop-messages: [];
+    in-out property <string> workshop-input-text: "";
+    in-out property <[PipelineStepData]> workshop-pipeline-steps: [];
+    in-out property <string> workshop-pipeline-state: "idle";
+    in-out property <string> workshop-product-name: "";
+    in-out property <int> workshop-total-artifacts: 0;
+    in-out property <string> workshop-estimated-cost: "$0.00";
+    in-out property <bool> workshop-api-key-valid: false;
+
     // Scene name for exit confirmation
     in-out property <string> scene-name: "Untitled";
     
@@ -155,6 +167,8 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-context-menu: false;
     in-out property <length> context-menu-x: 0px;
     in-out property <length> context-menu-y: 0px;
+    in-out property <string> context-menu-node-type: ""; // "entity" or "file"
+    in-out property <[MenuItem]> context-menu-items: [];
     
     // Current tool
     in-out property <string> current-tool: "select";
@@ -190,6 +204,9 @@ export component StudioWindow inherits Window {
     
     // Properties panel data (pushed from Bevy for selected entity)
     in-out property <[PropertyData]> entity-properties: [];
+    // Help icon settings (from File > Settings)
+    in-out property <bool> show-help-icons: true;
+    in-out property <bool> help-opens-in-tab: false;
     
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
@@ -332,6 +349,8 @@ export component StudioWindow inherits Window {
     
     // Properties
     callback property-changed(string, string);
+    // Help icon — open /learn documentation URL
+    callback open-learn-url(string);
     
     // Command bar
     callback execute-command(string);
@@ -410,9 +429,24 @@ export component StudioWindow inherits Window {
     callback open-url(string);
     callback menu-action(string);
     
+    // Workshop Panel (System 0: Ideation)
+    callback workshop-send-message(string);
+    callback workshop-approve-mcp(int);
+    callback workshop-skip-mcp(int);
+    callback workshop-edit-mcp(int);
+    callback workshop-open-artifact(string);
+    callback workshop-start-pipeline();
+    callback workshop-pause-pipeline();
+    callback workshop-resume-pipeline();
+    callback workshop-cancel-pipeline();
+    callback workshop-optimize-and-build();
+
     // Settings / Panels
     callback open-settings();
     callback open-find();
+    // Help icon setting changes (fired immediately from Settings dialog)
+    callback help-icons-changed(bool);
+    callback help-opens-in-tab-changed(bool);
     
     // Dock Layout System Callbacks
     callback apply-layout-preset(int);
@@ -636,9 +670,32 @@ export component StudioWindow inherits Window {
                             on-add-service() => { root.add-service(); }
                             on-expand-all() => { root.expand-all(); }
                             on-collapse-all() => { root.collapse-all(); }
-                            on-context-menu(x, y) => {
+                            on-context-menu(x, y, node-id, node-type) => {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;
+                                root.context-menu-node-type = node-type;
+                                
+                                // Populate menu items based on node type
+                                if node-type == "file" {
+                                    root.context-menu-items = [
+                                        { id: "open", label: "Open", shortcut: "Enter", icon: @image-url("../../assets/icons/ui/new-file.svg"), enabled: true, separator-after: false },
+                                        { id: "open-with", label: "Open With...", shortcut: "", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: true },
+                                        { id: "cut", label: "Cut", shortcut: "Ctrl+X", icon: @image-url("../../assets/icons/ui/cut.svg"), enabled: true, separator-after: false },
+                                        { id: "copy", label: "Copy", shortcut: "Ctrl+C", icon: @image-url("../../assets/icons/ui/copy.svg"), enabled: true, separator-after: false },
+                                        { id: "paste", label: "Paste", shortcut: "Ctrl+V", icon: @image-url("../../assets/icons/ui/paste.svg"), enabled: true, separator-after: false },
+                                        { id: "delete", label: "Delete", shortcut: "Del", icon: @image-url("../../assets/icons/ui/delete.svg"), enabled: true, separator-after: true },
+                                        { id: "rename", label: "Rename", shortcut: "F2", icon: @image-url("../../assets/icons/ui/rename.svg"), enabled: true, separator-after: false },
+                                        { id: "duplicate", label: "Duplicate", shortcut: "Ctrl+D", icon: @image-url("../../assets/icons/ui/duplicate.svg"), enabled: true, separator-after: true },
+                                        { id: "show-in-explorer", label: "Show in File Explorer", shortcut: "", icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+                                        { id: "copy-path", label: "Copy Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+                                        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: true },
+                                        { id: "properties", label: "Properties", shortcut: "Alt+Enter", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: false },
+                                    ];
+                                } else {
+                                    // Entity menu - use default items from ContextMenu component
+                                    root.context-menu-items = [];
+                                }
+                                
                                 root.show-context-menu = true;
                             }
                         }
@@ -1422,9 +1479,9 @@ export component StudioWindow inherits Window {
             }
 
             // ================================================================
-            // Right Panel (Properties, History, Soul, Script Editor)
+            // Right Panel (Properties, History, Soul, Workshop)
             // ================================================================
-            if root.show-properties || root.show-history || root.show-soul-panel || root.show-script-editor: Rectangle {
+            if root.show-properties || root.show-history || root.show-soul-panel || root.show-script-editor || root.show-workshop-panel: Rectangle {
                 width: root.right-panel-width;
                 background: Theme.panel-background;
                 border-width: 0px;
@@ -1525,6 +1582,26 @@ export component StudioWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
+                            
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.right-tab-index == 3 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.right-tab-index = 3; }
+                                }
+                                
+                                Text {
+                                    text: "Workshop";
+                                    color: root.right-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                     
@@ -1538,7 +1615,10 @@ export component StudioWindow inherits Window {
                             selected-class: root.selected-class;
                             selected-icon: root.selected-icon;
                             properties: root.entity-properties;
+                            show-help-icons: root.show-help-icons;
+                            help-opens-in-tab: root.help-opens-in-tab;
                             on-property-changed(name, value) => { root.property-changed(name, value); }
+                            on-open-learn-url(url) => { root.open-learn-url(url); }
                         }
                         
                         if root.right-tab-index == 1: HistoryPanel {
@@ -1549,6 +1629,29 @@ export component StudioWindow inherits Window {
                         if root.right-tab-index == 2: SoulPanel {
                             on-build-script(id) => { root.build-script(id); }
                             on-open-script(id) => { root.open-script(id); }
+                        }
+                        
+                        if root.right-tab-index == 3: WorkshopPanel {
+                            messages: root.workshop-messages;
+                            input-text <=> root.workshop-input-text;
+                            pipeline-steps: root.workshop-pipeline-steps;
+                            pipeline-state: root.workshop-pipeline-state;
+                            product-name: root.workshop-product-name;
+                            total-artifacts: root.workshop-total-artifacts;
+                            estimated-cost: root.workshop-estimated-cost;
+                            api-key-valid: root.workshop-api-key-valid;
+                            
+                            on-send-message(text) => { root.workshop-send-message(text); }
+                            on-approve-mcp(id) => { root.workshop-approve-mcp(id); }
+                            on-skip-mcp(id) => { root.workshop-skip-mcp(id); }
+                            on-edit-mcp(id) => { root.workshop-edit-mcp(id); }
+                            on-open-artifact(path) => { root.workshop-open-artifact(path); }
+                            on-start-pipeline() => { root.workshop-start-pipeline(); }
+                            on-pause-pipeline() => { root.workshop-pause-pipeline(); }
+                            on-resume-pipeline() => { root.workshop-resume-pipeline(); }
+                            on-cancel-pipeline() => { root.workshop-cancel-pipeline(); }
+                            on-configure-api() => { root.open-settings(); }
+                            on-optimize-and-build() => { root.workshop-optimize-and-build(); }
                         }
                     }
                 }
@@ -1621,20 +1724,27 @@ export component StudioWindow inherits Window {
     }
     
     // Context menu backdrop (click anywhere outside to dismiss)
+    // Must be clip:false so the menu can overflow Explorer/Properties panel boundaries
     if root.show-context-menu: Rectangle {
         x: 0px;
         y: 0px;
-        width: 100%;
-        height: 100%;
+        width: root.width;
+        height: root.height;
         background: transparent;
+        clip: false;
         
         TouchArea {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
             clicked => { root.show-context-menu = false; }
         }
         
         ContextMenu {
-            x: root.context-menu-x;
-            y: root.context-menu-y;
+            x: min(root.context-menu-x, root.width - 224px);
+            y: min(root.context-menu-y, root.height - 270px);
+            items: root.context-menu-items;
             on-action(action) => {
                 root.context-action(action);
                 root.show-context-menu = false;
@@ -1685,6 +1795,10 @@ export component StudioWindow inherits Window {
     
     // Settings dialog
     if root.show-settings-dialog: SettingsDialog {
+        show-help-icons <=> root.show-help-icons;
+        help-opens-in-tab <=> root.help-opens-in-tab;
+        on-help-icons-changed(val) => { root.help-icons-changed(val); }
+        on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
         on-save => { root.show-settings-dialog = false; }
         on-close => { root.show-settings-dialog = false; }
     }
