@@ -24,6 +24,9 @@ pub mod scope;
 pub mod soul_context;
 pub mod rune_api;
 pub mod error_tracker;
+pub mod vm_pool;
+pub mod rune_ecs_module;
+pub mod parallel_execution;
 
 pub use builder::*;
 pub use cache::*;

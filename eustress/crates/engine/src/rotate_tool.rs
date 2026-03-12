@@ -76,7 +76,7 @@ fn draw_rotate_gizmos(
     let (center, bbox_extent) = compute_group_center_and_extent(&query, &children_query, &child_transforms);
 
     // Camera-distance-scaled radius, incorporating object bounding extent
-    let Ok((_, cam_gt, projection)) = cameras.single() else { return };
+    let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
     let radius = compute_ring_radius(center, bbox_extent, cam_gt, projection);
 
     let yellow = Color::srgba(1.0, 1.0, 0.0, 1.0);
@@ -151,7 +151,7 @@ fn handle_rotate_interaction(
 
     let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform, projection)) = cameras.single() else { return };
+    let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return };
 
     let fov = match projection {

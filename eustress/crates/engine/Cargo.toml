@@ -76,6 +76,7 @@ open = "5"
 rune = "0.14"
 rand = "0.8"
 rayon = "1.10"
+crossbeam = "0.8"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
@@ -110,6 +111,8 @@ bytemuck = { version = "1.16", features = ["derive"] }
 winres = "0.1"
 resvg = "0.44"
 ico = "0.3"
+icns = "0.3"
+png = "0.17"
 slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
 
 [features]
@@ -121,3 +124,5 @@ debug = ["bevy/bevy_debug_stepping"]
 cef = ["bevy_cef"]
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
+# Rune scripting with VM pooling and ECS bindings
+realism-scripting = []

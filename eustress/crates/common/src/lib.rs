@@ -39,6 +39,7 @@ pub mod usd;
 pub mod utils;
 pub mod xr;
 pub mod orbital;
+pub mod physics;
 pub mod realism;
 pub mod simulation;
 

@@ -17,11 +17,12 @@ fn main() {
     let svg_path = Path::new("assets/icon.svg");
     let ico_path = Path::new("assets/icon.ico");
     let png_path = Path::new("assets/icon.png");
+    let icns_path = Path::new("assets/icon.icns");
     
     println!("cargo:rerun-if-changed=assets/icon.svg");
     println!("cargo:rerun-if-changed=build.rs");
     
-    // Convert SVG to ICO and PNG if SVG exists and is newer
+    // Convert SVG to ICO, PNG, and ICNS if SVG exists and is newer
     let should_convert = if svg_path.exists() {
         let svg_modified = std::fs::metadata(svg_path).unwrap().modified().unwrap();
         let ico_needs_update = !ico_path.exists() || {
@@ -32,7 +33,11 @@ fn main() {
             let png_modified = std::fs::metadata(png_path).unwrap().modified().unwrap();
             svg_modified > png_modified
         };
-        ico_needs_update || png_needs_update
+        let icns_needs_update = !icns_path.exists() || {
+            let icns_modified = std::fs::metadata(icns_path).unwrap().modified().unwrap();
+            svg_modified > icns_modified
+        };
+        ico_needs_update || png_needs_update || icns_needs_update
     } else {
         false
     };
@@ -77,6 +82,36 @@ fn main() {
         resvg::render(&tree, transform, &mut pixmap.as_mut());
         pixmap.save_png(png_path).expect("Failed to save PNG file");
         println!("cargo:warning=✅ SVG converted to PNG successfully");
+        
+        // Generate ICNS for macOS (multiple sizes required by Apple)
+        // Note: icns crate expects PNG input, so we render each size and use read_png
+        let icns_sizes = [16, 32, 64, 128, 256, 512];
+        let mut icon_family = icns::IconFamily::new();
+        
+        for size in icns_sizes {
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+            let scale = size as f32 / tree.size().width().max(tree.size().height());
+            let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+            
+            // Encode as PNG in memory
+            let mut png_data = Vec::new();
+            let mut encoder = png::Encoder::new(&mut png_data, size, size);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("Failed to write PNG header");
+            writer.write_image_data(pixmap.data()).expect("Failed to write PNG data");
+            drop(writer);
+            
+            // Read back as icns::Image
+            let image = icns::Image::read_png(std::io::Cursor::new(png_data))
+                .expect("Failed to read PNG for ICNS");
+            icon_family.add_icon(&image).expect("Failed to add icon to ICNS family");
+        }
+        
+        let file = File::create(icns_path).expect("Failed to create ICNS file");
+        icon_family.write(BufWriter::new(file)).expect("Failed to write ICNS file");
+        println!("cargo:warning=✅ SVG converted to ICNS successfully");
     }
     
     // Windows-specific: embed icon in executable

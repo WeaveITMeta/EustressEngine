@@ -687,31 +687,36 @@ export component PropertiesPanel inherits Rectangle {
                 padding-left: 14px;
                 padding-right: 14px;
                 spacing: 8px;
-                alignment: center;
+                alignment: start;
 
                 // Class icon — SVG image when something is selected, fallback placeholder
-                if root.selected-count > 0: Rectangle {
+                if root.selected-count > 0: VerticalLayout {
                     width: 16px;
-                    height: 16px;
+                    alignment: center;
                     
                     Image {
-                        width: 100%;
-                        height: 100%;
+                        width: 16px;
+                        height: 16px;
                         source: root.selected-icon;
                         image-fit: contain;
                     }
                 }
-                if root.selected-count == 0: Rectangle {
+                if root.selected-count == 0: VerticalLayout {
                     width: 16px;
-                    height: 16px;
-                    border-radius: 3px;
-                    background: #333333;
-                    Text {
-                        text: "?";
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    alignment: center;
+                    
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 3px;
+                        background: #333333;
+                        Text {
+                            text: "?";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 

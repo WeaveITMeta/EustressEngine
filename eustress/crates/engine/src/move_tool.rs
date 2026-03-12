@@ -181,7 +181,7 @@ fn draw_move_gizmos(
     let center = (bounds_min + bounds_max) * 0.5;
 
     // --- Camera-distance-scaled handle length ---
-    let Ok((_, cam_gt, projection)) = cameras.single() else { return };
+    let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
     let fov = match projection {
         Projection::Perspective(p) => p.fov,
         _ => std::f32::consts::FRAC_PI_4,
@@ -264,7 +264,7 @@ fn handle_move_interaction(
 
     let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform, projection)) = cameras.single() else { return };
+    let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return };
     let camera_forward = camera_transform.forward().as_vec3();
 

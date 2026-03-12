@@ -192,13 +192,17 @@ export component LayoutPresetSelector inherits Rectangle {
             vertical-alignment: center;
             horizontal-stretch: 1;
         }
-        Image {
+        VerticalLayout {
             width: 12px;
-            height: 12px;
-            source: root.dropdown-open ? @image-url("../../assets/icons/ui/chevron-up.svg") :
-                    @image-url("../../assets/icons/ui/chevron-down.svg");
-            image-fit: contain;
-            vertical-alignment: center;
+            alignment: center;
+            
+            Image {
+                width: 12px;
+                height: 12px;
+                source: root.dropdown-open ? @image-url("../../assets/icons/ui/chevron-up.svg") :
+                        @image-url("../../assets/icons/ui/chevron-down.svg");
+                image-fit: contain;
+            }
         }
     }
     

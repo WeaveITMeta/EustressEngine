@@ -9,6 +9,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use avian3d::prelude::{Collider, RigidBody};
+use crate::rendering::PartEntity;
+use eustress_common::{Attributes, Tags};
 
 /// Instance definition loaded from .glb.toml file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +111,9 @@ pub struct InstanceProperties {
     pub cast_shadow: bool,
     #[serde(default)]
     pub reflectance: f32,
+    /// When true, the entity cannot be selected via 3D click (e.g. Baseplate)
+    #[serde(default)]
+    pub locked: bool,
 }
 
 fn default_color() -> [f32; 4] {
@@ -127,6 +133,7 @@ impl Default for InstanceProperties {
             can_collide: true,
             cast_shadow: true,
             reflectance: 0.0,
+            locked: false,
         }
     }
 }
@@ -642,6 +649,7 @@ pub fn spawn_instance(
         reflectance: instance.properties.reflectance,
         anchored: instance.properties.anchored,
         can_collide: instance.properties.can_collide,
+        locked: instance.properties.locked,
         cframe: Transform::from(instance.transform.clone()),
         ..default()
     };
@@ -670,6 +678,15 @@ pub fn spawn_instance(
         let mesh_handle: Handle<Mesh> = asset_server.load(mesh_path);
         let material_handle: Handle<StandardMaterial> = asset_server.load(material_path);
         
+        // Build collider at actual size for physics raycasting
+        let collider = match part_shape {
+            eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+            eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
+                Collider::cylinder(scale.x / 2.0, scale.y)
+            }
+            _ => Collider::cuboid(scale.x, scale.y, scale.z),
+        };
+
         let entity = commands.spawn((
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
@@ -684,9 +701,11 @@ pub fn spawn_instance(
             },
             base_part,
             eustress_common::classes::Part { shape: part_shape },
-            eustress_common::default_scene::PartEntityMarker {
-                part_id: String::new(), // filled in below
-            },
+            PartEntity { part_id: String::new() }, // filled in below
+            collider,
+            RigidBody::Static,
+            Attributes::new(),
+            Tags::new(),
             InstanceFile {
                 toml_path: toml_path.clone(),
                 mesh_path: absolute_mesh_path,
@@ -696,7 +715,7 @@ pub fn spawn_instance(
         )).id();
         let part_id = format!("{}v{}", entity.index(), entity.generation());
         let mut ec = commands.entity(entity);
-        ec.insert(eustress_common::default_scene::PartEntityMarker { part_id });
+        ec.insert(PartEntity { part_id });
         // Attach realism components if present in TOML
         if let Some(ref mat) = instance.material {
             ec.insert(mat.to_component());
@@ -728,6 +747,15 @@ pub fn spawn_instance(
         format!("{}#Mesh0/Primitive0", glb_path)
     );
     
+    // Build collider at actual size for physics raycasting
+    let collider = match part_shape {
+        eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+        eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
+            Collider::cylinder(scale.x / 2.0, scale.y)
+        }
+        _ => Collider::cuboid(scale.x, scale.y, scale.z),
+    };
+
     let entity = commands.spawn((
         Mesh3d(mesh_handle),
         MeshMaterial3d(material_handle),
@@ -742,9 +770,11 @@ pub fn spawn_instance(
         },
         base_part,
         eustress_common::classes::Part { shape: part_shape },
-        eustress_common::default_scene::PartEntityMarker {
-            part_id: String::new(), // filled in below
-        },
+        PartEntity { part_id: String::new() }, // filled in below
+        collider,
+        RigidBody::Static,
+        Attributes::new(),
+        Tags::new(),
         InstanceFile {
             toml_path: toml_path.clone(),
             mesh_path: absolute_mesh_path,
@@ -754,7 +784,7 @@ pub fn spawn_instance(
     )).id();
     let part_id = format!("{}v{}", entity.index(), entity.generation());
     let mut ec = commands.entity(entity);
-    ec.insert(eustress_common::default_scene::PartEntityMarker { part_id });
+    ec.insert(PartEntity { part_id });
     // Attach realism components if present in TOML
     if let Some(ref mat) = instance.material {
         ec.insert(mat.to_component());

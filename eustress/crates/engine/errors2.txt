@@ -1,0 +1,657 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling eustress-common v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\common)
+warning: eustress-engine@0.1.0: Embedding icon from: "\\\\?\\E:\\Workspace\\EustressEngine\\eustress\\crates\\engine\\assets\\icon.ico"
+warning: eustress-engine@0.1.0: Γ£à Icon embedded in executable successfully
+error[E0432]: unresolved import `bevy::utils::HashMap`
+  --> crates\common\src\physics\gravity.rs:20:5
+   |
+20 | use bevy::utils::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^ no `HashMap` in the root
+   |
+help: consider importing this struct instead
+   |
+20 - use bevy::utils::HashMap;
+20 + use std::collections::HashMap;
+   |
+
+error[E0432]: unresolved imports `bevy::utils::HashMap`, `bevy::utils::HashSet`
+  --> crates\common\src\physics\dynamic_gravity.rs:20:19
+   |
+20 | use bevy::utils::{HashMap, HashSet};
+   |                   ^^^^^^^  ^^^^^^^ no `HashSet` in the root
+   |                   |
+   |                   no `HashMap` in the root
+   |
+   = help: consider importing this struct instead:
+           std::collections::HashMap
+   = help: consider importing this struct instead:
+           std::collections::HashSet
+
+warning: unused imports: `AssetSource` and `ContentHash`
+  --> crates\common\src\assets\categories.rs:26:13
+   |
+26 | use super::{ContentHash, AssetSource};
+   |             ^^^^^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `ClassName` and `Instance`
+  --> crates\common\src\plugins\character_plugin.rs:29:22
+   |
+29 | use crate::classes::{Instance, ClassName};
+   |                      ^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `CharacterRoot`
+  --> crates\common\src\plugins\character_plugin.rs:31:24
+   |
+31 |     Player, Character, CharacterRoot,
+   |                        ^^^^^^^^^^^^^
+
+warning: unused imports: `apply_procedural_limb_animation`, `update_character_facing_system`, and `update_head_look_system`
+   --> crates\common\src\plugins\character_plugin.rs:148:13
+    |
+148 |             apply_procedural_limb_animation,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+149 |             update_character_facing_system,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+150 |             update_head_look_system,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::info`
+ --> crates\common\src\plugins\humanoid.rs:8:5
+  |
+8 | use tracing::info;
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `crate::classes::BasePart`
+  --> crates\common\src\plugins\humanoid.rs:10:5
+   |
+10 | use crate::classes::BasePart;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AnimationState`
+  --> crates\common\src\plugins\humanoid.rs:15:50
+   |
+15 |     LocomotionController, AnimationStateMachine, AnimationState,
+   |                                                  ^^^^^^^^^^^^^^
+
+warning: unused imports: `AnimationService` and `LayerMask`
+  --> crates\common\src\plugins\animation_plugin.rs:33:40
+   |
+33 |     FootIK, HumanoidRig, HumanoidBone, LayerMask, AnimationService,
+   |                                        ^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CoordinateSystem`, `OctreeNode`, `PointCloudImportSettings`, and `PointCloudPointNormal`
+  --> crates\common\src\pointcloud\processing.rs:32:22
+   |
+32 |     PointCloudPoint, PointCloudPointNormal, PointCloudLOD, PointCloudFormat,
+   |                      ^^^^^^^^^^^^^^^^^^^^^
+33 |     PointCloudImportSettings, OctreeNode, PointCloudHeader, CoordinateSystem,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^                    ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ElevationFormat`, `import_asc`, and `import_hgt`
+  --> crates\common\src\pointcloud\elevation_import.rs:24:37
+   |
+24 | use super::formats::{ElevationData, ElevationFormat, import_elevation, import_geotiff, import_asc, import_hgt};
+   |                                     ^^^^^^^^^^^^^^^                                    ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `warn`
+  --> crates\common\src\services\team.rs:20:21
+   |
+20 | use tracing::{info, warn};
+   |                     ^^^^
+
+warning: unused import: `avian3d::prelude::*`
+  --> crates\common\src\terrain\mod.rs:56:5
+   |
+56 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::BTreeMap`
+  --> crates\common\src\physics\gravity.rs:21:5
+   |
+21 | use std::collections::BTreeMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::BTreeMap`
+  --> crates\common\src\physics\dynamic_gravity.rs:21:5
+   |
+21 | use std::collections::BTreeMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+  --> crates\common\src\realism\mod.rs:63:7
+   |
+63 | #[cfg(feature = "realism-quantum")]
+   |       ^^^^^^^^^^-----------------
+   |                 |
+   |                 help: there is a expected value with a similar name: `"realism-wasm"`
+   |
+   = note: expected values for `feature` are: `async-assets`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `image`, `kiddo`, `model-import`, `notify`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rkyv`, `rune`, `rune-modules`, `rune-wasm`, `s3`, `symbolica`, and `tiff` and 3 more
+   = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused imports: `mechanics` and `thermodynamics`
+  --> crates\common\src\realism\particles\systems.rs:18:28
+   |
+18 | use crate::realism::laws::{thermodynamics, mechanics};
+   |                            ^^^^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `crate::realism::laws::thermodynamics`
+  --> crates\common\src\realism\fluids\water.rs:15:5
+   |
+15 | use crate::realism::laws::thermodynamics;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Particle`
+  --> crates\common\src\realism\visualizers\property_overlay.rs:14:45
+   |
+14 | use crate::realism::particles::components::{Particle, ThermodynamicState, KineticState};
+   |                                             ^^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\visualizers\mod.rs:18:13
+   |
+18 |     pub use super::property_overlay::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `temperature_to_color` in the value namespace is first re-exported here
+19 |     pub use super::vector_field::*;
+20 |     pub use super::heat_map::*;
+   |             ------------------ but the name `temperature_to_color` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: unused import: `VertexAttributeValues`
+ --> crates\common\src\realism\deformation\fracture_mesh.rs:6:24
+  |
+6 | use bevy::mesh::{Mesh, VertexAttributeValues, Indices, PrimitiveTopology};
+  |                        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+  --> crates\common\src\realism\mod.rs:95:11
+   |
+95 |     #[cfg(feature = "realism-quantum")]
+   |           ^^^^^^^^^^-----------------
+   |                     |
+   |                     help: there is a expected value with a similar name: `"realism-wasm"`
+   |
+   = note: expected values for `feature` are: `async-assets`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `image`, `kiddo`, `model-import`, `notify`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rkyv`, `rune`, `rune-modules`, `rune-wasm`, `s3`, `symbolica`, and `tiff` and 3 more
+   = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:77:13
+   |
+77 |     pub use super::units::*;
+   |             ^^^^^^^^^^^^^^^ the name `work` in the value namespace is first re-exported here
+78 |     pub use super::laws::prelude::*;
+   |             ----------------------- but the name `work` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:77:13
+   |
+77 |     pub use super::units::*;
+   |             ^^^^^^^^^^^^^^^ the name `kinetic_energy` in the value namespace is first re-exported here
+78 |     pub use super::laws::prelude::*;
+   |             ----------------------- but the name `kinetic_energy` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:78:13
+   |
+78 |     pub use super::laws::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `WaterPhase` in the type namespace is first re-exported here
+...
+81 |     pub use super::fluids::prelude::*;
+   |             ------------------------- but the name `WaterPhase` in the type namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:80:13
+   |
+80 |     pub use super::materials::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `DeformationState` in the type namespace is first re-exported here
+...
+83 |     pub use super::deformation::prelude::*;
+   |             ------------------------------ but the name `DeformationState` in the type namespace is also re-exported here
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+   --> crates\common\src\realism\mod.rs:128:15
+    |
+128 |         #[cfg(feature = "realism-quantum")]
+    |               ^^^^^^^^^^-----------------
+    |                         |
+    |                         help: there is a expected value with a similar name: `"realism-wasm"`
+    |
+    = note: expected values for `feature` are: `async-assets`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `image`, `kiddo`, `model-import`, `notify`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rkyv`, `rune`, `rune-modules`, `rune-wasm`, `s3`, `symbolica`, and `tiff` and 3 more
+    = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: use of deprecated function `eustress_format::load_eustress`: RON scene format is deprecated. Use binary format for new scenes.
+  --> crates\common\src\lib.rs:89:5
+   |
+89 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `eustress_format::save_eustress`: RON scene format is deprecated. Use save_binary_scene instead.
+  --> crates\common\src\lib.rs:89:20
+   |
+89 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+   |                    ^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::save_for_engine`: RON scene format is deprecated. Use save_binary_scene instead.
+  --> crates\common\src\lib.rs:89:35
+   |
+89 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+   |                                   ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::save_for_client`: RON scene format is deprecated. Use save_binary_scene instead.
+  --> crates\common\src\lib.rs:89:52
+   |
+89 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+   |                                                    ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::is_client_scene`: Use is_eustress_file instead. Client/Engine distinction removed.
+  --> crates\common\src\lib.rs:92:23
+   |
+92 |     is_eustress_file, is_client_scene, is_engine_scene, is_legacy_format,
+   |                       ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::is_engine_scene`: Use is_eustress_file instead. .eustressengine is now a legacy extension.
+  --> crates\common\src\lib.rs:92:40
+   |
+92 |     is_eustress_file, is_client_scene, is_engine_scene, is_legacy_format,
+   |                                        ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::to_engine_path`: Use to_eustress_path instead. .eustressengine is deprecated.
+  --> crates\common\src\lib.rs:94:23
+   |
+94 |     to_eustress_path, to_engine_path, to_client_path,
+   |                       ^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::to_client_path`: Use to_eustress_path instead. Client/Engine distinction removed.
+  --> crates\common\src\lib.rs:94:39
+   |
+94 |     to_eustress_path, to_engine_path, to_client_path,
+   |                                       ^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::EXTENSION_CLIENT`: Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress
+   --> crates\common\src\lib.rs:101:5
+    |
+101 |     EXTENSION_CLIENT, EXTENSION_ENGINE,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::EXTENSION_ENGINE`: Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress
+   --> crates\common\src\lib.rs:101:23
+    |
+101 |     EXTENSION_CLIENT, EXTENSION_ENGINE,
+    |                       ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::DEFAULT_ENGINE_EXTENSION`: Use DEFAULT_EXTENSION instead
+   --> crates\common\src\lib.rs:102:5
+    |
+102 |     DEFAULT_ENGINE_EXTENSION, DEFAULT_CLIENT_EXTENSION,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::DEFAULT_CLIENT_EXTENSION`: Use DEFAULT_EXTENSION instead
+   --> crates\common\src\lib.rs:102:31
+    |
+102 |     DEFAULT_ENGINE_EXTENSION, DEFAULT_CLIENT_EXTENSION,
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0282]: type annotations needed
+   --> crates\common\src\physics\gravity.rs:296:31
+    |
+296 |                 nearby.extend(entities.iter().copied());
+    |                               ^^^^^^^^ cannot infer type
+
+error[E0277]: the trait bound `bevy::prelude::Color: From<{float}>` is not satisfied
+   --> crates\common\src\physics\gravity.rs:442:17
+    |
+439 |             gizmos.sphere(
+    |                    ------ required by a bound introduced by this call
+...
+442 |                 10.0,
+    |                 ^^^^ the trait `From<{float}>` is not implemented for `bevy::prelude::Color`
+    |
+    = help: the following other types implement trait `From<T>`:
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hsla>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hsva>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hwba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Laba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Lcha>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::LinearRgba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Oklaba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Oklcha>`
+            and 2 others
+    = note: required for `{float}` to implement `Into<bevy::prelude::Color>`
+note: required by a bound in `circles::<impl GizmoBuffer<Config, Clear>>::sphere`
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_gizmos-0.18.0\src\circles.rs:211:21
+    |
+207 |     pub fn sphere(
+    |            ------ required by a bound in this associated function
+...
+211 |         color: impl Into<Color>,
+    |                     ^^^^^^^^^^^ required by this bound in `circles::<impl GizmoBuffer<Config, Clear>>::sphere`
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+   --> crates\common\src\physics\gravity.rs:439:20
+    |
+439 |             gizmos.sphere(
+    |                    ^^^^^^
+440 |                 transform.translation,
+441 |                 Quat::IDENTITY,
+    |                 -------------- expected `f32`, found `Quat`
+442 |                 10.0,
+443 |                 Color::srgb(0.0, 1.0, 0.0),
+    |                 -------------------------- unexpected argument #4 of type `bevy::prelude::Color`
+    |
+note: method defined here
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_gizmos-0.18.0\src\circles.rs:207:12
+    |
+207 |     pub fn sphere(
+    |            ^^^^^^
+help: remove the extra argument
+    |
+441 ~                 /* f32 */,
+442 ~                 10.0,
+    |
+
+error[E0689]: can't call method `max` on ambiguous numeric type `{float}`
+   --> crates\common\src\physics\gravity.rs:520:43
+    |
+520 |             max_magnitude = max_magnitude.max(magnitude);
+    |                                           ^^^
+    |
+help: you must specify a type for this binding, like `f32`
+    |
+513 |     let mut max_magnitude: f32 = 0.0;
+    |                          +++++
+
+error[E0277]: the trait bound `MassTier: std::default::Default` is not satisfied
+  --> crates\common\src\physics\dynamic_gravity.rs:45:35
+   |
+45 | #[derive(Component, Debug, Clone, Reflect)]
+   |                                   ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `std::default::Default` is not implemented for `MassTier`
+  --> crates\common\src\physics\dynamic_gravity.rs:95:1
+   |
+95 | pub enum MassTier {
+   | ^^^^^^^^^^^^^^^^^
+   = note: this error originates in the derive macro `Reflect` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `bevy::prelude::Color: From<{float}>` is not satisfied
+   --> crates\common\src\physics\dynamic_gravity.rs:553:66
+    |
+553 |             gizmos.sphere(transform.translation, Quat::IDENTITY, radius, color);
+    |                    ------                                        ^^^^^^ the trait `From<{float}>` is not implemented for `bevy::prelude::Color`
+    |                    |
+    |                    required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `From<T>`:
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hsla>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hsva>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Hwba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Laba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Lcha>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::LinearRgba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Oklaba>`
+              `bevy::prelude::Color` implements `From<bevy::prelude::Oklcha>`
+            and 2 others
+    = note: required for `{float}` to implement `Into<bevy::prelude::Color>`
+note: required by a bound in `circles::<impl GizmoBuffer<Config, Clear>>::sphere`
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_gizmos-0.18.0\src\circles.rs:211:21
+    |
+207 |     pub fn sphere(
+    |            ------ required by a bound in this associated function
+...
+211 |         color: impl Into<Color>,
+    |                     ^^^^^^^^^^^ required by this bound in `circles::<impl GizmoBuffer<Config, Clear>>::sphere`
+
+error[E0061]: this method takes 3 arguments but 4 arguments were supplied
+   --> crates\common\src\physics\dynamic_gravity.rs:553:20
+    |
+553 |             gizmos.sphere(transform.translation, Quat::IDENTITY, radius, color);
+    |                    ^^^^^^                        --------------          ----- unexpected argument #4 of type `bevy::prelude::Color`
+    |                                                  |
+    |                                                  expected `f32`, found `Quat`
+    |
+note: method defined here
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_gizmos-0.18.0\src\circles.rs:207:12
+    |
+207 |     pub fn sphere(
+    |            ^^^^^^
+help: remove the extra argument
+    |
+553 -             gizmos.sphere(transform.translation, Quat::IDENTITY, radius, color);
+553 +             gizmos.sphere(transform.translation, /* f32 */, radius);
+    |
+
+warning: unused import: `avian3d::prelude`
+  --> crates\common\src\plugins\character_plugin.rs:26:5
+   |
+26 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+ --> crates\common\src\plugins\humanoid.rs:7:5
+  |
+7 | use avian3d::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+  --> crates\common\src\plugins\skinned_character.rs:22:5
+   |
+22 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `rayon::prelude`
+  --> crates\common\src\realism\particles\systems.rs:13:5
+   |
+13 | use rayon::prelude::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `rayon::prelude`
+  --> crates\common\src\realism\fluids\sph.rs:14:5
+   |
+14 | use rayon::prelude::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+ --> crates\common\src\terrain\lod.rs:9:5
+  |
+9 | use avian3d::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused variable: `sun_elevation`
+    --> crates\common\src\classes.rs:5264:13
+     |
+5264 |         let sun_elevation = sun.elevation();
+     |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sun_elevation`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `id`
+   --> crates\common\src\parameters.rs:720:39
+    |
+720 |     pub fn register_domain(&mut self, id: String, config: DomainConfig) {
+    |                                       ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `char_up`
+   --> crates\common\src\plugins\animation_plugin.rs:692:13
+    |
+692 |         let char_up = global_transform.up();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_char_up`
+
+warning: unused variable: `spatial_query`
+   --> crates\common\src\plugins\animation_plugin.rs:752:5
+    |
+752 |     spatial_query: &SpatialQuery,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_spatial_query`
+
+warning: unused variable: `origin`
+   --> crates\common\src\plugins\animation_plugin.rs:753:5
+    |
+753 |     origin: Vec3,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_origin`
+
+warning: unused variable: `direction`
+   --> crates\common\src\plugins\animation_plugin.rs:754:5
+    |
+754 |     direction: Vec3,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_direction`
+
+warning: unused variable: `forward`
+   --> crates\common\src\plugins\animation_plugin.rs:905:13
+    |
+905 |         let forward = transform.forward().as_vec3();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_forward`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\mesh_optimization.rs:309:9
+    |
+309 |     let mut vertices = points.to_vec();
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\mesh_optimization.rs:310:9
+    |
+310 |     let mut mesh_normals = normals.map(|n| n.to_vec())
+    |         ----^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `file_len`
+   --> crates\common\src\pointcloud\formats.rs:340:9
+    |
+340 |     let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_file_len`
+
+warning: unused variable: `actual_index`
+   --> crates\common\src\pointcloud\formats.rs:363:21
+    |
+363 |                 let actual_index = if index < 0 { !index } else { index };
+    |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_actual_index`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\formats.rs:434:9
+    |
+434 |     let mut vertices: Vec<Vec3> = Vec::new();
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `data_start`
+   --> crates\common\src\pointcloud\formats.rs:447:25
+    |
+447 |             if let Some(data_start) = trimmed.find("*") {
+    |                         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_start`
+
+warning: unused variable: `v`
+   --> crates\common\src\pointcloud\formats.rs:468:27
+    |
+468 |                 if let Ok(v) = part.trim().parse::<f64>() {
+    |                           ^
+    |
+help: you might have meant to pattern match on the similarly named constant `G`
+    |
+468 -                 if let Ok(v) = part.trim().parse::<f64>() {
+468 +                 if let Ok(physics::gravity::G) = part.trim().parse::<f64>() {
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+468 |                 if let Ok(_v) = part.trim().parse::<f64>() {
+    |                           +
+
+warning: value assigned to `normals` is never read
+    --> crates\common\src\pointcloud\formats.rs:1434:27
+     |
+1434 |         let mut normals = Vec::new();
+     |                           ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `max_x`
+   --> crates\common\src\pointcloud\elevation_import.rs:489:17
+    |
+489 |             let max_x = min_x + config.chunk_size;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_max_x`
+
+warning: unused variable: `max_z`
+   --> crates\common\src\pointcloud\elevation_import.rs:490:17
+    |
+490 |             let max_z = min_z + config.chunk_size;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_max_z`
+
+warning: unused variable: `lat_rad`
+   --> crates\common\src\pointcloud\elevation_import.rs:572:9
+    |
+572 |     let lat_rad = lat.to_radians();
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lat_rad`
+
+warning: unused variable: `meshes`
+   --> crates\common\src\terrain\mod.rs:145:5
+    |
+145 |     meshes: &mut Assets<Mesh>,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_meshes`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\terrain\mod.rs:254:13
+    |
+254 |         let mut chunk_commands = commands.spawn((
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `neighbor_entity`
+  --> crates\common\src\realism\particles\systems.rs:84:13
+   |
+84 |         for neighbor_entity in neighbors {
+   |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_neighbor_entity`
+
+warning: unused variable: `transform`
+   --> crates\common\src\realism\particles\systems.rs:197:33
+    |
+197 |     for (particle, mut kinetic, transform, thermo, fluid) in query.iter_mut() {
+    |                                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_transform`
+
+warning: unused variable: `e`
+   --> crates\common\src\realism\fluids\sph.rs:324:29
+    |
+324 |                     .find(|(e, p, _)| (*p - *pos).length() < 0.01)
+    |                             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: unused variable: `entity`
+   --> crates\common\src\realism\visualizers\property_overlay.rs:209:10
+    |
+209 |     for (entity, transform, overlay, thermo, kinetic, stress, fracture) in query.iter() {
+    |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity`
+
+warning: unused variable: `impact_point`
+   --> crates\common\src\realism\deformation\fracture_mesh.rs:361:5
+    |
+361 |     impact_point: Vec3,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_impact_point`
+
+warning: unused variable: `mat_a`
+   --> crates\common\src\realism\thermal_conduction.rs:187:41
+    |
+187 |             let (entity_a, transform_a, mat_a) = entities[i];
+    |                                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_mat_a`
+
+warning: unused variable: `name`
+   --> crates\common\src\simulation\recorder.rs:242:14
+    |
+242 |         for (name, series) in &self.series {
+    |              ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+Some errors have detailed explanations: E0061, E0277, E0282, E0432, E0689.
+For more information about an error, try `rustc --explain E0061`.
+warning: `eustress-common` (lib) generated 71 warnings
+error: could not compile `eustress-common` (lib) due to 9 previous errors; 71 warnings emitted

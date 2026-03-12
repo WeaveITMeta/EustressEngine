@@ -849,7 +849,7 @@ pub fn consume_pending_paste(
 
     // Try to get cursor position and camera for raycast
     let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
-    let camera_data = cameras.single().ok();
+    let camera_data = cameras.iter().find(|(c, _)| c.order == 0);
 
     let target_position = match (cursor_pos, camera_data) {
         (Some(cursor), Some((camera, cam_transform))) => {

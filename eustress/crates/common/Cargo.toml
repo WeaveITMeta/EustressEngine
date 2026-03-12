@@ -39,6 +39,7 @@ rand = "0.8"
 
 # Parallel processing
 rayon = "1.10"
+crossbeam = "0.8"
 
 # Byte casting for GPU buffers
 bytemuck = { version = "1.14", features = ["derive"] }

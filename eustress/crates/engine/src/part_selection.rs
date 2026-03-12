@@ -73,9 +73,10 @@ pub fn part_selection_system(
     let alt_pressed = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     let multi_select_modifier = shift_pressed || ctrl_pressed;
     
-    let (camera, camera_transform, projection) = match camera_query.single() {
-        Ok(ct) => ct,
-        Err(_) => return,
+    // Find the main 3D camera (order=0) — there may be multiple cameras (e.g. Slint overlay at order=100)
+    let (camera, camera_transform, projection) = match camera_query.iter().find(|(c, _, _)| c.order == 0) {
+        Some(ct) => ct,
+        None => return,
     };
     
     // Convert screen space to ray

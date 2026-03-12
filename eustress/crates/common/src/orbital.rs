@@ -1,9 +1,17 @@
 //! # Orbital Module
 //!
 //! Orbital mechanics and coordinate systems for planetary-scale scenes.
+//!
+//! ## Modules
+//!
+//! - `hybrid_coords`: Automatic Vec3/DVec3 precision switching for solar system scale
+//! - `wgs84`: WGS84/ECEF coordinate conversions
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+
+pub mod hybrid_coords;
+pub mod wgs84;
 
 // WGS84 constants
 pub const WGS84_A: f64 = 6378137.0; // Semi-major axis (meters)

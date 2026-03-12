@@ -208,7 +208,7 @@ fn handle_select_drag(
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
-    let Ok((camera, camera_transform, projection)) = cameras.single() else { return; };
+    let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return; };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return; };
     
     if mouse.just_pressed(MouseButton::Left) {
@@ -742,7 +742,7 @@ fn handle_box_selection(
     
     let Ok(window) = windows.single() else { return; };
     let Some(cursor_pos) = window.cursor_position() else { return; };
-    let Ok((camera, camera_transform)) = cameras.single() else { return; };
+    let Some((camera, camera_transform)) = cameras.iter().find(|(c, _)| c.order == 0) else { return; };
     
     // Check if Shift is held for additive selection
     let shift_held = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
