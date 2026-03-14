@@ -577,8 +577,12 @@ pub struct StudioState {
     
     // Properties panel — hash of last pushed model to avoid flickering hover on redundant pushes
     pub last_properties_hash: u64,
-    // Ribbon toolbar — hash of last pushed state to avoid flickering on redundant pushes
-    pub last_toolbar_hash: u64,
+    // Properties panel — last selected entity to detect selection changes
+    pub last_selected_entity: Option<bevy::prelude::Entity>,
+    // Properties panel — frame counter since last selection change (delays sync to avoid flicker during editing)
+    pub frames_since_selection_change: u32,
+    // Output console — last log count to avoid rebuilding model on every sync
+    pub last_log_count: usize,
 }
 
 /// Data for a single center tab (script or web)
@@ -663,7 +667,9 @@ impl Default for StudioState {
             help_opens_in_tab: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_properties_hash: 0,
-            last_toolbar_hash: 0,
+            last_selected_entity: None,
+            frames_since_selection_change: 0,
+            last_log_count: 0,
         }
     }
 }
@@ -1098,9 +1104,9 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, forward_input_to_slint)
             .add_systems(Update, forward_keyboard_to_slint)
-            .add_systems(Update, drain_slint_actions)
-            .add_systems(Update, sync_bevy_to_slint)
-            .add_systems(Update, render_slint_to_texture)
+            .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
+            .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
             // Window resize handling
             .add_systems(Update, handle_window_resize)
             // Performance tracking
@@ -1712,9 +1718,6 @@ fn render_slint_to_texture(
     // the heap and eventually triggers STATUS_STACK_BUFFER_OVERRUN via the CRT panic handler.
     
     // Render Slint UI directly into the Bevy texture's CPU-side storage.
-    // Guard: buffer must be exactly tex_width × tex_height × 4 bytes.
-    // If a resize just happened the buffer and descriptor can momentarily disagree;
-    // skipping this frame is safe — the next frame will be consistent.
     if let Some(data) = image.data.as_mut() {
         let expected_bytes = tex_width * tex_height * 4;
         if data.len() != expected_bytes {
@@ -1766,8 +1769,17 @@ fn forward_input_to_slint(
             cursor_pos.x / scale_factor,
             cursor_pos.y / scale_factor,
         );
+        // Only dispatch PointerMoved when position actually changes.
+        // Sending it every frame causes Slint to re-evaluate hover states and
+        // mark dirty regions continuously, triggering unnecessary software renderer repaints.
+        let moved = match cursor_state.position {
+            Some(prev) => (prev.x - position.x).abs() > 0.1 || (prev.y - position.y).abs() > 0.1,
+            None => true,
+        };
         cursor_state.position = Some(position);
-        adapter.slint_window.dispatch_event(WindowEvent::PointerMoved { position });
+        if moved {
+            adapter.slint_window.dispatch_event(WindowEvent::PointerMoved { position });
+        }
     } else if any_button_held {
         // Cursor is outside the window but a button is pressed — keep last position
         // so Slint doesn't cancel the active drag/scroll operation.
@@ -3867,20 +3879,33 @@ fn sync_bevy_to_slint(
         }
     }
     
-    // ── Per-frame: FPS / frame time (changes every frame, keep live) ──
+    // ── Per-frame: FPS / frame time ──
+    // Only update when value changes by >= 1.0 to avoid marking Slint dirty every frame.
+    // FPS fluctuates constantly; displaying sub-integer precision is unnecessary noise.
     if let Some(ref perf) = perf {
-        ui.set_current_fps(perf.fps);
-        ui.set_current_frame_time(perf.avg_frame_time_ms);
+        let current_fps = ui.get_current_fps();
+        let current_frame_time = ui.get_current_frame_time();
+        let new_fps = perf.fps.round();
+        let new_frame_time = (perf.avg_frame_time_ms * 10.0).round() / 10.0;
+        if (new_fps - current_fps).abs() >= 1.0 {
+            ui.set_current_fps(new_fps);
+        }
+        if (new_frame_time - current_frame_time).abs() >= 0.5 {
+            ui.set_current_frame_time(new_frame_time);
+        }
     }
     
-    // ── Per-frame: play mode state (must update immediately when state changes) ──
+    // ── Per-frame: play mode state (only update when changed) ──
     if let Some(ref pms) = play_mode_state {
         let play_state_str = match pms.get() {
             crate::play_mode::PlayModeState::Playing => "playing",
             crate::play_mode::PlayModeState::Paused  => "paused",
             crate::play_mode::PlayModeState::Editing => "stopped",
         };
-        ui.set_play_state(play_state_str.into());
+        let current_play_state: String = ui.get_play_state().into();
+        if current_play_state != play_state_str {
+            ui.set_play_state(play_state_str.into());
+        }
     }
 
     // ── Throttled (every 10 frames): everything that rarely changes ──
@@ -3890,87 +3915,23 @@ fn sync_bevy_to_slint(
         if perf.should_throttle(10) { return; }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // Hash-based change detection: compute hash of all toolbar state values
-    // and only push to Slint when something actually changed.
-    // This prevents Slint from marking the UI dirty on every throttled frame.
-    // ══════════════════════════════════════════════════════════════════════════
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    
-    // Hash StudioState values
-    if let Some(ref s) = state {
-        std::mem::discriminant(&s.current_tool).hash(&mut hasher);
-        std::mem::discriminant(&s.transform_mode).hash(&mut hasher);
-        s.show_exit_confirmation.hash(&mut hasher);
-        s.has_unsaved_changes.hash(&mut hasher);
-        s.show_network_panel.hash(&mut hasher);
-        s.show_terrain_editor.hash(&mut hasher);
-        s.mindspace_panel_visible.hash(&mut hasher);
-        s.show_help_icons.hash(&mut hasher);
-        s.help_opens_in_tab.hash(&mut hasher);
-    }
-    
-    // Hash terrain state
-    terrain_roots.is_empty().hash(&mut hasher);
-    terrain_chunks.iter().count().hash(&mut hasher);
-    if let Some(ref tm) = terrain_mode {
-        std::mem::discriminant(&**tm).hash(&mut hasher);
-    }
-    if let Some(ref tb) = terrain_brush {
-        std::mem::discriminant(&tb.mode).hash(&mut hasher);
-    }
-    if let Ok(config) = terrain_config.single() {
-        config.chunk_size.to_bits().hash(&mut hasher);
-        config.chunk_resolution.hash(&mut hasher);
-        config.height_scale.to_bits().hash(&mut hasher);
-        config.lod_levels.hash(&mut hasher);
-    }
-    
-    // Hash EditorSettings
-    if let Some(ref es) = editor_settings {
-        es.snap_enabled.hash(&mut hasher);
-        es.snap_size.to_bits().hash(&mut hasher);
-        es.show_grid.hash(&mut hasher);
-        es.grid_size.to_bits().hash(&mut hasher);
-    }
-    
-    // Hash auth state
-    if let Some(ref auth) = auth_state {
-        auth.is_offline().hash(&mut hasher);
-        auth.is_logged_in().hash(&mut hasher);
-        auth.can_publish().hash(&mut hasher);
-        if let Some(ref user) = auth.user {
-            user.username.hash(&mut hasher);
-        }
-    }
-    
-    // Hash entity count
+    // Entity count
     let entity_count = if let Some(ref snapshot) = snapshot {
         let count = snapshot.entities.len();
         if count > 0 { count } else { instance_query.iter().count() }
     } else {
         instance_query.iter().count()
     };
-    entity_count.hash(&mut hasher);
     
-    // Hash output log count (not full content, just count for change detection)
-    if let Some(ref output) = output {
-        output.entries.len().hash(&mut hasher);
-    }
-    
-    let new_hash = hasher.finish();
-    
-    // Get mutable reference to state for hash comparison
+    // Get mutable reference to state
     let Some(mut state) = state else { return };
-    
-    // Only push to Slint if state actually changed
-    if new_hash == state.last_toolbar_hash {
-        return;
-    }
-    state.last_toolbar_hash = new_hash;
 
-    // Sync StudioState → Slint properties
+    // ══════════════════════════════════════════════════════════════════════════
+    // Individual change detection: only set each property when it actually changes
+    // This prevents Slint from marking the UI dirty when nothing changed
+    // ══════════════════════════════════════════════════════════════════════════
+    
+    // Tool selection - always sync immediately (critical for responsiveness)
     let tool_str = match state.current_tool {
         Tool::Select => "select",
         Tool::Move => "move",
@@ -3978,22 +3939,46 @@ fn sync_bevy_to_slint(
         Tool::Scale => "scale",
         Tool::Terrain => "terrain",
     };
-    ui.set_current_tool(tool_str.into());
+    let current_tool: String = ui.get_current_tool().into();
+    if current_tool != tool_str {
+        ui.set_current_tool(tool_str.into());
+    }
     
+    // Transform mode
     let mode_str = match state.transform_mode {
         TransformMode::World => "world",
         TransformMode::Local => "local",
     };
-    ui.set_transform_mode(mode_str.into());
-    
-    ui.set_show_exit_confirmation(state.show_exit_confirmation);
-    ui.set_has_unsaved_changes(state.has_unsaved_changes);
-    ui.set_show_network_panel(state.show_network_panel);
-    ui.set_show_terrain_editor(state.show_terrain_editor);
-    ui.set_has_terrain(!terrain_roots.is_empty());
-    if let Some(ref tm) = terrain_mode {
-        ui.set_terrain_edit_mode(**tm == eustress_common::terrain::TerrainMode::Editor);
+    let current_mode: String = ui.get_transform_mode().into();
+    if current_mode != mode_str {
+        ui.set_transform_mode(mode_str.into());
     }
+    
+    // Boolean flags - only set when changed
+    if ui.get_show_exit_confirmation() != state.show_exit_confirmation {
+        ui.set_show_exit_confirmation(state.show_exit_confirmation);
+    }
+    if ui.get_has_unsaved_changes() != state.has_unsaved_changes {
+        ui.set_has_unsaved_changes(state.has_unsaved_changes);
+    }
+    if ui.get_show_network_panel() != state.show_network_panel {
+        ui.set_show_network_panel(state.show_network_panel);
+    }
+    if ui.get_show_terrain_editor() != state.show_terrain_editor {
+        ui.set_show_terrain_editor(state.show_terrain_editor);
+    }
+    let has_terrain = !terrain_roots.is_empty();
+    if ui.get_has_terrain() != has_terrain {
+        ui.set_has_terrain(has_terrain);
+    }
+    // Terrain mode
+    if let Some(ref tm) = terrain_mode {
+        let terrain_edit = **tm == eustress_common::terrain::TerrainMode::Editor;
+        if ui.get_terrain_edit_mode() != terrain_edit {
+            ui.set_terrain_edit_mode(terrain_edit);
+        }
+    }
+    // Terrain brush
     if let Some(ref tb) = terrain_brush {
         let brush_str = match tb.mode {
             eustress_common::terrain::BrushMode::Raise => "raise",
@@ -4007,83 +3992,118 @@ fn sync_bevy_to_slint(
             eustress_common::terrain::BrushMode::Region => "region",
             eustress_common::terrain::BrushMode::Fill => "fill",
         };
-        ui.set_terrain_brush(brush_str.into());
+        let current_brush: String = ui.get_terrain_brush().into();
+        if current_brush != brush_str {
+            ui.set_terrain_brush(brush_str.into());
+        }
     }
-    // Sync terrain config properties to panel
+    // Terrain config - only sync when values change
     if let Ok(config) = terrain_config.single() {
         let (total_w, _total_d) = config.total_size();
-        ui.set_terrain_size(format!("{:.0}", total_w).into());
-        ui.set_terrain_chunk_size(format!("{:.0}", config.chunk_size).into());
-        ui.set_terrain_resolution(format!("{}", config.chunk_resolution).into());
-        ui.set_terrain_height_scale(format!("{:.1}", config.height_scale).into());
-        ui.set_terrain_lod_levels(format!("{}", config.lod_levels).into());
-        ui.set_terrain_material("Default".into());
+        let size_str = format!("{:.0}", total_w);
+        let current_size: String = ui.get_terrain_size().into();
+        if current_size != size_str {
+            ui.set_terrain_size(size_str.into());
+            ui.set_terrain_chunk_size(format!("{:.0}", config.chunk_size).into());
+            ui.set_terrain_resolution(format!("{}", config.chunk_resolution).into());
+            ui.set_terrain_height_scale(format!("{:.1}", config.height_scale).into());
+            ui.set_terrain_lod_levels(format!("{}", config.lod_levels).into());
+            ui.set_terrain_material("Default".into());
+        }
     }
-    ui.set_terrain_chunk_count(format!("{}", terrain_chunks.iter().count()).into());
-    ui.set_show_mindspace_panel(state.mindspace_panel_visible);
-    // Sync help icon settings to Properties panel (read from StudioState)
-    ui.set_show_help_icons(state.show_help_icons);
-    ui.set_help_opens_in_tab(state.help_opens_in_tab);
+    let chunk_count_str = format!("{}", terrain_chunks.iter().count());
+    let current_chunk_count: String = ui.get_terrain_chunk_count().into();
+    if current_chunk_count != chunk_count_str {
+        ui.set_terrain_chunk_count(chunk_count_str.into());
+    }
+    // Mindspace panel
+    if ui.get_show_mindspace_panel() != state.mindspace_panel_visible {
+        ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+    }
+    // Help icon settings
+    if ui.get_show_help_icons() != state.show_help_icons {
+        ui.set_show_help_icons(state.show_help_icons);
+    }
+    if ui.get_help_opens_in_tab() != state.help_opens_in_tab {
+        ui.set_help_opens_in_tab(state.help_opens_in_tab);
+    }
     
-    // Sync EditorSettings → Slint (snap/grid state)
+    // EditorSettings - only sync when changed
     if let Some(ref es) = editor_settings {
-        ui.set_snap_enabled(es.snap_enabled);
-        ui.set_snap_size(es.snap_size);
-        ui.set_grid_visible(es.show_grid);
-        ui.set_grid_size(es.grid_size);
+        if ui.get_snap_enabled() != es.snap_enabled {
+            ui.set_snap_enabled(es.snap_enabled);
+        }
+        if (ui.get_snap_size() - es.snap_size).abs() > 0.001 {
+            ui.set_snap_size(es.snap_size);
+        }
+        if ui.get_grid_visible() != es.show_grid {
+            ui.set_grid_visible(es.show_grid);
+        }
+        if (ui.get_grid_size() - es.grid_size).abs() > 0.001 {
+            ui.set_grid_size(es.grid_size);
+        }
     }
 
-    // Sync account and local-first cloud state
-    if let Some(ref auth) = auth_state {
-        let account_name = auth.user
+    // Account state - only sync when changed
+    let (account_name, account_status, sync_status) = if let Some(ref auth) = auth_state {
+        let name = auth.user
             .as_ref()
             .map(|user| user.username.clone())
             .unwrap_or_else(|| "Guest".to_string());
-        let account_status = if auth.is_offline() {
+        let status = if auth.is_offline() {
             "Offline"
         } else if auth.is_logged_in() {
             "Online"
         } else {
             "Logged out"
         };
-        let sync_status = if auth.is_offline() {
+        let sync = if auth.is_offline() {
             "Offline local"
         } else if auth.can_publish() {
             "Cloud sync ready"
         } else {
             "Local-first"
         };
-
+        (name, status, sync)
+    } else {
+        ("Guest".to_string(), "Logged out", "Local-first")
+    };
+    let current_account: String = ui.get_account_name().into();
+    if current_account != account_name {
         ui.set_account_name(account_name.into());
         ui.set_account_status(account_status.into());
         ui.set_sync_status(sync_status.into());
-    } else {
-        ui.set_account_name("Guest".into());
-        ui.set_account_status("Logged out".into());
-        ui.set_sync_status("Local-first".into());
     }
     
-    // Sync entity count
-    ui.set_current_entity_count(entity_count as i32);
+    // Sync entity count - only when changed
+    let current_entity_count = ui.get_current_entity_count();
+    if entity_count as i32 != current_entity_count {
+        ui.set_current_entity_count(entity_count as i32);
+    }
     
     // Sync output console logs → Slint (last 200 entries)
+    // Only rebuild the model when log count changes to avoid flickering
     if let Some(ref output) = output {
-        let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
-            LogData {
-                id: i as i32,
-                level: match entry.level {
-                    LogLevel::Info => "info".into(),
-                    LogLevel::Warn => "warning".into(),
-                    LogLevel::Error => "error".into(),
-                    LogLevel::Debug => "debug".into(),
-                },
-                timestamp: entry.timestamp.clone().into(),
-                message: entry.message.clone().into(),
-                source: slint::SharedString::default(),
-            }
-        }).collect();
-        let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
-        ui.set_output_logs(slint::ModelRc::from(model_rc));
+        let new_log_count = output.entries.len();
+        if new_log_count != state.last_log_count {
+            state.last_log_count = new_log_count;
+            let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
+                LogData {
+                    id: i as i32,
+                    level: match entry.level {
+                        LogLevel::Info => "info".into(),
+                        LogLevel::Warn => "warning".into(),
+                        LogLevel::Error => "error".into(),
+                        LogLevel::Debug => "debug".into(),
+                    },
+                    timestamp: entry.timestamp.clone().into(),
+                    message: entry.message.clone().into(),
+                    source: slint::SharedString::default(),
+                }
+            }).collect();
+            let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
+            ui.set_output_logs(slint::ModelRc::from(model_rc));
+        }
     }
     
     // Workshop Panel sync is handled by the dedicated sync_workshop_to_slint system
@@ -4091,7 +4111,7 @@ fn sync_bevy_to_slint(
 }
 
 /// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
-/// Throttled: only runs when pipeline is dirty (has unsent changes).
+/// Only runs when the pipeline resource has actually changed (Bevy change detection).
 fn sync_workshop_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
@@ -4100,6 +4120,8 @@ fn sync_workshop_to_slint(
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
+    // Only sync when the pipeline resource was actually mutated this frame
+    if !pipeline.is_changed() { return; }
     let ui = &slint_context.window;
     
     // Push pipeline state string
@@ -4407,6 +4429,15 @@ fn sync_unified_explorer_to_slint(
     let instance_entities: std::collections::HashSet<Entity> = 
         instances.iter().map(|(e, _)| e).collect();
     
+    // Build a parent -> children lookup map from ChildOf components
+    // This is more reliable than querying Children, which may not be populated yet
+    let mut children_of_parent: std::collections::HashMap<Entity, Vec<Entity>> = std::collections::HashMap::new();
+    for (entity, _) in instances.iter() {
+        if let Ok(child_of) = child_of_query.get(entity) {
+            children_of_parent.entry(child_of.0).or_default().push(entity);
+        }
+    }
+    
     // Find root entities (no ChildOf, or ChildOf points to non-Instance entity)
     // Filter out adornment entities (meta = true) - they are hidden from Explorer
     let mut roots: Vec<Entity> = Vec::new();
@@ -4475,11 +4506,45 @@ fn sync_unified_explorer_to_slint(
         "StarterCharacterScripts", "StarterPlayerScripts",
     ].into_iter().collect();
     
+    // Find service entities and populate their children buckets directly
+    // This is more reliable than using roots, since children of services have ChildOf
+    // pointing to the service entity, so they're not in roots.
+    for (entity, _) in instances.iter() {
+        if let Ok(service) = service_components.get(entity) {
+            // Get children of this service entity from the children_of_parent map
+            if let Some(children) = children_of_parent.get(&entity) {
+                for child in children {
+                    // Skip adornments
+                    if let Ok((_, inst)) = instances.get(*child) {
+                        if inst.class_name.is_adornment() {
+                            continue;
+                        }
+                    }
+                    match service.class_name.as_str() {
+                        "Workspace" => workspace_roots.push(*child),
+                        "Lighting" => lighting_roots.push(*child),
+                        "StarterGui" => starter_gui_roots.push(*child),
+                        "SoulService" => soul_service_roots.push(*child),
+                        other if !hardcoded_services.contains(other) => {
+                            dynamic_service_roots.entry(other.to_string()).or_default().push(*child);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    // Also add root entities that don't have a parent (fallback for entities without ChildOf)
     for entity in &roots {
         if let Ok((_, instance)) = instances.get(*entity) {
-            // Skip service header entities — they have a ServiceComponent and are rendered
-            // as fixed headers by make_service_node(), not as tree children
+            // Skip service header entities
             if service_components.get(*entity).is_ok() {
+                continue;
+            }
+            
+            // Skip if already added (has ChildOf to a service)
+            if child_of_query.get(*entity).is_ok() {
                 continue;
             }
             
@@ -4493,11 +4558,10 @@ fn sync_unified_explorer_to_slint(
                     other if !hardcoded_services.contains(other) => {
                         dynamic_service_roots.entry(other.to_string()).or_default().push(*entity);
                     }
-                    _ => {} // Entity in a hardcoded service with no children bucket (Players, Teams, etc.)
+                    _ => {}
                 }
             } else {
                 // Fallback: classify by ClassName
-                // Folders default to Workspace (not StarterGui)
                 if is_lighting_child(&instance.class_name) {
                     lighting_roots.push(*entity);
                 } else if is_ui_child(&instance.class_name) {
@@ -4534,10 +4598,12 @@ fn sync_unified_explorer_to_slint(
                 continue;
             }
 
-            let has_children = children_query.get(entity)
+            // Use children_of_parent map (built from ChildOf components) instead of Children query
+            // This is more reliable since Children may not be populated yet after ChildOf insertion
+            let has_children = children_of_parent.get(&entity)
                 .map(|children| children.iter().any(|c| {
-                    instance_entities.contains(&c) && 
-                    instances.get(c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
+                    instance_entities.contains(c) && 
+                    instances.get(*c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
                 }))
                 .unwrap_or(false);
 
@@ -4575,12 +4641,13 @@ fn sync_unified_explorer_to_slint(
             });
 
             if is_expanded && has_children {
-                if let Ok(children) = children_query.get(entity) {
+                if let Some(children) = children_of_parent.get(&entity) {
                     let mut child_instances: Vec<Entity> = children.iter()
                         .filter(|c| {
                             instance_entities.contains(c) &&
-                            instances.get(*c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
+                            instances.get(**c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
                         })
+                        .copied()
                         .collect();
                     child_instances.sort_by(|a, b| {
                         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
@@ -5274,12 +5341,34 @@ fn sync_properties_to_slint(
         Query<&eustress_common::classes::ScrollingFrame>,
     )>,
 ) {
-    // Throttle: only update every 3 frames for near-realtime property display
-    if let Some(ref perf) = perf {
-        if perf.should_throttle(3) { return; }
-    }
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
+    
+    // Detect selection changes to trigger immediate sync
+    let current_selected = match &explorer_state.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    };
+    
+    let selection_changed = current_selected != studio_state.last_selected_entity;
+    if selection_changed {
+        studio_state.last_selected_entity = current_selected;
+        studio_state.frames_since_selection_change = 0;
+        studio_state.last_properties_hash = 0; // Force rebuild on selection change
+    } else {
+        studio_state.frames_since_selection_change += 1;
+    }
+    
+    // Only sync properties:
+    // 1. Immediately on selection change (frames_since_selection_change == 0)
+    // 2. After a long delay (300 frames = ~5 seconds at 60fps) to catch external changes
+    // This prevents flickering during editing while still allowing property updates
+    let should_sync = studio_state.frames_since_selection_change == 0 
+        || studio_state.frames_since_selection_change == 300;
+    
+    if !should_sync {
+        return;
+    }
     
     let selected_entity = match &explorer_state.selected {
         SelectedItem::Entity(e) => *e,
@@ -6297,7 +6386,10 @@ fn sync_center_tabs_to_slint(
         .as_ref()
         .and_then(|root| root.0.file_name().map(|name| name.to_string_lossy().to_string()))
         .unwrap_or_else(|| "Space".to_string());
-    ui.set_scene_tab_name(scene_tab_name.into());
+    let current_scene_name: String = ui.get_scene_tab_name().into();
+    if current_scene_name != scene_tab_name {
+        ui.set_scene_tab_name(scene_tab_name.into());
+    }
     
     // Check if tabs were updated by CenterTabManager sync
     let mut tabs_changed = state.tabs_dirty;
@@ -6373,14 +6465,17 @@ fn sync_center_tabs_to_slint(
         }
     }
     
-    // Update active-tab-type property
+    // Update active-tab-type property - only when changed
     let tab_type = if state.active_center_tab <= 0 {
         "scene"
     } else {
         let idx = (state.active_center_tab - 1) as usize;
         state.center_tabs.get(idx).map(|t| t.tab_type.as_str()).unwrap_or("scene")
     };
-    ui.set_active_tab_type(tab_type.into());
+    let current_tab_type: String = ui.get_active_tab_type().into();
+    if current_tab_type != tab_type {
+        ui.set_active_tab_type(tab_type.into());
+    }
     
     // Push tab data to Slint when changed
     if tabs_changed {
