@@ -512,11 +512,7 @@ pub struct ViewSelectorState {
     pub grid: bool,
 }
 
-#[derive(Resource, Default)]
-pub struct AssetManagerState {
-    pub search_query: String,
-    pub selected_asset: Option<String>,
-}
+// AssetManagerState lives in slint_ui.rs — re-exported below via asset_manager module
 
 #[derive(Resource, Default)]
 pub struct DynamicPropertiesPanel {
@@ -762,7 +758,7 @@ pub mod output {
 }
 
 pub mod asset_manager {
-    pub use super::AssetManagerState;
+    pub use super::slint_ui::AssetManagerState;
     pub struct AssetManagerPanel;
 }
 

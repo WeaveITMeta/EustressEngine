@@ -1,0 +1,13 @@
+# Plastic — default material for new parts
+# Smooth matte plastic with moderate roughness
+
+[material]
+name = "Plastic"
+description = "Standard matte plastic surface"
+tags = ["plastic", "default", "matte"]
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.7
+reflectance = 0.5

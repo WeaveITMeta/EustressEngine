@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 pub mod file_loader;
 pub mod file_watcher;
+pub mod gui_loader;
 pub mod instance_loader;
+pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;
 pub mod space_ops;

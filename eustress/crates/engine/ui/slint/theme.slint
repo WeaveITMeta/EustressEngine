@@ -123,6 +123,11 @@ export component IconButton inherits Rectangle {
     in property <color> tint: #d4d4d4; // Tint color for SVG icon (default matches base icon grey)
     
     callback clicked();
+    callback right-clicked();
+    callback long-pressed();
+    
+    property <bool> is-pressing: false;
+    property <bool> tooltip-visible: false;
     
     width: root.label != "" ? (label-measure.preferred-width > 34px ? label-measure.preferred-width + 10px : 44px) : 36px;
     height: root.label != "" ? 52px : 36px;
@@ -145,10 +150,52 @@ export component IconButton inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
-        clicked => { root.clicked(); }
-        moved => {
-            if root.tooltip != "" {
-                tooltip-popup.show();
+        clicked => { 
+            if !root.is-pressing {
+                root.clicked(); 
+            }
+        }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.right-clicked();
+            } else if event.button == PointerEventButton.left {
+                if event.kind == PointerEventKind.down {
+                    root.is-pressing = true;
+                    long-press-timer.restart();
+                } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                    root.is-pressing = false;
+                }
+            }
+        }
+    }
+    
+    // Tooltip hover timer - show after brief delay when hovering
+    tooltip-timer := Timer {
+        interval: 300ms;
+        running: touch.has-hover && root.tooltip != "" && !root.tooltip-visible;
+        triggered => {
+            root.tooltip-visible = true;
+            tooltip-popup.show();
+        }
+    }
+    
+    // Hide tooltip timer - close when not hovering
+    hide-tooltip-timer := Timer {
+        interval: 50ms;
+        running: !touch.has-hover && root.tooltip-visible;
+        triggered => {
+            root.tooltip-visible = false;
+            tooltip-popup.close();
+        }
+    }
+    
+    // Long-press timer - triggers after 500ms of holding
+    long-press-timer := Timer {
+        interval: 500ms;
+        triggered => {
+            if root.is-pressing {
+                root.is-pressing = false;
+                root.long-pressed();
             }
         }
     }

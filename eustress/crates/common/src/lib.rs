@@ -18,6 +18,7 @@
 //! - **Services**: Runtime resources (PlayerService, LightingService, etc.)
 //! - **Scene**: Serialization format for saving/loading
 
+pub mod adornments;
 pub mod assets;
 pub mod attributes;
 pub mod classes;

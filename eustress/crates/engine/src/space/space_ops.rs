@@ -38,6 +38,7 @@ use eustress_common::{
 /// Order matters: Workspace first so the 3D viewport has a target immediately.
 const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "Workspace",               class: "Workspace",              icon: "workspace",          description: "3D world objects — Parts, Models, Terrain" },
+    ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "Lighting",                class: "Lighting",               icon: "lighting",           description: "Light sources — Sun, Sky, Atmosphere" },
     ServiceFolder { name: "Players",                 class: "Players",                icon: "players",            description: "Player instances and character models" },
     ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul scripts (.soul files)" },
@@ -95,9 +96,8 @@ pub struct ScaffoldResult {
 /// │   ├── Sky.sky.toml
 /// │   └── Atmosphere.atmosphere.toml
 /// ├── Players/  … (+ 7 more service folders)
-/// ├── assets/
-/// │   └── meshes/         (empty, ready for user assets)
 /// ├── src/                (empty, for Soul scripts)
+/// (Note: assets/ lives at Universe level, not Space level)
 /// ├── space.toml          (space metadata)
 /// ├── simulation.toml     (simulation readiness)
 /// └── .gitignore
@@ -123,8 +123,10 @@ pub fn scaffold_new_space(
     create_dir_all(&space_root.join(".eustress").join("cache").join("staging"))?;
     create_dir_all(&space_root.join(".eustress").join("cache").join("recordings"))?;
     create_dir_all(&space_root.join(".eustress").join("local"))?;
-    create_dir_all(&space_root.join("assets").join("meshes"))?;
     create_dir_all(&space_root.join("src"))?;
+
+    // Ensure Universe-level assets/parts/ has engine default GLBs
+    ensure_universe_default_parts(&space_root);
 
     let now = Utc::now().to_rfc3339();
 
@@ -250,6 +252,45 @@ pub fn scaffold_new_space(
     })
 }
 
+/// Copy engine default part GLBs (block, ball, wedge, etc.) into a target directory.
+/// Skips files that already exist so user modifications are preserved.
+pub fn copy_engine_default_parts(target_parts_dir: &Path) {
+    let engine_parts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("parts");
+
+    if !engine_parts_dir.exists() {
+        warn!("Engine parts directory not found at {:?}", engine_parts_dir);
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(&engine_parts_dir) else { return };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if src.extension().and_then(|e| e.to_str()) == Some("glb") {
+            let dest = target_parts_dir.join(src.file_name().unwrap());
+            if !dest.exists() {
+                if let Err(e) = std::fs::copy(&src, &dest) {
+                    warn!("Failed to copy {:?} → {:?}: {}", src, dest, e);
+                } else {
+                    info!("📦 Copied default part {:?} → {:?}", src.file_name().unwrap(), dest);
+                }
+            }
+        }
+    }
+}
+
+/// Ensure the Universe-level assets/parts/ directory exists and has engine defaults.
+/// Called at Space load time to handle existing Universes that predate this feature.
+pub fn ensure_universe_default_parts(space_root: &Path) {
+    if let Some(universe_root) = crate::space::universe_root_for_path(space_root) {
+        let parts_dir = universe_root.join("assets").join("parts");
+        let _ = std::fs::create_dir_all(&parts_dir);
+        let _ = std::fs::create_dir_all(universe_root.join("assets").join("meshes"));
+        copy_engine_default_parts(&parts_dir);
+    }
+}
+
 pub fn resolve_active_universe_root(current_space_root: Option<&Path>) -> PathBuf {
     if let Some(space_root) = current_space_root {
         if let Some(universe_root) = crate::space::universe_root_for_path(space_root) {
@@ -359,6 +400,7 @@ pub fn save_space(world: &mut World) {
                         let c = base_part.color.to_srgba();
                         [c.red, c.green, c.blue, c.alpha]
                     },
+                    material: format!("{:?}", base_part.material),
                     transparency: base_part.transparency,
                     anchored: base_part.anchored,
                     can_collide: base_part.can_collide,
@@ -457,6 +499,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         .map(|u| u.username.clone());
     ensure_manifest_set(space_path, Some(&space_name_from_path(space_path)), author.as_deref());
 
+    // Ensure Universe-level assets/parts/ has engine default GLBs
+    ensure_universe_default_parts(space_path);
+
     info!("📂 Opening Space: {:?}", space_path);
 
     let to_despawn: Vec<Entity> = {
@@ -508,6 +553,7 @@ pub fn apply_space_rescan(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<crate::space::SpaceFileRegistry>,
+    mut material_registry: ResMut<crate::space::material_loader::MaterialRegistry>,
     space_root: Res<crate::space::SpaceRoot>,
 ) {
     if !rescan.0 { return; }
@@ -530,13 +576,13 @@ pub fn apply_space_rescan(
             FileType::Directory => {
                 crate::space::file_loader::spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, space_path, entry, None,
                 );
             }
             _ => {
                 crate::space::file_loader::spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, space_path, entry, None,
                 );
             }
         }
@@ -582,6 +628,11 @@ pub fn new_universe(world: &mut World) {
 
     match std::fs::create_dir(&requested_universe_root) {
         Ok(()) => {
+            // Create Universe-level asset directories and copy engine default parts
+            let _ = std::fs::create_dir_all(requested_universe_root.join("assets").join("parts"));
+            let _ = std::fs::create_dir_all(requested_universe_root.join("assets").join("meshes"));
+            copy_engine_default_parts(&requested_universe_root.join("assets").join("parts"));
+
             if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
                 notifs.success(format!("Universe created: {}", universe_name));
             }

@@ -177,7 +177,10 @@ pub fn process_file_changes(
     mut registry: ResMut<SpaceFileRegistry>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     mut recently_written: ResMut<RecentlyWrittenFiles>,
+    space_root: Res<super::SpaceRoot>,
     // Query for entities loaded from files
     file_entities: Query<(Entity, &super::file_loader::LoadedFromFile)>,
     // Query for Soul scripts
@@ -217,7 +220,7 @@ pub fn process_file_changes(
                 );
             }
             FileChangeType::Created => {
-                handle_file_created(&event, &mut registry, &mut commands, &asset_server);
+                handle_file_created(&event, &mut registry, &mut material_registry, &mut commands, &asset_server, &mut materials, &space_root.0);
             }
             FileChangeType::Removed => {
                 handle_file_removed(&event, &mut registry, &mut commands);
@@ -341,8 +344,11 @@ fn handle_file_modified(
 fn handle_file_created(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,
+    material_registry: &mut super::material_loader::MaterialRegistry,
     commands: &mut Commands,
     asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    space_root: &std::path::Path,
 ) {
     // Check if file type should spawn an entity
     if !event.file_type.spawns_entity_in_service(&event.service) {
@@ -449,6 +455,95 @@ fn handle_file_created(
                 }
                 Err(e) => {
                     error!("Failed to read new Soul script {:?}: {}", event.path, e);
+                }
+            }
+        }
+        
+        FileType::Toml => {
+            // Load .part.toml, .model.toml, .instance.toml files
+            match super::instance_loader::load_instance_definition(&event.path) {
+                Ok(instance) => {
+                    let entity = super::instance_loader::spawn_instance(
+                        commands,
+                        asset_server,
+                        materials,
+                        material_registry,
+                        event.path.clone(),
+                        instance,
+                    );
+                    
+                    let name = event.path.file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    
+                    registry.register(
+                        event.path.clone(),
+                        entity,
+                        super::file_loader::FileMetadata {
+                            path: event.path.clone(),
+                            file_type: event.file_type,
+                            service: event.service.clone(),
+                            name,
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        },
+                    );
+                    
+                    info!("✅ Loaded new instance file: {:?}", event.path);
+                }
+                Err(e) => {
+                    error!("Failed to load new instance file {:?}: {}", event.path, e);
+                }
+            }
+        }
+        
+        FileType::Material => {
+            // Hot-load new .mat.toml files into MaterialRegistry
+            match super::material_loader::load_material_definition(&event.path) {
+                Ok(definition) => {
+                    let mat_name = if definition.material.name.is_empty() {
+                        super::material_loader::material_name_from_path(&event.path)
+                    } else {
+                        definition.material.name.clone()
+                    };
+                    let mat_toml_dir = event.path.parent().unwrap_or(std::path::Path::new("."));
+                    let standard_mat = super::material_loader::build_standard_material(
+                        &definition,
+                        asset_server,
+                        mat_toml_dir,
+                        space_root,
+                    );
+                    let handle = materials.add(standard_mat);
+                    material_registry.insert(
+                        mat_name.clone(),
+                        handle,
+                        definition.clone(),
+                        event.path.clone(),
+                    );
+                    let entity = super::material_loader::spawn_material_entity(
+                        commands,
+                        event.path.clone(),
+                        &definition,
+                    );
+                    registry.register(
+                        event.path.clone(),
+                        entity,
+                        super::file_loader::FileMetadata {
+                            path: event.path.clone(),
+                            file_type: event.file_type,
+                            service: event.service.clone(),
+                            name: mat_name.clone(),
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        },
+                    );
+                    info!("🎨 Hot-loaded new material '{}' from {:?}", mat_name, event.path);
+                }
+                Err(e) => {
+                    error!("Failed to load new material {:?}: {}", event.path, e);
                 }
             }
         }

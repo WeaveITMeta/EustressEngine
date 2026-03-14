@@ -10,7 +10,7 @@ import { PropertiesPanel, PropertyData } from "properties.slint";
 import { OutputConsole, LogData } from "output.slint";
 import { CommandBar } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
-import { AssetManager } from "asset_manager.slint";
+import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
 import { SoulPanel } from "soul_panel.slint";
 import { ScriptEditor, ScriptTab, CenterTab, HighlightLine } from "script_editor.slint";
@@ -150,6 +150,18 @@ export component StudioWindow inherits Window {
     in-out property <bool> has-terrain: false;
     in-out property <bool> terrain-edit-mode: false;
     in-out property <string> terrain-brush: "raise";
+    in-out property <float> terrain-brush-size: 10.0;
+    in-out property <float> terrain-brush-strength: 0.5;
+    in-out property <float> terrain-brush-falloff: 0.5;
+    
+    // Terrain config properties (from _terrain.toml, synced from TerrainConfig)
+    in-out property <string> terrain-size: "512";
+    in-out property <string> terrain-chunk-size: "64";
+    in-out property <string> terrain-resolution: "256";
+    in-out property <string> terrain-height-scale: "1.0";
+    in-out property <string> terrain-lod-levels: "5";
+    in-out property <string> terrain-chunk-count: "0";
+    in-out property <string> terrain-material: "Default";
     
     // Network state
     in-out property <bool> server-running: false;
@@ -290,6 +302,17 @@ export component StudioWindow inherits Window {
     // Right panel tab
     in-out property <int> right-tab-index: 0;
 
+    // Asset Manager
+    in property <[AssetNode]> asset-nodes: [];
+    in property <string> asset-category: "All";
+    in property <int> universe-asset-count: 0;
+    in property <int> space-asset-count: 0;
+    callback asset-select(int);
+    callback asset-expand(int);
+    callback asset-import(string);
+    callback asset-search(string);
+    callback asset-category-changed(string);
+
     // ========================================================================
     // Callbacks (bound to Bevy systems)
     // ========================================================================
@@ -349,6 +372,8 @@ export component StudioWindow inherits Window {
     
     // Properties
     callback property-changed(string, string);
+    // Section header chevron toggle — Rust drives collapsed state
+    callback section-toggle(string);
     // Help icon — open /learn documentation URL
     callback open-learn-url(string);
     
@@ -568,7 +593,7 @@ export component StudioWindow inherits Window {
             // ================================================================
             // Left Panel (Explorer, Toolbox, Assets, etc.)
             // ================================================================
-            if root.show-explorer || root.show-toolbox || root.show-assets: Rectangle {
+            if root.show-explorer || root.show-toolbox || root.show-assets || root.show-terrain-editor: Rectangle {
                 width: root.left-panel-width;
                 background: Theme.panel-background;
                 border-width: 0px;
@@ -653,6 +678,26 @@ export component StudioWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
+                            
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.left-tab-index == 3 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+                                
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.left-tab-index = 3; }
+                                }
+                                
+                                Text {
+                                    text: "Terrain";
+                                    color: root.left-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                     
@@ -706,7 +751,34 @@ export component StudioWindow inherits Window {
                             on-insert-part(part-type) => { root.insert-part(part-type); }
                         }
                         
-                        if root.left-tab-index == 2: AssetManager {}
+                        if root.left-tab-index == 2: AssetManager {
+                            asset-nodes: root.asset-nodes;
+                            current-category: root.asset-category;
+                            universe-asset-count: root.universe-asset-count;
+                            space-asset-count: root.space-asset-count;
+                            on-select-asset(id) => { root.asset-select(id); }
+                            on-expand-asset(id) => { root.asset-expand(id); }
+                            on-import-asset(kind) => { root.asset-import(kind); }
+                            on-search-changed(text) => { root.asset-search(text); }
+                            on-category-changed(cat) => { root.asset-category-changed(cat); }
+                        }
+                        
+                        if root.left-tab-index == 3: TerrainEditor {
+                            has-terrain: root.has-terrain;
+                            edit-mode: root.terrain-edit-mode;
+                            current-brush: root.terrain-brush;
+                            terrain-size: root.terrain-size;
+                            terrain-chunk-size: root.terrain-chunk-size;
+                            terrain-resolution: root.terrain-resolution;
+                            terrain-height-scale: root.terrain-height-scale;
+                            terrain-lod-levels: root.terrain-lod-levels;
+                            terrain-chunk-count: root.terrain-chunk-count;
+                            terrain-material: root.terrain-material;
+                            on-toggle-edit-mode() => { root.toggle-terrain-edit-mode(); }
+                            on-generate-terrain(size) => { root.generate-terrain(size); }
+                            on-import-heightmap() => { root.import-heightmap(); }
+                            on-export-heightmap() => { root.export-heightmap(); }
+                        }
                     }
                 }
                 
@@ -1618,6 +1690,7 @@ export component StudioWindow inherits Window {
                             show-help-icons: root.show-help-icons;
                             help-opens-in-tab: root.help-opens-in-tab;
                             on-property-changed(name, value) => { root.property-changed(name, value); }
+                            on-section-toggle(category) => { root.section-toggle(category); }
                             on-open-learn-url(url) => { root.open-learn-url(url); }
                         }
                         

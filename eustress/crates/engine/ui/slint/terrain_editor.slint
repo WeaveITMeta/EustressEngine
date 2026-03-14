@@ -1,31 +1,141 @@
 // ============================================================================
-// Eustress Engine Studio - Terrain Editor Panel
-// Brush tools and terrain manipulation
+// Eustress Engine Studio - Terrain Panel
+// Terrain properties, chunk list, and import/export.
+// Brush tools and settings live in the Terrain ribbon tab toolbar only.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Slider, ComboBox } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
 
+// Collapsible section header with chevron
+component SectionRow inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> expanded: true;
+    callback clicked();
+    
+    height: 24px;
+    background: touch.has-hover ? Theme.button-hover : transparent;
+    
+    touch := TouchArea { clicked => { root.clicked(); } }
+    
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        
+        Text {
+            text: root.expanded ? "▼" : "▶";
+            color: Theme.text-secondary;
+            font-size: 9px;
+            width: 12px;
+            vertical-alignment: center;
+        }
+        
+        Text {
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            font-weight: 600;
+            vertical-alignment: center;
+            letter-spacing: 0.3px;
+        }
+    }
+}
+
+// Read-only property row: label + value
+component PropertyRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    
+    height: 24px;
+    
+    HorizontalBox {
+        padding-left: 16px;
+        padding-right: 8px;
+        spacing: 8px;
+        
+        Text {
+            min-width: 110px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// Chunk list item row
+export component ChunkRow inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> selected: false;
+    callback clicked();
+    
+    height: 24px;
+    background: root.selected ? Theme.selection-background : 
+                chunk-touch.has-hover ? Theme.button-hover : transparent;
+    
+    chunk-touch := TouchArea { clicked => { root.clicked(); } }
+    
+    HorizontalBox {
+        padding-left: 24px;
+        padding-right: 8px;
+        spacing: 6px;
+        
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            background: #3cb371;
+            border-radius: 2px;
+        }
+        
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+}
+
 export component TerrainEditor inherits Rectangle {
     // Properties
     in property <bool> has-terrain: false;
     in property <bool> edit-mode: false;
-    in property <string> current-brush: "raise"; // raise, lower, smooth, flatten, paint
-    in property <float> brush-size: 10.0;
-    in property <float> brush-strength: 0.5;
-    in property <float> brush-falloff: 0.5;
-    in property <int> selected-texture: 0;
+    in property <string> current-brush: "raise";
+    
+    // Terrain global properties (from _terrain.toml)
+    in property <string> terrain-size: "512";
+    in property <string> terrain-chunk-size: "64";
+    in property <string> terrain-resolution: "256";
+    in property <string> terrain-height-scale: "1.0";
+    in property <string> terrain-lod-levels: "5";
+    in property <string> terrain-chunk-count: "0";
+    in property <string> terrain-material: "Default";
+    
+    // Section expand states
+    in-out property <bool> section-properties-expanded: true;
+    in-out property <bool> section-chunks-expanded: true;
+    in-out property <bool> section-import-export-expanded: true;
+    
+    // Selected chunk index (-1 = none)
+    in-out property <int> selected-chunk: -1;
     
     // Callbacks
     callback on-toggle-edit-mode();
-    callback on-set-brush(string);
-    callback on-brush-size-changed(float);
-    callback on-brush-strength-changed(float);
-    callback on-brush-falloff-changed(float);
-    callback on-select-texture(int);
-    callback on-generate-terrain(string); // "small", "medium", "large"
+    callback on-generate-terrain(string);
     callback on-import-heightmap();
     callback on-export-heightmap();
+    callback on-select-chunk(int);
     
     background: Theme.panel-background;
     
@@ -34,9 +144,10 @@ export component TerrainEditor inherits Rectangle {
         spacing: 0px;
         
         PanelHeader {
-            title: "Terrain Editor";
+            title: "Terrain";
         }
         
+        // ── No terrain state ──────────────────────────────────────────
         if !root.has-terrain: Rectangle {
             vertical-stretch: 1;
             
@@ -45,12 +156,14 @@ export component TerrainEditor inherits Rectangle {
                 spacing: 12px;
                 alignment: center;
                 
-                Image {
-                    width: 48px;
-                    height: 48px;
-                    source: @image-url("../../assets/icons/ui/terrain.svg");
-                    image-fit: contain;
-                    horizontal-alignment: center;
+                HorizontalBox {
+                    alignment: center;
+                    Image {
+                        width: 48px;
+                        height: 48px;
+                        source: @image-url("../../assets/icons/ui/terrain.svg");
+                        image-fit: contain;
+                    }
                 }
                 
                 Text {
@@ -131,263 +244,10 @@ export component TerrainEditor inherits Rectangle {
                 
                 Rectangle { height: 8px; }
                 
-                Rectangle {
-                    width: 140px;
-                    height: 32px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-import-heightmap(); }
-                    }
-                    
-                    Text {
-                        text: "Import Heightmap...";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-        
-        if root.has-terrain: ScrollView {
-            vertical-stretch: 1;
-            
-            VerticalBox {
-                padding: 8px;
-                spacing: 12px;
-                
-                // Edit mode toggle
-                Rectangle {
-                    height: 36px;
-                    background: root.edit-mode ? Theme.accent-blue : Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-toggle-edit-mode(); }
-                    }
-                    
-                    HorizontalBox {
-                        padding: 8px;
-                        spacing: 8px;
-                        
-                        if root.edit-mode: Image {
-                            width: 14px;
-                            height: 14px;
-                            source: @image-url("../../assets/icons/ui/check.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-                        if !root.edit-mode: Rectangle {
-                            width: 14px;
-                            height: 14px;
-                            border-radius: 7px;
-                            border-width: 1.5px;
-                            border-color: Theme.text-secondary;
-                        }
-                        
-                        Text {
-                            text: "Edit Mode (T)";
-                            color: root.edit-mode ? white : Theme.text-primary;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                // Brush tools
-                Text {
-                    text: "Brush Tools";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
                 HorizontalBox {
-                    spacing: 4px;
-                    
-                    for brush in [
-                        { id: "raise", icon: "▲", label: "Raise" },
-                        { id: "lower", icon: "▼", label: "Lower" },
-                        { id: "smooth", icon: "~", label: "Smooth" },
-                        { id: "flatten", icon: "═", label: "Flatten" },
-                        { id: "paint", icon: "P", label: "Paint" },
-                    ]: Rectangle {
-                        horizontal-stretch: 1;
-                        height: 48px;
-                        background: root.current-brush == brush.id ? Theme.selection-background : Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-set-brush(brush.id); }
-                        }
-                        
-                        VerticalBox {
-                            alignment: center;
-                            
-                            Text {
-                                text: brush.icon;
-                                color: root.current-brush == brush.id ? Theme.accent-blue : Theme.text-primary;
-                                font-size: 16px;
-                                horizontal-alignment: center;
-                            }
-                            
-                            Text {
-                                text: brush.label;
-                                color: Theme.text-secondary;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                            }
-                        }
-                    }
-                }
-                
-                // Brush settings
-                Text {
-                    text: "Brush Settings";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
-                VerticalBox {
-                    spacing: 8px;
-                    
-                    // Size
-                    HorizontalBox {
-                        Text {
-                            width: 70px;
-                            text: "Size";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                        
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 1;
-                            maximum: 100;
-                            value: root.brush-size;
-                            changed(value) => { root.on-brush-size-changed(value); }
-                        }
-                        
-                        Text {
-                            width: 40px;
-                            text: round(root.brush-size);
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    // Strength
-                    HorizontalBox {
-                        Text {
-                            width: 70px;
-                            text: "Strength";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                        
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 0;
-                            maximum: 1;
-                            value: root.brush-strength;
-                            changed(value) => { root.on-brush-strength-changed(value); }
-                        }
-                        
-                        Text {
-                            width: 40px;
-                            text: round(root.brush-strength * 100) + "%";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    // Falloff
-                    HorizontalBox {
-                        Text {
-                            width: 70px;
-                            text: "Falloff";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                        
-                        Slider {
-                            horizontal-stretch: 1;
-                            minimum: 0;
-                            maximum: 1;
-                            value: root.brush-falloff;
-                            changed(value) => { root.on-brush-falloff-changed(value); }
-                        }
-                        
-                        Text {
-                            width: 40px;
-                            text: round(root.brush-falloff * 100) + "%";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                // Texture palette (for paint mode)
-                if root.current-brush == "paint": VerticalBox {
-                    spacing: 8px;
-                    
-                    Text {
-                        text: "Textures";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-                    
-                    HorizontalBox {
-                        spacing: 4px;
-                        
-                        for i in [0, 1, 2, 3]: Rectangle {
-                            width: 48px;
-                            height: 48px;
-                            background: i == root.selected-texture ? Theme.selection-background : Theme.background-tertiary;
-                            border-radius: 4px;
-                            border-width: i == root.selected-texture ? 2px : 0px;
-                            border-color: Theme.accent-blue;
-                            
-                            TouchArea {
-                                clicked => { root.on-select-texture(i); }
-                            }
-                            
-                            Text {
-                                text: i == 0 ? "Grass" : i == 1 ? "Rock" : i == 2 ? "Sand" : "Snow";
-                                color: Theme.text-secondary;
-                                font-size: 9px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-                
-                Rectangle { height: 8px; }
-                
-                // Import/Export
-                Text {
-                    text: "Import / Export";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
-                HorizontalBox {
-                    spacing: 8px;
-                    
+                    alignment: center;
                     Rectangle {
-                        horizontal-stretch: 1;
+                        width: 160px;
                         height: 32px;
                         background: Theme.button-background;
                         border-radius: 4px;
@@ -397,29 +257,201 @@ export component TerrainEditor inherits Rectangle {
                         }
                         
                         Text {
-                            text: "Import";
+                            text: "Import Heightmap...";
                             color: Theme.text-primary;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
+                }
+            }
+        }
+        
+        // ── Terrain exists — properties, chunks, import/export ────────
+        if root.has-terrain: ScrollView {
+            vertical-stretch: 1;
+            min-width: 240px;
+            
+            VerticalBox {
+                padding: 0px;
+                spacing: 0px;
+                min-width: 240px;
+                
+                // ── Edit mode toggle ──
+                Rectangle {
+                    height: 40px;
                     
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
+                    HorizontalBox {
+                        padding: 8px;
                         
-                        TouchArea {
-                            clicked => { root.on-export-heightmap(); }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            min-width: 200px;
+                            height: 28px;
+                            background: root.edit-mode ? Theme.accent-blue : Theme.button-background;
+                            border-radius: 4px;
+                            
+                            TouchArea {
+                                clicked => { root.on-toggle-edit-mode(); }
+                            }
+                            
+                            HorizontalBox {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                
+                                if root.edit-mode: Image {
+                                    width: 12px;
+                                    height: 12px;
+                                    source: @image-url("../../assets/icons/ui/check.svg");
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                }
+                                if !root.edit-mode: Rectangle {
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: 6px;
+                                    border-width: 1.5px;
+                                    border-color: Theme.text-secondary;
+                                }
+                                
+                                Text {
+                                    text: root.edit-mode ? "Editing (T)" : "Edit Mode (T)";
+                                    color: root.edit-mode ? white : Theme.text-primary;
+                                    font-size: 11px;
+                                    font-weight: 500;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                
+                                if root.edit-mode: Text {
+                                    text: root.current-brush.to-uppercase();
+                                    color: #ffffff80;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                    min-width: 40px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // ── Properties section ──
+                SectionRow {
+                    label: "PROPERTIES";
+                    expanded: root.section-properties-expanded;
+                    clicked => { root.section-properties-expanded = !root.section-properties-expanded; }
+                }
+                
+                if root.section-properties-expanded: VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    
+                    PropertyRow { label: "Size"; value: root.terrain-size + " m"; }
+                    PropertyRow { label: "Chunk Size"; value: root.terrain-chunk-size + " m"; }
+                    PropertyRow { label: "Resolution"; value: root.terrain-resolution; }
+                    PropertyRow { label: "Height Scale"; value: root.terrain-height-scale; }
+                    PropertyRow { label: "LOD Levels"; value: root.terrain-lod-levels; }
+                    PropertyRow { label: "Material"; value: root.terrain-material; }
+                    
+                    Rectangle { height: 4px; }
+                }
+                
+                // Separator
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+                
+                // ── Chunks section ──
+                SectionRow {
+                    label: "CHUNKS (" + root.terrain-chunk-count + ")";
+                    expanded: root.section-chunks-expanded;
+                    clicked => { root.section-chunks-expanded = !root.section-chunks-expanded; }
+                    min-width: 240px;
+                }
+                
+                if root.section-chunks-expanded: VerticalBox {
+                    padding: 0px;
+                    spacing: 0px;
+                    
+                    // Chunk count hint when empty
+                    if root.terrain-chunk-count == "0": Text {
+                        text: "  No chunks loaded";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        height: 24px;
+                        vertical-alignment: center;
+                    }
+                    
+                    Rectangle { height: 4px; }
+                }
+                
+                // Separator
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+                
+                // ── Import / Export section ──
+                SectionRow {
+                    label: "IMPORT / EXPORT";
+                    expanded: root.section-import-export-expanded;
+                    clicked => { root.section-import-export-expanded = !root.section-import-export-expanded; }
+                }
+                
+                if root.section-import-export-expanded: VerticalBox {
+                    padding: 8px;
+                    spacing: 8px;
+                    
+                    HorizontalBox {
+                        spacing: 8px;
+                        
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            background: Theme.button-background;
+                            border-radius: 4px;
+                            
+                            TouchArea {
+                                clicked => { root.on-import-heightmap(); }
+                            }
+                            
+                            Text {
+                                text: "Import";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                         
-                        Text {
-                            text: "Export";
-                            color: Theme.text-primary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 28px;
+                            background: Theme.button-background;
+                            border-radius: 4px;
+                            
+                            TouchArea {
+                                clicked => { root.on-export-heightmap(); }
+                            }
+                            
+                            Text {
+                                text: "Export";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
+                    }
+                    
+                    Text {
+                        text: "Supports: R16, PNG, RAW, HGT, ASC, TIFF";
+                        color: Theme.text-secondary;
+                        font-size: 10px;
                     }
                 }
             }

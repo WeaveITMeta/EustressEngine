@@ -38,6 +38,8 @@ pub mod material;
 pub mod history;
 pub mod brushes;
 pub mod compute;
+pub mod toml_loader;
+pub mod water;
 
 pub use config::*;
 pub use chunk::*;
@@ -48,6 +50,7 @@ pub use material::*;
 pub use history::*;
 pub use brushes::*;
 pub use compute::*;
+pub use water::*;
 
 use bevy::prelude::*;
 use tracing::info;
@@ -72,12 +75,14 @@ impl Plugin for TerrainPlugin {
             .register_type::<TerrainData>()
             .register_type::<Chunk>()
             
+            // Water resource
+            .init_resource::<WaterConfig>()
+            
             // Core systems
             .add_systems(Update, (
                 process_terrain_generation_queue,  // Process async terrain generation
-                // update_lod_system,
-                // chunk_spawn_system,
-                // chunk_cull_system,
+                water::water_sync_system,
+                water::water_update_system,
             ))
             
             // Editor systems (only run in Editor mode)

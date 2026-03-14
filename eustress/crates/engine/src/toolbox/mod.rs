@@ -33,7 +33,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Block",
             description: "Basic building block - the most common part",
             category: "Basic",
-            mesh_path: "assets/meshes/block.glb",
+            mesh_path: "assets/parts/block.glb",
             default_size: [4.0, 1.0, 2.0],
         },
         ToolboxMesh {
@@ -41,7 +41,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Ball",
             description: "Round sphere - great for decorations",
             category: "Basic",
-            mesh_path: "assets/meshes/ball.glb",
+            mesh_path: "assets/parts/ball.glb",
             default_size: [2.0, 2.0, 2.0],
         },
         ToolboxMesh {
@@ -49,7 +49,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Cylinder",
             description: "Cylindrical shape - pillars and poles",
             category: "Basic",
-            mesh_path: "assets/meshes/cylinder.glb",
+            mesh_path: "assets/parts/cylinder.glb",
             default_size: [2.0, 4.0, 2.0],
         },
         ToolboxMesh {
@@ -57,7 +57,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Wedge",
             description: "Triangular wedge - ramps and roofs",
             category: "Basic",
-            mesh_path: "assets/meshes/wedge.glb",
+            mesh_path: "assets/parts/wedge.glb",
             default_size: [2.0, 1.0, 2.0],
         },
         ToolboxMesh {
@@ -65,7 +65,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Corner Wedge",
             description: "Corner wedge - roof corners",
             category: "Basic",
-            mesh_path: "assets/meshes/corner_wedge.glb",
+            mesh_path: "assets/parts/corner_wedge.glb",
             default_size: [2.0, 1.0, 2.0],
         },
         ToolboxMesh {
@@ -73,7 +73,7 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
             name: "Cone",
             description: "Cone shape - decorative element",
             category: "Basic",
-            mesh_path: "assets/meshes/cone.glb",
+            mesh_path: "assets/parts/cone.glb",
             default_size: [2.0, 4.0, 2.0],
         },
     ]

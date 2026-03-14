@@ -157,7 +157,7 @@ fn main() {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: "../common/assets".to_string(),
+                file_path: "assets".to_string(),
                 ..default()
             })
         )

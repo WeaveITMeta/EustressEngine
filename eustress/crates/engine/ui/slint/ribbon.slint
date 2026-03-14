@@ -3,8 +3,162 @@
 // Top toolbar with menus, tools, and play controls
 // ============================================================================
 
-import { HorizontalBox, VerticalBox, ScrollView } from "std-widgets.slint";
+import { HorizontalBox, VerticalBox, ScrollView, Slider } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
+
+// Floating brush settings modal that appears beneath toolbar buttons
+component BrushSettingsModal inherits PopupWindow {
+    in property <string> brush-name: "";
+    in property <float> brush-size: 10.0;
+    in property <float> brush-strength: 0.5;
+    in property <string> brush-falloff: "smooth";
+    
+    callback size-changed(float);
+    callback strength-changed(float);
+    callback falloff-changed(string);
+    
+    width: 220px;
+    
+    Rectangle {
+        background: #2a2a2a;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #3a3a3a;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000080;
+        
+        VerticalBox {
+            padding: 12px;
+            spacing: 10px;
+            
+            // Header
+            Text {
+                text: root.brush-name + " Settings";
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            
+            Rectangle { height: 1px; background: #3a3a3a; }
+            
+            // Size slider
+            VerticalBox {
+                spacing: 4px;
+                
+                HorizontalBox {
+                    Text {
+                        text: "Size";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: Math.round(root.brush-size);
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        min-width: 30px;
+                        horizontal-alignment: right;
+                    }
+                }
+                
+                Slider {
+                    minimum: 1.0;
+                    maximum: 100.0;
+                    value: root.brush-size;
+                    changed(val) => { root.size-changed(val); }
+                }
+            }
+            
+            // Strength slider
+            VerticalBox {
+                spacing: 4px;
+                
+                HorizontalBox {
+                    Text {
+                        text: "Strength";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: Math.round(root.brush-strength * 100) + "%";
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        min-width: 40px;
+                        horizontal-alignment: right;
+                    }
+                }
+                
+                Slider {
+                    minimum: 0.0;
+                    maximum: 1.0;
+                    value: root.brush-strength;
+                    changed(val) => { root.strength-changed(val); }
+                }
+            }
+            
+            // Falloff selector
+            VerticalBox {
+                spacing: 4px;
+                
+                Text {
+                    text: "Falloff";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                }
+                
+                HorizontalBox {
+                    spacing: 4px;
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 24px;
+                        background: root.brush-falloff == "linear" ? Theme.selection-background : Theme.button-background;
+                        border-radius: 3px;
+                        TouchArea { clicked => { root.falloff-changed("linear"); } }
+                        Text {
+                            text: "Linear";
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 24px;
+                        background: root.brush-falloff == "smooth" ? Theme.selection-background : Theme.button-background;
+                        border-radius: 3px;
+                        TouchArea { clicked => { root.falloff-changed("smooth"); } }
+                        Text {
+                            text: "Smooth";
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 24px;
+                        background: root.brush-falloff == "sharp" ? Theme.selection-background : Theme.button-background;
+                        border-radius: 3px;
+                        TouchArea { clicked => { root.falloff-changed("sharp"); } }
+                        Text {
+                            text: "Sharp";
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 // Grouped toolbar section with icon row + compact category label
 component ToolGroup inherits Rectangle {
@@ -196,6 +350,18 @@ export component Ribbon inherits Rectangle {
     callback on-set-terrain-brush(string);
     callback on-import-heightmap();
     callback on-export-heightmap();
+    callback on-brush-size-changed(float);
+    callback on-brush-strength-changed(float);
+    callback on-brush-falloff-changed(string);
+    
+    // Brush settings properties
+    in-out property <float> brush-size: 10.0;
+    in-out property <float> brush-strength: 0.5;
+    in-out property <string> brush-falloff: "smooth";
+    in-out property <bool> show-brush-settings: false;
+    in-out property <string> settings-brush-name: "";
+    in-out property <length> settings-modal-x: 0px;
+    in-out property <length> settings-modal-y: 0px;
     
     // Plugin callbacks
     callback on-plugin-action(string);
@@ -410,7 +576,6 @@ export component Ribbon inherits Rectangle {
                                     DropdownItem { label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
                                     DropdownItem { label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
                                     DropdownItem { label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
-                                    DropdownItem { label: "MeshPart"; clicked => { root.on-menu-action("insert:meshpart"); } }
                                     DropdownItem { label: "UnionOperation"; clicked => { root.on-menu-action("insert:unionoperation"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "STRUCTURE"; }
@@ -1015,12 +1180,12 @@ export component Ribbon inherits Rectangle {
                 spacing: 6px;
                 
                 for tab-item in [
-                    { name: "Home",      id: "home",      color: #4686b4 },
+                    { name: "Home",      id: "home",      color: #808080 },
                     { name: "Model",     id: "model",     color: #6495ed },
-                    { name: "UI",        id: "ui",        color: #9370db },
+                    { name: "UI",        id: "ui",        color: #00A2FF },
                     { name: "Terrain",   id: "terrain",   color: #3cb371 },
                     { name: "Test",      id: "test",      color: #ff8c00 },
-                    { name: "MindSpace", id: "mindspace", color: #7b68ee },
+                    { name: "MindSpace", id: "mindspace", color: #0ACED6 },
                 ] : Rectangle {
                     width: tab-text.preferred-width + 16px;
                     height: 20px;
@@ -1157,7 +1322,6 @@ export component Ribbon inherits Rectangle {
                 ToolGroup {
                     label: "Parts";
                     IconButton { icon: @image-url("../../assets/icons/part.svg"); label: "Part"; tooltip: "Insert Part"; tint: #64b5f6; clicked => { root.on-menu-action("insert:part"); } }
-                    IconButton { icon: @image-url("../../assets/icons/meshpart.svg"); label: "Mesh"; tooltip: "Insert MeshPart"; tint: #64b5f6; clicked => { root.on-menu-action("insert:meshpart"); } }
                     IconButton { icon: @image-url("../../assets/icons/unionoperation.svg"); label: "Union"; tooltip: "Insert Union"; tint: #64b5f6; clicked => { root.on-menu-action("insert:unionoperation"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Insert Seat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:seat"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/vehicle.svg"); label: "Vehicle"; tooltip: "Insert VehicleSeat"; tint: #64b5f6; clicked => { root.on-menu-action("insert:vehicleseat"); } }
@@ -1216,11 +1380,11 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Containers";
-                    IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:screengui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "BillboardGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:billboardgui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/surface.svg"); label: "Surface"; tooltip: "SurfaceGui"; tint: #9575cd; clicked => { root.on-menu-action("insert:surfacegui"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Frame"; tooltip: "Frame"; tint: #9575cd; clicked => { root.on-menu-action("insert:frame"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/scroll.svg"); label: "Scroll"; tooltip: "ScrollingFrame"; tint: #9575cd; clicked => { root.on-menu-action("insert:scrollingframe"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/screen.svg"); label: "Screen"; tooltip: "ScreenGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:screengui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/billboard.svg"); label: "Billboard"; tooltip: "BillboardGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:billboardgui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/surface.svg"); label: "Surface"; tooltip: "SurfaceGui"; tint: #00A2FF; clicked => { root.on-menu-action("insert:surfacegui"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Frame"; tooltip: "Frame"; tint: #00A2FF; clicked => { root.on-menu-action("insert:frame"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scroll.svg"); label: "Scroll"; tooltip: "ScrollingFrame"; tint: #00A2FF; clicked => { root.on-menu-action("insert:scrollingframe"); } }
                 }
                 GroupDivider {}
                 
@@ -1277,13 +1441,153 @@ export component Ribbon inherits Rectangle {
                 
                 ToolGroup {
                     label: "Brushes";
-                    IconButton { icon: @image-url("../../assets/icons/ui/chevron-up.svg"); label: "Raise"; tooltip: "Raise (1)"; tint: #81c784; clicked => { root.on-set-terrain-brush("raise"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/chevron-down.svg"); label: "Lower"; tooltip: "Lower (2)"; tint: #e57373; clicked => { root.on-set-terrain-brush("lower"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/filter.svg"); label: "Smooth"; tooltip: "Smooth (3)"; tint: #64b5f6; clicked => { root.on-set-terrain-brush("smooth"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/reset.svg"); label: "Flatten"; tooltip: "Flatten (4)"; tint: #ffb74d; clicked => { root.on-set-terrain-brush("flatten"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Paint"; tooltip: "Paint (5)"; tint: #ce93d8; clicked => { root.on-set-terrain-brush("paint"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/frame.svg"); label: "Region"; tooltip: "Region"; tint: #90caf9; clicked => { root.on-set-terrain-brush("region"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/palette.svg"); label: "Fill"; tooltip: "Fill"; tint: #a5d6a7; clicked => { root.on-set-terrain-brush("fill"); } }
+                    raise-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/chevron-up.svg"); 
+                        label: "Raise"; 
+                        tooltip: "Raise (1) | Hold or right-click for settings"; 
+                        tint: #81c784; 
+                        clicked => { root.on-set-terrain-brush("raise"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Raise";
+                            root.settings-modal-x = raise-btn.absolute-position.x;
+                            root.settings-modal-y = raise-btn.absolute-position.y + raise-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Raise";
+                            root.settings-modal-x = raise-btn.absolute-position.x;
+                            root.settings-modal-y = raise-btn.absolute-position.y + raise-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    lower-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/chevron-down.svg"); 
+                        label: "Lower"; 
+                        tooltip: "Lower (2) | Hold or right-click for settings"; 
+                        tint: #e57373; 
+                        clicked => { root.on-set-terrain-brush("lower"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Lower";
+                            root.settings-modal-x = lower-btn.absolute-position.x;
+                            root.settings-modal-y = lower-btn.absolute-position.y + lower-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Lower";
+                            root.settings-modal-x = lower-btn.absolute-position.x;
+                            root.settings-modal-y = lower-btn.absolute-position.y + lower-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    smooth-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/filter.svg"); 
+                        label: "Smooth"; 
+                        tooltip: "Smooth (3) | Hold or right-click for settings"; 
+                        tint: #64b5f6; 
+                        clicked => { root.on-set-terrain-brush("smooth"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Smooth";
+                            root.settings-modal-x = smooth-btn.absolute-position.x;
+                            root.settings-modal-y = smooth-btn.absolute-position.y + smooth-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Smooth";
+                            root.settings-modal-x = smooth-btn.absolute-position.x;
+                            root.settings-modal-y = smooth-btn.absolute-position.y + smooth-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    flatten-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/reset.svg"); 
+                        label: "Flatten"; 
+                        tooltip: "Flatten (4) | Hold or right-click for settings"; 
+                        tint: #ffb74d; 
+                        clicked => { root.on-set-terrain-brush("flatten"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Flatten";
+                            root.settings-modal-x = flatten-btn.absolute-position.x;
+                            root.settings-modal-y = flatten-btn.absolute-position.y + flatten-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Flatten";
+                            root.settings-modal-x = flatten-btn.absolute-position.x;
+                            root.settings-modal-y = flatten-btn.absolute-position.y + flatten-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    paint-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/palette.svg"); 
+                        label: "Paint"; 
+                        tooltip: "Paint (5) | Hold or right-click for settings"; 
+                        tint: #ce93d8; 
+                        clicked => { root.on-set-terrain-brush("paint"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Paint";
+                            root.settings-modal-x = paint-btn.absolute-position.x;
+                            root.settings-modal-y = paint-btn.absolute-position.y + paint-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Paint";
+                            root.settings-modal-x = paint-btn.absolute-position.x;
+                            root.settings-modal-y = paint-btn.absolute-position.y + paint-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    region-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/frame.svg"); 
+                        label: "Region"; 
+                        tooltip: "Region | Hold or right-click for settings"; 
+                        tint: #90caf9; 
+                        clicked => { root.on-set-terrain-brush("region"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Region";
+                            root.settings-modal-x = region-btn.absolute-position.x;
+                            root.settings-modal-y = region-btn.absolute-position.y + region-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Region";
+                            root.settings-modal-x = region-btn.absolute-position.x;
+                            root.settings-modal-y = region-btn.absolute-position.y + region-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
+                    fill-btn := IconButton { 
+                        icon: @image-url("../../assets/icons/ui/palette.svg"); 
+                        label: "Fill"; 
+                        tooltip: "Fill | Hold or right-click for settings"; 
+                        tint: #a5d6a7; 
+                        clicked => { root.on-set-terrain-brush("fill"); }
+                        right-clicked => { 
+                            root.settings-brush-name = "Fill";
+                            root.settings-modal-x = fill-btn.absolute-position.x;
+                            root.settings-modal-y = fill-btn.absolute-position.y + fill-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                        long-pressed => { 
+                            root.settings-brush-name = "Fill";
+                            root.settings-modal-x = fill-btn.absolute-position.x;
+                            root.settings-modal-y = fill-btn.absolute-position.y + fill-btn.height;
+                            root.show-brush-settings = true;
+                            brush-settings-modal.show();
+                        }
+                    }
                 }
                 GroupDivider {}
                 
@@ -1397,6 +1701,29 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/summary.svg"); label: "Summary"; tooltip: "Generate Summary"; tint: #81c784; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
                 }
             }
+        }
+    }
+    
+    // Brush settings modal - positioned beneath clicked brush button
+    brush-settings-modal := BrushSettingsModal {
+        x: root.settings-modal-x;
+        y: root.settings-modal-y;
+        brush-name: root.settings-brush-name;
+        brush-size: root.brush-size;
+        brush-strength: root.brush-strength;
+        brush-falloff: root.brush-falloff;
+        
+        size-changed(val) => { 
+            root.brush-size = val;
+            root.on-brush-size-changed(val);
+        }
+        strength-changed(val) => { 
+            root.brush-strength = val;
+            root.on-brush-strength-changed(val);
+        }
+        falloff-changed(val) => { 
+            root.brush-falloff = val;
+            root.on-brush-falloff-changed(val);
         }
     }
 }

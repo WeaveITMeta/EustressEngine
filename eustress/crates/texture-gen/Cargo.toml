@@ -1,0 +1,8 @@
+[package]
+name = "texture-gen"
+version = "0.1.0"
+edition = "2021"
+description = "Procedural PBR texture generator for Eustress default materials"
+
+[dependencies]
+png = "0.17"

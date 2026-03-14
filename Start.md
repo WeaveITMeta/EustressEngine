@@ -14,12 +14,6 @@ cargo run -p eustress-engine
 
 First build takes ~5–10 minutes (Bevy 0.18 + Slint UI). Subsequent builds are incremental (~30s).
 
-### With a scene file
-
-```powershell
-cargo run -p eustress-engine -- --scene path/to/scene.eustress
-```
-
 ### Release mode (much faster runtime)
 
 ```powershell

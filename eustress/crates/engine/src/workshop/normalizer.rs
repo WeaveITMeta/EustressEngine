@@ -103,15 +103,18 @@ pub fn build_normalize_prompt(conversation_context: &str) -> String {
 // 3. write_brief_to_disk() — serialize to TOML and write to product directory
 // ============================================================================
 
-/// Determine the product output directory from the product name
-/// docs/Products/{ProductName}/ (spaces replaced with underscores)
-pub fn product_output_dir(project_root: &Path, product_name: &str) -> PathBuf {
+/// Determine the product output directory within a Space's Workspace service.
+///
+/// Returns `space_root/Workspace/{safe_name}/` — the product directory is a child
+/// of Workspace, containing part files, documentation, and the ideation brief.
+/// No `docs/Products/` directory is used in Eustress.
+pub fn product_output_dir(space_root: &Path, product_name: &str) -> PathBuf {
     let safe_name = product_name
         .replace(' ', "_")
         .replace('/', "_")
         .replace('\\', "_")
         .replace(':', "_");
-    project_root.join("docs").join("Products").join(safe_name)
+    space_root.join("Workspace").join(safe_name)
 }
 
 /// Write an IdeationBrief to ideation_brief.toml in the product directory

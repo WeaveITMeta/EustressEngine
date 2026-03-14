@@ -1,0 +1,24 @@
+# Fabric — woven textile cloth
+# Very high roughness, soft matte finish
+
+[material]
+name = "Fabric"
+description = "Woven textile cloth with soft matte finish"
+tags = ["fabric", "cloth", "textile", "soft"]
+
+[pbr]
+base_color = [0.70, 0.65, 0.60, 1.0]
+metallic = 0.0
+roughness = 0.95
+reflectance = 0.15
+
+[textures]
+base_color = "textures/fabric_base_color.png"
+normal = "textures/fabric_normal.png"
+metallic_roughness = "textures/fabric_metallic_roughness.png"
+
+[physics]
+melting_point = 0.0
+ignition_point = 523.0
+thermal_conductivity = 0.04
+specific_heat = 1400.0

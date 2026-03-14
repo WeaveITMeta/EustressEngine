@@ -214,6 +214,26 @@ pub enum ClassName {
     SolarSystem,      // Container for orbital hierarchies
     CelestialBody,    // Orbital object with n-body gravity
     RegionChunk,      // Geospatial fragment with floating origin
+    // Adornment Classes (meta entities hidden from Explorer)
+    BoxHandleAdornment,      // Box-shaped handle for scale tool
+    SphereHandleAdornment,   // Sphere-shaped handle for rotation pivot
+    ConeHandleAdornment,     // Cone-shaped handle for move tool arrows
+    CylinderHandleAdornment, // Cylinder-shaped handle for axis shafts
+    LineHandleAdornment,     // Line-shaped handle for axis indicators
+    PyramidHandleAdornment,  // Pyramid-shaped handle for directional indicators
+    WireframeHandleAdornment,// Wireframe box for bounding visualization
+    ImageHandleAdornment,    // Image-based handle for custom icons
+    SelectionBox,            // Wireframe box highlighting selected entities
+    SelectionSphere,         // Wireframe sphere highlighting spherical entities
+    SurfaceSelection,        // Highlights a specific face/surface
+    ArcHandles,              // 3D rotation arcs for rotate tool
+    Handles,                 // 6-directional handles for move/scale tools
+    PathfindingLink,         // Visual connection between waypoints
+    PathfindingModifier,     // Modifies pathfinding behavior for a region
+    // Smart Grid Adornments
+    GridSensor,              // Dynamic corner indicator for smart snapping
+    AlignmentGuide,          // Visual line showing edge/center alignment
+    SnapIndicator,           // Ghost preview showing snapped position
 }
 
 impl ClassName {
@@ -276,6 +296,26 @@ impl ClassName {
             ClassName::SolarSystem => "SolarSystem",
             ClassName::CelestialBody => "CelestialBody",
             ClassName::RegionChunk => "RegionChunk",
+            // Adornments
+            ClassName::BoxHandleAdornment => "BoxHandleAdornment",
+            ClassName::SphereHandleAdornment => "SphereHandleAdornment",
+            ClassName::ConeHandleAdornment => "ConeHandleAdornment",
+            ClassName::CylinderHandleAdornment => "CylinderHandleAdornment",
+            ClassName::LineHandleAdornment => "LineHandleAdornment",
+            ClassName::PyramidHandleAdornment => "PyramidHandleAdornment",
+            ClassName::WireframeHandleAdornment => "WireframeHandleAdornment",
+            ClassName::ImageHandleAdornment => "ImageHandleAdornment",
+            ClassName::SelectionBox => "SelectionBox",
+            ClassName::SelectionSphere => "SelectionSphere",
+            ClassName::SurfaceSelection => "SurfaceSelection",
+            ClassName::ArcHandles => "ArcHandles",
+            ClassName::Handles => "Handles",
+            ClassName::PathfindingLink => "PathfindingLink",
+            ClassName::PathfindingModifier => "PathfindingModifier",
+            // Smart Grid
+            ClassName::GridSensor => "GridSensor",
+            ClassName::AlignmentGuide => "AlignmentGuide",
+            ClassName::SnapIndicator => "SnapIndicator",
         }
     }
     
@@ -343,8 +383,52 @@ impl ClassName {
             "RegionChunk" => Ok(ClassName::RegionChunk),
             // Legacy: AdvancedPart maps to Part (realism data is now dynamic on any class)
             "AdvancedPart" => Ok(ClassName::Part),
+            // Adornments
+            "BoxHandleAdornment" => Ok(ClassName::BoxHandleAdornment),
+            "SphereHandleAdornment" => Ok(ClassName::SphereHandleAdornment),
+            "ConeHandleAdornment" => Ok(ClassName::ConeHandleAdornment),
+            "CylinderHandleAdornment" => Ok(ClassName::CylinderHandleAdornment),
+            "LineHandleAdornment" => Ok(ClassName::LineHandleAdornment),
+            "PyramidHandleAdornment" => Ok(ClassName::PyramidHandleAdornment),
+            "WireframeHandleAdornment" => Ok(ClassName::WireframeHandleAdornment),
+            "ImageHandleAdornment" => Ok(ClassName::ImageHandleAdornment),
+            "SelectionBox" => Ok(ClassName::SelectionBox),
+            "SelectionSphere" => Ok(ClassName::SelectionSphere),
+            "SurfaceSelection" => Ok(ClassName::SurfaceSelection),
+            "ArcHandles" => Ok(ClassName::ArcHandles),
+            "Handles" => Ok(ClassName::Handles),
+            "PathfindingLink" => Ok(ClassName::PathfindingLink),
+            "PathfindingModifier" => Ok(ClassName::PathfindingModifier),
+            // Smart Grid
+            "GridSensor" => Ok(ClassName::GridSensor),
+            "AlignmentGuide" => Ok(ClassName::AlignmentGuide),
+            "SnapIndicator" => Ok(ClassName::SnapIndicator),
             _ => Err(format!("Unknown class name: {}", s)),
         }
+    }
+    
+    /// Returns true if this class is an adornment (meta entity hidden from Explorer)
+    pub fn is_adornment(&self) -> bool {
+        matches!(self,
+            ClassName::BoxHandleAdornment |
+            ClassName::SphereHandleAdornment |
+            ClassName::ConeHandleAdornment |
+            ClassName::CylinderHandleAdornment |
+            ClassName::LineHandleAdornment |
+            ClassName::PyramidHandleAdornment |
+            ClassName::WireframeHandleAdornment |
+            ClassName::ImageHandleAdornment |
+            ClassName::SelectionBox |
+            ClassName::SelectionSphere |
+            ClassName::SurfaceSelection |
+            ClassName::ArcHandles |
+            ClassName::Handles |
+            ClassName::PathfindingLink |
+            ClassName::PathfindingModifier |
+            ClassName::GridSensor |
+            ClassName::AlignmentGuide |
+            ClassName::SnapIndicator
+        )
     }
 }
 

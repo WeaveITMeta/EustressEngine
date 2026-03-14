@@ -557,13 +557,17 @@ export component WorkshopPanel inherits Rectangle {
                 alignment: center;
                 spacing: 8px;
 
-                Image {
-                    width: 40px;
+                HorizontalLayout {
+                    alignment: center;
                     height: 40px;
-                    source: @image-url("../../assets/icons/ui/sparkle.svg");
-                    image-fit: contain;
-                    horizontal-alignment: center;
-                    opacity: 0.5;
+
+                    Image {
+                        width: 40px;
+                        height: 40px;
+                        source: @image-url("../../assets/icons/ui/sparkle.svg");
+                        image-fit: contain;
+                        opacity: 0.5;
+                    }
                 }
 
                 Text {

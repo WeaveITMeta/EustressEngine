@@ -232,28 +232,25 @@ export component SoulSettingsDialog inherits Rectangle {
                 background: #13131f;
                 border-radius: 8px;
 
-                // Centered icon + text block
-                HorizontalLayout {
-                    alignment: center;
-                    spacing: 8px;
-                    width: parent.width;
+                // Centered icon + text — absolute position for true visual center
+                Image {
+                    x: (parent.width - 16px - 8px - 96px) / 2;
+                    y: (parent.height - 16px) / 2;
+                    width: 16px;
+                    height: 16px;
+                    source: @image-url("../../assets/icons/soulservice.svg");
+                    image-fit: contain;
+                }
+
+                Text {
+                    x: (parent.width - 16px - 8px - 96px) / 2 + 16px + 8px;
+                    y: 0px;
                     height: parent.height;
-
-                    Image {
-                        width: 16px;
-                        height: 16px;
-                        source: @image-url("../../assets/icons/ui/brain.svg");
-                        image-fit: contain;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: "Soul Settings";
-                        color: Theme.text-primary;
-                        font-size: 13px;
-                        font-weight: 600;
-                        vertical-alignment: center;
-                    }
+                    text: "Soul Settings";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
                 }
 
                 // Close X — top-right

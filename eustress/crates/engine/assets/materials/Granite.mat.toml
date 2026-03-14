@@ -1,0 +1,19 @@
+# Granite — igneous rock with crystalline speckle
+# Medium-high roughness, multicolored flecks
+
+[material]
+name = "Granite"
+description = "Igneous rock with visible crystalline speckle"
+tags = ["stone", "rock", "granite", "natural"]
+
+[pbr]
+base_color = [0.55, 0.52, 0.50, 1.0]
+metallic = 0.0
+roughness = 0.7
+reflectance = 0.4
+
+[physics]
+melting_point = 1533.0
+yield_strength = 200.0e6
+thermal_conductivity = 2.5
+specific_heat = 790.0

@@ -1,0 +1,19 @@
+# Sand — loose granular sand
+# Very high roughness, warm tan tones
+
+[material]
+name = "Sand"
+description = "Loose granular sand surface"
+tags = ["sand", "natural", "ground", "beach"]
+
+[pbr]
+base_color = [0.82, 0.72, 0.52, 1.0]
+metallic = 0.0
+roughness = 0.95
+reflectance = 0.2
+
+[physics]
+melting_point = 1973.0
+yield_strength = 0.0
+thermal_conductivity = 0.3
+specific_heat = 830.0

@@ -1,0 +1,25 @@
+# Wood — natural wood grain
+# High roughness, zero metallic, warm tones
+
+[material]
+name = "Wood"
+description = "Natural wood grain surface"
+tags = ["wood", "natural", "organic"]
+
+[pbr]
+base_color = [0.55, 0.35, 0.18, 1.0]
+metallic = 0.0
+roughness = 0.8
+reflectance = 0.3
+
+[textures]
+base_color = "textures/wood_base_color.png"
+normal = "textures/wood_normal.png"
+metallic_roughness = "textures/wood_metallic_roughness.png"
+
+[physics]
+melting_point = 0.0
+ignition_point = 573.0
+yield_strength = 40.0e6
+thermal_conductivity = 0.15
+specific_heat = 1700.0

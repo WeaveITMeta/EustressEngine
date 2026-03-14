@@ -1,0 +1,19 @@
+# Slate — natural foliated metamorphic rock
+# Medium roughness, dark gray-blue tones
+
+[material]
+name = "Slate"
+description = "Natural foliated metamorphic rock with layered texture"
+tags = ["stone", "rock", "slate", "natural"]
+
+[pbr]
+base_color = [0.35, 0.38, 0.42, 1.0]
+metallic = 0.0
+roughness = 0.6
+reflectance = 0.4
+
+[physics]
+melting_point = 1473.0
+yield_strength = 100.0e6
+thermal_conductivity = 2.0
+specific_heat = 760.0

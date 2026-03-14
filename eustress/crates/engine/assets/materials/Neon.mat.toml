@@ -1,0 +1,15 @@
+# Neon — self-illuminating emissive surface
+# Zero roughness, strong emissive glow, no shadows
+
+[material]
+name = "Neon"
+description = "Self-illuminating emissive surface that glows in the dark"
+tags = ["neon", "emissive", "glow", "light"]
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.1
+reflectance = 0.3
+emissive = [2.0, 2.0, 2.0, 1.0]
+unlit = false

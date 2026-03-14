@@ -43,11 +43,14 @@ impl Plugin for EngineTerrainPlugin {
             .init_resource::<TerrainSelection>()
             .init_resource::<TerrainHistory>()
             .init_resource::<AdvancedBrushState>()
+            .init_resource::<BrushPreviewState>()
             .add_systems(Update, (
                 sync_terrain_class_to_system,
                 handle_editor_shortcuts,
                 update_selection_gizmos,
                 handle_undo_redo_shortcuts,
+                update_brush_preview,
+                // terrain_paint_system is registered in common::terrain::TerrainPlugin
             ).run_if(resource_equals(TerrainMode::Editor)));
     }
 }
@@ -94,6 +97,15 @@ impl Default for TerrainEditorState {
 pub struct TerrainSelection {
     pub selected_chunk: Option<Entity>,
     pub hovered_chunk: Option<Entity>,
+}
+
+/// Brush preview state — tracks where the brush circle should render
+#[derive(Resource, Default)]
+pub struct BrushPreviewState {
+    /// World-space position of the brush center (terrain hit point)
+    pub position: Option<Vec3>,
+    /// Whether the brush is actively painting (LMB held)
+    pub is_painting: bool,
 }
 
 // ============================================================================
@@ -203,6 +215,110 @@ fn update_selection_gizmos(
             );
         }
     }
+}
+
+/// Update brush preview gizmo — renders a circle on the terrain surface at cursor position
+fn update_brush_preview(
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    terrain_query: Query<&TerrainConfig, With<TerrainRoot>>,
+    brush: Res<TerrainBrush>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut preview: ResMut<BrushPreviewState>,
+    mut gizmos: Gizmos,
+) {
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
+    let Ok(config) = terrain_query.single() else { return };
+
+    let Some(cursor_pos) = window.cursor_position() else {
+        preview.position = None;
+        preview.is_painting = false;
+        return;
+    };
+
+    let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else {
+        preview.position = None;
+        return;
+    };
+
+    // Raycast to terrain ground plane (Y = 0)
+    // TODO: Replace with proper terrain heightmap raycast for accuracy on sculpted terrain
+    if ray.direction.y.abs() < 0.001 {
+        preview.position = None;
+        return;
+    }
+    let t = -ray.origin.y / ray.direction.y;
+    if t < 0.0 {
+        preview.position = None;
+        return;
+    }
+
+    let hit = ray.origin + ray.direction * t;
+    preview.position = Some(hit);
+    preview.is_painting = buttons.pressed(MouseButton::Left);
+
+    // Draw brush circle on terrain surface
+    let radius = brush.radius;
+    let color = if preview.is_painting {
+        // Active painting: bright mode-specific color
+        match brush.mode {
+            BrushMode::Raise => bevy::color::Color::srgba(0.2, 1.0, 0.2, 0.9),
+            BrushMode::Lower => bevy::color::Color::srgba(1.0, 0.2, 0.2, 0.9),
+            BrushMode::Smooth => bevy::color::Color::srgba(0.2, 0.6, 1.0, 0.9),
+            BrushMode::Flatten => bevy::color::Color::srgba(1.0, 1.0, 0.2, 0.9),
+            BrushMode::PaintTexture => bevy::color::Color::srgba(1.0, 0.5, 0.0, 0.9),
+            _ => bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.9),
+        }
+    } else {
+        // Hovering: semi-transparent white
+        bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.5)
+    };
+
+    // Outer brush circle
+    gizmos.circle(
+        Isometry3d::new(
+            hit + Vec3::Y * 0.05, // Slight Y offset to avoid z-fighting
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        ),
+        radius,
+        color,
+    );
+
+    // Inner falloff circle (shows where full-strength brush starts fading)
+    if brush.falloff > 0.01 {
+        let inner_radius = radius * (1.0 - brush.falloff);
+        if inner_radius > 0.1 {
+            let inner_color = bevy::color::Color::srgba(
+                color.to_srgba().red,
+                color.to_srgba().green,
+                color.to_srgba().blue,
+                0.25,
+            );
+            gizmos.circle(
+                Isometry3d::new(
+                    hit + Vec3::Y * 0.05,
+                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                ),
+                inner_radius,
+                inner_color,
+            );
+        }
+    }
+
+    // Crosshair at center
+    let cross_size = radius * 0.1;
+    let cross_color = bevy::color::Color::srgba(1.0, 1.0, 1.0, 0.3);
+    gizmos.line(
+        hit + Vec3::new(-cross_size, 0.05, 0.0),
+        hit + Vec3::new(cross_size, 0.05, 0.0),
+        cross_color,
+    );
+    gizmos.line(
+        hit + Vec3::new(0.0, 0.05, -cross_size),
+        hit + Vec3::new(0.0, 0.05, cross_size),
+        cross_color,
+    );
 }
 
 /// Handle undo/redo shortcuts for terrain

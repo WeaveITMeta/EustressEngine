@@ -1,0 +1,19 @@
+# Foil — thin reflective metallic foil
+# Very low roughness, highly reflective mirror-like surface
+
+[material]
+name = "Foil"
+description = "Thin reflective metallic foil"
+tags = ["metal", "foil", "reflective", "mirror"]
+
+[pbr]
+base_color = [0.9, 0.9, 0.92, 1.0]
+metallic = 0.95
+roughness = 0.1
+reflectance = 0.95
+
+[physics]
+melting_point = 933.0
+yield_strength = 10.0e6
+thermal_conductivity = 237.0
+specific_heat = 897.0

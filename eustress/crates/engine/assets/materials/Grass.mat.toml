@@ -1,0 +1,19 @@
+# Grass — natural grass ground cover
+# Very high roughness, green tones, zero metallic
+
+[material]
+name = "Grass"
+description = "Natural grass ground cover with blade texture"
+tags = ["grass", "natural", "organic", "ground"]
+
+[pbr]
+base_color = [0.25, 0.50, 0.15, 1.0]
+metallic = 0.0
+roughness = 0.95
+reflectance = 0.2
+
+[physics]
+melting_point = 0.0
+ignition_point = 573.0
+thermal_conductivity = 0.05
+specific_heat = 1800.0

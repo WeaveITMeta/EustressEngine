@@ -16,6 +16,8 @@ export struct PropertyData {
     options: [string], // For enum types
     // Section header flag: if true, this entry is a category header (not a property)
     is-header: bool,
+    // When true, this property's section is collapsed and the row should be hidden
+    section-collapsed: bool,
     // Vec3 parsed values (populated by Rust for vec3 types)
     x-value: string,
     y-value: string,
@@ -109,6 +111,9 @@ component SectionHeader inherits Rectangle {
     in property <string> title: "";
     in-out property <bool> expanded: true;
     
+    // Fired when chevron is clicked so parent can update model state
+    callback clicked();
+    
     height: 32px;
     background: @linear-gradient(180deg, #252525 0%, #1e1e1e 100%);
     
@@ -122,7 +127,12 @@ component SectionHeader inherits Rectangle {
     
     TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.expanded = !root.expanded; }
+        clicked => {
+            // Do NOT toggle root.expanded locally — Rust is the single source of truth.
+            // The callback fires on-section-toggle → Rust toggles collapsed_sections →
+            // next sync pushes updated section-collapsed → expanded binding updates.
+            root.clicked();
+        }
     }
     
     HorizontalLayout {
@@ -179,12 +189,7 @@ component PropRow inherits Rectangle {
     callback open-learn-url(string);
     
     height: 28px;
-    background: touch.has-hover ? #1a1a1a : transparent;
     border-radius: 2px;
-    
-    touch := TouchArea {
-        scroll-event(e) => { return reject; }
-    }
     
     HorizontalLayout {
         padding-left: 8px;
@@ -203,7 +208,7 @@ component PropRow inherits Rectangle {
         Text {
             width: 100px;
             text: root.label;
-            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
@@ -258,12 +263,7 @@ component Vec3Row inherits Rectangle {
     callback open-learn-url(string);
     
     height: 28px;
-    background: touch.has-hover ? #1a1a1a : transparent;
     border-radius: 2px;
-    
-    touch := TouchArea {
-        scroll-event(e) => { return reject; }
-    }
     
     HorizontalLayout {
         padding-left: 8px;
@@ -281,7 +281,7 @@ component Vec3Row inherits Rectangle {
         Text {
             width: 100px;
             text: root.label;
-            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
@@ -446,12 +446,7 @@ component RotationVec3Row inherits Rectangle {
     callback open-learn-url(string);
 
     height: 28px;
-    background: touch.has-hover ? #1a1a1a : transparent;
     border-radius: 2px;
-
-    touch := TouchArea {
-        scroll-event(e) => { return reject; }
-    }
 
     HorizontalLayout {
         padding-left: 8px;
@@ -469,7 +464,7 @@ component RotationVec3Row inherits Rectangle {
         Text {
             width: 100px;
             text: root.label;
-            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
@@ -634,12 +629,7 @@ component ColorRow inherits Rectangle {
     callback open-learn-url(string);
     
     height: 28px;
-    background: touch.has-hover ? #1a1a1a : transparent;
     border-radius: 2px;
-    
-    touch := TouchArea {
-        scroll-event(e) => { return reject; }
-    }
     
     HorizontalLayout {
         padding-left: 8px;
@@ -657,7 +647,7 @@ component ColorRow inherits Rectangle {
         Text {
             width: 100px;
             text: root.label;
-            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
@@ -724,7 +714,6 @@ component BoolRow inherits Rectangle {
     callback open-learn-url(string);
     
     height: 28px;
-    background: touch.has-hover ? #1a1a1a : transparent;
     border-radius: 2px;
     
     touch := TouchArea {
@@ -734,7 +723,6 @@ component BoolRow inherits Rectangle {
                 root.value-changed(root.value == "true" ? "false" : "true");
             }
         }
-        scroll-event(e) => { return reject; }
     }
     
     HorizontalLayout {
@@ -753,7 +741,7 @@ component BoolRow inherits Rectangle {
         Text {
             width: 100px;
             text: root.label;
-            color: touch.has-hover ? Theme.text-primary : Theme.text-secondary;
+            color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
@@ -805,6 +793,8 @@ export component PropertiesPanel inherits Rectangle {
     
     // Callbacks
     callback on-property-changed(string, string);
+    // Fired when a section header chevron is clicked — Rust toggles collapsed state
+    callback on-section-toggle(string);
     // Fired when a help icon with a learn-url is clicked
     callback on-open-learn-url(string);
     
@@ -905,21 +895,26 @@ export component PropertiesPanel inherits Rectangle {
                 alignment: center;
                 spacing: 12px;
                 
-                // Empty state icon
-                Rectangle {
-                    width: 48px;
+                // Empty state icon — centered horizontally
+                HorizontalLayout {
+                    alignment: center;
                     height: 48px;
-                    border-radius: 24px;
-                    background: #1a1a1a;
-                    border-width: 1px;
-                    border-color: #2a2a2a;
-                    
-                    Text {
-                        text: "◇";
-                        color: Theme.text-secondary;
-                        font-size: 20px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 24px;
+                        background: #1a1a1a;
+                        border-width: 1px;
+                        border-color: #2a2a2a;
+                        
+                        Text {
+                            text: "◇";
+                            color: Theme.text-secondary;
+                            font-size: 20px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
                 
@@ -953,14 +948,19 @@ export component PropertiesPanel inherits Rectangle {
                 
                 for prop in root.properties: VerticalLayout {
                     spacing: 0px;
+                    // Hide collapsed rows (height 0 + invisible)
+                    visible: prop.is-header || !prop.section-collapsed;
+                    height: (prop.is-header || !prop.section-collapsed) ? self.preferred-height : 0px;
                     
-                    // Category header
+                    // Category header — fires on-section-toggle so Rust updates section-collapsed
                     if prop.is-header: SectionHeader {
                         title: prop.category;
+                        expanded: !prop.section-collapsed;
+                        clicked => { root.on-section-toggle(prop.category); }
                     }
                     
                     // Vec3 property (position, scale)
-                    if !prop.is-header && prop.property-type == "vec3": Vec3Row {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "vec3": Vec3Row {
                         label: prop.name;
                         value: prop.value;
                         x-value: prop.x-value;
@@ -975,7 +975,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
 
                     // Rotation property — degrees with +/- buttons, supports negatives
-                    if !prop.is-header && prop.property-type == "rotation": RotationVec3Row {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "rotation": RotationVec3Row {
                         label: prop.name;
                         value: prop.value;
                         x-value: prop.x-value;
@@ -990,7 +990,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
                     
                     // Color property
-                    if !prop.is-header && prop.property-type == "color": ColorRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "color": ColorRow {
                         label: prop.name;
                         value: prop.value;
                         editable: prop.editable;
@@ -1002,7 +1002,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
                     
                     // Bool property
-                    if !prop.is-header && prop.property-type == "bool": BoolRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "bool": BoolRow {
                         label: prop.name;
                         value: prop.value;
                         editable: prop.editable;
@@ -1014,7 +1014,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
                     
                     // String / float / int / enum — generic row
-                    if !prop.is-header && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

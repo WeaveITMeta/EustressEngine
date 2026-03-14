@@ -394,7 +394,39 @@ fn apply_brush_to_chunk(
                     };
                 }
                 BrushMode::PaintTexture => {
-                    // TODO: Modify splatmap with voxel precision
+                    // Paint material onto splatmap cache
+                    let total_pixels = (config.chunk_resolution + 1) * (config.chunk_resolution + 1);
+                    // Initialize splat cache if empty (default to all grass = channel 0)
+                    if data.splat_cache.len() != (total_pixels * 4) as usize {
+                        data.splat_cache = vec![0.0; (total_pixels * 4) as usize];
+                        // Default: 100% grass (channel 0)
+                        for i in 0..total_pixels as usize {
+                            data.splat_cache[i * 4] = 1.0;
+                        }
+                    }
+                    let splat_idx = idx * 4;
+                    if splat_idx + 3 < data.splat_cache.len() {
+                        let layer = brush.texture_layer.min(3);
+                        let paint_strength = base_effect * 5.0; // Scale up for visible paint strokes
+                        // Add weight to target channel, reduce others proportionally
+                        let current = data.splat_cache[splat_idx + layer];
+                        let new_weight = (current + paint_strength).min(1.0);
+                        let added = new_weight - current;
+                        data.splat_cache[splat_idx + layer] = new_weight;
+                        // Reduce other channels proportionally to keep sum ≈ 1.0
+                        let other_sum: f32 = (0..4)
+                            .filter(|&c| c != layer)
+                            .map(|c| data.splat_cache[splat_idx + c])
+                            .sum();
+                        if other_sum > 0.0 {
+                            for c in 0..4 {
+                                if c != layer {
+                                    data.splat_cache[splat_idx + c] *= (1.0 - added / other_sum).max(0.0);
+                                }
+                            }
+                        }
+                        data.splat_dirty = true;
+                    }
                 }
                 BrushMode::Region | BrushMode::Fill => {
                     // Region selection and fill are handled separately

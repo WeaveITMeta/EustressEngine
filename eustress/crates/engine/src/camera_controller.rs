@@ -547,6 +547,7 @@ fn eustress_camera_controls(
     mut cam_query: Query<(&mut EustressCamera, &Transform, &Camera, &GlobalTransform), With<Camera3d>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    studio_state: Option<Res<crate::ui::StudioState>>,
 ) {
     let (mut cam, transform, camera, global_transform) = match cam_query.single_mut() {
         Ok(c) => c,
@@ -554,6 +555,18 @@ fn eustress_camera_controls(
     };
     
     if !cam.enabled {
+        return;
+    }
+
+    // Block ALL camera input when a modal settings dialog is open.
+    // Consume events to prevent buildup, then return early.
+    let modal_open = studio_state.as_ref().map_or(false, |s| {
+        s.show_settings_window || s.show_soul_settings_window || s.show_keybindings_window
+    });
+    if modal_open {
+        ev_motion.clear();
+        ev_wheel.clear();
+        ev_touch.clear();
         return;
     }
     

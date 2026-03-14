@@ -1,0 +1,24 @@
+# Marble — polished metamorphic stone with veining
+# Low-medium roughness from polish, subtle subsurface
+
+[material]
+name = "Marble"
+description = "Polished metamorphic stone with characteristic veining"
+tags = ["stone", "marble", "polished", "luxury"]
+
+[pbr]
+base_color = [0.92, 0.90, 0.88, 1.0]
+metallic = 0.0
+roughness = 0.25
+reflectance = 0.6
+
+[textures]
+base_color = "textures/marble_base_color.png"
+normal = "textures/marble_normal.png"
+metallic_roughness = "textures/marble_metallic_roughness.png"
+
+[physics]
+melting_point = 1473.0
+yield_strength = 60.0e6
+thermal_conductivity = 2.5
+specific_heat = 880.0

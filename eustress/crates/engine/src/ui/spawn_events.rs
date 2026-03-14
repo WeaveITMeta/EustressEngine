@@ -273,16 +273,13 @@ pub struct SetTerrainBrushEvent {
     pub mode: BrushMode,
 }
 
-/// Event to import terrain heightmap
-/// TODO: Implement heightmap import handler
+/// Event to import terrain heightmap from file
 #[derive(Message)]
-#[allow(dead_code)]
 pub struct ImportTerrainEvent {
     pub path: String,
 }
 
-/// Event to export terrain heightmap
-/// TODO: Implement heightmap export handler
+/// Event to export terrain heightmap to file
 #[derive(Message)]
 #[allow(dead_code)]
 pub struct ExportTerrainEvent {
@@ -342,16 +339,167 @@ pub fn handle_toggle_terrain_edit(
 }
 
 /// System to handle terrain brush mode changes
+/// Auto-enables Editor mode when a brush is selected so toolbar buttons work immediately.
 pub fn handle_set_terrain_brush(
     mut brush_events: MessageReader<SetTerrainBrushEvent>,
     brush: Option<ResMut<TerrainBrush>>,
+    mode: Option<ResMut<TerrainMode>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
     let Some(mut brush) = brush else { return };
+    let Some(mut mode) = mode else { return };
     let Some(mut notifications) = notifications else { return };
     for event in brush_events.read() {
         brush.mode = event.mode;
-        notifications.info(format!("Terrain Brush: {:?}", event.mode));
+        // Auto-enable edit mode when selecting a brush tool
+        if *mode != TerrainMode::Editor {
+            *mode = TerrainMode::Editor;
+            notifications.info(format!("Terrain Edit Mode: ON — Brush: {:?}", event.mode));
+        } else {
+            notifications.info(format!("Terrain Brush: {:?}", event.mode));
+        }
+    }
+}
+
+/// System to handle heightmap import events
+///
+/// Pipeline: file dialog path → elevation import → chunk → save R16 → spawn terrain
+pub fn handle_import_terrain(
+    mut import_events: MessageReader<ImportTerrainEvent>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    existing_terrain: Query<Entity, With<TerrainRoot>>,
+    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+) {
+    let Some(mut notifications) = notifications else { return };
+    for event in import_events.read() {
+        let path = std::path::Path::new(&event.path);
+        if !path.exists() {
+            notifications.error(format!("Heightmap file not found: {}", event.path));
+            continue;
+        }
+
+        // Step 1: Import elevation data from any supported format
+        let import_config = eustress_common::pointcloud::ElevationImportConfig {
+            chunk_size: 64.0,
+            chunk_resolution: 64,
+            height_scale: 50.0,
+            vertical_exaggeration: 1.0,
+            height_offset: 0.0,
+            generate_lods: true,
+            lod_levels: 4,
+            fill_nodata: true,
+            nodata_fill_value: 0.0,
+            smooth_terrain: false,
+            smooth_iterations: 0,
+            coord_system: eustress_common::pointcloud::ElevationCoordSystem::Local,
+        };
+
+        match eustress_common::pointcloud::import_elevation_to_terrain(path, &import_config) {
+            Ok(result) => {
+                // Step 2: Remove existing terrain
+                for entity in existing_terrain.iter() {
+                    commands.entity(entity).despawn();
+                }
+
+                // Step 3: Save imported height cache as chunked R16 files
+                let space_root = crate::space::default_space_root();
+                let terrain_dir = space_root.join("Workspace").join("Terrain");
+                let chunks_dir = terrain_dir.join("chunks");
+                let _ = std::fs::create_dir_all(&chunks_dir);
+
+                // Save per-chunk R16 files from the imported height cache
+                let config = &result.config;
+                let data = &result.data;
+                let resolution = config.chunk_resolution;
+                for cz in 0..(config.chunks_z * 2) {
+                    for cx in 0..(config.chunks_x * 2) {
+                        let chunk_path = chunks_dir.join(format!("x{}_z{}.r16", cx, cz));
+                        let start_x = cx * resolution;
+                        let start_z = cz * resolution;
+
+                        // Extract chunk heightmap from the full cache
+                        let mut chunk_heights = vec![0u8; (resolution * resolution * 2) as usize];
+                        for z in 0..resolution {
+                            for x in 0..resolution {
+                                let src_x = start_x + x;
+                                let src_z = start_z + z;
+                                let src_idx = (src_z * data.cache_width + src_x) as usize;
+                                let dst_idx = (z * resolution + x) as usize;
+                                let height_val = if src_idx < data.height_cache.len() {
+                                    data.height_cache[src_idx]
+                                } else {
+                                    0.0
+                                };
+                                let raw = (height_val.clamp(0.0, 1.0) * 65535.0) as u16;
+                                let bytes = raw.to_le_bytes();
+                                chunk_heights[dst_idx * 2] = bytes[0];
+                                chunk_heights[dst_idx * 2 + 1] = bytes[1];
+                            }
+                        }
+                        let _ = std::fs::write(&chunk_path, &chunk_heights);
+                    }
+                }
+
+                // Step 4: Write _terrain.toml config
+                let terrain_toml = format!(
+                    r#"# Auto-generated from imported heightmap: {}
+[terrain]
+chunk_size = {:.1}
+chunk_resolution = {}
+height_scale = {:.1}
+seed = 0
+
+[streaming]
+view_distance = {:.1}
+cull_margin = 200.0
+chunks_per_frame = 4
+
+[lod]
+levels = {}
+distances = {:?}
+"#,
+                    path.display(),
+                    config.chunk_size,
+                    config.chunk_resolution,
+                    import_config.height_scale,
+                    config.view_distance,
+                    config.lod_levels,
+                    config.lod_distances,
+                );
+                let _ = std::fs::write(terrain_dir.join("_terrain.toml"), terrain_toml);
+
+                // Step 5: Spawn terrain from imported data
+                let _terrain = spawn_terrain(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    result.config,
+                    result.data,
+                );
+
+                let warnings_str = if result.warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", result.warnings.join(", "))
+                };
+                notifications.success(format!(
+                    "Imported heightmap: {}x{} chunks, elevation {:.0}–{:.0}m{}",
+                    result.chunk_count.0, result.chunk_count.1,
+                    result.elevation_bounds.0, result.elevation_bounds.1,
+                    warnings_str,
+                ));
+                info!(
+                    "Imported terrain from {:?}: {}x{} chunks, saved R16 to {:?}",
+                    path, result.chunk_count.0, result.chunk_count.1, chunks_dir
+                );
+            }
+            Err(e) => {
+                notifications.error(format!("Failed to import heightmap: {}", e));
+                error!("Heightmap import failed for {:?}: {}", path, e);
+            }
+        }
     }
 }
 
@@ -379,6 +527,7 @@ impl Plugin for SpawnEventsPlugin {
                 handle_spawn_terrain_events,
                 handle_toggle_terrain_edit,
                 handle_set_terrain_brush,
+                handle_import_terrain,
             ));
     }
 }

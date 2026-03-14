@@ -191,6 +191,16 @@ pub struct TerrainData {
     
     /// Height of height cache
     pub cache_height: u32,
+    
+    /// Cached splatmap weights — 4 floats per pixel [grass, rock, dirt, snow]
+    /// Layout: `splat_cache[pixel_index * 4 + channel]` where channel 0..3 = RGBA
+    /// Dimensions match `cache_width × cache_height`.
+    #[reflect(ignore)]
+    pub splat_cache: Vec<f32>,
+    
+    /// Whether the splatmap cache has been modified and needs GPU re-upload
+    #[reflect(ignore)]
+    pub splat_dirty: bool,
 }
 
 impl TerrainData {

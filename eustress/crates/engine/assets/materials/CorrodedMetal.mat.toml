@@ -1,0 +1,24 @@
+# CorrodedMetal — rusted, weathered metal
+# High roughness from oxidation, reduced metallic
+
+[material]
+name = "CorrodedMetal"
+description = "Rusted and oxidized weathered metal"
+tags = ["metal", "rust", "corroded", "weathered"]
+
+[pbr]
+base_color = [0.55, 0.35, 0.2, 1.0]
+metallic = 0.6
+roughness = 0.8
+reflectance = 0.3
+
+[textures]
+base_color = "textures/corroded_metal_base_color.png"
+normal = "textures/corroded_metal_normal.png"
+metallic_roughness = "textures/corroded_metal_metallic_roughness.png"
+
+[physics]
+melting_point = 1811.0
+yield_strength = 120.0e6
+thermal_conductivity = 30.0
+specific_heat = 500.0

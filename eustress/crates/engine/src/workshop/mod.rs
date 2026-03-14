@@ -2,7 +2,7 @@
 //!
 //! Conversational chat interface for product ideation. Takes a natural language
 //! idea and guides the user through patent, SOTA validation, requirements,
-//! mesh generation, instance files, and catalog registration — step by step.
+//! mesh generation, part files, and catalog registration — step by step.
 //!
 //! ## Table of Contents
 //!
@@ -18,7 +18,7 @@
 //! - All AI interactions use the BYOK API key from Soul Settings
 //! - Conversation history persisted to ~/.eustress_engine/workshop/history/{session_id}/entries.json
 //! - Each pipeline step requires explicit user approval before spending credits
-//! - Generated .glb meshes loaded once to GPU; .toml instance files clone with unique properties
+//! - Generated .glb meshes loaded once to GPU; .part.toml files clone with unique properties
 
 pub mod persistence;
 pub mod normalizer;
@@ -145,6 +145,9 @@ pub enum ArtifactType {
     Readme,
     Catalog,
     Brief,
+    RuneSimScript,
+    RuneUiScript,
+    UiToml,
 }
 
 impl ArtifactType {
@@ -159,6 +162,9 @@ impl ArtifactType {
             ArtifactType::Readme => "readme",
             ArtifactType::Catalog => "catalog",
             ArtifactType::Brief => "brief",
+            ArtifactType::RuneSimScript => "rune_sim_script",
+            ArtifactType::RuneUiScript => "rune_ui_script",
+            ArtifactType::UiToml => "ui_toml",
         }
     }
 }
@@ -230,8 +236,12 @@ pub enum IdeationState {
     GeneratingRequirements,
     /// Running Blender headless for .glb meshes
     GeneratingMeshes,
-    /// Generating .glb.toml instance files
-    GeneratingInstances,
+    /// Generating .part.toml files placed in Workspace
+    GeneratingParts,
+    /// Generating Rune simulation scripts placed in SoulService
+    GeneratingSimScripts,
+    /// Generating ScreenGui UI TOML + Rune UI scripts placed in StarterGui
+    GeneratingUI,
     /// Registering in Products.md catalog
     FinalizingCatalog,
     /// All steps complete, ready for Systems 1-8 handoff
@@ -451,7 +461,7 @@ impl IdeationPipeline {
             },
             PipelineStep {
                 index: 5,
-                label: "Instance files".to_string(),
+                label: "Part files".to_string(),
                 status: StepStatus::Waiting,
                 artifact_count: 0,
                 mcp_endpoint: "/mcp/ideation/brief".to_string(),
@@ -459,6 +469,22 @@ impl IdeationPipeline {
             },
             PipelineStep {
                 index: 6,
+                label: "Rune sim scripts".to_string(),
+                status: StepStatus::Waiting,
+                artifact_count: 0,
+                mcp_endpoint: "/mcp/ideation/brief".to_string(),
+                estimated_cost: 0.04,
+            },
+            PipelineStep {
+                index: 7,
+                label: "UI + UI scripts".to_string(),
+                status: StepStatus::Waiting,
+                artifact_count: 0,
+                mcp_endpoint: "/mcp/ideation/brief".to_string(),
+                estimated_cost: 0.04,
+            },
+            PipelineStep {
+                index: 8,
                 label: "Catalog entry".to_string(),
                 status: StepStatus::Waiting,
                 artifact_count: 0,
@@ -790,10 +816,11 @@ fn handle_skip_mcp(
 /// Process Claude responses — route by step type:
 /// - None (chat): add system message, stay in Conversing state
 /// - Step 0 (normalize): parse TOML → write ideation_brief.toml → propose patent step
-/// - Steps 1-6 (artifacts): handled by artifact_gen::handle_artifact_completion
+/// - Steps 1-8 (artifacts): handled by artifact_gen::handle_artifact_completion
 fn handle_claude_response(
     mut events: MessageReader<ClaudeResponseEvent>,
     mut pipeline: ResMut<IdeationPipeline>,
+    space_root: Res<crate::space::SpaceRoot>,
 ) {
     for event in events.read() {
         // Mark MCP command as done if applicable
@@ -846,13 +873,13 @@ fn handle_claude_response(
                         // Set product name from brief
                         pipeline.product_name = brief.product.name.clone();
                         
-                        // Write to disk
-                        let output_dir = normalizer::product_output_dir(std::path::Path::new("."), &pipeline.product_name);
+                        // Write to disk — brief goes to Space/Workspace/{product}/
+                        let output_dir = normalizer::product_output_dir(&space_root.0, &pipeline.product_name);
                         match normalizer::write_brief_to_disk(&output_dir, &brief) {
                             Ok(path) => {
                                 pipeline.add_artifact_message(
                                     path.clone(),
-                                    ArtifactType::Toml,
+                                    ArtifactType::Brief,
                                 );
                                 pipeline.add_system_message(
                                     format!("Ideation brief generated: {}", path.display()),

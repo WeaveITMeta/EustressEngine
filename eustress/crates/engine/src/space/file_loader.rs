@@ -107,8 +107,9 @@ impl FileType {
         // EEP marker files (folder containers per EEP_SPECIFICATION.md)
         // _service.toml - marks a folder as a Service (Workspace, Lighting, etc.)
         // _instance.toml - marks a folder as a container (Model, Folder, ScreenGui, etc.)
+        // These are metadata files, NOT entities — return None so they are never spawned.
         if path_str.ends_with("_service.toml") || path_str.ends_with("_instance.toml") {
-            return Some(Self::Toml); // Container marker file
+            return None;
         }
         
         // Instance files (spawn as entities)
@@ -166,6 +167,9 @@ impl FileType {
             
             // StarterGui: GUI elements spawn as UI entities
             (Self::GuiElement | Self::Toml, "StarterGui") => true,
+            
+            // MaterialService: Material definitions spawn as material entities
+            (Self::Material, "MaterialService") => true,
             
             // Scripts in any service folder
             (Self::Soul | Self::Rune, _) => true,
@@ -280,6 +284,13 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
             });
         } else {
             // Regular file
+
+            // Skip EEP marker files — these define folder types, not entities
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if fname == "_instance.toml" || fname == "_service.toml" {
+                continue;
+            }
+
             let Some(file_type) = FileType::from_path(&path) else { continue };
             let Ok(meta) = std::fs::metadata(&path) else { continue };
             let name = path.file_stem()
@@ -301,12 +312,12 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
 }
 
 /// Scan a Space directory and discover all loadable files and subdirectories.
-/// Returns a flat list — Directory entries carry their children inline.
+/// Returns service directories as Directory entries with their children inline.
 /// 
 /// Services are discovered from the filesystem by looking for directories
 /// containing `_service.toml` marker files (EEP-compliant, no hardcoding).
 pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
-    let mut files = Vec::new();
+    let mut entries = Vec::new();
     
     // Discover services from filesystem - look for directories with _service.toml
     // This replaces the hardcoded service list with EEP-compliant discovery
@@ -315,10 +326,22 @@ pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
     for service_name in &services {
         let service_path = space_path.join(service_name);
         if !service_path.exists() { continue; }
-        files.extend(scan_dir_entries(&service_path, service_name));
+        
+        // Return the service directory as a Directory entry with its contents as children
+        // This ensures files inside services (like materials) get parented to the service entity
+        let children = scan_dir_entries(&service_path, service_name);
+        entries.push(FileMetadata {
+            path: service_path,
+            file_type: FileType::Directory,
+            service: service_name.clone(),
+            name: service_name.clone(),
+            size: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            children,
+        });
     }
     
-    files
+    entries
 }
 
 /// Discover services by scanning for directories containing `_service.toml` marker files.
@@ -367,6 +390,7 @@ pub fn spawn_file_entry(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     registry: &mut ResMut<SpaceFileRegistry>,
+    material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
     space_path: &Path,
     file_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -386,6 +410,16 @@ pub fn spawn_file_entry(
     // Check if this file type should spawn an entity in this service
     if !file_meta.file_type.spawns_entity_in_service(&file_meta.service) {
         debug!("Skipping {:?} in {} (doesn't spawn entity)", file_meta.path, file_meta.service);
+        return None;
+    }
+
+    // Skip _instance.toml marker files — they define the parent folder type,
+    // not entities to render in the Explorer tree
+    let is_instance_marker = file_meta.path.file_name()
+        .map(|n| n.to_string_lossy() == "_instance.toml")
+        .unwrap_or(false);
+    if is_instance_marker {
+        debug!("Skipping {:?} (folder container marker, not an entity)", file_meta.path);
         return None;
     }
 
@@ -421,9 +455,17 @@ pub fn spawn_file_entry(
                             commands,
                             asset_server,
                             materials,
+                            material_registry,
                             file_meta.path.clone(),
                             instance,
                         );
+                        // Attach LoadedFromFile so the Explorer can classify this
+                        // entity by service (Workspace, Lighting, etc.)
+                        commands.entity(e).insert(LoadedFromFile {
+                            path: file_meta.path.clone(),
+                            file_type: file_meta.file_type,
+                            service: file_meta.service.clone(),
+                        });
                         registry.register(file_meta.path.clone(), e, file_meta.clone());
                         e
                     }
@@ -553,51 +595,68 @@ pub fn spawn_file_entry(
         }
 
         FileType::GuiElement => {
-            // Load GUI element files (.textlabel.toml, .frame.toml, etc.) as UI entities.
-            // path.extension() returns "toml" for compound paths, so extract the
-            // second-to-last stem segment (e.g. "Panel.frame.toml" → stem "Panel.frame" → ext "frame").
-            let gui_ext = file_meta.path
-                .file_stem()  // "Panel.frame"
-                .and_then(|s| std::path::Path::new(s).extension())  // "frame"
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let class_name = match gui_ext {
-                "textlabel" => eustress_common::classes::ClassName::TextLabel,
-                "textbutton" => eustress_common::classes::ClassName::TextButton,
-                "frame" | "screengui" => eustress_common::classes::ClassName::Frame,
-                "imagelabel" => eustress_common::classes::ClassName::ImageLabel,
-                "imagebutton" => eustress_common::classes::ClassName::ImageButton,
-                "scrollingframe" => eustress_common::classes::ClassName::ScrollingFrame,
-                "textbox" => eustress_common::classes::ClassName::TextBox,
-                "viewportframe" => eustress_common::classes::ClassName::ViewportFrame,
-                _ => eustress_common::classes::ClassName::Frame, // Default to Frame
-            };
-            // Name is everything before the first dot (e.g. "Panel" from "Panel.frame.toml")
-            let display_name = file_meta.path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.splitn(2, '.').next())
-                .unwrap_or(&file_meta.name)
-                .to_string();
-            
-            let e = commands.spawn((
-                eustress_common::classes::Instance {
-                    name: display_name.clone(),
-                    class_name,
-                    archivable: true,
-                    id: 0,
-                    ai: false,
-                },
-                LoadedFromFile {
-                    path: file_meta.path.clone(),
-                    file_type: file_meta.file_type,
-                    service: file_meta.service.clone(),
-                },
-                Name::new(display_name.clone()),
-            )).id();
-            registry.register(file_meta.path.clone(), e, file_meta.clone());
-            info!("🖼️ Loaded GUI element {} ({:?}) from {:?}", display_name, class_name, file_meta.path);
-            e
+            // Load GUI element files (.textlabel.toml, .frame.toml, etc.) as Bevy UI entities.
+            // Parses the TOML file for visual properties (position, size, colors, text)
+            // and spawns with proper Bevy UI components (Node, BackgroundColor, Text, etc.)
+            // so they render visually in the viewport.
+            match super::gui_loader::load_gui_definition(&file_meta.path) {
+                Ok(gui_def) => {
+                    let display_name = super::gui_loader::gui_display_name(&file_meta.path);
+                    let gui_type = super::gui_loader::gui_class_from_extension(&file_meta.path);
+                    let e = super::gui_loader::spawn_gui_element(
+                        commands,
+                        &file_meta.path,
+                        &gui_def,
+                    );
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("🖼️ Loaded GUI element {} ({}) from {:?}", display_name, gui_type, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("Failed to load GUI element {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
+        }
+
+        FileType::Material => {
+            // Load .mat.toml files into MaterialRegistry and spawn Explorer entity
+            match super::material_loader::load_material_definition(&file_meta.path) {
+                Ok(definition) => {
+                    let mat_name = if definition.material.name.is_empty() {
+                        super::material_loader::material_name_from_path(&file_meta.path)
+                    } else {
+                        definition.material.name.clone()
+                    };
+                    let mat_toml_dir = file_meta.path.parent().unwrap_or(std::path::Path::new("."));
+                    let standard_mat = super::material_loader::build_standard_material(
+                        &definition,
+                        asset_server,
+                        mat_toml_dir,
+                        space_path,
+                    );
+                    let handle = materials.add(standard_mat);
+                    // Register material in the MaterialRegistry for Part resolution
+                    material_registry.insert(
+                        mat_name.clone(),
+                        handle,
+                        definition.clone(),
+                        file_meta.path.clone(),
+                    );
+                    let e = super::material_loader::spawn_material_entity(
+                        commands,
+                        file_meta.path.clone(),
+                        &definition,
+                    );
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("🎨 Loaded material '{}' from {:?}", mat_name, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("Failed to load material {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
         }
 
         FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
@@ -619,14 +678,15 @@ pub fn spawn_file_entry(
     Some(entity)
 }
 
-/// Spawn a Directory entry as a Folder entity, then spawn all its children
-/// parented to that Folder.  Recurses for nested subdirectories.
+/// Spawn a Directory entry as a Folder entity (or Service entity if it contains _service.toml),
+/// then spawn all its children parented to that entity. Recurses for nested subdirectories.
 pub fn spawn_directory_entry(
     commands: &mut Commands,
     asset_server: &Res<AssetServer>,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     registry: &mut ResMut<SpaceFileRegistry>,
+    material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
     space_path: &Path,
     dir_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -639,6 +699,45 @@ pub fn spawn_directory_entry(
     // Skip 'meshes' directories - these are asset storage, not part of the scene hierarchy
     if dir_meta.name == "meshes" || dir_meta.path.components().any(|c| c.as_os_str() == "meshes") {
         debug!("Skipping meshes directory {:?} (asset storage)", dir_meta.path);
+        return;
+    }
+
+    // Check for _service.toml — this is a service root directory
+    let service_toml_path = dir_meta.path.join("_service.toml");
+    if service_toml_path.exists() {
+        // Spawn as a Service entity, then parent children to it
+        match super::service_loader::load_service_definition(&service_toml_path) {
+            Ok(service_def) => {
+                let service_entity = super::service_loader::spawn_service(
+                    commands,
+                    service_toml_path.clone(),
+                    service_def,
+                );
+                registry.register(service_toml_path, service_entity, dir_meta.clone());
+                info!("🏢 Spawned Service '{}' with {} children", dir_meta.name, dir_meta.children.len());
+                
+                // Spawn all children parented to this service
+                for child in &dir_meta.children {
+                    match child.file_type {
+                        FileType::Directory => {
+                            spawn_directory_entry(
+                                commands, asset_server, meshes, materials, registry,
+                                material_registry, space_path, child, Some(service_entity),
+                            );
+                        }
+                        _ => {
+                            spawn_file_entry(
+                                commands, asset_server, meshes, materials, registry,
+                                material_registry, space_path, child, Some(service_entity),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!("Failed to load service {:?}: {}", service_toml_path, err);
+            }
+        }
         return;
     }
 
@@ -664,23 +763,55 @@ pub fn spawn_directory_entry(
     };
 
     // Spawn the Folder / ScreenGui / Model entity
-    let folder_entity = commands.spawn((
-        eustress_common::classes::Instance {
-            name: dir_meta.name.clone(),
-            class_name,
-            archivable: true,
-            id: 0,
-            ai: false,
-        },
-        LoadedFromFile {
-            path: dir_meta.path.clone(),
-            file_type: FileType::Directory,
-            service: dir_meta.service.clone(),
-        },
-        Name::new(dir_meta.name.clone()),
-        Transform::default(),
-        Visibility::default(),
-    )).id();
+    // ScreenGui directories need Bevy UI components (Node, GlobalZIndex) instead
+    // of 3D components (Transform, Visibility) so child UI elements render correctly.
+    let is_screen_gui = matches!(class_name, eustress_common::classes::ClassName::ScreenGui);
+
+    let folder_entity = if is_screen_gui {
+        // ScreenGui: fullscreen UI root — uses Node layout so children render as Bevy UI
+        commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+            },
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            GlobalZIndex(100), // Above 3D scene, below Slint overlay
+            BackgroundColor(Color::NONE),
+        )).id()
+    } else {
+        // Regular Folder / Model — 3D entity
+        commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+            },
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Transform::default(),
+            Visibility::default(),
+        )).id()
+    };
 
     // Parent to containing Folder or service root if provided
     if let Some(parent) = parent_entity {
@@ -696,13 +827,13 @@ pub fn spawn_directory_entry(
             FileType::Directory => {
                 spawn_directory_entry(
                     commands, asset_server, meshes, materials, registry,
-                    space_path, child, Some(folder_entity),
+                    material_registry, space_path, child, Some(folder_entity),
                 );
             }
             _ => {
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
-                    space_path, child, Some(folder_entity),
+                    material_registry, space_path, child, Some(folder_entity),
                 );
             }
         }
@@ -716,6 +847,7 @@ pub fn load_space_files_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<SpaceFileRegistry>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     space_root: Res<super::SpaceRoot>,
 ) {
     let space_path = &space_root.0;
@@ -735,14 +867,14 @@ pub fn load_space_files_system(
             FileType::Directory => {
                 spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, space_path, entry, None,
                 );
             }
             // Regular file → entity at service root level (no parent)
             _ => {
                 spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, space_path, entry, None,
                 );
             }
         }
@@ -759,6 +891,7 @@ impl Plugin for SpaceFileLoaderPlugin {
         
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
+            .init_resource::<super::material_loader::MaterialRegistry>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .add_systems(Startup, (

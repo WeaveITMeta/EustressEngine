@@ -116,6 +116,7 @@ pub use formats::{
     import_pts, import_dxf_points, export_ply,
     // Elevation data
     ElevationData, import_elevation, import_asc, import_hgt, import_geotiff,
+    import_r16, import_png_heightmap,
     // Utilities
     detect_format, supported_extensions, is_supported,
 };

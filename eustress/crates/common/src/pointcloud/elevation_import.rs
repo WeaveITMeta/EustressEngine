@@ -221,6 +221,8 @@ pub fn elevation_to_terrain(
         height_cache: resampled,
         cache_width: target_width,
         cache_height: target_height,
+        splat_cache: Vec::new(),
+        splat_dirty: false,
     };
     
     Ok(ElevationImportResult {

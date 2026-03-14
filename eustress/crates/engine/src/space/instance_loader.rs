@@ -121,9 +121,16 @@ pub struct InstanceProperties {
     pub cast_shadow: bool,
     #[serde(default)]
     pub reflectance: f32,
+    /// Material name — resolved from MaterialRegistry first, then Material enum fallback
+    #[serde(default = "default_material_name_plastic")]
+    pub material: String,
     /// When true, the entity cannot be selected via 3D click (e.g. Baseplate)
     #[serde(default)]
     pub locked: bool,
+}
+
+fn default_material_name_plastic() -> String {
+    "Plastic".to_string()
 }
 
 fn default_color() -> [f32; 4] {
@@ -143,6 +150,7 @@ impl Default for InstanceProperties {
             can_collide: true,
             cast_shadow: true,
             reflectance: 0.0,
+            material: default_material_name_plastic(),
             locked: false,
         }
     }
@@ -632,6 +640,7 @@ pub fn spawn_instance(
     commands: &mut Commands,
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
+    material_registry: &super::material_loader::MaterialRegistry,
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
@@ -725,18 +734,18 @@ pub fn spawn_instance(
     info!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
         name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
     
-    // Build material from properties
+    // Build material from properties — registry-first, enum fallback
     let [r, g, b, a] = instance.properties.color;
     let transparency = instance.properties.transparency;
-    let alpha = a * (1.0 - transparency);
-    let material_handle = materials.add(StandardMaterial {
-        base_color: Color::srgba(r, g, b, alpha),
-        alpha_mode: if alpha < 1.0 { AlphaMode::Blend } else { AlphaMode::Opaque },
-        perceptual_roughness: 0.7,
-        metallic: 0.0,
-        reflectance: instance.properties.reflectance,
-        ..default()
-    });
+    let base_color = Color::srgba(r, g, b, a);
+    let material_handle = super::material_loader::resolve_material(
+        &instance.properties.material,
+        material_registry,
+        materials,
+        base_color,
+        transparency,
+        instance.properties.reflectance,
+    );
     
     let scale = Vec3::from_array(instance.transform.scale);
     

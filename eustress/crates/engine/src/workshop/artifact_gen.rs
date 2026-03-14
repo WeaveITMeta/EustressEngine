@@ -2,22 +2,29 @@
 //!
 //! Each pipeline step after normalization generates a specific artifact type.
 //! This module defines the system prompts, output file paths, and dispatch logic
-//! for each of the 6 artifact generation steps.
+//! for each of the 8 artifact generation steps.
 //!
 //! ## Table of Contents
 //!
 //! 1. ArtifactStep enum — maps pipeline step indices to generation logic
-//! 2. Per-step system prompts — patent, SOTA, requirements, meshes, instances, catalog
+//! 2. Per-step system prompts — patent, SOTA, requirements, meshes, parts, sim scripts, UI, catalog
 //! 3. dispatch_artifact_request — spawns background thread for approved artifact steps
 //! 4. handle_artifact_response — processes completed artifact generation (write to disk)
 //!
 //! ## Architecture
 //!
-//! - Each step requires an approved MCP command before dispatching
-//! - The brief TOML (from normalization) is included as context in every prompt
-//! - Generated artifacts are written to docs/Products/{ProductName}/
-//! - Each step fires a ClaudeResponseEvent with the step_index set
-//! - Mesh generation (step 4) is special: it generates Blender Python scripts, not markdown
+//! All generated artifacts live in the Space/Universe filesystem hierarchy:
+//!
+//! - **Workspace/{product}/** — product directory: part.toml files, patent, SOTA,
+//!   requirements, brief, catalog README, Blender script
+//! - **Universe/assets/meshes/{product}/** — shared .glb mesh files (referenced by part.toml)
+//! - **SoulService/{product}/** — Rune simulation scripts (physics, fitness)
+//! - **StarterGui/{product}/** — ScreenGui UI TOML files
+//! - **StarterGui/{product}/scripts/** — Rune UI data-feedback scripts
+//!
+//! No docs/Products/ directory is used in Eustress. Each step requires an approved
+//! MCP command before dispatching. The brief TOML is included as context in every prompt.
+//! Each step fires a ClaudeResponseEvent with the step_index set.
 
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -26,7 +33,7 @@ use eustress_common::soul::ClaudeConfig;
 
 use super::{
     IdeationPipeline, IdeationState, ClaudeResponseEvent,
-    McpCommandStatus, ArtifactType, normalizer,
+    McpCommandStatus, ArtifactType,
     claude_bridge::WorkshopClaudeTasks,
 };
 
@@ -45,9 +52,13 @@ pub enum ArtifactStep {
     Requirements,
     /// Step 4: Generate Blender Python scripts for mesh creation
     MeshGeneration,
-    /// Step 5: Generate .glb.toml instance files
-    InstanceFiles,
-    /// Step 6: Generate README.md and update Products.md catalog
+    /// Step 5: Generate .part.toml files placed in Workspace
+    PartFiles,
+    /// Step 6: Generate Rune simulation scripts placed in SoulService
+    SimScripts,
+    /// Step 7: Generate ScreenGui UI TOML + Rune UI scripts placed in StarterGui
+    UiGeneration,
+    /// Step 8: Generate README.md and update Products.md catalog
     CatalogEntry,
 }
 
@@ -60,8 +71,10 @@ impl ArtifactStep {
             2 => Some(Self::SotaValidation),
             3 => Some(Self::Requirements),
             4 => Some(Self::MeshGeneration),
-            5 => Some(Self::InstanceFiles),
-            6 => Some(Self::CatalogEntry),
+            5 => Some(Self::PartFiles),
+            6 => Some(Self::SimScripts),
+            7 => Some(Self::UiGeneration),
+            8 => Some(Self::CatalogEntry),
             _ => None,
         }
     }
@@ -73,8 +86,10 @@ impl ArtifactStep {
             Self::SotaValidation => 2,
             Self::Requirements => 3,
             Self::MeshGeneration => 4,
-            Self::InstanceFiles => 5,
-            Self::CatalogEntry => 6,
+            Self::PartFiles => 5,
+            Self::SimScripts => 6,
+            Self::UiGeneration => 7,
+            Self::CatalogEntry => 8,
         }
     }
 
@@ -85,7 +100,9 @@ impl ArtifactStep {
             Self::SotaValidation => IdeationState::GeneratingSotaValidation,
             Self::Requirements => IdeationState::GeneratingRequirements,
             Self::MeshGeneration => IdeationState::GeneratingMeshes,
-            Self::InstanceFiles => IdeationState::GeneratingInstances,
+            Self::PartFiles => IdeationState::GeneratingParts,
+            Self::SimScripts => IdeationState::GeneratingSimScripts,
+            Self::UiGeneration => IdeationState::GeneratingUI,
             Self::CatalogEntry => IdeationState::FinalizingCatalog,
         }
     }
@@ -97,19 +114,24 @@ impl ArtifactStep {
             Self::SotaValidation => "sota",
             Self::Requirements => "requirements",
             Self::MeshGeneration => "meshes",
-            Self::InstanceFiles => "instances",
+            Self::PartFiles => "parts",
+            Self::SimScripts => "sim_scripts",
+            Self::UiGeneration => "ui",
             Self::CatalogEntry => "catalog",
         }
     }
 
-    /// Output filename relative to the product directory
+    /// Output filename relative to the product docs directory (for doc artifacts)
+    /// or a marker for runtime artifacts that go into Space/Universe directories.
     pub fn output_filename(&self) -> &'static str {
         match self {
             Self::Patent => "PATENT.md",
             Self::SotaValidation => "SOTA_VALIDATION.md",
             Self::Requirements => "EustressEngine_Requirements.md",
-            Self::MeshGeneration => "V1/meshes/generate_meshes.py",
-            Self::InstanceFiles => "V1/",  // Directory — multiple .glb.toml files
+            Self::MeshGeneration => "generate_meshes.py",
+            Self::PartFiles => "__WORKSPACE__",  // Written to Space/Workspace/{product}/
+            Self::SimScripts => "__SOULSERVICE__",   // Written to Space/SoulService/{product}/
+            Self::UiGeneration => "__STARTERGUI__",   // Written to Space/StarterGui/{product}/
             Self::CatalogEntry => "README.md",
         }
     }
@@ -121,7 +143,9 @@ impl ArtifactStep {
             Self::SotaValidation => ArtifactType::Sota,
             Self::Requirements => ArtifactType::Requirements,
             Self::MeshGeneration => ArtifactType::Mesh,
-            Self::InstanceFiles => ArtifactType::Toml,
+            Self::PartFiles => ArtifactType::Toml,
+            Self::SimScripts => ArtifactType::RuneSimScript,
+            Self::UiGeneration => ArtifactType::UiToml,
             Self::CatalogEntry => ArtifactType::Catalog,
         }
     }
@@ -133,7 +157,9 @@ impl ArtifactStep {
             Self::SotaValidation => 0.04,
             Self::Requirements => 0.04,
             Self::MeshGeneration => 0.03,
-            Self::InstanceFiles => 0.02,
+            Self::PartFiles => 0.02,
+            Self::SimScripts => 0.04,
+            Self::UiGeneration => 0.04,
             Self::CatalogEntry => 0.01,
         }
     }
@@ -145,7 +171,9 @@ impl ArtifactStep {
             Self::SotaValidation => SOTA_SYSTEM_PROMPT,
             Self::Requirements => REQUIREMENTS_SYSTEM_PROMPT,
             Self::MeshGeneration => MESH_SYSTEM_PROMPT,
-            Self::InstanceFiles => INSTANCE_SYSTEM_PROMPT,
+            Self::PartFiles => PART_SYSTEM_PROMPT,
+            Self::SimScripts => SIM_SCRIPTS_SYSTEM_PROMPT,
+            Self::UiGeneration => UI_GENERATION_SYSTEM_PROMPT,
             Self::CatalogEntry => CATALOG_SYSTEM_PROMPT,
         }
     }
@@ -249,44 +277,57 @@ The script must be runnable headless via: blender --background --python generate
 
 Output ONLY the Python script. Do not wrap in markdown code fences."#;
 
-/// System prompt for .glb.toml instance file generation
-const INSTANCE_SYSTEM_PROMPT: &str = r#"You are an instance file generator for the Eustress Engine.
+/// System prompt for .part.toml file generation
+/// Part files go in Workspace/{product}/ and reference meshes via assets/meshes/{product}/
+const PART_SYSTEM_PROMPT: &str = r#"You are a part file generator for the Eustress Engine.
 
-Given an ideation brief (TOML) and the list of generated mesh files, generate .glb.toml instance files for each mesh part. Each instance file uses this PascalCase schema:
+Given an ideation brief (TOML), generate .part.toml files for each mesh part.
+These files will be placed in the Space's Workspace/{product_name}/ directory.
+Meshes live in the Universe's assets/meshes/{product_name}/ directory.
+
+Each part file uses this schema (lowercase keys matching InstanceDefinition):
 
 ```toml
-[Asset]
-GlbPath = "meshes/{component_name}.glb"
+[asset]
+mesh = "assets/meshes/{product_name}/{component_name}.glb"
+scene = "Scene0"
 
-[Transform]
-Position = [0.0, 0.0, 0.0]
-Rotation = [0.0, 0.0, 0.0, 1.0]
-Scale = [1.0, 1.0, 1.0]
+[transform]
+position = [0.0, 1.0, -5.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
 
-[Properties]
-ClassName = "{ComponentName}"
-DisplayName = "{Human Readable Name}"
-# Add component-specific properties from the brief
+[properties]
+color = [0.8, 0.8, 0.8, 1.0]
+transparency = 0.0
+anchored = true
+can_collide = true
+cast_shadow = true
 
-[Material]
-BaseColor = [0.8, 0.8, 0.8, 1.0]
-Metallic = 0.0
-Roughness = 0.5
+[metadata]
+class_name = "Part"
+archivable = true
 
-[Thermodynamic]
-Temperature = 293.15
-SpecificHeat = 897.0
-ThermalConductivity = 237.0
-Density = 2700.0
+[material]
+name = "Al 6061-T6"
+density = 2700.0
+thermal_conductivity = 167.0
+specific_heat = 896.0
+young_modulus = 68900.0
 
-[Electrochemical]
+[thermodynamic]
+temperature = 293.15
+pressure = 101325.0
+
+[electrochemical]
 # Only for electrochemically active components
-IonicConductivity = 0.003
-VoltageWindow = [0.0, 5.0]
 ```
 
+IMPORTANT: Position the first/main component at [0.0, 1.0, -5.0] so it spawns in front of the camera.
+Offset other components relative to the main one based on the assembly layout.
+
 Generate one TOML block per mesh part. Separate each file with a comment line:
-# --- FILE: {component_name}.glb.toml ---
+# --- FILE: {component_name}.part.toml ---
 
 Use real material property values from the brief. Do not invent numbers.
 Output ONLY the TOML content. Do not wrap in markdown code fences."#;
@@ -310,6 +351,125 @@ SECOND: A Products.md catalog entry (single row to append) in this format:
 | {Name} | {Category} | {Tier} | {Key Spec} | {Innovation Count} | {Date} |
 
 Output both sections. Do not wrap in code fences."#;
+
+/// System prompt for Rune simulation script generation
+/// Scripts go in SoulService/{product}/ for physics/chemistry simulation logic
+const SIM_SCRIPTS_SYSTEM_PROMPT: &str = r#"You are a Rune simulation script generator for the Eustress Engine.
+
+Given an ideation brief (TOML) and the EustressEngine_Requirements.md context, generate Rune scripts
+that implement the simulation physics and chemistry for this product.
+
+These scripts will be placed in the Space's SoulService/{product_name}/ directory.
+
+The Rune scripting environment provides these APIs:
+- `sim.time()` — current simulation time in seconds
+- `sim.dt()` — timestep in simulation seconds
+- `sim.is_running()` — check if simulation is active
+- `sim.get("watchpoint_name")` — get current watchpoint value
+- `sim.record("name", value)` — record a value to a watchpoint
+- `sim.add_watchpoint("name", "label", "unit")` — register a new watchpoint
+- `sim.add_breakpoint("name", "variable", ">", threshold)` — add simulation breakpoint
+- `sim.set_time_scale(scale)` — adjust time compression
+- `ecs.get_voltage("entity_name")` — get entity voltage
+- `ecs.get_soc("entity_name")` — get state of charge
+- `ecs.get_temperature("entity_name")` — get entity temperature
+- `ecs.get_dendrite_risk("entity_name")` — get dendrite risk
+- `ecs.get_sim("key")` — get simulation value by key
+- `ecs.set_sim("key", value)` — set simulation value
+- `log_info("message")`, `log_warn("message")`, `log_error("message")`
+
+Generate the following scripts:
+
+1. **{product_name}_simulation.rune** — Main simulation loop implementing the governing equations
+   from the requirements. Register watchpoints on startup, compute physics each tick.
+
+2. **{product_name}_fitness.rune** — Fitness scoring function that reads watchpoints and
+   computes the fitness score per the requirements. Records "fitness_score" watchpoint.
+
+Separate each file with:
+# --- FILE: {filename}.rune ---
+
+Use the real equations and constants from the brief. Match watchpoint names to the
+brief's target_specs metrics. Output ONLY the Rune script content."#;
+
+/// System prompt for ScreenGui UI TOML + Rune UI scripts generation
+/// UI TOML goes in StarterGui/{product}/, scripts go in StarterGui/{product}/scripts/
+const UI_GENERATION_SYSTEM_PROMPT: &str = r#"You are a UI generator for the Eustress Engine.
+
+Given an ideation brief (TOML), generate:
+1. A ScreenGui TOML file that defines the data feedback dashboard
+2. A Rune UI script that wires simulation data to the UI elements
+
+These files will be placed in the Space's StarterGui/{product_name}/ directory.
+
+The ScreenGui TOML format uses the GuiElement .screengui.toml pattern:
+
+```toml
+# {product_name}_dashboard.screengui.toml
+[metadata]
+class_name = "ScreenGui"
+archivable = true
+
+[ui]
+text = ""
+background_color = [0.1, 0.1, 0.12, 0.85]
+background_transparency = 0.15
+border_color = [0.3, 0.3, 0.35, 1.0]
+border_size = 1.0
+position_x = 0.7
+position_y = 0.02
+size_x = 0.28
+size_y = 0.45
+anchor_point_x = 0.0
+anchor_point_y = 0.0
+z_index = 10
+```
+
+For child UI elements, generate .textlabel.toml and .frame.toml files:
+
+```toml
+# Title.textlabel.toml
+[metadata]
+class_name = "TextLabel"
+
+[ui]
+text = "Product Dashboard"
+font_size = 18.0
+text_color = [1.0, 1.0, 1.0, 1.0]
+background_transparency = 1.0
+size_x = 1.0
+size_y = 0.08
+```
+
+```toml
+# Voltage.textlabel.toml — updates via Rune script
+[metadata]
+class_name = "TextLabel"
+
+[ui]
+text = "Voltage: --"
+font_size = 14.0
+text_color = [0.7, 0.9, 1.0, 1.0]
+background_transparency = 1.0
+```
+
+For the Rune UI script (placed in scripts/ subdirectory), use the ECS bindings API:
+- `ecs.get_sim("watchpoint_name")` — read simulation values
+- `ecs.get_voltage("entity")`, `ecs.get_temperature("entity")`, etc.
+- `log_info("message")` — debug logging
+- The script runs each frame and updates UI text labels with current sim data
+
+Generate these outputs separated by file markers:
+
+1. **{product_name}_dashboard.screengui.toml** — Main ScreenGui container
+2. **Title.textlabel.toml** — Dashboard title
+3. One **.textlabel.toml** per key metric from the brief's target_specs
+4. **scripts/{product_name}_ui.rune** — Script that reads sim data and updates labels
+
+Separate each file with:
+# --- FILE: {filename} ---
+
+Output ONLY the file contents. Do not wrap in markdown code fences."#;
 
 // ============================================================================
 // 3. dispatch_artifact_request — spawn background thread for approved steps
@@ -344,7 +504,7 @@ pub fn dispatch_artifact_requests(
 
         // Determine which step this is from the content
         let content = &m.content;
-        for step_idx in 1u32..=6 {
+        for step_idx in 1u32..=8 {
             if let Some(step) = ArtifactStep::from_step_index(step_idx) {
                 if content.contains(step.step_param()) {
                     return Some((m.id, step));
@@ -435,17 +595,24 @@ pub fn dispatch_artifact_requests(
 // ============================================================================
 
 /// Processes a completed artifact generation response:
-/// - Writes the generated content to the product directory
+/// - Writes the generated content to the correct directory based on artifact type:
+///   - Product docs (patent, SOTA, requirements, brief, catalog, Blender script)
+///     → Space/Workspace/{product}/  (child of the product directory)
+///   - Part TOML files → Space/Workspace/{product}/
+///   - .glb mesh files → Universe/assets/meshes/{product}/ (via Blender script output dir)
+///   - Rune sim scripts → Space/SoulService/{product}/
+///   - UI TOML + UI scripts → Space/StarterGui/{product}/ (scripts in scripts/ subfolder)
 /// - Adds an artifact message to the conversation
 /// - Advances the pipeline to the next step (or proposes it as an MCP command)
 pub fn handle_artifact_completion(
     mut events: MessageReader<ClaudeResponseEvent>,
     mut pipeline: ResMut<IdeationPipeline>,
+    space_root: Res<crate::space::SpaceRoot>,
 ) {
     for event in events.read() {
-        // Only handle artifact step responses (step_index 1-6)
+        // Only handle artifact step responses (step_index 1-8)
         let step_idx = match event.step_index {
-            Some(idx) if idx >= 1 && idx <= 6 => idx,
+            Some(idx) if idx >= 1 && idx <= 8 => idx,
             _ => continue,
         };
 
@@ -454,37 +621,80 @@ pub fn handle_artifact_completion(
             None => continue,
         };
 
-        // Determine output path
         let product_name = pipeline.product_name.clone();
-        let output_dir = normalizer::product_output_dir(std::path::Path::new("."), &product_name);
+        let safe_name = safe_product_name(&product_name);
+
+        // Space directory — all product artifacts live in the Space filesystem
+        let space_path = &space_root.0;
+
+        // Product directory in Workspace — the primary product container
+        // All doc artifacts (patent, SOTA, requirements, brief, README) are children of this
+        let workspace_product_dir = space_path.join("Workspace").join(&safe_name);
+
+        // Universe assets directory for shared mesh files
+        let universe_assets_dir = resolve_universe_assets_dir(space_path, &safe_name);
 
         let output_path = match step {
-            ArtifactStep::InstanceFiles => {
-                // Instance files: split by file separator and write each one
-                write_instance_files(&output_dir, &event.content);
-                output_dir.join("V1")
+            ArtifactStep::PartFiles => {
+                // Part .toml files → Space/Workspace/{product}/
+                write_split_files(&workspace_product_dir, &event.content, ".part.toml");
+                workspace_product_dir.clone()
+            }
+            ArtifactStep::SimScripts => {
+                // Rune simulation scripts → Space/SoulService/{product}/
+                let soul_product_dir = space_path.join("SoulService").join(&safe_name);
+                write_split_files(&soul_product_dir, &event.content, ".rune");
+                soul_product_dir
+            }
+            ArtifactStep::UiGeneration => {
+                // UI TOML + UI scripts → Space/StarterGui/{product}/
+                // Scripts go in a scripts/ subfolder (handled by write_split_files path logic)
+                let gui_product_dir = space_path.join("StarterGui").join(&safe_name);
+                write_split_files(&gui_product_dir, &event.content, "");
+                gui_product_dir
+            }
+            ArtifactStep::MeshGeneration => {
+                // Blender script → Workspace/{product}/generate_meshes.py
+                // Ensure Universe assets/meshes/{product}/ directory exists for script output
+                let _ = std::fs::create_dir_all(&universe_assets_dir);
+                let path = workspace_product_dir.join("generate_meshes.py");
+                let _ = std::fs::create_dir_all(&workspace_product_dir);
+                // Inject the correct output directory into the script content
+                let patched_content = event.content.replace(
+                    "OUTPUT_DIR = ",
+                    &format!("OUTPUT_DIR = r\"{}\"  # ", universe_assets_dir.display()),
+                );
+                let final_content = if patched_content == event.content {
+                    format!(
+                        "# Mesh output directory: {}\n# Run: blender --background --python generate_meshes.py\n\n{}",
+                        universe_assets_dir.display(),
+                        event.content
+                    )
+                } else {
+                    patched_content
+                };
+                write_artifact_file(&path, &final_content);
+                path
             }
             ArtifactStep::CatalogEntry => {
-                // Split README.md and Products.md entry
+                // README.md → Workspace/{product}/README.md
                 let parts: Vec<&str> = event.content.splitn(2, "---CATALOG_SEPARATOR---").collect();
                 if let Some(readme) = parts.first() {
-                    let readme_path = output_dir.join("README.md");
+                    let readme_path = workspace_product_dir.join("README.md");
                     write_artifact_file(&readme_path, readme.trim());
                 }
                 if let Some(catalog_entry) = parts.get(1) {
-                    // Append to Products.md at project root
-                    append_catalog_entry(catalog_entry.trim());
+                    // Catalog entry appended to Space-level Products.md
+                    let catalog_path = space_path.join("Products.md");
+                    append_catalog_entry_to(&catalog_path, catalog_entry.trim());
                 }
-                output_dir.join("README.md")
+                workspace_product_dir.join("README.md")
             }
             _ => {
-                // Standard single-file artifacts (patent, SOTA, requirements, mesh script)
+                // Single-file artifacts in the product directory (patent, SOTA, requirements)
                 let filename = step.output_filename();
-                let path = output_dir.join(filename);
-                // Create parent directories if needed
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+                let path = workspace_product_dir.join(filename);
+                let _ = std::fs::create_dir_all(&workspace_product_dir);
                 write_artifact_file(&path, &event.content);
                 path
             }
@@ -543,12 +753,16 @@ fn write_artifact_file(path: &PathBuf, content: &str) {
     }
 }
 
-/// Write multiple instance files from a single response using file separators
-fn write_instance_files(output_dir: &PathBuf, content: &str) {
-    let v1_dir = output_dir.join("V1");
-    let _ = std::fs::create_dir_all(&v1_dir);
+/// Write multiple files from a single Claude response using "# --- FILE: {name} ---" markers.
+///
+/// `output_dir` — base directory for all files (created if missing).
+/// `default_extension` — appended to filenames that lack an extension (e.g. ".part.toml").
+///   Pass "" to leave filenames as-is.
+///
+/// Files whose name starts with "scripts/" will be placed in an output_dir/scripts/ subdirectory.
+fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &str) {
+    let _ = std::fs::create_dir_all(output_dir);
 
-    // Split on "# --- FILE: {name} ---" markers
     let mut current_filename: Option<String> = None;
     let mut current_content = String::new();
 
@@ -556,7 +770,7 @@ fn write_instance_files(output_dir: &PathBuf, content: &str) {
         if line.starts_with("# --- FILE:") && line.ends_with("---") {
             // Write previous file if any
             if let Some(ref filename) = current_filename {
-                let path = v1_dir.join(filename);
+                let path = resolve_split_file_path(output_dir, filename, default_extension);
                 write_artifact_file(&path, current_content.trim());
             }
             // Extract new filename
@@ -574,30 +788,76 @@ fn write_instance_files(output_dir: &PathBuf, content: &str) {
 
     // Write last file
     if let Some(ref filename) = current_filename {
-        let path = v1_dir.join(filename);
+        let path = resolve_split_file_path(output_dir, filename, default_extension);
         write_artifact_file(&path, current_content.trim());
     }
 }
 
-/// Append a catalog entry to docs/Products.md (create if not exists)
-fn append_catalog_entry(entry: &str) {
-    let catalog_path = PathBuf::from("docs/Products.md");
+/// Resolve the full path for a split file, handling scripts/ subdirectory and default extensions.
+fn resolve_split_file_path(output_dir: &PathBuf, filename: &str, default_extension: &str) -> PathBuf {
+    let mut name = filename.to_string();
 
+    // Append default extension if the filename doesn't already have a recognized extension
+    if !default_extension.is_empty() && !name.contains('.') {
+        name.push_str(default_extension);
+    }
+
+    // Files with path separators (e.g. "scripts/foo.rune") are placed relative to output_dir
+    let path = output_dir.join(&name);
+
+    // Ensure parent directory exists (handles scripts/ subdirectory)
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    path
+}
+
+/// Resolve the Universe assets/meshes/{product}/ directory from a Space root path.
+///
+/// Space layout: Universe/spaces/SpaceName/ → Universe is two levels up.
+/// Mesh assets live at Universe/assets/meshes/{product}/.
+fn resolve_universe_assets_dir(space_root: &std::path::Path, safe_product_name: &str) -> PathBuf {
+    // Try standard layout: Universe/spaces/SpaceName/
+    let universe_root = if let Some(spaces_dir) = space_root.parent() {
+        if spaces_dir.file_name().map(|n| n == "spaces").unwrap_or(false) {
+            // Standard: space_root.parent() = "spaces", one more up = Universe root
+            spaces_dir.parent().unwrap_or(space_root).to_path_buf()
+        } else {
+            // Legacy: Space is directly inside Universe (no "spaces" intermediary)
+            spaces_dir.to_path_buf()
+        }
+    } else {
+        space_root.to_path_buf()
+    };
+
+    universe_root.join("assets").join("meshes").join(safe_product_name)
+}
+
+/// Sanitize a product name for use as a directory name
+fn safe_product_name(product_name: &str) -> String {
+    product_name
+        .replace(' ', "_")
+        .replace('/', "_")
+        .replace('\\', "_")
+        .replace(':', "_")
+}
+
+/// Append a catalog entry to a Products.md file at the given path (create if not exists)
+fn append_catalog_entry_to(catalog_path: &PathBuf, entry: &str) {
     if !catalog_path.exists() {
-        // Create with header
         let header = "# Product Catalog\n\n\
                       | Name | Category | Tier | Key Spec | Innovations | Date |\n\
                       |------|----------|------|----------|-------------|------|\n";
         let content = format!("{}{}\n", header, entry);
-        write_artifact_file(&catalog_path, &content);
+        write_artifact_file(catalog_path, &content);
     } else {
-        // Append entry
-        match std::fs::read_to_string(&catalog_path) {
+        match std::fs::read_to_string(catalog_path) {
             Ok(existing) => {
                 let updated = format!("{}\n{}\n", existing.trim_end(), entry);
-                write_artifact_file(&catalog_path, &updated);
+                write_artifact_file(catalog_path, &updated);
             }
-            Err(e) => warn!("Workshop: Failed to read Products.md: {}", e),
+            Err(e) => warn!("Workshop: Failed to read {:?}: {}", catalog_path, e),
         }
     }
 }

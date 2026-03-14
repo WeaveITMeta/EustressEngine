@@ -26,6 +26,7 @@ use slint::platform::WindowEvent;
 use crate::commands::{SelectionManager, TransformManager};
 use crate::ui::highlight::{highlight_to_lines, language_for_ext, HighlightLine as ComputedHighlightLine};
 use super::file_dialogs::{SceneFile, FileEvent, PublishRequest};
+use super::file_icons::load_file_icon;
 use super::spawn_events::SpawnEventsPlugin;
 use super::menu_events::MenuActionEvent;
 use super::{SlintUIFocus};
@@ -331,6 +332,7 @@ pub enum SlintAction {
     
     // Properties
     PropertyChanged(String, String),
+    SectionToggle(String), // Toggle collapse/expand of a property section by category name
     
     // Command bar
     ExecuteCommand(String),
@@ -343,6 +345,9 @@ pub enum SlintAction {
     GenerateTerrain(String),
     ToggleTerrainEditMode,
     SetTerrainBrush(String),
+    BrushSizeChanged(f32),
+    BrushStrengthChanged(f32),
+    BrushFalloffChanged(String),
     ImportHeightmap,
     ExportHeightmap,
     
@@ -406,6 +411,13 @@ pub enum SlintAction {
     // Viewport
     ViewportBoundsChanged(f32, f32, f32, f32), // x, y, width, height
     
+    // Asset Manager
+    AssetSelect(i32),
+    AssetExpand(i32),
+    AssetImport(String),
+    AssetSearch(String),
+    AssetCategoryChanged(String),
+
     // Generic menu action (ribbon Insert dropdown, Model menu, etc.)
     MenuAction(String),
     
@@ -559,6 +571,14 @@ pub struct StudioState {
     // Properties panel settings (from File > Settings)
     pub show_help_icons: bool,
     pub help_opens_in_tab: bool,
+    
+    // Properties panel — collapsed section categories
+    pub collapsed_sections: std::collections::HashSet<String>,
+    
+    // Properties panel — hash of last pushed model to avoid flickering hover on redundant pushes
+    pub last_properties_hash: u64,
+    // Ribbon toolbar — hash of last pushed state to avoid flickering on redundant pushes
+    pub last_toolbar_hash: u64,
 }
 
 /// Data for a single center tab (script or web)
@@ -641,6 +661,9 @@ impl Default for StudioState {
             pending_web_refresh: false,
             show_help_icons: true,
             help_opens_in_tab: false,
+            collapsed_sections: std::collections::HashSet::new(),
+            last_properties_hash: 0,
+            last_toolbar_hash: 0,
         }
     }
 }
@@ -784,6 +807,8 @@ pub struct UnifiedExplorerState {
     /// When true, the next sync_unified_explorer_to_slint call bypasses the
     /// 30-frame throttle so selection/expand changes feel instant.
     pub needs_immediate_sync: bool,
+    /// Hash of last pushed tree model to avoid flickering on redundant pushes
+    pub last_tree_hash: u64,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -805,6 +830,7 @@ impl Default for UnifiedExplorerState {
             dirty: true,
             file_path_cache: std::collections::HashMap::new(),
             needs_immediate_sync: false,
+            last_tree_hash: 0,
         }
     }
 }
@@ -1041,6 +1067,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
+            .insert_resource(BrushState::new())
             .init_resource::<ToolboxState>()
             .init_resource::<StudioDockState>()
             .init_resource::<UnifiedExplorerState>()
@@ -1055,6 +1082,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<super::ViewportBounds>()
             .init_resource::<LastWindowSize>()
             .init_resource::<super::center_tabs::CenterTabManager>()
+            .init_resource::<AssetManagerState>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -1068,13 +1096,11 @@ impl Plugin for SlintUiPlugin {
             .add_plugins(super::monaco_bridge::MonacoBridgePlugin)
             // Slint software renderer overlay systems
             .add_systems(Startup, setup_slint_overlay)
-            .add_systems(Update, (
-                forward_input_to_slint,
-                forward_keyboard_to_slint,
-                drain_slint_actions.in_set(SlintSystems::Drain),
-                sync_bevy_to_slint,
-                render_slint_to_texture,
-            ).chain())
+            .add_systems(Update, forward_input_to_slint)
+            .add_systems(Update, forward_keyboard_to_slint)
+            .add_systems(Update, drain_slint_actions)
+            .add_systems(Update, sync_bevy_to_slint)
+            .add_systems(Update, render_slint_to_texture)
             // Window resize handling
             .add_systems(Update, handle_window_resize)
             // Performance tracking
@@ -1085,6 +1111,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
+            // Asset Manager sync: scan Universe + Space directories (throttled internally)
+            .add_systems(Update, sync_asset_manager_to_slint)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
@@ -1280,6 +1308,8 @@ fn setup_slint_overlay(world: &mut World) {
     // Properties
     let q = queue.clone();
     ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
+    let q = queue.clone();
+    ui.on_section_toggle(move |category| q.push(SlintAction::SectionToggle(category.to_string())));
 
     // Help icon — open /learn URL (tabbed viewer or system browser per settings)
     let q = queue.clone();
@@ -1314,11 +1344,30 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_toggle_terrain_edit_mode(move || q.push(SlintAction::ToggleTerrainEditMode));
     let q = queue.clone();
     ui.on_set_terrain_brush(move |brush| q.push(SlintAction::SetTerrainBrush(brush.to_string())));
+    // TODO: Uncomment after Slint regenerates bindings for brush settings callbacks
+    // let q = queue.clone();
+    // ui.on_brush_size_changed(move |size| q.push(SlintAction::BrushSizeChanged(size)));
+    // let q = queue.clone();
+    // ui.on_brush_strength_changed(move |strength| q.push(SlintAction::BrushStrengthChanged(strength)));
+    // let q = queue.clone();
+    // ui.on_brush_falloff_changed(move |falloff| q.push(SlintAction::BrushFalloffChanged(falloff.to_string())));
     let q = queue.clone();
     ui.on_import_heightmap(move || q.push(SlintAction::ImportHeightmap));
     let q = queue.clone();
     ui.on_export_heightmap(move || q.push(SlintAction::ExportHeightmap));
     
+    // Asset Manager
+    let q = queue.clone();
+    ui.on_asset_select(move |id| q.push(SlintAction::AssetSelect(id)));
+    let q = queue.clone();
+    ui.on_asset_expand(move |id| q.push(SlintAction::AssetExpand(id)));
+    let q = queue.clone();
+    ui.on_asset_import(move |kind| q.push(SlintAction::AssetImport(kind.to_string())));
+    let q = queue.clone();
+    ui.on_asset_search(move |text| q.push(SlintAction::AssetSearch(text.to_string())));
+    let q = queue.clone();
+    ui.on_asset_category_changed(move |cat| q.push(SlintAction::AssetCategoryChanged(cat.to_string())));
+
     // Network
     let q = queue.clone();
     ui.on_start_server(move || q.push(SlintAction::StartServer));
@@ -1793,8 +1842,10 @@ struct DrainEventWriters<'w> {
     redo_events: MessageWriter<'w, crate::commands::RedoCommandEvent>,
     exit_events: MessageWriter<'w, bevy::app::AppExit>,
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
+    terrain_spawn: MessageWriter<'w, super::spawn_events::SpawnTerrainEvent>,
     terrain_toggle: MessageWriter<'w, super::spawn_events::ToggleTerrainEditEvent>,
     terrain_brush: MessageWriter<'w, super::spawn_events::SetTerrainBrushEvent>,
+    terrain_import: MessageWriter<'w, super::spawn_events::ImportTerrainEvent>,
     // Workshop Panel (System 0: Ideation)
     workshop_send: MessageWriter<'w, crate::workshop::WorkshopSendMessageEvent>,
     workshop_approve: MessageWriter<'w, crate::workshop::WorkshopApproveMcpEvent>,
@@ -1802,6 +1853,24 @@ struct DrainEventWriters<'w> {
     workshop_edit: MessageWriter<'w, crate::workshop::WorkshopEditMcpEvent>,
     workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
     workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
+}
+
+/// Terrain brush settings state
+#[derive(Resource, Default)]
+pub struct BrushState {
+    pub size: f32,
+    pub strength: f32,
+    pub falloff: String,
+}
+
+impl BrushState {
+    pub fn new() -> Self {
+        Self {
+            size: 10.0,
+            strength: 0.5,
+            falloff: "smooth".to_string(),
+        }
+    }
 }
 
 /// Bundled mutable resources for drain_slint_actions
@@ -1821,6 +1890,14 @@ struct DrainResources<'w> {
     selection_manager: Option<Res<'w, BevySelectionManager>>,
     /// Workshop pipeline resource for cancel/pause/resume actions
     workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
+    /// Material registry for resolving material names on spawned parts
+    material_registry: Option<ResMut<'w, crate::space::material_loader::MaterialRegistry>>,
+    /// Asset Manager panel state (expand/collapse, search, category filter)
+    asset_manager_state: Option<ResMut<'w, AssetManagerState>>,
+    /// Terrain brush settings (size, strength, falloff)
+    brush_state: Option<ResMut<'w, BrushState>>,
+    /// Standard materials for spawning instances
+    materials: ResMut<'w, Assets<StandardMaterial>>,
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -1901,6 +1978,20 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, as_new:
     ui.set_show_publish_dialog(true);
 }
 
+/// Custom SystemParam bundle to group entity queries and stay under 16-parameter limit
+#[derive(bevy::ecs::system::SystemParam)]
+struct DrainActionQueries<'w, 's> {
+    instances: Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>,
+    transforms: Query<'w, 's, &'static mut Transform>,
+    base_parts: Query<'w, 's, &'static mut eustress_common::classes::BasePart>,
+    instance_files: Query<'w, 's, &'static crate::space::instance_loader::InstanceFile>,
+    loaded_from_file: Query<'w, 's, (Entity, &'static crate::space::LoadedFromFile)>,
+    service_components: Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>,
+    terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
+    terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
+    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+}
+
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
 fn drain_slint_actions(
@@ -1908,27 +1999,9 @@ fn drain_slint_actions(
     slint_context: Option<NonSend<SlintUiState>>,
     mut events: DrainEventWriters,
     mut res: DrainResources,
-    mut instances: Query<(Entity, &mut eustress_common::classes::Instance)>,
-    mut transforms: Query<&mut Transform>,
-    mut base_parts: Query<&mut eustress_common::classes::BasePart>,
-    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
-    loaded_from_file: Query<(Entity, &crate::space::LoadedFromFile)>,
-    mut service_components: Query<&mut crate::space::service_loader::ServiceComponent>,
+    mut queries: DrainActionQueries,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    // Mutable UI class components collapsed into ParamSet to stay within Bevy's 16-param limit
-    mut ui_queries: ParamSet<(
-        Query<&mut eustress_common::classes::TextLabel>,
-        Query<&mut eustress_common::classes::TextButton>,
-        Query<&mut eustress_common::classes::TextBox>,
-        Query<&mut eustress_common::classes::Frame>,
-        Query<&mut eustress_common::classes::ImageLabel>,
-        Query<&mut eustress_common::classes::ImageButton>,
-        Query<&mut eustress_common::classes::ScrollingFrame>,
-    )>,
 ) {
     let Some(queue) = queue else { return };
     let actions = queue.drain();
@@ -2182,7 +2255,7 @@ fn drain_slint_actions(
             }
             SlintAction::OpenScript(id) => {
                 // Open a Soul Script in a new center tab (or focus existing)
-                let script_name = instances.iter()
+                let script_name = queries.instances.iter()
                     .find(|(_, inst)| inst.id as i32 == id)
                     .map(|(_, inst)| inst.name.clone())
                     .unwrap_or_else(|| format!("Script #{}", id));
@@ -2308,7 +2381,15 @@ fn drain_slint_actions(
             }
             
             // Terrain
-            SlintAction::GenerateTerrain(_size) => {
+            SlintAction::GenerateTerrain(size) => {
+                // Spawn terrain with size-appropriate config and switch to Terrain tab
+                use eustress_common::terrain::TerrainConfig;
+                let config = match size.as_str() {
+                    "small" => TerrainConfig::small(),
+                    "large" => TerrainConfig::large(),
+                    _ => TerrainConfig::default(), // "medium"
+                };
+                events.terrain_spawn.write(super::spawn_events::SpawnTerrainEvent { config });
                 if let Some(ref mut s) = res.state {
                     s.show_terrain_editor = true;
                 }
@@ -2335,17 +2416,40 @@ fn drain_slint_actions(
                     events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { mode: m });
                 }
             }
+            SlintAction::BrushSizeChanged(size) => {
+                // Update brush size in terrain state
+                if let Some(ref mut brush_state) = res.brush_state {
+                    brush_state.size = size;
+                }
+            }
+            SlintAction::BrushStrengthChanged(strength) => {
+                // Update brush strength in terrain state
+                if let Some(ref mut brush_state) = res.brush_state {
+                    brush_state.strength = strength;
+                }
+            }
+            SlintAction::BrushFalloffChanged(falloff) => {
+                // Update brush falloff in terrain state
+                if let Some(ref mut brush_state) = res.brush_state {
+                    brush_state.falloff = falloff;
+                }
+            }
             SlintAction::ImportHeightmap => {
                 // Open file dialog for heightmap import
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Heightmap", &["png", "exr", "raw", "r16"])
+                    .add_filter("Heightmap", &["png", "r16", "raw", "hgt", "asc", "tif", "tiff"])
                     .set_title("Import Heightmap")
                     .pick_file()
                 {
                     if let Some(ref mut out) = res.output {
                         out.info(format!("Importing heightmap: {}", path.display()));
                     }
-                    // TODO: Feed path into terrain system when heightmap loader is implemented
+                    events.terrain_import.write(super::spawn_events::ImportTerrainEvent {
+                        path: path.to_string_lossy().to_string(),
+                    });
+                    if let Some(ref mut s) = res.state {
+                        s.show_terrain_editor = true;
+                    }
                 }
             }
             SlintAction::ExportHeightmap => {
@@ -2457,7 +2561,7 @@ fn drain_slint_actions(
                             // Reconstruct the service name by matching against known service name lengths.
                             // Service names are stored in class_name on the TreeNode; we recover them
                             // by scanning service_components for entities whose name matches the ID.
-                            let service_name = service_components.iter()
+                            let service_name = queries.service_components.iter()
                                 .find_map(|sc| {
                                     // ServiceComponent.class_name matches the service display name
                                     if -(sc.class_name.len() as i32) == id {
@@ -2480,19 +2584,26 @@ fn drain_slint_actions(
                             }
                         } else {
                             // Positive ID — look up Entity from stable sequential ID cache
-                            let entity = es.entity_id_cache.get(&id).copied();
-                            es.selected = entity
-                                .filter(|e| instances.get(*e).is_ok())
-                                .map(SelectedItem::Entity)
-                                .unwrap_or(SelectedItem::None);
-
-                            // Also update BevySelectionManager so FocusSelection (F key)
-                            // can read the correct entity bounds from SelectionSyncManager.
-                            if let Some(entity) = entity {
-                                if let Some(ref sel_mgr) = res.selection_manager {
-                                    let id_str = format!("{}v{}", entity.index(), entity.generation());
-                                    sel_mgr.0.write().select(id_str);
+                            if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                                // Accept entity if it has Instance component OR if it's a terrain entity
+                                let is_valid = queries.instances.get(entity).is_ok() 
+                                    || queries.terrain_roots.get(entity).is_ok()
+                                    || queries.terrain_chunks.get(entity).is_ok();
+                                
+                                if is_valid {
+                                    es.selected = SelectedItem::Entity(entity);
+                                    
+                                    // Also update BevySelectionManager so FocusSelection (F key)
+                                    // can read the correct entity bounds from SelectionSyncManager.
+                                    if let Some(ref sel_mgr) = res.selection_manager {
+                                        let id_str = format!("{}v{}", entity.index(), entity.generation());
+                                        sel_mgr.0.write().select(id_str);
+                                    }
+                                } else {
+                                    es.selected = SelectedItem::None;
                                 }
+                            } else {
+                                es.selected = SelectedItem::None;
                             }
                         }
                     } else {
@@ -2565,11 +2676,11 @@ fn drain_slint_actions(
                     let entity_opt = res.explorer_state.as_ref()
                         .and_then(|es| es.entity_id_cache.get(&id).copied());
                     if let Some(entity) = entity_opt {
-                        if let Ok((_, inst)) = instances.get(entity) {
+                        if let Ok((_, inst)) = queries.instances.get(entity) {
                             if inst.class_name == eustress_common::classes::ClassName::SoulScript {
                                 // Open SoulScript in tabbed viewer
                                 // Get the file path from LoadedFromFile component if available
-                                if let Ok((_, loaded)) = loaded_from_file.get(entity) {
+                                if let Ok((_, loaded)) = queries.loaded_from_file.get(entity) {
                                     if let Some(ref mut mgr) = res.tab_manager {
                                         let idx = mgr.open_file(&loaded.path);
                                         if let Some(ref mut out) = res.output {
@@ -2617,7 +2728,7 @@ fn drain_slint_actions(
                     let entity_opt = res.explorer_state.as_ref()
                         .and_then(|es| es.entity_id_cache.get(&id).copied());
                     if let Some(entity) = entity_opt {
-                        if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                        if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
                             inst.name = name;
                         }
                     }
@@ -2675,6 +2786,17 @@ fn drain_slint_actions(
                 }
             }
             
+            // Properties section collapse/expand toggle
+            SlintAction::SectionToggle(category) => {
+                if let Some(ref mut s) = res.state {
+                    if !s.collapsed_sections.remove(&category) {
+                        s.collapsed_sections.insert(category);
+                    }
+                    // Force properties re-sync next frame so section-collapsed flags update
+                    s.show_properties = true;
+                }
+            }
+            
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
@@ -2708,18 +2830,18 @@ fn drain_slint_actions(
                     match key.as_str() {
                         // Instance fields
                         "Name" => {
-                            if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                            if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
                                 inst.name = val.clone();
                             }
                         }
                         "Archivable" => {
-                            if let Ok((_, mut inst)) = instances.get_mut(entity) {
+                            if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
                                 inst.archivable = val == "true";
                             }
                         }
                         // Transform fields
                         "Position.X" | "Position.Y" | "Position.Z" => {
-                            if let Ok(mut t) = transforms.get_mut(entity) {
+                            if let Ok(mut t) = queries.transforms.get_mut(entity) {
                                 if let Ok(v) = val.parse::<f32>() {
                                     match key.as_str() {
                                         "Position.X" => t.translation.x = v,
@@ -2731,7 +2853,7 @@ fn drain_slint_actions(
                             }
                         }
                         "Scale.X" | "Scale.Y" | "Scale.Z" => {
-                            if let Ok(mut t) = transforms.get_mut(entity) {
+                            if let Ok(mut t) = queries.transforms.get_mut(entity) {
                                 if let Ok(v) = val.parse::<f32>() {
                                     match key.as_str() {
                                         "Scale.X" => t.scale.x = v,
@@ -2744,44 +2866,28 @@ fn drain_slint_actions(
                         }
                         // BasePart fields
                         "Transparency" => {
-                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
                                 if let Ok(v) = val.parse::<f32>() {
                                     bp.transparency = v;
                                 }
                             }
                         }
                         "Anchored" => {
-                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
                                 bp.anchored = val == "true";
                             }
                         }
                         "CanCollide" => {
-                            if let Ok(mut bp) = base_parts.get_mut(entity) {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
                                 bp.can_collide = val == "true";
                             }
                         }
                         _ => {
-                            // UI class ECS component live mutation via PropertyAccess
-                            use eustress_common::classes::PropertyAccess;
-                            let prop_val = property_string_to_value(&key, &val);
-                            if let Some(pv) = prop_val {
-                                let mut applied = false;
-                                if let Ok(mut c) = ui_queries.p0().get_mut(entity)     { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } }
-                                if !applied { if let Ok(mut c) = ui_queries.p1().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied { if let Ok(mut c) = ui_queries.p2().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied { if let Ok(mut c) = ui_queries.p3().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied { if let Ok(mut c) = ui_queries.p4().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied { if let Ok(mut c) = ui_queries.p5().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied { if let Ok(mut c) = ui_queries.p6().get_mut(entity)  { if c.set_property(&key, pv.clone()).is_ok() { applied = true; } } }
-                                if !applied {
-                                    if let Some(ref mut out) = res.output {
-                                        out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
-                                    }
-                                }
-                            } else {
-                                if let Some(ref mut out) = res.output {
-                                    out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
-                                }
+                            // TODO: UI class ECS component live mutation via PropertyAccess
+                            // This requires ui_queries ParamSet which is not available in drain_slint_actions
+                            // For now, just log unhandled properties
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
                             }
                         }
                     }
@@ -2790,7 +2896,7 @@ fn drain_slint_actions(
                     // File-System-First: Write property changes back to TOML
                     // Supports ALL properties dynamically
                     // ══════════════════════════════════════════════════════════
-                    if let Ok(instance_file) = instance_files.get(entity) {
+                    if let Ok(instance_file) = queries.instance_files.get(entity) {
                         match crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
                             Ok(mut def) => {
                                 let changed = update_toml_property(&mut def, &key, &val);
@@ -2824,7 +2930,7 @@ fn drain_slint_actions(
                     // Service property write-back: Update ServiceComponent dynamically
                     // Any property can be edited - no hardcoding
                     // ══════════════════════════════════════════════════════════
-                    if let Ok(mut service) = service_components.get_mut(entity) {
+                    if let Ok(mut service) = queries.service_components.get_mut(entity) {
                         let mut changed = false;
                         
                         // Handle special service fields
@@ -2997,7 +3103,80 @@ fn drain_slint_actions(
             
             // Toolbox insertion - file-system-first: create .glb.toml → spawn inline
             SlintAction::InsertPart(part_type_str) => {
-                // Map UI part type string to toolbox mesh ID
+                // ── Model / Folder: create directory with _instance.toml ──
+                if part_type_str == "Model" || part_type_str == "Folder" {
+                    let space_root = crate::space::default_space_root();
+                    let workspace_dir = space_root.join("Workspace");
+                    let _ = std::fs::create_dir_all(&workspace_dir);
+
+                    // Generate unique directory name
+                    let base = part_type_str.clone();
+                    let dir_name = {
+                        let test = workspace_dir.join(&base);
+                        if !test.exists() { base.clone() } else {
+                            (1..1000).map(|i| format!("{}{}", base, i))
+                                .find(|c| !workspace_dir.join(c).exists())
+                                .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
+                        }
+                    };
+                    let dir_path = workspace_dir.join(&dir_name);
+                    if let Err(e) = std::fs::create_dir_all(&dir_path) {
+                        error!("Failed to create {} directory: {}", part_type_str, e);
+                    } else {
+                        let instance_toml = format!(
+                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n",
+                            part_type_str
+                        );
+                        if let Err(e) = std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
+                            error!("Failed to write _instance.toml: {}", e);
+                        } else {
+                            let class_enum = if part_type_str == "Model" {
+                                eustress_common::classes::ClassName::Model
+                            } else {
+                                eustress_common::classes::ClassName::Folder
+                            };
+                            let entity = commands.spawn((
+                                eustress_common::classes::Instance {
+                                    name: dir_name.clone(),
+                                    class_name: class_enum,
+                                    archivable: true,
+                                    id: 0,
+                                    ai: false,
+                                },
+                                crate::space::file_loader::LoadedFromFile {
+                                    path: dir_path.clone(),
+                                    file_type: crate::space::FileType::Directory,
+                                    service: "Workspace".to_string(),
+                                },
+                                Name::new(dir_name.clone()),
+                                Transform::default(),
+                                Visibility::default(),
+                            )).id();
+                            if let Some(ref mut registry) = res.file_registry {
+                                registry.register(
+                                    dir_path.clone(),
+                                    entity,
+                                    crate::space::FileMetadata {
+                                        path: dir_path.clone(),
+                                        file_type: crate::space::FileType::Directory,
+                                        service: "Workspace".to_string(),
+                                        name: dir_name.clone(),
+                                        size: 0,
+                                        modified: std::time::SystemTime::now(),
+                                        children: Vec::new(),
+                                    },
+                                );
+                            }
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Created {} '{}'", part_type_str, dir_name));
+                            }
+                            info!("📁 Created {} '{}' at {:?}", part_type_str, dir_name, dir_path);
+                        }
+                    }
+                    continue;
+                }
+
+                // ── Mesh primitives: create .glb.toml file ──
                 let mesh_id = match part_type_str.as_str() {
                     "Part" | "Block" => "block",
                     "SpherePart" | "Ball" => "ball",
@@ -3009,7 +3188,7 @@ fn drain_slint_actions(
                 };
 
                 // Compute spawn position: 10 units in front of the camera, min Y = 0.5
-                let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) {
+                let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
                     let forward = cam_transform.forward();
                     let cam_pos = cam_transform.translation();
                     let pos = cam_pos + forward * 10.0;
@@ -3025,7 +3204,7 @@ fn drain_slint_actions(
                     match &es.selected {
                         SelectedItem::Entity(e) => {
                             // Only parent to Folder or Model — not to parts/scripts/services
-                            instances.get(*e).ok().and_then(|(ent, inst)| {
+                            queries.instances.get(*e).ok().and_then(|(ent, inst)| {
                                 match inst.class_name {
                                     eustress_common::classes::ClassName::Folder
                                     | eustress_common::classes::ClassName::Model => Some(ent),
@@ -3042,7 +3221,7 @@ fn drain_slint_actions(
                 // Fall back to Workspace service root if no folder selected:
                 // find the entity whose LoadedFromFile has service == "Workspace" and is a _service.toml
                 let parent_entity = parent_entity.or_else(|| {
-                    loaded_from_file.iter().find_map(|(lff_entity, lff)| {
+                    queries.loaded_from_file.iter().find_map(|(lff_entity, lff)| {
                         if lff.service == "Workspace"
                             && lff.path.file_name()
                                 .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
@@ -3061,7 +3240,7 @@ fn drain_slint_actions(
                 // Step 1: Create .glb.toml instance file on disk in the correct directory.
                 // If parented to a folder entity, write the file inside that folder's directory.
                 let write_dir = parent_entity
-                    .and_then(|pe| loaded_from_file.get(pe).ok())
+                    .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                     .map(|(_, lff)| {
                         // For Directory entries, path IS the directory; for _service.toml, use parent dir
                         if lff.path.is_dir() {
@@ -3083,10 +3262,13 @@ fn drain_slint_actions(
                         match crate::space::load_instance_definition(&toml_path) {
                             Ok(instance) => {
                                 // Step 3: Spawn entity inline
+                                let default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
+                                let mat_reg_ref = res.material_registry.as_deref().unwrap_or(&default_mat_reg);
                                 let entity = crate::space::instance_loader::spawn_instance(
                                     &mut commands,
                                     &asset_server,
-                                    &mut materials,
+                                    &mut res.materials,
+                                    mat_reg_ref,
                                     toml_path.clone(),
                                     instance,
                                 );
@@ -3252,18 +3434,89 @@ fn drain_slint_actions(
             // Ribbon menu actions — route insert:* to InsertPart or log unsupported
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
+
+                // Model / Folder inserts → create directory with _instance.toml
+                if action == "insert:model" || action == "insert:folder" {
+                    let part_type_str = if action == "insert:model" { "Model" } else { "Folder" };
+                    let space_root = crate::space::default_space_root();
+                    let workspace_dir = space_root.join("Workspace");
+                    let _ = std::fs::create_dir_all(&workspace_dir);
+                    let base = part_type_str.to_string();
+                    let dir_name = {
+                        let test = workspace_dir.join(&base);
+                        if !test.exists() { base.clone() } else {
+                            (1..1000).map(|i| format!("{}{}", base, i))
+                                .find(|c| !workspace_dir.join(c).exists())
+                                .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
+                        }
+                    };
+                    let dir_path = workspace_dir.join(&dir_name);
+                    if let Err(e) = std::fs::create_dir_all(&dir_path) {
+                        error!("Failed to create {} directory: {}", part_type_str, e);
+                    } else {
+                        let instance_toml = format!(
+                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n",
+                            part_type_str
+                        );
+                        if let Err(e) = std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
+                            error!("Failed to write _instance.toml: {}", e);
+                        } else {
+                            let class_enum = if part_type_str == "Model" {
+                                eustress_common::classes::ClassName::Model
+                            } else {
+                                eustress_common::classes::ClassName::Folder
+                            };
+                            let entity = commands.spawn((
+                                eustress_common::classes::Instance {
+                                    name: dir_name.clone(),
+                                    class_name: class_enum,
+                                    archivable: true,
+                                    id: 0,
+                                    ai: false,
+                                },
+                                crate::space::file_loader::LoadedFromFile {
+                                    path: dir_path.clone(),
+                                    file_type: crate::space::FileType::Directory,
+                                    service: "Workspace".to_string(),
+                                },
+                                Name::new(dir_name.clone()),
+                                Transform::default(),
+                                Visibility::default(),
+                            )).id();
+                            if let Some(ref mut registry) = res.file_registry {
+                                registry.register(dir_path.clone(), entity, crate::space::FileMetadata {
+                                    path: dir_path.clone(),
+                                    file_type: crate::space::FileType::Directory,
+                                    service: "Workspace".to_string(),
+                                    name: dir_name.clone(),
+                                    size: 0,
+                                    modified: std::time::SystemTime::now(),
+                                    children: Vec::new(),
+                                });
+                            }
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Created {} '{}'", part_type_str, dir_name));
+                            }
+                            info!("📁 Created {} '{}' at {:?}", part_type_str, dir_name, dir_path);
+                        }
+                    }
+                    continue;
+                }
+
                 // Primitive / structure inserts → reuse the full InsertPart pipeline
                 let mesh_id: Option<&str> = match action {
                     "insert:part"            => Some("block"),
                     "insert:sphere"          => Some("ball"),
                     "insert:cylinder"        => Some("cylinder"),
                     "insert:wedge"           => Some("wedge"),
+                    "insert:cone"            => Some("cone"),
+                    "insert:corner_wedge"    => Some("corner_wedge"),
                     _ => None,
                 };
 
                 if let Some(mid) = mesh_id {
                     // Camera-forward spawn position (same logic as InsertPart)
-                    let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = camera_query.iter().find(|(c, _)| c.order == 0) {
+                    let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
                         let forward = cam_transform.forward();
                         let cam_pos  = cam_transform.translation();
                         let pos = cam_pos + forward * 10.0;
@@ -3276,7 +3529,7 @@ fn drain_slint_actions(
                     let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
                         match &es.selected {
                             SelectedItem::Entity(e) => {
-                                instances.get(*e).ok().and_then(|(ent, inst)| {
+                                queries.instances.get(*e).ok().and_then(|(ent, inst)| {
                                     match inst.class_name {
                                         eustress_common::classes::ClassName::Folder
                                         | eustress_common::classes::ClassName::Model => Some(ent),
@@ -3289,7 +3542,7 @@ fn drain_slint_actions(
                     } else { None };
 
                     let parent_entity = parent_entity.or_else(|| {
-                        loaded_from_file.iter().find_map(|(lff_entity, lff)| {
+                        queries.loaded_from_file.iter().find_map(|(lff_entity, lff)| {
                             if lff.service == "Workspace"
                                 && lff.path.file_name()
                                     .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
@@ -3304,7 +3557,7 @@ fn drain_slint_actions(
 
                     let space_root = crate::space::default_space_root();
                     let write_dir = parent_entity
-                        .and_then(|pe| loaded_from_file.get(pe).ok())
+                        .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                         .map(|(_, lff)| {
                             if lff.path.is_dir() { lff.path.clone() }
                             else { lff.path.parent().unwrap_or(&space_root.join("Workspace")).to_path_buf() }
@@ -3315,10 +3568,13 @@ fn drain_slint_actions(
                         Ok(toml_path) => {
                             match crate::space::load_instance_definition(&toml_path) {
                                 Ok(instance) => {
+                                    let default_mat_reg2 = crate::space::material_loader::MaterialRegistry::default();
+                                    let mat_reg_ref2 = res.material_registry.as_deref().unwrap_or(&default_mat_reg2);
                                     let entity = crate::space::instance_loader::spawn_instance(
                                         &mut commands,
                                         &asset_server,
-                                        &mut materials,
+                                        &mut res.materials,
+                                        mat_reg_ref2,
                                         toml_path.clone(),
                                         instance,
                                     );
@@ -3386,7 +3642,7 @@ fn drain_slint_actions(
 
                     if let Some((class_name_str, file_ext, service)) = ui_insert {
                         // Find the service entity (StarterGui root)
-                        let service_entity = loaded_from_file.iter().find_map(|(e, lff)| {
+                        let service_entity = queries.loaded_from_file.iter().find_map(|(e, lff)| {
                             if lff.service == service
                                 && lff.path.file_name()
                                     .map(|n| n.to_string_lossy().as_ref() == "_service.toml")
@@ -3400,7 +3656,7 @@ fn drain_slint_actions(
 
                         let space_root = crate::space::default_space_root();
                         let write_dir = service_entity
-                            .and_then(|pe| loaded_from_file.get(pe).ok())
+                            .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                             .map(|(_, lff)| {
                                 if lff.path.is_dir() { lff.path.clone() }
                                 else { lff.path.parent().unwrap_or(&space_root.join(service)).to_path_buf() }
@@ -3419,69 +3675,43 @@ fn drain_slint_actions(
                             if !path.exists() { Some(candidate) } else { None }
                         }).unwrap_or_else(|| format!("{}_new", base_name));
 
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let instance = crate::space::instance_loader::InstanceDefinition {
-                            asset: Some(crate::space::instance_loader::AssetReference {
-                                mesh: String::new(),
-                                scene: String::new(),
-                            }),
-                            transform: crate::space::instance_loader::TransformData::default(),
-                            properties: crate::space::instance_loader::InstanceProperties::default(),
-                            metadata: crate::space::instance_loader::InstanceMetadata {
-                                class_name: class_name_str.to_string(),
-                                archivable: true,
-                                created: now.clone(),
-                                last_modified: now,
-                            },
-                            material: None,
-                            thermodynamic: None,
-                            electrochemical: None,
-                            ui: None,
-                            extra: std::collections::HashMap::new(),
-                        };
+                        // Create GUI TOML with proper [instance]/[gui]/[text] format
+                        let gui_def = crate::space::gui_loader::create_default_gui_toml(
+                            class_name_str,
+                            &instance_name,
+                        );
 
                         let _ = std::fs::create_dir_all(&write_dir);
                         let toml_path = write_dir.join(format!("{}.{}.toml", instance_name, file_ext));
 
-                        match crate::space::instance_loader::write_instance_definition(&toml_path, &instance) {
+                        // Write GUI TOML to disk, then load + spawn with Bevy UI components
+                        match crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
                             Ok(()) => {
-                                match crate::space::instance_loader::load_instance_definition(&toml_path) {
-                                    Ok(inst_def) => {
-                                        let entity = crate::space::instance_loader::spawn_instance(
-                                            &mut commands,
-                                            &asset_server,
-                                            &mut materials,
-                                            toml_path.clone(),
-                                            inst_def,
-                                        );
-                                        if let Some(parent) = service_entity {
-                                            commands.entity(entity).insert(ChildOf(parent));
-                                        }
-                                        if let Some(ref mut registry) = res.file_registry {
-                                            registry.register(
-                                                toml_path.clone(),
-                                                entity,
-                                                crate::space::FileMetadata {
-                                                    path: toml_path.clone(),
-                                                    file_type: crate::space::FileType::GuiElement,
-                                                    service: service.to_string(),
-                                                    name: instance_name.clone(),
-                                                    size: 0,
-                                                    modified: std::time::SystemTime::now(),
-                                                    children: Vec::new(),
-                                                },
-                                            );
-                                        }
-                                        if let Some(ref mut out) = res.output {
-                                            out.info(format!("Inserted {} as {:?}", class_name_str, toml_path));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("UI insert load error for {}: {}", class_name_str, e);
-                                        if let Some(ref mut out) = res.output {
-                                            out.error(format!("Insert {} failed: {}", class_name_str, e));
-                                        }
-                                    }
+                                let entity = crate::space::gui_loader::spawn_gui_element(
+                                    &mut commands,
+                                    &toml_path,
+                                    &gui_def,
+                                );
+                                if let Some(parent) = service_entity {
+                                    commands.entity(entity).insert(ChildOf(parent));
+                                }
+                                if let Some(ref mut registry) = res.file_registry {
+                                    registry.register(
+                                        toml_path.clone(),
+                                        entity,
+                                        crate::space::FileMetadata {
+                                            path: toml_path.clone(),
+                                            file_type: crate::space::FileType::GuiElement,
+                                            service: service.to_string(),
+                                            name: instance_name.clone(),
+                                            size: 0,
+                                            modified: std::time::SystemTime::now(),
+                                            children: Vec::new(),
+                                        },
+                                    );
+                                }
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Inserted {} as {:?}", class_name_str, toml_path));
                                 }
                             }
                             Err(e) => {
@@ -3491,6 +3721,50 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                    } else if action == "terrain:clear" {
+                        // Clear terrain: delete Workspace/Terrain directory and despawn all terrain entities
+                        let space_root = crate::space::default_space_root();
+                        let terrain_dir = space_root.join("Workspace").join("Terrain");
+                        
+                        // Delete terrain directory and all its contents
+                        if terrain_dir.exists() {
+                            match std::fs::remove_dir_all(&terrain_dir) {
+                                Ok(()) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info("Deleted Workspace/Terrain directory");
+                                    }
+                                    info!("🗑️ Deleted terrain directory: {:?}", terrain_dir);
+                                }
+                                Err(e) => {
+                                    error!("Failed to delete terrain directory: {}", e);
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Failed to delete terrain files: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Despawn all terrain entities (TerrainRoot and Chunks)
+                        let terrain_count = queries.terrain_roots.iter().count();
+                        let chunk_count = queries.terrain_chunks.iter().count();
+                        
+                        for entity in queries.terrain_roots.iter() {
+                            commands.entity(entity).despawn();
+                        }
+                        
+                        for entity in queries.terrain_chunks.iter() {
+                            commands.entity(entity).despawn();
+                        }
+                        
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Cleared {} terrain entities", terrain_count + chunk_count));
+                        }
+                        info!("🗑️ Despawned {} terrain roots and {} chunks", terrain_count, chunk_count);
+                        
+                        // Mark explorer as dirty to refresh the tree
+                        if let Some(ref mut es) = res.explorer_state {
+                            es.dirty = true;
+                        }
                     } else {
                         // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
                         if let Some(ref mut out) = res.output {
@@ -3499,6 +3773,39 @@ fn drain_slint_actions(
                             }
                         }
                     }
+                }
+            }
+
+            // Asset Manager actions
+            SlintAction::AssetSelect(id) => {
+                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                    am.selected = Some(id);
+                    am.dirty = true;
+                }
+            }
+            SlintAction::AssetExpand(id) => {
+                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                    if am.expanded.contains(&id) {
+                        am.expanded.remove(&id);
+                    } else {
+                        am.expanded.insert(id);
+                    }
+                    am.dirty = true;
+                }
+            }
+            SlintAction::AssetImport(_kind) => {
+                info!("Asset import not yet implemented");
+            }
+            SlintAction::AssetSearch(text) => {
+                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                    am.search = text;
+                    am.dirty = true;
+                }
+            }
+            SlintAction::AssetCategoryChanged(cat) => {
+                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                    am.category = cat;
+                    am.dirty = true;
                 }
             }
 
@@ -3525,7 +3832,7 @@ fn drain_slint_actions(
 /// Updates tool selection, play state, FPS, panel visibility, output logs, etc.
 fn sync_bevy_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
-    state: Option<Res<StudioState>>,
+    state: Option<ResMut<StudioState>>,
     perf: Option<Res<UIPerformance>>,
     output: Option<Res<OutputConsole>>,
     editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
@@ -3535,6 +3842,12 @@ fn sync_bevy_to_slint(
     // Direct entity count query as fallback when snapshot is empty
     instance_query: Query<Entity, With<eustress_common::classes::Instance>>,
     play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    // Terrain state sync
+    terrain_roots: Query<Entity, With<eustress_common::terrain::TerrainRoot>>,
+    terrain_config: Query<&eustress_common::terrain::TerrainConfig, With<eustress_common::terrain::TerrainRoot>>,
+    terrain_chunks: Query<Entity, With<eustress_common::terrain::Chunk>>,
+    terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
+    terrain_brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -3577,32 +3890,140 @@ fn sync_bevy_to_slint(
         if perf.should_throttle(10) { return; }
     }
 
-    // Sync StudioState → Slint properties
-    if let Some(ref state) = state {
-        let tool_str = match state.current_tool {
-            Tool::Select => "select",
-            Tool::Move => "move",
-            Tool::Rotate => "rotate",
-            Tool::Scale => "scale",
-            Tool::Terrain => "terrain",
-        };
-        ui.set_current_tool(tool_str.into());
-        
-        let mode_str = match state.transform_mode {
-            TransformMode::World => "world",
-            TransformMode::Local => "local",
-        };
-        ui.set_transform_mode(mode_str.into());
-        
-        ui.set_show_exit_confirmation(state.show_exit_confirmation);
-        ui.set_has_unsaved_changes(state.has_unsaved_changes);
-        ui.set_show_network_panel(state.show_network_panel);
-        ui.set_show_terrain_editor(state.show_terrain_editor);
-        ui.set_show_mindspace_panel(state.mindspace_panel_visible);
-        // Sync help icon settings to Properties panel (read from StudioState)
-        ui.set_show_help_icons(state.show_help_icons);
-        ui.set_help_opens_in_tab(state.help_opens_in_tab);
+    // ══════════════════════════════════════════════════════════════════════════
+    // Hash-based change detection: compute hash of all toolbar state values
+    // and only push to Slint when something actually changed.
+    // This prevents Slint from marking the UI dirty on every throttled frame.
+    // ══════════════════════════════════════════════════════════════════════════
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    
+    // Hash StudioState values
+    if let Some(ref s) = state {
+        std::mem::discriminant(&s.current_tool).hash(&mut hasher);
+        std::mem::discriminant(&s.transform_mode).hash(&mut hasher);
+        s.show_exit_confirmation.hash(&mut hasher);
+        s.has_unsaved_changes.hash(&mut hasher);
+        s.show_network_panel.hash(&mut hasher);
+        s.show_terrain_editor.hash(&mut hasher);
+        s.mindspace_panel_visible.hash(&mut hasher);
+        s.show_help_icons.hash(&mut hasher);
+        s.help_opens_in_tab.hash(&mut hasher);
     }
+    
+    // Hash terrain state
+    terrain_roots.is_empty().hash(&mut hasher);
+    terrain_chunks.iter().count().hash(&mut hasher);
+    if let Some(ref tm) = terrain_mode {
+        std::mem::discriminant(&**tm).hash(&mut hasher);
+    }
+    if let Some(ref tb) = terrain_brush {
+        std::mem::discriminant(&tb.mode).hash(&mut hasher);
+    }
+    if let Ok(config) = terrain_config.single() {
+        config.chunk_size.to_bits().hash(&mut hasher);
+        config.chunk_resolution.hash(&mut hasher);
+        config.height_scale.to_bits().hash(&mut hasher);
+        config.lod_levels.hash(&mut hasher);
+    }
+    
+    // Hash EditorSettings
+    if let Some(ref es) = editor_settings {
+        es.snap_enabled.hash(&mut hasher);
+        es.snap_size.to_bits().hash(&mut hasher);
+        es.show_grid.hash(&mut hasher);
+        es.grid_size.to_bits().hash(&mut hasher);
+    }
+    
+    // Hash auth state
+    if let Some(ref auth) = auth_state {
+        auth.is_offline().hash(&mut hasher);
+        auth.is_logged_in().hash(&mut hasher);
+        auth.can_publish().hash(&mut hasher);
+        if let Some(ref user) = auth.user {
+            user.username.hash(&mut hasher);
+        }
+    }
+    
+    // Hash entity count
+    let entity_count = if let Some(ref snapshot) = snapshot {
+        let count = snapshot.entities.len();
+        if count > 0 { count } else { instance_query.iter().count() }
+    } else {
+        instance_query.iter().count()
+    };
+    entity_count.hash(&mut hasher);
+    
+    // Hash output log count (not full content, just count for change detection)
+    if let Some(ref output) = output {
+        output.entries.len().hash(&mut hasher);
+    }
+    
+    let new_hash = hasher.finish();
+    
+    // Get mutable reference to state for hash comparison
+    let Some(mut state) = state else { return };
+    
+    // Only push to Slint if state actually changed
+    if new_hash == state.last_toolbar_hash {
+        return;
+    }
+    state.last_toolbar_hash = new_hash;
+
+    // Sync StudioState → Slint properties
+    let tool_str = match state.current_tool {
+        Tool::Select => "select",
+        Tool::Move => "move",
+        Tool::Rotate => "rotate",
+        Tool::Scale => "scale",
+        Tool::Terrain => "terrain",
+    };
+    ui.set_current_tool(tool_str.into());
+    
+    let mode_str = match state.transform_mode {
+        TransformMode::World => "world",
+        TransformMode::Local => "local",
+    };
+    ui.set_transform_mode(mode_str.into());
+    
+    ui.set_show_exit_confirmation(state.show_exit_confirmation);
+    ui.set_has_unsaved_changes(state.has_unsaved_changes);
+    ui.set_show_network_panel(state.show_network_panel);
+    ui.set_show_terrain_editor(state.show_terrain_editor);
+    ui.set_has_terrain(!terrain_roots.is_empty());
+    if let Some(ref tm) = terrain_mode {
+        ui.set_terrain_edit_mode(**tm == eustress_common::terrain::TerrainMode::Editor);
+    }
+    if let Some(ref tb) = terrain_brush {
+        let brush_str = match tb.mode {
+            eustress_common::terrain::BrushMode::Raise => "raise",
+            eustress_common::terrain::BrushMode::Lower => "lower",
+            eustress_common::terrain::BrushMode::Smooth => "smooth",
+            eustress_common::terrain::BrushMode::Flatten => "flatten",
+            eustress_common::terrain::BrushMode::PaintTexture => "paint",
+            eustress_common::terrain::BrushMode::VoxelAdd => "voxeladd",
+            eustress_common::terrain::BrushMode::VoxelRemove => "voxelremove",
+            eustress_common::terrain::BrushMode::VoxelSmooth => "voxelsmooth",
+            eustress_common::terrain::BrushMode::Region => "region",
+            eustress_common::terrain::BrushMode::Fill => "fill",
+        };
+        ui.set_terrain_brush(brush_str.into());
+    }
+    // Sync terrain config properties to panel
+    if let Ok(config) = terrain_config.single() {
+        let (total_w, _total_d) = config.total_size();
+        ui.set_terrain_size(format!("{:.0}", total_w).into());
+        ui.set_terrain_chunk_size(format!("{:.0}", config.chunk_size).into());
+        ui.set_terrain_resolution(format!("{}", config.chunk_resolution).into());
+        ui.set_terrain_height_scale(format!("{:.1}", config.height_scale).into());
+        ui.set_terrain_lod_levels(format!("{}", config.lod_levels).into());
+        ui.set_terrain_material("Default".into());
+    }
+    ui.set_terrain_chunk_count(format!("{}", terrain_chunks.iter().count()).into());
+    ui.set_show_mindspace_panel(state.mindspace_panel_visible);
+    // Sync help icon settings to Properties panel (read from StudioState)
+    ui.set_show_help_icons(state.show_help_icons);
+    ui.set_help_opens_in_tab(state.help_opens_in_tab);
     
     // Sync EditorSettings → Slint (snap/grid state)
     if let Some(ref es) = editor_settings {
@@ -3642,13 +4063,7 @@ fn sync_bevy_to_slint(
         ui.set_sync_status("Local-first".into());
     }
     
-    // Sync entity count (throttled with everything else)
-    let entity_count = if let Some(ref snapshot) = snapshot {
-        let count = snapshot.entities.len();
-        if count > 0 { count } else { instance_query.iter().count() }
-    } else {
-        instance_query.iter().count()
-    };
+    // Sync entity count
     ui.set_current_entity_count(entity_count as i32);
     
     // Sync output console logs → Slint (last 200 entries)
@@ -3959,6 +4374,9 @@ fn sync_unified_explorer_to_slint(
     child_of_query: Query<&ChildOf>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    // Terrain entities for Explorer tree (TerrainRoot + Chunks)
+    terrain_roots: Query<(Entity, &eustress_common::terrain::TerrainConfig), With<eustress_common::terrain::TerrainRoot>>,
+    terrain_chunks: Query<(Entity, &eustress_common::terrain::Chunk)>,
 ) {
     // Bypass throttle when a user interaction (select/expand/collapse) demands
     // an immediate refresh; otherwise throttle to every 30 frames.
@@ -3990,8 +4408,13 @@ fn sync_unified_explorer_to_slint(
         instances.iter().map(|(e, _)| e).collect();
     
     // Find root entities (no ChildOf, or ChildOf points to non-Instance entity)
+    // Filter out adornment entities (meta = true) - they are hidden from Explorer
     let mut roots: Vec<Entity> = Vec::new();
-    for (entity, _instance) in instances.iter() {
+    for (entity, instance) in instances.iter() {
+        // Skip adornment classes (meta entities hidden from Explorer)
+        if instance.class_name.is_adornment() {
+            continue;
+        }
         match child_of_query.get(entity) {
             Ok(child_of) => {
                 if !instance_entities.contains(&child_of.0) {
@@ -4038,6 +4461,19 @@ fn sync_unified_explorer_to_slint(
     let mut lighting_roots: Vec<Entity> = Vec::new();
     let mut starter_gui_roots: Vec<Entity> = Vec::new();
     let mut soul_service_roots: Vec<Entity> = Vec::new();
+    // Dynamic services: entities whose LoadedFromFile.service is not one of the
+    // hardcoded names above. Keyed by service name for Explorer rendering.
+    let mut dynamic_service_roots: std::collections::HashMap<String, Vec<Entity>> = std::collections::HashMap::new();
+    
+    // Set of hardcoded service names — entities in these are handled by the
+    // dedicated buckets above, everything else goes to dynamic_service_roots.
+    let hardcoded_services: std::collections::HashSet<&str> = [
+        "Workspace", "Lighting", "StarterGui", "SoulService",
+        "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
+        "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
+        // Also skip StarterCharacterScripts and StarterPlayerScripts if present
+        "StarterCharacterScripts", "StarterPlayerScripts",
+    ].into_iter().collect();
     
     for entity in &roots {
         if let Ok((_, instance)) = instances.get(*entity) {
@@ -4054,7 +4490,10 @@ fn sync_unified_explorer_to_slint(
                     "Lighting" => lighting_roots.push(*entity),
                     "StarterGui" => starter_gui_roots.push(*entity),
                     "SoulService" => soul_service_roots.push(*entity),
-                    _ => workspace_roots.push(*entity), // Default to Workspace
+                    other if !hardcoded_services.contains(other) => {
+                        dynamic_service_roots.entry(other.to_string()).or_default().push(*entity);
+                    }
+                    _ => {} // Entity in a hardcoded service with no children bucket (Players, Teams, etc.)
                 }
             } else {
                 // Fallback: classify by ClassName
@@ -4089,9 +4528,17 @@ fn sync_unified_explorer_to_slint(
 
         while let Some((entity, depth)) = stack.pop() {
             let Ok((_, instance)) = instances.get(entity) else { continue };
+            
+            // Skip adornment classes (meta entities hidden from Explorer)
+            if instance.class_name.is_adornment() {
+                continue;
+            }
 
             let has_children = children_query.get(entity)
-                .map(|children| children.iter().any(|c| instance_entities.contains(&c)))
+                .map(|children| children.iter().any(|c| {
+                    instance_entities.contains(&c) && 
+                    instances.get(c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
+                }))
                 .unwrap_or(false);
 
             // Assign a stable sequential i32 ID (avoids u64 truncation to i32)
@@ -4130,7 +4577,10 @@ fn sync_unified_explorer_to_slint(
             if is_expanded && has_children {
                 if let Ok(children) = children_query.get(entity) {
                     let mut child_instances: Vec<Entity> = children.iter()
-                        .filter(|c| instance_entities.contains(c))
+                        .filter(|c| {
+                            instance_entities.contains(c) &&
+                            instances.get(*c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
+                        })
                         .collect();
                     child_instances.sort_by(|a, b| {
                         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
@@ -4156,14 +4606,273 @@ fn sync_unified_explorer_to_slint(
     let mut entity_id_cache = std::mem::take(&mut explorer_state.entity_id_cache);
     let mut next_id = explorer_state.next_entity_node_id;
 
-    // Helper: is a service currently expanded?
-    let svc_expanded = |name: &str| explorer_state.expanded_services.contains(name);
+    // Helper: is a service currently expanded? (clone to avoid borrow conflicts)
+    let expanded_services = explorer_state.expanded_services.clone();
+    let svc_expanded = |name: &str| expanded_services.contains(name);
 
     // Service: Workspace (depth 0) + children (depth 1+)
-    let ws_has = !workspace_roots.is_empty();
+    let has_terrain = !terrain_roots.is_empty();
+    let ws_has = !workspace_roots.is_empty() || has_terrain;
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state));
     if svc_expanded("Workspace") {
         tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
+        
+        // Inject Terrain entities (TerrainRoot + Chunks) into Workspace
+        for (terrain_entity, terrain_config) in terrain_roots.iter() {
+            let terrain_node_id = next_id;
+            entity_id_cache.insert(terrain_node_id, terrain_entity);
+            next_id += 1;
+            
+            // Collect chunks that belong to this terrain root
+            let terrain_chunk_entities: Vec<(Entity, &eustress_common::terrain::Chunk)> = 
+                if let Ok(children) = children_query.get(terrain_entity) {
+                    children.iter()
+                        .filter_map(|c| terrain_chunks.get(c).ok())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+            
+            let has_chunks = !terrain_chunk_entities.is_empty();
+            let is_terrain_expanded = expanded_entities.contains(&terrain_entity);
+            let is_terrain_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == terrain_entity);
+            
+            let (total_w, _) = terrain_config.total_size();
+            
+            tree_nodes.push(TreeNode {
+                id: terrain_node_id,
+                name: format!("Terrain ({:.0}m)", total_w).into(),
+                icon: load_service_icon("terrain"),
+                depth: 1,
+                expandable: has_chunks,
+                expanded: is_terrain_expanded,
+                selected: is_terrain_selected,
+                visible: true,
+                node_type: "entity".into(),
+                class_name: "Terrain".into(),
+                path: slint::SharedString::default(),
+                is_directory: false,
+                extension: slint::SharedString::default(),
+                size: slint::SharedString::default(),
+                modified: false,
+            });
+            
+            // Add chunk children if terrain is expanded
+            if is_terrain_expanded {
+                let mut sorted_chunks = terrain_chunk_entities;
+                sorted_chunks.sort_by(|(_, a), (_, b)| {
+                    a.position.x.cmp(&b.position.x)
+                        .then(a.position.y.cmp(&b.position.y))
+                });
+                
+                for (chunk_entity, chunk) in &sorted_chunks {
+                    let chunk_node_id = next_id;
+                    entity_id_cache.insert(chunk_node_id, *chunk_entity);
+                    next_id += 1;
+                    
+                    let is_chunk_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == *chunk_entity);
+                    
+                    tree_nodes.push(TreeNode {
+                        id: chunk_node_id,
+                        name: format!("Chunk ({}, {})", chunk.position.x, chunk.position.y).into(),
+                        icon: load_service_icon("terrain"),
+                        depth: 2,
+                        expandable: false,
+                        expanded: false,
+                        selected: is_chunk_selected,
+                        visible: true,
+                        node_type: "entity".into(),
+                        class_name: "Chunk".into(),
+                        path: slint::SharedString::default(),
+                        is_directory: false,
+                        extension: slint::SharedString::default(),
+                        size: format!("LOD {}", chunk.lod).into(),
+                        modified: chunk.dirty,
+                    });
+                }
+            }
+        }
+    }
+
+    // ================================================================
+    // Terrain Folder (file-system-first) — appears under Workspace
+    // Shows Workspace/Terrain/ directory with _terrain.toml and chunks/
+    // ================================================================
+    {
+        let space_root = &crate::space::default_space_root();
+        let terrain_dir = space_root.join("Workspace").join("Terrain");
+        
+        if terrain_dir.exists() {
+            // Terrain folder node (depth 1, child of Workspace)
+            let terrain_folder_id = next_id;
+            next_id += 1;
+            
+            // Register in file_path_cache for expand/collapse actions
+            explorer_state.file_path_cache.insert(terrain_folder_id, terrain_dir.clone());
+            
+            let terrain_expanded = explorer_state.expanded_dirs.contains(&terrain_dir);
+            let terrain_selected = matches!(&explorer_state.selected, SelectedItem::File(p) if p == &terrain_dir);
+            
+            // Count total files in terrain dir for display
+            let mut file_count = 0;
+            if let Ok(entries) = std::fs::read_dir(&terrain_dir) {
+                file_count = entries.flatten().filter(|e| e.path().is_file()).count();
+            }
+            
+            let folder_icon = {
+                let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon("folder"));
+                slint::Image::load_from_path(&icon_path).unwrap_or_default()
+            };
+            tree_nodes.push(TreeNode {
+                id: terrain_folder_id,
+                name: format!("Terrain ({} files)", file_count).into(),
+                icon: folder_icon,
+                depth: 1,
+                expandable: true,
+                expanded: terrain_expanded,
+                selected: terrain_selected,
+                visible: true,
+                node_type: "file".into(),
+                class_name: slint::SharedString::default(),
+                path: terrain_dir.to_string_lossy().to_string().into(),
+                is_directory: true,
+                extension: slint::SharedString::default(),
+                size: slint::SharedString::default(),
+                modified: false,
+            });
+            
+            // If expanded, show contents
+            if terrain_expanded {
+                // Collect all entries (files and subdirs)
+                let mut entries: Vec<(String, std::path::PathBuf, bool)> = Vec::new();
+                if let Ok(read_dir) = std::fs::read_dir(&terrain_dir) {
+                    for entry in read_dir.flatten() {
+                        let path = entry.path();
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                        let is_dir = path.is_dir();
+                        entries.push((name, path, is_dir));
+                    }
+                }
+                
+                // Sort: directories first, then files, alphabetically
+                entries.sort_by(|a, b| {
+                    match (a.2, b.2) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.0.cmp(&b.0),
+                    }
+                });
+                
+                // Add each entry as a TreeNode
+                for (name, path, is_dir) in &entries {
+                    let entry_id = next_id;
+                    next_id += 1;
+                    
+                    // Register in file_path_cache
+                    explorer_state.file_path_cache.insert(entry_id, path.clone());
+                    
+                    let entry_selected = matches!(&explorer_state.selected, SelectedItem::File(p) if p == path);
+                    let entry_expanded = *is_dir && explorer_state.expanded_dirs.contains(path);
+                    
+                    let extension = if !is_dir {
+                        path.extension().and_then(|e| e.to_str()).unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    
+                    let size = if !is_dir {
+                        path.metadata().map(|m| {
+                            let bytes = m.len();
+                            if bytes < 1024 { format!("{} B", bytes) }
+                            else if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
+                            else { format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)) }
+                        }).unwrap_or_default()
+                    } else {
+                        // Count files in subdirectory
+                        std::fs::read_dir(path)
+                            .map(|rd| format!("{} items", rd.flatten().count()))
+                            .unwrap_or_default()
+                    };
+                    
+                    let entry_icon = {
+                        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(if *is_dir { "folder" } else { extension }));
+                        slint::Image::load_from_path(&icon_path).unwrap_or_default()
+                    };
+                    tree_nodes.push(TreeNode {
+                        id: entry_id,
+                        name: name.clone().into(),
+                        icon: entry_icon,
+                        depth: 2,
+                        expandable: *is_dir,
+                        expanded: entry_expanded,
+                        selected: entry_selected,
+                        visible: true,
+                        node_type: "file".into(),
+                        class_name: slint::SharedString::default(),
+                        path: path.to_string_lossy().to_string().into(),
+                        is_directory: *is_dir,
+                        extension: extension.into(),
+                        size: size.into(),
+                        modified: false,
+                    });
+                    
+                    // If subdirectory is expanded, show its contents (depth 3)
+                    if *is_dir && entry_expanded {
+                        if let Ok(sub_entries) = std::fs::read_dir(path) {
+                            let mut sub_files: Vec<(String, std::path::PathBuf)> = sub_entries
+                                .flatten()
+                                .filter(|e| e.path().is_file())
+                                .map(|e| {
+                                    let p = e.path();
+                                    let n = p.file_name().and_then(|f| f.to_str()).unwrap_or("").to_string();
+                                    (n, p)
+                                })
+                                .collect();
+                            sub_files.sort_by(|a, b| a.0.cmp(&b.0));
+                            
+                            for (sub_name, sub_path) in &sub_files {
+                                let sub_id = next_id;
+                                next_id += 1;
+                                
+                                // Register in file_path_cache
+                                explorer_state.file_path_cache.insert(sub_id, sub_path.clone());
+                                
+                                let sub_selected = matches!(&explorer_state.selected, SelectedItem::File(p) if p == sub_path);
+                                let sub_ext = sub_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                                let sub_size = sub_path.metadata().map(|m| {
+                                    let bytes = m.len();
+                                    if bytes < 1024 { format!("{} B", bytes) }
+                                    else if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
+                                    else { format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)) }
+                                }).unwrap_or_default();
+                                
+                                let sub_icon = {
+                                    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(sub_ext));
+                                    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+                                };
+                                tree_nodes.push(TreeNode {
+                                    id: sub_id,
+                                    name: sub_name.clone().into(),
+                                    icon: sub_icon,
+                                    depth: 3,
+                                    expandable: false,
+                                    expanded: false,
+                                    selected: sub_selected,
+                                    visible: true,
+                                    node_type: "file".into(),
+                                    class_name: slint::SharedString::default(),
+                                    path: sub_path.to_string_lossy().to_string().into(),
+                                    is_directory: false,
+                                    extension: sub_ext.into(),
+                                    size: sub_size.into(),
+                                    modified: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Service: Lighting (depth 0) + children (depth 1+)
@@ -4214,6 +4923,45 @@ fn sync_unified_explorer_to_slint(
     // Service: Chat (depth 0) - no editor children
     tree_nodes.push(make_service_node("Chat", "chat", 0, false, false, &explorer_state));
 
+    // ================================================================
+    // Dynamic services: discovered from _service.toml files on disk.
+    // Any service folder not in the hardcoded list above gets rendered here.
+    // ================================================================
+    {
+        let space_root = &crate::space::default_space_root();
+        if let Ok(read_dir) = std::fs::read_dir(space_root) {
+            let mut dynamic_names: Vec<String> = Vec::new();
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if !path.is_dir() { continue; }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                // Skip hardcoded services — they are already rendered above
+                if hardcoded_services.contains(name) { continue; }
+                // Must have _service.toml to be a valid service
+                if !path.join("_service.toml").exists() { continue; }
+                dynamic_names.push(name.to_string());
+            }
+            dynamic_names.sort();
+
+            for svc_name in &dynamic_names {
+                // Load icon from _service.toml if available
+                let svc_toml = space_root.join(svc_name).join("_service.toml");
+                let icon_name = std::fs::read_to_string(&svc_toml)
+                    .ok()
+                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                    .and_then(|v| v.get("service").and_then(|s| s.get("icon")).and_then(|i| i.as_str().map(|s| s.to_string())))
+                    .unwrap_or_else(|| svc_name.to_lowercase());
+
+                let children = dynamic_service_roots.get(svc_name).cloned().unwrap_or_default();
+                let has = !children.is_empty();
+                tree_nodes.push(make_service_node(svc_name, &icon_name, 0, has, svc_expanded(svc_name), &explorer_state));
+                if svc_expanded(svc_name) && has {
+                    tree_nodes.extend(build_entity_nodes(&children, 1, &mut entity_id_cache, &mut next_id));
+                }
+            }
+        }
+    }
+
     // Write entity_id_cache and counter back to explorer_state
     explorer_state.entity_id_cache = entity_id_cache;
     explorer_state.next_entity_node_id = next_id;
@@ -4235,9 +4983,28 @@ fn sync_unified_explorer_to_slint(
         }
     }
     
-    // Push unified tree to Slint
-    let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
-    ui.set_tree_nodes(slint::ModelRc::from(model));
+    // Hash-based change detection: only push to Slint when the model data actually
+    // changes. Re-pushing an identical model destroys and recreates all `for` loop
+    // items in Slint, which resets hover state and causes visible flickering.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in &tree_nodes {
+        node.id.hash(&mut hasher);
+        node.name.hash(&mut hasher);
+        node.depth.hash(&mut hasher);
+        node.expanded.hash(&mut hasher);
+        node.selected.hash(&mut hasher);
+        node.expandable.hash(&mut hasher);
+        node.visible.hash(&mut hasher);
+        node.node_type.hash(&mut hasher);
+    }
+    let new_hash = hasher.finish();
+    
+    if new_hash != explorer_state.last_tree_hash {
+        explorer_state.last_tree_hash = new_hash;
+        let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
+        ui.set_tree_nodes(slint::ModelRc::from(model));
+    }
 }
 
 /// Create a service header node (Workspace, Lighting, Players, etc.)
@@ -4486,6 +5253,7 @@ fn build_file_tree_nodes(
 fn sync_properties_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     perf: Option<Res<UIPerformance>>,
+    mut studio_state: ResMut<StudioState>,
     explorer_state: Res<UnifiedExplorerState>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     transforms: Query<&Transform>,
@@ -4640,6 +5408,7 @@ fn sync_properties_to_slint(
             add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
             add_prop("Appearance", "Reflectance", format!("{:.3}", toml_def.properties.reflectance), "float", true);
             add_prop("Appearance", "CastShadow", toml_def.properties.cast_shadow.to_string(), "bool", true);
+            add_prop("Appearance", "Material", toml_def.properties.material.clone(), "string", true);
             
             // -- Physics section --
             add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
@@ -4779,6 +5548,7 @@ fn sync_properties_to_slint(
     let mut flat_props: Vec<PropertyData> = Vec::new();
     for cat in &ordered_categories {
         // Insert category header
+        let is_collapsed = studio_state.collapsed_sections.contains(cat);
         flat_props.push(PropertyData {
             name: slint::SharedString::default(),
             value: slint::SharedString::default(),
@@ -4787,6 +5557,7 @@ fn sync_properties_to_slint(
             editable: false,
             options: slint::ModelRc::default(),
             is_header: true,
+            section_collapsed: is_collapsed,
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
@@ -4815,6 +5586,7 @@ fn sync_properties_to_slint(
                     editable,
                     options: slint::ModelRc::default(),
                     is_header: false,
+                    section_collapsed: is_collapsed,
                     x_value: x_val.into(),
                     y_value: y_val.into(),
                     z_value: z_val.into(),
@@ -4825,9 +5597,29 @@ fn sync_properties_to_slint(
         }
     }
     
-    // Push to Slint
-    let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_props));
-    ui.set_entity_properties(slint::ModelRc::from(model_rc));
+    // Hash-based change detection: only push to Slint when the model data actually
+    // changes. Re-pushing an identical model destroys and recreates all `for` loop
+    // items in Slint, which resets hover state and causes visible flickering.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for prop in &flat_props {
+        prop.name.hash(&mut hasher);
+        prop.value.hash(&mut hasher);
+        prop.category.hash(&mut hasher);
+        prop.property_type.hash(&mut hasher);
+        prop.is_header.hash(&mut hasher);
+        prop.section_collapsed.hash(&mut hasher);
+        prop.x_value.hash(&mut hasher);
+        prop.y_value.hash(&mut hasher);
+        prop.z_value.hash(&mut hasher);
+    }
+    let new_hash = hasher.finish();
+    
+    if new_hash != studio_state.last_properties_hash {
+        studio_state.last_properties_hash = new_hash;
+        let model_rc = std::rc::Rc::new(slint::VecModel::from(flat_props));
+        ui.set_entity_properties(slint::ModelRc::from(model_rc));
+    }
 }
 
 /// Converts a property name + string value into a typed PropertyValue.
@@ -4952,6 +5744,7 @@ fn update_toml_property(
         "Transparency" => { if let Ok(v) = val.parse() { def.properties.transparency = v; true } else { false } }
         "Reflectance" => { if let Ok(v) = val.parse() { def.properties.reflectance = v; true } else { false } }
         "CastShadow" => { def.properties.cast_shadow = val == "true"; true }
+        "Material" => { def.properties.material = val.to_string(); true }
         
         // Physics (properties section)
         "Anchored" => { def.properties.anchored = val == "true"; true }
@@ -5214,6 +6007,7 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             category: category.into(),
             options: slint::ModelRc::default(),
             is_header: is_hdr,
+            section_collapsed: false,
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
@@ -5315,6 +6109,7 @@ fn build_service_properties(
             category: category.into(),
             options: slint::ModelRc::default(),
             is_header: is_hdr,
+            section_collapsed: false,
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
@@ -5734,6 +6529,293 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
 fn build_line_numbers_text(content: &str) -> String {
     let count = content.chars().filter(|&c| c == '\n').count() + 1;
     (1..=count).map(|n| n.to_string()).collect::<Vec<_>>().join("\n")
+}
+
+// ============================================================================
+// Asset Manager — state + sync system
+// ============================================================================
+
+/// Persistent state for the Asset Manager panel
+#[derive(Resource, Default)]
+pub struct AssetManagerState {
+    /// Which category filter is active ("All", "Meshes", "Textures", etc.)
+    pub category: String,
+    /// Search query typed by the user
+    pub search: String,
+    /// Expanded section IDs (negative IDs for section headers)
+    pub expanded: std::collections::HashSet<i32>,
+    /// Currently selected node ID
+    pub selected: Option<i32>,
+    /// Frame counter for throttling
+    pub frame: u64,
+    /// Whether an immediate re-sync is needed (expand/collapse/search change)
+    pub dirty: bool,
+    /// Hash of last pushed model to avoid flickering on redundant pushes
+    pub last_hash: u64,
+}
+
+/// Classify a file extension into an asset category string
+fn asset_category_for_extension(ext: &str) -> &'static str {
+    match ext {
+        "glb" | "gltf" | "obj" | "fbx" | "stl" => "Meshes",
+        "png" | "jpg" | "jpeg" | "bmp" | "tga" | "tiff" | "webp" | "hdr" | "exr" => "Textures",
+        "ogg" | "mp3" | "wav" | "flac" => "Audio",
+        "mat.toml" => "Materials",
+        "soul" | "rune" | "lua" | "wasm" => "Scripts",
+        "ttf" | "otf" | "woff" | "woff2" => "Fonts",
+        _ => "Other",
+    }
+}
+
+/// Get the compound extension for category matching (e.g. "mat.toml" from "Foo.mat.toml")
+fn compound_ext(path: &std::path::Path) -> String {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    // Check for compound extensions like .mat.toml, .part.toml, .glb.toml
+    if name.ends_with(".mat.toml") { return "mat.toml".to_string(); }
+    if name.ends_with(".part.toml") { return "part.toml".to_string(); }
+    if name.ends_with(".glb.toml") { return "glb.toml".to_string(); }
+    path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string()
+}
+
+/// Format file size as human-readable string
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 { return format!("{} B", bytes); }
+    if bytes < 1024 * 1024 { return format!("{:.1} KB", bytes as f64 / 1024.0); }
+    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Load an icon for asset type
+fn asset_icon(asset_type: &str) -> slint::Image {
+    let icon_name = match asset_type {
+        "section" => "ui/package",
+        "folder" => "ui/group",
+        "Meshes" | "mesh" => "ui/package",
+        "Textures" | "texture" => "ui/image",
+        "Audio" | "audio" => "ui/audio",
+        "Materials" | "material" => "ui/palette",
+        "Scripts" | "script" => "ui/new-file",
+        "Fonts" | "font" => "ui/new-file",
+        _ => "ui/new-file",
+    };
+    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("icons")
+        .join(format!("{}.svg", icon_name));
+    slint::Image::load_from_path(&icon_path).unwrap_or_default()
+}
+
+/// Scan a directory recursively and collect asset files as (relative_path, full_path, size)
+fn scan_asset_dir(dir: &std::path::Path, base: &std::path::Path) -> Vec<(String, std::path::PathBuf, u64)> {
+    let mut results = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return results };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            // Recurse into subdirectories
+            results.extend(scan_asset_dir(&path, base));
+        } else {
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            let relative = path.strip_prefix(base)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.file_name().unwrap_or_default().to_string_lossy().to_string());
+            results.push((relative, path, size));
+        }
+    }
+    results
+}
+
+/// Sync the Asset Manager tree to Slint.
+/// Builds a hierarchy:
+///   ▸ Universe Assets
+///     ▸ Engine Parts (assets/parts/)
+///     ▸ Custom Meshes (assets/meshes/)
+///   ▸ Space Assets
+///     (all non-service assets in current Space)
+fn sync_asset_manager_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut state: ResMut<AssetManagerState>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
+) {
+    state.frame += 1;
+    // Throttle: sync every 60 frames or when dirty
+    if !state.dirty && state.frame % 60 != 1 { return; }
+    state.dirty = false;
+
+    let Some(ctx) = slint_context.as_ref() else { return };
+    let ui = &ctx.window;
+
+    let space_root = space_root_res.map(|r| r.0.clone())
+        .unwrap_or_else(crate::space::default_space_root);
+
+    let universe_root = crate::space::universe_root_for_path(&space_root);
+    let category = &state.category;
+    let search = state.search.to_lowercase();
+
+    let mut asset_nodes: Vec<(i32, String, slint::Image, String, i32, bool, bool, bool, String, String)> = Vec::new();
+    let mut next_id: i32 = 1;
+    let mut universe_count: i32 = 0;
+    let mut space_count: i32 = 0;
+
+    // Section IDs (negative to avoid collision with file IDs)
+    let universe_section_id: i32 = -1;
+    let engine_parts_id: i32 = -2;
+    let custom_meshes_id: i32 = -3;
+    let space_section_id: i32 = -4;
+
+    // Check expansion state
+    let universe_expanded = state.expanded.contains(&universe_section_id);
+    let engine_parts_expanded = state.expanded.contains(&engine_parts_id);
+    let custom_meshes_expanded = state.expanded.contains(&custom_meshes_id);
+    let space_expanded = state.expanded.contains(&space_section_id);
+    let selected = state.selected;
+
+    // Helper: push a node tuple
+    let mut push_node = |id: i32, name: &str, icon: slint::Image, asset_type: &str, depth: i32, expandable: bool, expanded: bool, size: &str, path: &str| {
+        let is_selected = selected == Some(id);
+        asset_nodes.push((id, name.to_string(), icon, asset_type.to_string(), depth, expandable, expanded, is_selected, size.to_string(), path.to_string()));
+    };
+
+    // ── Universe Assets section ─────────────────────────────────────────
+    if let Some(ref uni_root) = universe_root {
+        let parts_dir = uni_root.join("assets").join("parts");
+        let meshes_dir = uni_root.join("assets").join("meshes");
+
+        let parts_files = scan_asset_dir(&parts_dir, &parts_dir);
+        let mesh_files = scan_asset_dir(&meshes_dir, &meshes_dir);
+        let uni_total = parts_files.len() + mesh_files.len();
+        universe_count = uni_total as i32;
+
+        push_node(universe_section_id, &format!("Universe Assets ({})", uni_total),
+            asset_icon("section"), "section", 0, true, universe_expanded, "", "");
+
+        if universe_expanded {
+            // Engine Parts subfolder
+            let has_parts = !parts_files.is_empty();
+            push_node(engine_parts_id, &format!("Engine Parts ({})", parts_files.len()),
+                asset_icon("folder"), "folder", 1, has_parts, engine_parts_expanded, "", "");
+
+            if engine_parts_expanded {
+                for (rel, full_path, size) in &parts_files {
+                    let ext = compound_ext(full_path);
+                    let cat = asset_category_for_extension(&ext);
+                    let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    // Filter by category
+                    if category != "All" && cat != category.as_str() { continue; }
+                    // Filter by search
+                    if !search.is_empty() && !fname.to_lowercase().contains(&search) { continue; }
+
+                    let id = next_id; next_id += 1;
+                    push_node(id, &fname, asset_icon(cat), cat, 2, false, false,
+                        &format_file_size(*size), &full_path.to_string_lossy());
+                }
+            }
+
+            // Custom Meshes subfolder
+            let has_meshes = !mesh_files.is_empty();
+            push_node(custom_meshes_id, &format!("Custom Meshes ({})", mesh_files.len()),
+                asset_icon("folder"), "folder", 1, has_meshes, custom_meshes_expanded, "", "");
+
+            if custom_meshes_expanded {
+                for (rel, full_path, size) in &mesh_files {
+                    let ext = compound_ext(full_path);
+                    let cat = asset_category_for_extension(&ext);
+                    let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if category != "All" && cat != category.as_str() { continue; }
+                    if !search.is_empty() && !fname.to_lowercase().contains(&search) { continue; }
+
+                    let id = next_id; next_id += 1;
+                    push_node(id, &fname, asset_icon(cat), cat, 2, false, false,
+                        &format_file_size(*size), &full_path.to_string_lossy());
+                }
+            }
+        }
+    }
+
+    // ── Space Assets section ────────────────────────────────────────────
+    // Scan current Space for non-marker, non-service TOML and media files
+    {
+        let space_files = scan_asset_dir(&space_root, &space_root);
+        // Filter to actual asset files (not _service.toml, _instance.toml, space.toml, etc.)
+        let space_assets: Vec<_> = space_files.iter().filter(|(rel, path, _)| {
+            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Skip marker files and config
+            if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml"
+                || fname == ".gitignore" || rel.starts_with(".eustress")
+                || rel.starts_with("src") { return false; }
+            let ext = compound_ext(path);
+            let cat = asset_category_for_extension(&ext);
+            // Category filter
+            if category != "All" && cat != category.as_str() { return false; }
+            // Search filter
+            if !search.is_empty() && !fname.to_lowercase().contains(&search) { return false; }
+            // Only show recognized asset types
+            cat != "Other"
+        }).collect();
+
+        space_count = space_assets.len() as i32;
+        push_node(space_section_id, &format!("Space Assets ({})", space_assets.len()),
+            asset_icon("section"), "section", 0, true, space_expanded, "", "");
+
+        if space_expanded {
+            for (rel, full_path, size) in &space_assets {
+                let ext = compound_ext(full_path);
+                let cat = asset_category_for_extension(&ext);
+                let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                // Show relative path as name for better context
+                let display_name = if rel.contains('/') {
+                    rel.clone()
+                } else {
+                    fname
+                };
+
+                let id = next_id; next_id += 1;
+                push_node(id, &display_name, asset_icon(cat), cat, 1, false, false,
+                    &format_file_size(*size), &full_path.to_string_lossy());
+            }
+        }
+    }
+
+    // Convert to Slint model
+    let slint_nodes: Vec<AssetNode> = asset_nodes.into_iter().map(|(id, name, icon, asset_type, depth, expandable, expanded, selected, size, path)| {
+        AssetNode {
+            id,
+            name: name.into(),
+            icon,
+            asset_type: asset_type.into(),
+            depth,
+            expandable,
+            expanded,
+            selected,
+            size: size.into(),
+            path: path.into(),
+        }
+    }).collect();
+
+    // Hash-based change detection: only push to Slint when the model data actually
+    // changes. Re-pushing an identical model destroys and recreates all `for` loop
+    // items in Slint, which resets hover state and causes visible flickering.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in &slint_nodes {
+        node.id.hash(&mut hasher);
+        node.name.hash(&mut hasher);
+        node.depth.hash(&mut hasher);
+        node.expandable.hash(&mut hasher);
+        node.expanded.hash(&mut hasher);
+        node.selected.hash(&mut hasher);
+        node.asset_type.hash(&mut hasher);
+    }
+    let new_hash = hasher.finish();
+    
+    if new_hash != state.last_hash {
+        state.last_hash = new_hash;
+        let model = std::rc::Rc::new(slint::VecModel::from(slint_nodes));
+        ui.set_asset_nodes(slint::ModelRc::from(model));
+        ui.set_universe_asset_count(universe_count);
+        ui.set_space_asset_count(space_count);
+    }
 }
 
 /// Load an SVG icon as a slint::Image from the assets/icons directory

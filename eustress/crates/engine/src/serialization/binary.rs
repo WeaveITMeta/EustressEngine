@@ -492,6 +492,25 @@ impl ClassId {
             ClassName::RegionChunk => ClassId::Model,
             // Large-scale worlds - map to Model as container fallback
             ClassName::ChunkedWorld => ClassId::Model,
+            // Adornments - meta entities, map to Instance as fallback (not serialized to binary)
+            ClassName::BoxHandleAdornment => ClassId::Instance,
+            ClassName::SphereHandleAdornment => ClassId::Instance,
+            ClassName::ConeHandleAdornment => ClassId::Instance,
+            ClassName::CylinderHandleAdornment => ClassId::Instance,
+            ClassName::LineHandleAdornment => ClassId::Instance,
+            ClassName::PyramidHandleAdornment => ClassId::Instance,
+            ClassName::WireframeHandleAdornment => ClassId::Instance,
+            ClassName::ImageHandleAdornment => ClassId::Instance,
+            ClassName::SelectionBox => ClassId::Instance,
+            ClassName::SelectionSphere => ClassId::Instance,
+            ClassName::SurfaceSelection => ClassId::Instance,
+            ClassName::ArcHandles => ClassId::Instance,
+            ClassName::Handles => ClassId::Instance,
+            ClassName::PathfindingLink => ClassId::Instance,
+            ClassName::PathfindingModifier => ClassId::Instance,
+            ClassName::GridSensor => ClassId::Instance,
+            ClassName::AlignmentGuide => ClassId::Instance,
+            ClassName::SnapIndicator => ClassId::Instance,
         }
     }
     

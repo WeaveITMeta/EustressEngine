@@ -15,6 +15,7 @@ ProductName = "Eustress Engine"
 name = "eustress-engine"
 path = "src/main.rs"
 
+
 [dependencies]
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism"] }

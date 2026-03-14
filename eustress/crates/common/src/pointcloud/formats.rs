@@ -204,6 +204,10 @@ pub enum ElevationFormat {
     BIL,
     /// Terragen heightmap
     TER,
+    /// Raw 16-bit heightmap (.r16)
+    R16,
+    /// PNG grayscale heightmap
+    PNG,
 }
 
 impl ElevationFormat {
@@ -217,6 +221,8 @@ impl ElevationFormat {
             "hgt" => Some(Self::HGT),
             "bil" => Some(Self::BIL),
             "ter" => Some(Self::TER),
+            "r16" | "raw" => Some(Self::R16),
+            "png" => Some(Self::PNG),
             _ => None,
         }
     }
@@ -231,6 +237,8 @@ impl ElevationFormat {
             Self::HGT => "HGT - SRTM height data",
             Self::BIL => "BIL - Band Interleaved by Line",
             Self::TER => "TER - Terragen heightmap",
+            Self::R16 => "R16 - Raw 16-bit heightmap",
+            Self::PNG => "PNG - Grayscale heightmap image",
         }
     }
 }
@@ -1720,6 +1728,88 @@ pub fn import_geotiff(_path: &Path) -> Result<ElevationData, String> {
     Err("GeoTIFF import requires 'geotiff' feature".to_string())
 }
 
+/// Import raw 16-bit heightmap (.r16)
+///
+/// R16 files are square, little-endian unsigned 16-bit heightmaps.
+/// Resolution is inferred from file size: `sqrt(file_bytes / 2)`.
+/// Values are normalized to 0.0..1.0 range, then scaled by cell_size=1.0.
+pub fn import_r16(path: &Path) -> Result<ElevationData, String> {
+    let data = std::fs::read(path).map_err(|e| format!("Failed to read R16 {:?}: {}", path, e))?;
+    if data.len() < 2 || data.len() % 2 != 0 {
+        return Err(format!("R16 file has invalid size: {} bytes (must be even)", data.len()));
+    }
+    let pixel_count = data.len() / 2;
+    let side = (pixel_count as f64).sqrt() as usize;
+    if side * side != pixel_count {
+        return Err(format!(
+            "R16 file is not square: {} pixels (nearest square root: {})",
+            pixel_count, side
+        ));
+    }
+    let heights: Vec<f32> = data.chunks_exact(2)
+        .map(|pair| {
+            let raw = u16::from_le_bytes([pair[0], pair[1]]);
+            raw as f32 / 65535.0
+        })
+        .collect();
+
+    Ok(ElevationData {
+        width: side,
+        height: side,
+        heights,
+        cell_size: 1.0,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        nodata: -9999.0,
+        data_type: ElevationFormat::R16,
+    })
+}
+
+/// Import PNG grayscale heightmap (.png)
+///
+/// Reads a PNG image using the `image` crate and converts to height data:
+/// - Grayscale: values normalized to 0.0..1.0
+/// - 16-bit grayscale: full precision, values normalized to 0.0..1.0
+/// - RGB/RGBA: luminance formula (0.299R + 0.587G + 0.114B), normalized to 0.0..1.0
+///
+/// Requires the `geotiff` feature (which enables the `image` crate).
+#[cfg(feature = "geotiff")]
+pub fn import_png_heightmap(path: &Path) -> Result<ElevationData, String> {
+    let img = image::open(path)
+        .map_err(|e| format!("Failed to open PNG {:?}: {}", path, e))?;
+    let width = img.width() as usize;
+    let height = img.height() as usize;
+
+    // Try 16-bit grayscale first for maximum precision
+    let heights: Vec<f32> = if let Some(gray16) = img.as_luma16() {
+        gray16.pixels()
+            .map(|p| p.0[0] as f32 / 65535.0)
+            .collect()
+    } else {
+        // Convert to 8-bit grayscale (handles RGB, RGBA, grayscale, etc.)
+        let gray = img.to_luma8();
+        gray.pixels()
+            .map(|p| p.0[0] as f32 / 255.0)
+            .collect()
+    };
+
+    Ok(ElevationData {
+        width,
+        height,
+        heights,
+        cell_size: 1.0,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        nodata: -9999.0,
+        data_type: ElevationFormat::PNG,
+    })
+}
+
+#[cfg(not(feature = "geotiff"))]
+pub fn import_png_heightmap(_path: &Path) -> Result<ElevationData, String> {
+    Err("PNG heightmap import requires 'geotiff' feature (for the image crate)".to_string())
+}
+
 /// Import elevation data from any supported format
 pub fn import_elevation(path: &Path) -> Result<ElevationData, String> {
     let ext = path.extension()
@@ -1730,6 +1820,8 @@ pub fn import_elevation(path: &Path) -> Result<ElevationData, String> {
         "asc" | "grd" => import_asc(path),
         "hgt" => import_hgt(path),
         "tif" | "tiff" | "geotiff" => import_geotiff(path),
+        "r16" | "raw" => import_r16(path),
+        "png" => import_png_heightmap(path),
         "dem" | "dsm" | "dtm" => {
             // Try GeoTIFF first, then ASC, then HGT
             import_geotiff(path)
@@ -1804,7 +1896,7 @@ pub fn supported_extensions() -> Vec<&'static str> {
         // Point cloud
         "ply", "las", "laz", "pts", "xyz", "txt", "dxf", "pcd", "e57", "splat",
         // Elevation
-        "dem", "dsm", "dtm", "tif", "tiff", "asc", "grd", "hgt", "bil", "ter",
+        "dem", "dsm", "dtm", "tif", "tiff", "asc", "grd", "hgt", "bil", "ter", "r16", "raw", "png",
     ]
 }
 
