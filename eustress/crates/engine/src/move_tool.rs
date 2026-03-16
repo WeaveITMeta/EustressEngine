@@ -259,11 +259,24 @@ fn handle_move_interaction(
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     spatial_query: SpatialQuery,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
     if !state.active { return; }
 
     let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
+    
+    // Block NEW drags when cursor is over UI panels (outside 3D viewport).
+    // Allow in-progress drags to continue even if cursor leaves the viewport.
+    if state.dragged_axis.is_none() && !state.free_drag {
+        if let Some(vb) = viewport_bounds.as_deref() {
+            if vb.width > 0.0 && vb.height > 0.0 {
+                let in_viewport = cursor_pos.x >= vb.x && cursor_pos.x <= vb.x + vb.width
+                    && cursor_pos.y >= vb.y && cursor_pos.y <= vb.y + vb.height;
+                if !in_viewport { return; }
+            }
+        }
+    }
     let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
     let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) else { return };
     let camera_forward = camera_transform.forward().as_vec3();

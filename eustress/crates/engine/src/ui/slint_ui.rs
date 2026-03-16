@@ -1104,6 +1104,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, forward_input_to_slint)
             .add_systems(Update, forward_keyboard_to_slint)
+            .add_systems(Update, update_slint_ui_focus)
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
@@ -1894,6 +1895,52 @@ fn forward_input_to_slint(
             });
         }
     }
+}
+
+/// Updates `SlintUIFocus.has_focus` every frame based on cursor position vs viewport bounds.
+/// When the cursor is outside the 3D viewport area (i.e. over Explorer, Properties, Ribbon,
+/// Output, or Toolbox panels), `has_focus` is set to `true` to block 3D tool input.
+///
+/// This prevents phantom clicks: clicking a tool button in the ribbon no longer also fires
+/// a raycast into the 3D scene that could deselect objects or start an unintended drag.
+fn update_slint_ui_focus(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    viewport_bounds: Option<Res<super::ViewportBounds>>,
+    mut ui_focus: ResMut<super::SlintUIFocus>,
+) {
+    let Some(vb) = viewport_bounds.as_deref() else {
+        // No viewport bounds yet — assume UI doesn't have focus
+        ui_focus.has_focus = false;
+        return;
+    };
+    
+    // If viewport bounds are zero, layout hasn't been computed yet
+    if vb.width <= 0.0 || vb.height <= 0.0 {
+        ui_focus.has_focus = false;
+        return;
+    }
+    
+    let Ok(window) = windows.single() else {
+        ui_focus.has_focus = false;
+        return;
+    };
+    
+    let Some(cursor_pos) = window.cursor_position() else {
+        // Cursor outside the window — clear focus
+        ui_focus.has_focus = false;
+        ui_focus.last_ui_position = None;
+        return;
+    };
+    
+    // Check if cursor is inside the 3D viewport bounds (physical pixels)
+    let in_viewport = cursor_pos.x >= vb.x
+        && cursor_pos.x <= vb.x + vb.width
+        && cursor_pos.y >= vb.y
+        && cursor_pos.y <= vb.y + vb.height;
+    
+    // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
+    ui_focus.has_focus = !in_viewport;
+    ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
 }
 
 /// Try to restore auth session on startup
