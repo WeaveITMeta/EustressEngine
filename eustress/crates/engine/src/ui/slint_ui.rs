@@ -1594,6 +1594,11 @@ fn setup_slint_overlay(world: &mut World) {
     });
     
     world.insert_resource(SlintOverlayTexture(image_handle));
+    world.insert_resource(SlintStagingBuffer {
+        pixels: vec![PremultipliedRgbaColor::default(); (width * height) as usize],
+        width: width as usize,
+        height: height as usize,
+    });
     world.insert_resource(SlintOverlayInitialized(true));
 
     // Set the window title-bar icon via WinitWindows (available here at Startup)
@@ -1674,6 +1679,21 @@ fn set_window_icon(world: &mut World) {
 #[derive(Resource)]
 pub struct SlintOverlayTexture(pub Handle<Image>);
 
+/// Staging buffer for Slint software renderer output.
+/// Slint renders into this buffer every frame. Only when dirty regions exist
+/// do we copy the affected rows into the Bevy Image and trigger a GPU re-upload.
+/// This avoids calling images.get_mut() every frame (which marks the entire
+/// texture asset as modified and forces a full ~8MB GPU upload even when
+/// nothing changed).
+#[derive(Resource)]
+struct SlintStagingBuffer {
+    /// Pixel data — same layout as the Bevy texture (width * height * 4 bytes RGBA)
+    pixels: Vec<PremultipliedRgbaColor>,
+    /// Current buffer dimensions
+    width: usize,
+    height: usize,
+}
+
 /// Tracks cursor position for Slint input forwarding
 #[derive(Resource, Default)]
 struct SlintCursorState {
@@ -1683,12 +1703,19 @@ struct SlintCursorState {
 /// Frame counter for one-time debug logging
 static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Renders the Slint UI to the Bevy texture each frame (from official bevy-hosts-slint)
+/// Renders the Slint UI to a staging buffer, then copies only dirty regions
+/// into the Bevy texture for GPU upload.
+///
+/// **Performance**: Slint renders into `SlintStagingBuffer` (no Bevy asset mutation).
+/// Only when dirty pixels exist do we call `images.get_mut()` and copy the affected
+/// rows. This avoids marking the ~8MB texture asset as modified every frame, which
+/// previously forced a full GPU re-upload even when nothing changed.
 fn render_slint_to_texture(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     slint_scenes: Query<&SlintScene>,
     slint_context: Option<NonSend<SlintUiState>>,
+    mut staging: ResMut<SlintStagingBuffer>,
 ) {
     let Some(slint_context) = slint_context else { return };
     
@@ -1699,46 +1726,79 @@ fn render_slint_to_texture(
     
     let adapter = &slint_context.adapter;
     
-    
     let Some(scene) = slint_scenes.iter().next() else {
         if frame < 5 { warn!("render_slint_to_texture: no SlintScene entity"); }
         return;
     };
-    let Some(image) = images.get_mut(&scene.image) else {
-        if frame < 5 { warn!("render_slint_to_texture: image asset not found"); }
-        return;
+    
+    // Read texture dimensions WITHOUT mutating the image asset.
+    // images.get() does NOT mark the asset as changed — no GPU re-upload triggered.
+    let (tex_width, tex_height) = {
+        let Some(image) = images.get(&scene.image) else {
+            if frame < 5 { warn!("render_slint_to_texture: image asset not found"); }
+            return;
+        };
+        (image.texture_descriptor.size.width as usize,
+         image.texture_descriptor.size.height as usize)
     };
     
-    let tex_width  = image.texture_descriptor.size.width  as usize;
-    let tex_height = image.texture_descriptor.size.height as usize;
+    // Ensure staging buffer matches texture dimensions
+    let needed = tex_width * tex_height;
+    if staging.pixels.len() != needed || staging.width != tex_width || staging.height != tex_height {
+        staging.pixels.resize(needed, PremultipliedRgbaColor::default());
+        staging.width = tex_width;
+        staging.height = tex_height;
+    }
     
-    // handle_window_resize owns adapter.resize() — do NOT call it here.
-    // Calling it every frame dispatches WindowEvent::Resized to Slint on every frame,
-    // forcing a full re-layout + re-alloc even when nothing changed, which exhausts
-    // the heap and eventually triggers STATUS_STACK_BUFFER_OVERRUN via the CRT panic handler.
+    // Render Slint UI into the staging buffer (NOT into image.data).
+    // ReusedBuffer mode: Slint only repaints dirty regions within the buffer.
+    let dirty_region = adapter.software_renderer.render(
+        &mut staging.pixels,
+        tex_width,
+    );
     
-    // Render Slint UI directly into the Bevy texture's CPU-side storage.
+    // Only touch the Bevy image when Slint actually repainted something.
+    // This is the critical optimization — when nothing is dirty (e.g. static UI,
+    // no hover, no animation), we skip the ~8MB GPU texture upload entirely.
+    let dirty_size = dirty_region.bounding_box_size();
+    if dirty_size.width == 0 || dirty_size.height == 0 {
+        return;
+    }
+    
+    // Dirty region exists — copy affected rows from staging into image.data
+    let dirty_origin = dirty_region.bounding_box_origin();
+    let dirty_x = dirty_origin.x as usize;
+    let dirty_y = dirty_origin.y as usize;
+    let dirty_w = dirty_size.width as usize;
+    let dirty_h = dirty_size.height as usize;
+    
+    let Some(image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
         let expected_bytes = tex_width * tex_height * 4;
         if data.len() != expected_bytes {
-            // Buffer and descriptor are out of sync (resize in flight) — skip this frame
+            // Buffer and descriptor are out of sync (resize in flight) — skip
             return;
         }
         
-        let dirty_region = adapter.software_renderer.render(
-            bytemuck::cast_slice_mut::<u8, PremultipliedRgbaColor>(data),
-            tex_width,
-        );
+        // Copy only the dirty rectangle's rows from staging → image.data.
+        // Each pixel is 4 bytes (PremultipliedRgbaColor = RGBA u8×4).
+        let staging_bytes: &[u8] = bytemuck::cast_slice(&staging.pixels);
+        let row_bytes = tex_width * 4;
+        let dirty_row_start = dirty_x * 4;
+        let dirty_row_len = dirty_w * 4;
         
-        // Only force GPU re-upload if Slint actually repainted something
-        let size = dirty_region.bounding_box_size();
-        let has_dirty = size.width > 0 && size.height > 0;
-        if has_dirty {
-            // WORKAROUND: Force GPU texture re-upload by touching the material mutably.
-            // See: https://github.com/bevyengine/bevy/issues/17350
-            materials.get_mut(&scene.material);
+        for row in dirty_y..(dirty_y + dirty_h).min(tex_height) {
+            let offset = row * row_bytes + dirty_row_start;
+            let end = offset + dirty_row_len;
+            if end <= data.len() && end <= staging_bytes.len() {
+                data[offset..end].copy_from_slice(&staging_bytes[offset..end]);
+            }
         }
     }
+    
+    // WORKAROUND: Force GPU texture re-upload by touching the material mutably.
+    // See: https://github.com/bevyengine/bevy/issues/17350
+    materials.get_mut(&scene.material);
 }
 
 /// Forwards Bevy mouse/keyboard input to Slint (from official bevy-hosts-slint)
@@ -4196,6 +4256,7 @@ fn handle_window_resize(
     slint_scenes: Query<&SlintScene>,
     mut overlay_quads: Query<&mut Mesh3d, With<SlintOverlaySprite>>,
     mut overlay_cameras: Query<(&mut Camera, &mut Projection), With<SlintOverlayCamera>>,
+    mut staging: ResMut<SlintStagingBuffer>,
 ) {
     let Some(window) = windows.iter().next() else { return };
     let Some(slint_context) = slint_context else { return };
@@ -4219,6 +4280,13 @@ fn handle_window_resize(
         slint::PhysicalSize::new(new_width, new_height),
         scale_factor,
     );
+    
+    // Resize the staging buffer to match new dimensions
+    let new_pixel_count = (new_width * new_height) as usize;
+    staging.pixels.resize(new_pixel_count, PremultipliedRgbaColor::default());
+    staging.pixels.fill(PremultipliedRgbaColor::default());
+    staging.width = new_width as usize;
+    staging.height = new_height as usize;
     
     // Resize the Slint texture to match physical framebuffer
     if let Some(scene) = slint_scenes.iter().next() {
