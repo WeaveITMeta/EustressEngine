@@ -220,6 +220,10 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-help-icons: true;
     in-out property <bool> help-opens-in-tab: false;
     
+    // Input focus tracking — when true, Rust sync systems should NOT push property updates
+    // to avoid overwriting user input while they're typing. Set by callbacks from input fields.
+    in-out property <bool> any-input-has-focus: false;
+    
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
     in-out property <length> right-panel-width: 300px;
@@ -1692,6 +1696,7 @@ export component StudioWindow inherits Window {
                             on-property-changed(name, value) => { root.property-changed(name, value); }
                             on-section-toggle(category) => { root.section-toggle(category); }
                             on-open-learn-url(url) => { root.open-learn-url(url); }
+                            on-input-focus-changed(focused) => { root.any-input-has-focus = focused; }
                         }
                         
                         if root.right-tab-index == 1: HistoryPanel {

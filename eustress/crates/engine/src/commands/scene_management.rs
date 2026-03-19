@@ -21,10 +21,10 @@ pub struct SceneManagerState {
 
 impl SceneManagerState {
     pub fn get_current_scene(&self) -> Option<String> {
-        self.current_scene.lock().unwrap().clone()
+        self.current_scene.lock().expect("SceneManagerState mutex poisoned").clone()
     }
     
     pub fn set_current_scene(&self, name: Option<String>) {
-        *self.current_scene.lock().unwrap() = name;
+        *self.current_scene.lock().expect("SceneManagerState mutex poisoned") = name;
     }
 }

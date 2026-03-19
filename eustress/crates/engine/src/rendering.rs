@@ -199,7 +199,7 @@ fn spawn_new_parts(
             // Regular parts - spawn with geometry
             let mesh = match part.part_type {
                 PartType::Cube => meshes.add(Cuboid::default()),
-                PartType::Sphere => meshes.add(Sphere::default().mesh().ico(5).unwrap()),
+                PartType::Sphere => meshes.add(Sphere::default().mesh().ico(5).unwrap_or_else(|_| Sphere::default().mesh().uv(32, 18))),
                 PartType::Cylinder => meshes.add(Cylinder::default()),
                 PartType::Wedge => meshes.add(Cuboid::default()), // TODO: Proper wedge mesh
                 PartType::CornerWedge => meshes.add(Cuboid::default()), // TODO: Proper corner wedge

@@ -5459,6 +5459,12 @@ fn sync_properties_to_slint(
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
     
+    // Skip sync entirely if user is actively editing an input field
+    // This prevents overwriting user input while they're typing
+    if ui.get_any_input_has_focus() {
+        return;
+    }
+    
     // Detect selection changes to trigger immediate sync
     let current_selected = match &explorer_state.selected {
         SelectedItem::Entity(e) => Some(*e),

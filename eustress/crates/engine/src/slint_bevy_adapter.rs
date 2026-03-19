@@ -139,12 +139,15 @@ pub async fn run_bevy_app_with_slint(
                 {
                     let world = app.world_mut();
 
-                    let mut back_buffer = world.get_resource_mut::<BackBuffer>().unwrap();
+                    let Some(mut back_buffer) = world.get_resource_mut::<BackBuffer>() else {
+                        continue; // Resource not yet initialized
+                    };
                     back_buffer.0 = Some(next_back_buffer.clone());
 
-                    let mut manual_texture_views = world
-                        .get_resource_mut::<bevy::render::texture::ManualTextureViews>()
-                        .unwrap();
+                    let Some(mut manual_texture_views) = world
+                        .get_resource_mut::<bevy::render::texture::ManualTextureViews>() else {
+                        continue; // Resource not yet initialized
+                    };
                     manual_texture_views.clear();
                     manual_texture_views.insert(
                         texture_view_handle,
@@ -186,15 +189,13 @@ pub async fn run_bevy_app_with_slint(
         bevy_main(app)
     });
 
-    control_message_sender
-        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: back_buffer })
-        .unwrap();
-    control_message_sender
-        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: inflight_buffer })
-        .unwrap();
-    control_message_sender
-        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: front_buffer })
-        .unwrap();
+    // Seed the channel — if send fails, the Bevy thread hasn't started yet (non-fatal)
+    let _ = control_message_sender
+        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: back_buffer });
+    let _ = control_message_sender
+        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: inflight_buffer });
+    let _ = control_message_sender
+        .send_blocking(ControlMessage::ReleaseFrontBufferTexture { texture: front_buffer });
 
     Ok((bevy_front_buffer_receiver, control_message_sender))
 }
@@ -233,8 +234,12 @@ impl render_graph::Node for SlintSwapChainDriver {
         _render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        let front_buffer_sender = world.get_resource::<FrontBufferReturnSender>().unwrap();
-        let back_buffer = world.get_resource::<BackBuffer>().unwrap();
+        let Some(front_buffer_sender) = world.get_resource::<FrontBufferReturnSender>() else {
+            return Ok(()); // Resource not available — skip this frame
+        };
+        let Some(back_buffer) = world.get_resource::<BackBuffer>() else {
+            return Ok(()); // Resource not available — skip this frame
+        };
 
         if let Some(bb) = &back_buffer.0 {
             // silently ignore errors when the sender is closed

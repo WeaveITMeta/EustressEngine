@@ -55,7 +55,7 @@ impl DeleteCommand {
                 if let (Some(bp), Some(p)) = (&deleted_entity.basepart, &deleted_entity.part) {
                     let mesh = match p.shape {
                         crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+                        crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                         crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
                         crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
                         crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),
@@ -164,7 +164,7 @@ impl DuplicateCommand {
                 if let (Some(bp), Some(p)) = (&dup_entity.basepart, &dup_entity.part) {
                     let mesh = match p.shape {
                         crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
-                        crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+                        crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                         crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
                         crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
                         crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),
@@ -272,7 +272,7 @@ impl CreateCommand {
                 let mut meshes = world.resource_mut::<Assets<Mesh>>();
                 match p.shape {
                     crate::classes::PartType::Block => meshes.add(Cuboid::from_size(bp.size)),
-                    crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+                    crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap_or_else(|_| Sphere::new(bp.size.x / 2.0).mesh().uv(32, 18))),
                     crate::classes::PartType::Cylinder => meshes.add(Cylinder::new(bp.size.x / 2.0, bp.size.y)),
                     crate::classes::PartType::Wedge => meshes.add(Cuboid::from_size(bp.size)),
                     crate::classes::PartType::CornerWedge => meshes.add(Cuboid::from_size(bp.size)),

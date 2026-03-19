@@ -394,7 +394,7 @@ impl SoulBuildPipeline {
         }
         
         // Process current build
-        let build = self.current.as_mut().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
         
         match &build.stage {
             BuildStage::Parsing => {
@@ -431,7 +431,7 @@ impl SoulBuildPipeline {
     /// Process parsing stage - NOW SKIPS AST AND GOES DIRECTLY TO GENERATION
     /// Soul scripts are free-form markdown that Claude interprets directly
     fn process_parsing(&mut self) {
-        let build = self.current.as_mut().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
         
         // NEW: Skip AST parsing entirely - send raw markdown to Claude
         // Any markdown content is valid - Claude will interpret it
@@ -452,8 +452,8 @@ impl SoulBuildPipeline {
     
     /// Start async code generation (spawns background thread)
     fn process_generating_start(&mut self) {
-        let build = self.current.as_mut().unwrap();
-        let ast = build.ast.as_ref().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
+        let ast = build.ast.as_ref().expect("BuildPipeline: AST not available");
         
         // Check if we have API key
         if !self.claude.has_api_key() {
@@ -513,7 +513,7 @@ impl SoulBuildPipeline {
     fn process_generating_poll(&mut self) {
         // First, try to extract the result without holding borrows
         let generation_result = {
-            let build = self.current.as_mut().unwrap();
+            let build = self.current.as_mut().expect("BuildPipeline: no active build");
             
             // Check if we have a result container
             let result_container = match build.async_generation_result.as_ref() {
@@ -552,8 +552,8 @@ impl SoulBuildPipeline {
     
     /// Handle the generation result (shared by sync and async paths)
     fn handle_generation_result(&mut self, generation_result: Result<GenerationResult, ClaudeError>) {
-        let build = self.current.as_mut().unwrap();
-        let ast = build.ast.as_ref().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
+        let ast = build.ast.as_ref().expect("BuildPipeline: AST not available");
         
         match generation_result {
             Ok(result) => {
@@ -708,8 +708,8 @@ impl SoulBuildPipeline {
     
     /// Process validation stage
     fn process_validating(&mut self) {
-        let build = self.current.as_mut().unwrap();
-        let code = build.generated_code.as_ref().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
+        let code = build.generated_code.as_ref().expect("BuildPipeline: generated code not available");
         
         let result = self.validator.validate(&code.source);
         
@@ -726,8 +726,8 @@ impl SoulBuildPipeline {
     
     /// Start async compilation (non-blocking)
     fn process_compiling_start(&mut self, compiler: &mut HotCompiler) {
-        let build = self.current.as_mut().unwrap();
-        let code = build.generated_code.as_ref().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
+        let code = build.generated_code.as_ref().expect("BuildPipeline: generated code not available");
         
         // Start async compilation in background thread
         compiler.compile_async(code);
@@ -738,7 +738,7 @@ impl SoulBuildPipeline {
     fn process_compiling_poll(&mut self, compiler: &mut HotCompiler) {
         // Check if compilation is complete
         if let Some(result) = compiler.poll_result() {
-            let build = self.current.as_mut().unwrap();
+            let build = self.current.as_mut().expect("BuildPipeline: no active build");
             
             if result.success {
                 info!("✅ Compilation successful for '{}'", result.module_name);
@@ -757,7 +757,7 @@ impl SoulBuildPipeline {
     
     /// Process loading stage
     fn process_loading(&mut self) {
-        let build = self.current.as_mut().unwrap();
+        let build = self.current.as_mut().expect("BuildPipeline: no active build");
         
         // For now, just mark as complete
         // In a full implementation, this would:
@@ -770,7 +770,7 @@ impl SoulBuildPipeline {
     
     /// Finalize the build and create result
     fn finalize_build(&mut self) {
-        let build = self.current.take().unwrap();
+        let build = self.current.take().expect("BuildPipeline: no active build to finalize");
         
         let (success, error) = match &build.stage {
             BuildStage::Complete => (true, None),
@@ -1114,7 +1114,7 @@ pub fn handle_command_bar_builds(
         // Poll for results - check if our CommandBar build completed
         if let Some(result) = pipeline.peek_result() {
             if result.name == "CommandBar" {
-                let result = pipeline.poll_result().unwrap();
+                let result = pipeline.poll_result().expect("BuildPipeline: poll_result returned None after peek");
                 state.building = false;
                 
                 if result.success {

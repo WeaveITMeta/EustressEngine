@@ -124,8 +124,8 @@ fn convert_txt_to_toml(txt_path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(txt_path)?;
     
     info!("✅ Auto-converted: {} → {}", 
-        txt_path.file_name().unwrap().to_string_lossy(),
-        toml_path.file_name().unwrap().to_string_lossy()
+        txt_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        toml_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
     );
     
     Ok(())

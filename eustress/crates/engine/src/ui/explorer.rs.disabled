@@ -116,7 +116,7 @@ impl ServiceType {
             ServiceType::StarterGui => egui::Color32::from_rgb(100, 200, 200),
             ServiceType::StarterPack => egui::Color32::from_rgb(150, 200, 100),
             ServiceType::StarterPlayer => egui::Color32::from_rgb(100, 255, 200),
-            ServiceType::SoundService => egui::Color32::from_rgb(150, 255, 100),
+            ServiceType::SoundService => egui::Color32::from_rgb(100, 200, 100),
             ServiceType::Teams => egui::Color32::from_rgb(255, 100, 100),
             ServiceType::Chat => egui::Color32::from_rgb(100, 150, 255),
             ServiceType::LocalizationService => egui::Color32::from_rgb(150, 200, 255),

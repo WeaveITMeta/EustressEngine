@@ -259,7 +259,7 @@ impl VigaPipeline {
         }
         
         // Process current task
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         match task.agent.state {
             AgentState::Idle => {
@@ -360,7 +360,7 @@ impl VigaPipeline {
     
     /// Start async generation
     fn start_generation(&mut self, api_key: Option<&str>) {
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         let Some(api_key) = api_key else {
             task.agent.fail("No API key configured".to_string());
@@ -410,7 +410,7 @@ impl VigaPipeline {
     
     /// Poll for generation result
     fn poll_generation(&mut self) -> Option<String> {
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         let result = {
             let async_result = task.async_result.as_ref()?;
@@ -447,7 +447,7 @@ impl VigaPipeline {
     
     /// Start async verification
     fn start_verification(&mut self, api_key: Option<&str>) {
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         let Some(api_key) = api_key else {
             task.agent.fail("No API key configured".to_string());
@@ -488,18 +488,17 @@ impl VigaPipeline {
     
     /// Poll for verification result
     fn poll_verification(&mut self) {
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         let result = {
             let async_result = task.async_result.as_ref();
             if async_result.is_none() {
                 return;
             }
-            let guard = async_result.unwrap().lock().ok();
-            if guard.is_none() {
+            let Some(guard) = async_result.expect("VigaPipeline: async_result checked above").lock().ok() else {
                 return;
-            }
-            guard.unwrap().clone()
+            };
+            guard.clone()
         };
         
         if let Some(result) = result {
@@ -530,7 +529,7 @@ impl VigaPipeline {
     
     /// Process feedback and update context
     fn process_feedback(&mut self) {
-        let task = self.current.as_mut().unwrap();
+        let task = self.current.as_mut().expect("VigaPipeline: no active task");
         
         // Add iteration to history
         let history_entry = IterationHistory {

@@ -1,0 +1,196 @@
+462	eustress\crates\engine\src\circumstances\supply_chain.rs	assert!((product.gross_margin().unwrap() - 6.49).abs() < 0.01);
+463	eustress\crates\engine\src\circumstances\supply_chain.rs	assert!((product.margin_pct().unwrap() - 43.3).abs() < 0.1);
+58	eustress\crates\engine\src\commands\entity_command.rs	crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+167	eustress\crates\engine\src\commands\entity_command.rs	crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+275	eustress\crates\engine\src\commands\entity_command.rs	crate::classes::PartType::Ball => meshes.add(Sphere::new(bp.size.x / 2.0).mesh().ico(5).unwrap()),
+16	eustress\crates\engine\src\commands\scene_commands.rs	let mut selected = self.selected.lock().unwrap();
+23	eustress\crates\engine\src\commands\scene_commands.rs	let mut selected = self.selected.lock().unwrap();
+31	eustress\crates\engine\src\commands\scene_commands.rs	let mut selected = self.selected.lock().unwrap();
+37	eustress\crates\engine\src\commands\scene_commands.rs	let mut selected = self.selected.lock().unwrap();
+47	eustress\crates\engine\src\commands\scene_commands.rs	self.selected.lock().unwrap().clone()
+52	eustress\crates\engine\src\commands\scene_commands.rs	self.selected.lock().unwrap().contains(&id.to_string())
+57	eustress\crates\engine\src\commands\scene_commands.rs	self.selected.lock().unwrap().len()
+62	eustress\crates\engine\src\commands\scene_commands.rs	self.selected.lock().unwrap().clear();
+67	eustress\crates\engine\src\commands\scene_commands.rs	let selected = self.selected.lock().unwrap().clone();
+68	eustress\crates\engine\src\commands\scene_commands.rs	*self.clipboard.lock().unwrap() = selected;
+73	eustress\crates\engine\src\commands\scene_commands.rs	self.clipboard.lock().unwrap().clone()
+78	eustress\crates\engine\src\commands\scene_commands.rs	!self.clipboard.lock().unwrap().is_empty()
+105	eustress\crates\engine\src\commands\scene_commands.rs	*self.mode.lock().unwrap() = mode;
+109	eustress\crates\engine\src\commands\scene_commands.rs	self.mode.lock().unwrap().clone()
+113	eustress\crates\engine\src\commands\scene_commands.rs	let mut snap = self.snap_enabled.lock().unwrap();
+118	eustress\crates\engine\src\commands\scene_commands.rs	let enabled = *self.snap_enabled.lock().unwrap();
+119	eustress\crates\engine\src\commands\scene_commands.rs	let increment = *self.snap_increment.lock().unwrap();
+38	eustress\crates\engine\src\commands\scene_management_commands.rs	let manager = scene_manager.manager.lock().unwrap();
+44	eustress\crates\engine\src\commands\scene_management_commands.rs	*scene_manager.current_scene.lock().unwrap() = Some(scene.clone());
+55	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut manager = scene_manager.manager.lock().unwrap();
+56	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut current_scene = scene_manager.current_scene.lock().unwrap();
+74	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut manager = scene_manager.manager.lock().unwrap();
+75	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut current_scene = scene_manager.current_scene.lock().unwrap();
+97	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut manager = scene_manager.manager.lock().unwrap();
+109	eustress\crates\engine\src\commands\scene_management_commands.rs	*scene_manager.current_scene.lock().unwrap() = Some(scene.clone());
+119	eustress\crates\engine\src\commands\scene_management_commands.rs	let manager = scene_manager.manager.lock().unwrap();
+130	eustress\crates\engine\src\commands\scene_management_commands.rs	let manager = scene_manager.manager.lock().unwrap();
+140	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut manager = scene_manager.manager.lock().unwrap();
+151	eustress\crates\engine\src\commands\scene_management_commands.rs	let current = scene_manager.current_scene.lock().unwrap();
+162	eustress\crates\engine\src\commands\scene_management_commands.rs	let mut current = scene_manager.current_scene.lock().unwrap();
+24	eustress\crates\engine\src\commands\scene_management.rs	self.current_scene.lock().unwrap().clone()
+28	eustress\crates\engine\src\commands\scene_management.rs	*self.current_scene.lock().unwrap() = name;
+307	eustress\crates\engine\src\play_server\protocol.rs	let decoded = GameMessage::deserialize(&bytes).unwrap();
+137	eustress\crates\engine\src\play_server\server.rs	let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+141	eustress\crates\engine\src\play_server\server.rs	std::time::Duration::from_secs(self.config.idle_timeout_secs).try_into().unwrap()
+616	eustress\crates\engine\src\scenarios\adapters.rs	}).unwrap();
+404	eustress\crates\engine\src\scenarios\engine.rs	let root_id = scenario.root_branch_id.unwrap();
+405	eustress\crates\engine\src\scenarios\engine.rs	let children: Vec<Uuid> = scenario.branch(root_id).unwrap().children.clone();
+407	eustress\crates\engine\src\scenarios\engine.rs	scenario.branch(id).unwrap().label == "High Prob"
+408	eustress\crates\engine\src\scenarios\engine.rs	}).unwrap();
+410	eustress\crates\engine\src\scenarios\engine.rs	scenario.branch(id).unwrap().label == "Low Prob"
+411	eustress\crates\engine\src\scenarios\engine.rs	}).unwrap();
+845	eustress\crates\engine\src\scenarios\evidence.rs	scenario.branch(id).unwrap().label == "Suspect A"
+846	eustress\crates\engine\src\scenarios\evidence.rs	}).copied().unwrap();
+875	eustress\crates\engine\src\scenarios\evidence.rs	scenario.branch(id).unwrap().label == "Suspect A"
+876	eustress\crates\engine\src\scenarios\evidence.rs	}).copied().unwrap();
+906	eustress\crates\engine\src\scenarios\evidence.rs	.unwrap().id;
+923	eustress\crates\engine\src\scenarios\evidence.rs	.unwrap().id;
+332	eustress\crates\engine\src\scenarios\persistence.rs	let root_id = scenario.root_branch_id.unwrap();
+336	eustress\crates\engine\src\scenarios\persistence.rs	let bytes = ScenarioPersistence::serialize_scenario(&scenario).unwrap();
+337	eustress\crates\engine\src\scenarios\persistence.rs	let loaded = ScenarioPersistence::deserialize_scenario(&bytes).unwrap();
+347	eustress\crates\engine\src\scenarios\persistence.rs	let mut bytes = ScenarioPersistence::serialize_scenario(&scenario).unwrap();
+364	eustress\crates\engine\src\scenarios\persistence.rs	let bytes = ScenarioPersistence::serialize_bundle(&bundle).unwrap();
+365	eustress\crates\engine\src\scenarios\persistence.rs	let loaded = ScenarioPersistence::deserialize_bundle(&bytes).unwrap();
+416	eustress\crates\engine\src\scenarios\pruning.rs	let high = s.add_branch(root, "High Prob", 0.8).unwrap();
+417	eustress\crates\engine\src\scenarios\pruning.rs	let low = s.add_branch(root, "Low Prob", 0.03).unwrap();
+419	eustress\crates\engine\src\scenarios\pruning.rs	s.add_branch(low, "Low Child A", 0.01).unwrap();
+420	eustress\crates\engine\src\scenarios\pruning.rs	s.add_branch(low, "Low Child B", 0.02).unwrap();
+422	eustress\crates\engine\src\scenarios\pruning.rs	s.add_branch(high, "High Child", 0.7).unwrap();
+438	eustress\crates\engine\src\scenarios\pruning.rs	let high = scenario.branches.values().find(|b| b.label == "High Prob").unwrap();
+454	eustress\crates\engine\src\scenarios\pruning.rs	let low_child_a = scenario.branches.values().find(|b| b.label == "Low Child A").unwrap();
+455	eustress\crates\engine\src\scenarios\pruning.rs	let low_child_b = scenario.branches.values().find(|b| b.label == "Low Child B").unwrap();
+474	eustress\crates\engine\src\scenarios\pruning.rs	let low = scenario.branches.values().find(|b| b.label == "Low Prob").unwrap();
+489	eustress\crates\engine\src\scenarios\pruning.rs	.unwrap().id;
+490	eustress\crates\engine\src\scenarios\pruning.rs	scenario.branches.get_mut(&low_id).unwrap().posterior = 0.15;
+497	eustress\crates\engine\src\scenarios\pruning.rs	let low = scenario.branches.get(&low_id).unwrap();
+515	eustress\crates\engine\src\scenarios\pruning.rs	.unwrap().id;
+521	eustress\crates\engine\src\scenarios\pruning.rs	let low = scenario.branches.get(&low_id).unwrap();
+1006	eustress\crates\engine\src\scenarios\scripting.rs	let hash1 = engine.compile(source).unwrap();
+1007	eustress\crates\engine\src\scenarios\scripting.rs	let hash2 = engine.compile(source).unwrap();
+1017	eustress\crates\engine\src\scenarios\scripting.rs	.unwrap().id;
+1020	eustress\crates\engine\src\scenarios\scripting.rs	let context = ScriptContext::from_scenario(&scenario, branch_a_id).unwrap();
+1021	eustress\crates\engine\src\scenarios\scripting.rs	let result = engine.execute(source, &context).unwrap();
+1023	eustress\crates\engine\src\scenarios\scripting.rs	assert_eq!(*result.probability_overrides.values().next().unwrap(), 0.85);
+1029	eustress\crates\engine\src\scenarios\scripting.rs	.unwrap();
+1037	eustress\crates\engine\src\scenarios\scripting.rs	let root_id = scenario.root_branch_id.unwrap();
+1040	eustress\crates\engine\src\scenarios\scripting.rs	let context = ScriptContext::from_scenario(&scenario, root_id).unwrap();
+1041	eustress\crates\engine\src\scenarios\scripting.rs	let result = engine.execute(source, &context).unwrap();
+1046	eustress\crates\engine\src\scenarios\scripting.rs	.unwrap();
+1054	eustress\crates\engine\src\scenarios\scripting.rs	let root_id = scenario.root_branch_id.unwrap();
+1058	eustress\crates\engine\src\scenarios\scripting.rs	let context = ScriptContext::from_scenario(&scenario, root_id).unwrap();
+1059	eustress\crates\engine\src\scenarios\scripting.rs	let result = engine.execute(source, &context).unwrap();
+1076	eustress\crates\engine\src\scenarios\scripting.rs	let root_id = scenario.root_branch_id.unwrap();
+1079	eustress\crates\engine\src\scenarios\scripting.rs	let context = ScriptContext::from_scenario(&scenario, root_id).unwrap();
+1093	eustress\crates\engine\src\scenarios\scripting.rs	let root_id = scenario.root_branch_id.unwrap();
+1101	eustress\crates\engine\src\scenarios\scripting.rs	let result = engine.execute_and_apply(source, &mut scenario, root_id).unwrap();
+1105	eustress\crates\engine\src\scenarios\scripting.rs	let a = scenario.branches.values().find(|b| b.label == "Suspect A").unwrap();
+1108	eustress\crates\engine\src\scenarios\scripting.rs	let u = scenario.branches.values().find(|b| b.label == "Unknown").unwrap();
+1116	eustress\crates\engine\src\scenarios\scripting.rs	let root_id = scenario.root_branch_id.unwrap();
+1120	eustress\crates\engine\src\scenarios\scripting.rs	let context = ScriptContext::from_scenario(&scenario, root_id).unwrap();
+899	eustress\crates\engine\src\scenarios\types.rs	let child_a = scenario.add_branch(root, "Hypothesis A", 0.6).unwrap();
+900	eustress\crates\engine\src\scenarios\types.rs	let child_b = scenario.add_branch(root, "Hypothesis B", 0.4).unwrap();
+903	eustress\crates\engine\src\scenarios\types.rs	assert!(scenario.branch(root).unwrap().children.contains(&child_a));
+904	eustress\crates\engine\src\scenarios\types.rs	assert!(scenario.branch(root).unwrap().children.contains(&child_b));
+905	eustress\crates\engine\src\scenarios\types.rs	assert_eq!(scenario.branch(child_a).unwrap().depth, 1);
+912	eustress\crates\engine\src\scenarios\types.rs	let branch = scenario.add_branch(root, "Suspect A", 0.5).unwrap();
+929	eustress\crates\engine\src\scenarios\types.rs	let new_posterior = scenario.bayesian_update(branch, eid).unwrap();
+938	eustress\crates\engine\src\scenarios\types.rs	let high = scenario.add_branch(root, "High Prob", 0.9).unwrap();
+939	eustress\crates\engine\src\scenarios\types.rs	let low = scenario.add_branch(root, "Low Prob", 0.02).unwrap();
+943	eustress\crates\engine\src\scenarios\types.rs	assert_eq!(scenario.branch(high).unwrap().status, BranchStatus::Active);
+944	eustress\crates\engine\src\scenarios\types.rs	assert_eq!(scenario.branch(low).unwrap().status, BranchStatus::Collapsed);
+951	eustress\crates\engine\src\scenarios\types.rs	let a = scenario.add_branch(root, "A", 0.3).unwrap();
+952	eustress\crates\engine\src\scenarios\types.rs	let b = scenario.add_branch(root, "B", 0.3).unwrap();
+953	eustress\crates\engine\src\scenarios\types.rs	let c = scenario.add_branch(root, "C", 0.3).unwrap();
+958	eustress\crates\engine\src\scenarios\types.rs	.map(|id| scenario.branch(*id).unwrap().posterior)
+716	eustress\crates\engine\src\serialization\binary.rs	.max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+1719	eustress\crates\engine\src\serialization\binary.rs	write_varint(&mut buf, v).unwrap();
+1720	eustress\crates\engine\src\serialization\binary.rs	let result = read_varint(&mut std::io::Cursor::new(buf)).unwrap();
+1742	eustress\crates\engine\src\serialization\binary.rs	write_vec3(&mut buf, v).unwrap();
+1743	eustress\crates\engine\src\serialization\binary.rs	let result = read_vec3(&mut std::io::Cursor::new(buf)).unwrap();
+397	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+434	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+455	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+456	eustress\crates\engine\src\soul\build_pipeline.rs	let ast = build.ast.as_ref().unwrap();
+516	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+555	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+556	eustress\crates\engine\src\soul\build_pipeline.rs	let ast = build.ast.as_ref().unwrap();
+711	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+712	eustress\crates\engine\src\soul\build_pipeline.rs	let code = build.generated_code.as_ref().unwrap();
+729	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+730	eustress\crates\engine\src\soul\build_pipeline.rs	let code = build.generated_code.as_ref().unwrap();
+741	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+760	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.as_mut().unwrap();
+773	eustress\crates\engine\src\soul\build_pipeline.rs	let build = self.current.take().unwrap();
+1117	eustress\crates\engine\src\soul\build_pipeline.rs	let result = pipeline.poll_result().unwrap();
+1186	eustress\crates\engine\src\soul\build_pipeline.rs	let result = pipeline.poll_result().unwrap();
+715	eustress\crates\engine\src\space\instance_loader.rs	let asset_ref = instance.asset.as_ref().unwrap();
+271	eustress\crates\engine\src\space\space_ops.rs	let dest = target_parts_dir.join(src.file_name().unwrap());
+276	eustress\crates\engine\src\space\space_ops.rs	info!("📦 Copied default part {:?} → {:?}", src.file_name().unwrap(), dest);
+287	eustress\crates\engine\src\studio_plugins\mod.rs	.unwrap()
+308	eustress\crates\engine\src\studio_plugins\mod.rs	.unwrap()
+190	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	let mut back_buffer_resource = world.get_resource_mut::<BackBuffer>().unwrap();
+196	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	.unwrap();
+257	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	.unwrap();
+260	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	.unwrap();
+263	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	.unwrap();
+313	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	let front_buffer_sender = world.get_resource::<FrontBufferReturnSender>().unwrap();
+314	eustress\crates\engine\src\ui\slint_bevy_adapter.rs	let back_buffer = world.get_resource::<BackBuffer>().unwrap();
+267	eustress\crates\engine\src\ui\slint_bridge.rs	self.0.lock().unwrap()
+287	eustress\crates\engine\src\ui\slint_bridge.rs	self.0.lock().unwrap().push(action);
+292	eustress\crates\engine\src\ui\slint_bridge.rs	let mut queue = self.0.lock().unwrap();
+1067	eustress\crates\engine\src\ui\slint_ui.rs	slint::platform::set_platform(Box::new(SlintBevyPlatform {})).unwrap();
+85	eustress\crates\engine\src\ui\spawn_events.rs	.unwrap()
+182	eustress\crates\engine\src\ui\spawn_events.rs	.unwrap()
+816	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+855	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+894	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+923	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+948	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+1800	eustress\crates\engine\src\ui\world_view.rs	.unwrap()
+555	eustress\crates\engine\src\viga\image_utils.rs	let decoded = decode_image_base64(&encoded).unwrap();
+262	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+363	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+413	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+450	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+491	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+498	eustress\crates\engine\src\viga\pipeline.rs	let guard = async_result.unwrap().lock().ok();
+502	eustress\crates\engine\src\viga\pipeline.rs	guard.unwrap().clone()
+533	eustress\crates\engine\src\viga\pipeline.rs	let task = self.current.as_mut().unwrap();
+329	eustress\crates\engine\src\auth.rs	.unwrap()
+358	eustress\crates\engine\src\auth.rs	.unwrap()
+519	eustress\crates\engine\src\move_tool.rs	if best.is_none() || cam_dist < best.unwrap().1 {
+289	eustress\crates\engine\src\part_selection.rs	if closest_hit.is_none() || distance < closest_hit.as_ref().unwrap().1 {
+124	eustress\crates\engine\src\parts.rs	let mut next_id = self.next_id.lock().unwrap();
+154	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+161	eustress\crates\engine\src\parts.rs	let parts = self.parts.lock().unwrap();
+170	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+175	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+216	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+223	eustress\crates\engine\src\parts.rs	let parts = self.parts.lock().unwrap();
+227	eustress\crates\engine\src\parts.rs	let mut next_id = self.next_id.lock().unwrap();
+237	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+244	eustress\crates\engine\src\parts.rs	let parts = self.parts.lock().unwrap();
+250	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+251	eustress\crates\engine\src\parts.rs	let mut next_id = self.next_id.lock().unwrap();
+268	eustress\crates\engine\src\parts.rs	let mut parts = self.parts.lock().unwrap();
+202	eustress\crates\engine\src\rendering.rs	PartType::Sphere => meshes.add(Sphere::default().mesh().ico(5).unwrap()),
+335	eustress\crates\engine\src\rotate_tool.rs	if best.is_none() || ring_err < best.unwrap().1 {
+279	eustress\crates\engine\src\scale_tool.rs	if best.is_none() || d < best.unwrap().1 {
+142	eustress\crates\engine\src\slint_bevy_adapter.rs	let mut back_buffer = world.get_resource_mut::<BackBuffer>().unwrap();
+147	eustress\crates\engine\src\slint_bevy_adapter.rs	.unwrap();
+191	eustress\crates\engine\src\slint_bevy_adapter.rs	.unwrap();
+194	eustress\crates\engine\src\slint_bevy_adapter.rs	.unwrap();
+197	eustress\crates\engine\src\slint_bevy_adapter.rs	.unwrap();
+236	eustress\crates\engine\src\slint_bevy_adapter.rs	let front_buffer_sender = world.get_resource::<FrontBufferReturnSender>().unwrap();
+237	eustress\crates\engine\src\slint_bevy_adapter.rs	let back_buffer = world.get_resource::<BackBuffer>().unwrap();
+127	eustress\crates\engine\src\txt_to_toml_watcher.rs	txt_path.file_name().unwrap().to_string_lossy(),
+128	eustress\crates\engine\src\txt_to_toml_watcher.rs	toml_path.file_name().unwrap().to_string_lossy()
+154	eustress\crates\engine\src\txt_to_toml_watcher.rs	fs::write(&txt_file, test_content).unwrap();
+157	eustress\crates\engine\src\txt_to_toml_watcher.rs	convert_txt_to_toml(&txt_file).unwrap();
+164	eustress\crates\engine\src\txt_to_toml_watcher.rs	let toml_content = fs::read_to_string(&toml_file).unwrap();

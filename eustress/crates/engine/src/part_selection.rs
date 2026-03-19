@@ -286,7 +286,7 @@ pub fn part_selection_system(
             });
             
             // Keep track of closest hit
-            if closest_hit.is_none() || distance < closest_hit.as_ref().unwrap().1 {
+            if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
                 closest_hit = Some((part_id, distance, entity, parent_model));
             }
         }

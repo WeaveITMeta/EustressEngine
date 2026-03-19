@@ -326,7 +326,7 @@ fn mock_login(email: &str, remember: bool) -> AuthResult {
     // Generate a mock token
     let mock_token = format!("dev_token_{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs());
     
     // Extract username from email
@@ -355,7 +355,7 @@ fn mock_steam_login() -> AuthResult {
     // Generate a mock token
     let mock_token = format!("dev_steam_token_{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs());
     
     // Create a mock Steam user

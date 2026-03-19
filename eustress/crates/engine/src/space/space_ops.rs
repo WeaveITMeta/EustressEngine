@@ -268,12 +268,13 @@ pub fn copy_engine_default_parts(target_parts_dir: &Path) {
     for entry in entries.flatten() {
         let src = entry.path();
         if src.extension().and_then(|e| e.to_str()) == Some("glb") {
-            let dest = target_parts_dir.join(src.file_name().unwrap());
+            let Some(file_name) = src.file_name() else { continue };
+            let dest = target_parts_dir.join(file_name);
             if !dest.exists() {
                 if let Err(e) = std::fs::copy(&src, &dest) {
                     warn!("Failed to copy {:?} → {:?}: {}", src, dest, e);
                 } else {
-                    info!("📦 Copied default part {:?} → {:?}", src.file_name().unwrap(), dest);
+                    info!("📦 Copied default part {:?} → {:?}", file_name, dest);
                 }
             }
         }

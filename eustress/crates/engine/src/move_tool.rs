@@ -516,7 +516,7 @@ pub fn detect_axis_hit(
                 // Depth-sort: prefer the handle closest to the camera
                 let mid = (center + seg_end) * 0.5;
                 let cam_dist = (mid - camera_transform.translation()).length();
-                if best.is_none() || cam_dist < best.unwrap().1 {
+                if best.map_or(true, |(_, d)| cam_dist < d) {
                     best = Some((axis, cam_dist));
                 }
             }

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
-  <!-- SoundService - musical note (yellow) -->
-  <circle cx="5" cy="12" r="2.5" fill="#F1C40F"/>
-  <rect x="7" y="3" width="2" height="9" fill="#F1C40F"/>
-  <path d="M9,3 Q14,2 14,6 Q14,8 9,7" fill="#F1C40F"/>
+  <!-- SoundService - musical note (green) -->
+  <circle cx="5" cy="12" r="2.5" fill="#64C864"/>
+  <rect x="7" y="3" width="2" height="9" fill="#64C864"/>
+  <path d="M9,3 Q14,2 14,6 Q14,8 9,7" fill="#64C864"/>
 </svg>

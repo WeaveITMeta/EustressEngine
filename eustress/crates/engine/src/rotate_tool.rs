@@ -332,7 +332,7 @@ fn detect_ring_hit(ray: &Ray3d, center: Vec3, radius: f32) -> Option<Axis3d> {
             let dist = (hit - center).length();
             if dist >= inner && dist <= outer {
                 let ring_err = (dist - radius).abs();
-                if best.is_none() || ring_err < best.unwrap().1 {
+                if best.map_or(true, |(_, d)| ring_err < d) {
                     best = Some((axis, ring_err));
                 }
             }

@@ -1,0 +1,76 @@
+[package]
+name = "eustress-workshop"
+version = "0.1.0"
+edition = "2021"
+description = "JARVIS-inspired physical-digital twin workshop: IoT tool tracking, AI-guided build guides, procurement lists, and 3D Space digital twins. Each tool is a .tool.toml file — the registry IS the file system."
+
+[dependencies]
+# Serialization — TOML files are the authoritative tool database
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Unique identifiers for each registered tool
+uuid = { version = "1.8", features = ["v4", "v5", "serde"] }
+
+# Timestamps for last-seen, last-used, registered-at
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging and diagnostics
+tracing = "0.1"
+
+# File system paths and home directory resolution
+dirs = "5.0"
+
+# Parallel TOML scan for bulk operations across the tool registry
+rayon = "1.10"
+
+# File watching — hot-reload .tool.toml changes into the in-memory index
+notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+
+# HTTP client for IoT telemetry polling and Amazon Product Advertising API
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
+
+# Async runtime for IoT MQTT streams
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
+
+# MQTT for real-time IoT tool telemetry (GPS chips, status sensors)
+rumqttc = { version = "0.24", optional = true }
+
+# Bevy ECS integration for 3D digital twin Space
+# Each .tool.toml spawns as an instanced mesh entity with a ToolComponent
+# Note: bevy_ecs, bevy_app, bevy_transform, bevy_reflect are always included in Bevy 0.18
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_log",
+    "bevy_asset",
+], optional = true }
+
+# URL encoding for Amazon Product Advertising API v5 requests
+urlencoding = { version = "2", optional = true }
+
+# Cryptographic signing for Amazon PA-API v5 (HMAC-SHA256 + AWS SigV4)
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+default = ["iot-mqtt", "procurement"]
+
+# IoT telemetry streaming via MQTT (GPS chips, tool sensors broadcasting location + status)
+iot-mqtt = ["rumqttc", "tokio"]
+
+# HTTP polling fallback for IoT telemetry (REST endpoints instead of MQTT broker)
+iot-http = ["reqwest", "tokio"]
+
+# Amazon Product Advertising API v5 — generates purchase lists for missing tools/materials
+procurement = ["reqwest", "tokio", "urlencoding", "hmac", "sha2", "base64"]
+
+# Bevy ECS integration — each .tool.toml spawns a 3D instanced mesh entity in the digital twin Space
+bevy-twin = ["bevy"]
+
+# Full feature set
+full = ["iot-mqtt", "iot-http", "procurement", "bevy-twin"]

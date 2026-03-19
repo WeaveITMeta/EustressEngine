@@ -35,13 +35,13 @@ pub fn create_new_scene(
     author: String,
     scene_manager: State<SceneManagerState>,
 ) -> Result<SceneData, String> {
-    let manager = scene_manager.manager.lock().unwrap();
+    let manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
     
     let scene = manager.create_new_scene(name, description, author)
         .map_err(|e| format!("Failed to create scene: {}", e))?;
     
     // Set as current scene
-    *scene_manager.current_scene.lock().unwrap() = Some(scene.clone());
+    *scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned") = Some(scene.clone());
     
     Ok(scene)
 }
@@ -52,8 +52,8 @@ pub fn save_current_scene(
     scene_manager: State<SceneManagerState>,
     part_manager: State<PartManager>,
 ) -> Result<String, String> {
-    let mut manager = scene_manager.manager.lock().unwrap();
-    let mut current_scene = scene_manager.current_scene.lock().unwrap();
+    let mut manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
+    let mut current_scene = scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned");
     
     let scene = current_scene.as_mut()
         .ok_or_else(|| "No scene is currently open".to_string())?;
@@ -71,8 +71,8 @@ pub fn save_scene_as(
     scene_manager: State<SceneManagerState>,
     part_manager: State<PartManager>,
 ) -> Result<String, String> {
-    let mut manager = scene_manager.manager.lock().unwrap();
-    let mut current_scene = scene_manager.current_scene.lock().unwrap();
+    let mut manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
+    let mut current_scene = scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned");
     
     let scene = current_scene.as_mut()
         .ok_or_else(|| "No scene is currently open".to_string())?;
@@ -94,7 +94,7 @@ pub fn load_scene(
     scene_manager: State<SceneManagerState>,
     part_manager: State<PartManager>,
 ) -> Result<SceneData, String> {
-    let mut manager = scene_manager.manager.lock().unwrap();
+    let mut manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
     
     let scene = manager.load_scene(&filepath)
         .map_err(|e| format!("Failed to load scene: {}", e))?;
@@ -106,7 +106,7 @@ pub fn load_scene(
     }
     
     // Set as current scene
-    *scene_manager.current_scene.lock().unwrap() = Some(scene.clone());
+    *scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned") = Some(scene.clone());
     
     Ok(scene)
 }
@@ -116,7 +116,7 @@ pub fn load_scene(
 pub fn list_available_scenes(
     scene_manager: State<SceneManagerState>,
 ) -> Result<Vec<SceneMetadata>, String> {
-    let manager = scene_manager.manager.lock().unwrap();
+    let manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
     
     manager.list_scenes()
         .map_err(|e| format!("Failed to list scenes: {}", e))
@@ -127,7 +127,7 @@ pub fn list_available_scenes(
 pub fn get_recent_scenes(
     scene_manager: State<SceneManagerState>,
 ) -> Result<Vec<RecentScene>, String> {
-    let manager = scene_manager.manager.lock().unwrap();
+    let manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
     Ok(manager.get_recent_scenes())
 }
 
@@ -137,7 +137,7 @@ pub fn delete_scene(
     filepath: String,
     scene_manager: State<SceneManagerState>,
 ) -> Result<(), String> {
-    let mut manager = scene_manager.manager.lock().unwrap();
+    let mut manager = scene_manager.manager.lock().expect("SceneManager mutex poisoned");
     
     manager.delete_scene(&filepath)
         .map_err(|e| format!("Failed to delete scene: {}", e))
@@ -148,7 +148,7 @@ pub fn delete_scene(
 pub fn get_current_scene(
     scene_manager: State<SceneManagerState>,
 ) -> Result<Option<SceneData>, String> {
-    let current = scene_manager.current_scene.lock().unwrap();
+    let current = scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned");
     Ok(current.clone())
 }
 
@@ -159,7 +159,7 @@ pub fn update_scene_metadata(
     description: Option<String>,
     scene_manager: State<SceneManagerState>,
 ) -> Result<SceneData, String> {
-    let mut current = scene_manager.current_scene.lock().unwrap();
+    let mut current = scene_manager.current_scene.lock().expect("SceneManager current_scene mutex poisoned");
     
     let scene = current.as_mut()
         .ok_or_else(|| "No scene is currently open".to_string())?;

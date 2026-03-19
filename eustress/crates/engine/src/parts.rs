@@ -121,7 +121,7 @@ impl Default for PartManager {
 
 impl PartManager {
     pub fn create_part(&self, part_type: PartType, position: Vec3, name: Option<String>) -> u32 {
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut next_id = self.next_id.lock().expect("PartManager next_id mutex poisoned");
         let id = *next_id;
         *next_id += 1;
         drop(next_id);
@@ -151,14 +151,14 @@ impl PartManager {
             locked: false, // Unlocked by default
         };
 
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         parts.insert(id, part_data);
 
         id
     }
 
     pub fn get_part(&self, id: u32) -> Option<PartData> {
-        let parts = self.parts.lock().unwrap();
+        let parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         parts.get(&id).cloned()
     }
     
@@ -167,12 +167,12 @@ impl PartManager {
     where
         F: FnOnce(&mut PartData) -> R,
     {
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         parts.get_mut(&id).map(f)
     }
 
     pub fn update_part(&self, id: u32, updates: PartUpdate) -> Result<(), String> {
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         let part = parts.get_mut(&id).ok_or("Part not found")?;
 
         if let Some(name) = updates.name {
@@ -213,18 +213,18 @@ impl PartManager {
     }
 
     pub fn delete_part(&self, id: u32) -> Result<(), String> {
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         parts.remove(&id).ok_or("Part not found")?;
         Ok(())
     }
 
     pub fn duplicate_part(&self, id: u32) -> Result<u32, String> {
         let original = {
-            let parts = self.parts.lock().unwrap();
+            let parts = self.parts.lock().expect("PartManager parts mutex poisoned");
             parts.get(&id).cloned().ok_or("Part not found")?
         };
 
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut next_id = self.next_id.lock().expect("PartManager next_id mutex poisoned");
         let new_id = *next_id;
         *next_id += 1;
         drop(next_id);
@@ -234,21 +234,21 @@ impl PartManager {
         new_part.name = format!("{} (Copy)", original.name);
         // Duplicate in place (no position offset)
 
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         parts.insert(new_id, new_part);
 
         Ok(new_id)
     }
 
     pub fn list_parts(&self) -> Result<Vec<PartData>, String> {
-        let parts = self.parts.lock().unwrap();
+        let parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         Ok(parts.values().cloned().collect())
     }
     
     /// Store a part with a specific ID (for loading scenes)
     pub fn store_part(&self, part: PartData) -> Result<(), String> {
-        let mut parts = self.parts.lock().unwrap();
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
+        let mut next_id = self.next_id.lock().expect("PartManager next_id mutex poisoned");
         
         // Get the ID before moving the part
         let part_id = part.id;
@@ -265,7 +265,7 @@ impl PartManager {
     }
 
     pub fn set_parent(&self, child_id: u32, parent_id: Option<u32>) -> Result<(), String> {
-        let mut parts = self.parts.lock().unwrap();
+        let mut parts = self.parts.lock().expect("PartManager parts mutex poisoned");
         
         // Verify child exists
         if !parts.contains_key(&child_id) {

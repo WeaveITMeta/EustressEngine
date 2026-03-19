@@ -17,7 +17,8 @@ members = [
     "crates/embedvec",
     "crates/spatial-llm",
     "crates/geo",
-    "crates/texture-gen"
+    "crates/texture-gen",
+    "crates/workshop"
 ]
 
 resolver = "2"

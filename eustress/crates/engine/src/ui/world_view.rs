@@ -813,7 +813,7 @@ pub fn apply_ui_actions(
                     archivable: true,
                     id: (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_nanos() % u32::MAX as u128) as u32,
                     ..Default::default()
                 };
@@ -852,7 +852,7 @@ pub fn apply_ui_actions(
                     archivable: true,
                     id: (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_nanos() % u32::MAX as u128) as u32,
                     ..Default::default()
                 };
@@ -891,7 +891,7 @@ pub fn apply_ui_actions(
                     archivable: true,
                     id: (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_nanos() % u32::MAX as u128) as u32,
                     ..Default::default()
                 };
@@ -920,7 +920,7 @@ pub fn apply_ui_actions(
                     archivable: true,
                     id: (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_nanos() % u32::MAX as u128) as u32,
                     ..Default::default()
                 };

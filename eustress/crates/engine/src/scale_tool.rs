@@ -276,7 +276,7 @@ fn handle_scale_interaction(
             for &(ax, tip) in handles {
                 let d = ray_to_point_distance(ray.origin, *ray.direction, tip);
                 if d < hit_radius {
-                    if best.is_none() || d < best.unwrap().1 {
+                    if best.map_or(true, |(_, dist)| d < dist) {
                         best = Some((ax, d));
                     }
                 }

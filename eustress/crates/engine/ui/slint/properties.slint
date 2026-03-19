@@ -184,9 +184,13 @@ component PropRow inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
+    
+    // Expose focus state so parent can aggregate across all rows
+    out property <bool> has-focus: input-edit.has-focus;
 
     callback value-changed(string);
     callback open-learn-url(string);
+    callback focus-changed(bool);
     
     height: 28px;
     border-radius: 2px;
@@ -214,22 +218,32 @@ component PropRow inherits Rectangle {
             overflow: elide;
         }
         
-        // Value editor with refined styling
-        if root.editable: Rectangle {
+        // Value editor with refined styling — always present but visibility controlled
+        Rectangle {
             horizontal-stretch: 1;
             height: 22px;
+            visible: root.editable;
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: input-edit.has-focus ? Theme.accent-blue : Theme.input-border;
             
-            LineEdit {
+            input-edit := LineEdit {
                 x: 0px;
                 y: 0px;
                 width: 100%;
                 height: 100%;
+                enabled: root.editable;
                 text: root.value;
-                edited(text) => { root.value-changed(text); }
+                edited(text) => {
+                    // Fire focus callback on first edit (user started typing)
+                    root.focus-changed(true);
+                    root.value-changed(text);
+                }
+                accepted => {
+                    // Fire focus callback when user presses Enter (done editing)
+                    root.focus-changed(false);
+                }
             }
         }
         
@@ -259,8 +273,12 @@ component Vec3Row inherits Rectangle {
     in property <string> y-value: "0";
     in property <string> z-value: "0";
     
+    // Expose focus state so parent can aggregate across all rows
+    out property <bool> has-focus: x-edit.has-focus || y-edit.has-focus || z-edit.has-focus;
+    
     callback value-changed(string);
     callback open-learn-url(string);
+    callback focus-changed(bool);
     
     height: 28px;
     border-radius: 2px;
@@ -327,8 +345,10 @@ component Vec3Row inherits Rectangle {
                     input-type: decimal;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(t + ", " + y-edit.text + ", " + z-edit.text);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
             }
         }
@@ -373,8 +393,10 @@ component Vec3Row inherits Rectangle {
                     input-type: decimal;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(x-edit.text + ", " + t + ", " + z-edit.text);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
             }
         }
@@ -419,8 +441,10 @@ component Vec3Row inherits Rectangle {
                     input-type: decimal;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(x-edit.text + ", " + y-edit.text + ", " + t);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
             }
         }
@@ -441,9 +465,13 @@ component RotationVec3Row inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
+    
+    // Expose focus state so parent can aggregate across all rows
+    out property <bool> has-focus: rx-edit.has-focus || ry-edit.has-focus || rz-edit.has-focus;
 
     callback value-changed(string);
     callback open-learn-url(string);
+    callback focus-changed(bool);
 
     height: 28px;
     border-radius: 2px;
@@ -495,8 +523,10 @@ component RotationVec3Row inherits Rectangle {
                     input-type: text;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(t + ", " + ry-edit.text + ", " + rz-edit.text);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
 
                 Rectangle {
@@ -543,8 +573,10 @@ component RotationVec3Row inherits Rectangle {
                     input-type: text;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(rx-edit.text + ", " + t + ", " + rz-edit.text);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
 
                 Rectangle {
@@ -591,8 +623,10 @@ component RotationVec3Row inherits Rectangle {
                     input-type: text;
                     enabled: root.editable;
                     edited(t) => {
+                        root.focus-changed(true);
                         root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + t);
                     }
+                    accepted => { root.focus-changed(false); }
                 }
 
                 Rectangle {
@@ -625,8 +659,12 @@ component ColorRow inherits Rectangle {
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
     
+    // Expose focus state so parent can aggregate across all rows
+    out property <bool> has-focus: color-edit.has-focus;
+    
     callback value-changed(string);
     callback open-learn-url(string);
+    callback focus-changed(bool);
     
     height: 28px;
     border-radius: 2px;
@@ -672,22 +710,28 @@ component ColorRow inherits Rectangle {
             }
         }
         
-        // Hex input with refined styling
-        if root.editable: Rectangle {
+        // Hex input with refined styling — always present but visibility controlled
+        Rectangle {
             horizontal-stretch: 1;
             height: 22px;
+            visible: root.editable;
             background: Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: color-edit.has-focus ? Theme.accent-blue : Theme.input-border;
             
-            LineEdit {
+            color-edit := LineEdit {
                 x: 0px;
                 y: 0px;
                 width: 100%;
                 height: 100%;
+                enabled: root.editable;
                 text: root.value;
-                edited(text) => { root.value-changed(text); }
+                edited(text) => {
+                    root.focus-changed(true);
+                    root.value-changed(text);
+                }
+                accepted => { root.focus-changed(false); }
             }
         }
         
@@ -797,6 +841,8 @@ export component PropertiesPanel inherits Rectangle {
     callback on-section-toggle(string);
     // Fired when a help icon with a learn-url is clicked
     callback on-open-learn-url(string);
+    // Fired when any input field gains or loses focus — Rust uses this to pause property sync
+    callback on-input-focus-changed(bool);
     
     background: Theme.panel-background;
     
@@ -972,6 +1018,7 @@ export component PropertiesPanel inherits Rectangle {
                         show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
                     }
 
                     // Rotation property — degrees with +/- buttons, supports negatives
@@ -987,6 +1034,7 @@ export component PropertiesPanel inherits Rectangle {
                         show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
                     }
                     
                     // Color property
@@ -999,6 +1047,7 @@ export component PropertiesPanel inherits Rectangle {
                         show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
                     }
                     
                     // Bool property
@@ -1024,6 +1073,7 @@ export component PropertiesPanel inherits Rectangle {
                         show-help-icons: root.show-help-icons;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
                     }
                 }
             }
