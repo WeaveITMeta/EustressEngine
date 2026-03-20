@@ -1,0 +1,19 @@
+# SurfaceGui — Rendered on a BasePart's surface face
+# Bevy: UI overlay projected onto mesh face
+
+[gui]
+enabled = true
+face = "Front"
+canvas_size = [800.0, 600.0]
+adornee = ""
+active = true
+always_on_top = false
+light_influence = 0.0
+clips_descendants = false
+z_index_behavior = "Sibling"
+pixels_per_stud = 50.0
+brightness = 1.0
+
+[metadata]
+class_name = "SurfaceGui"
+archivable = true

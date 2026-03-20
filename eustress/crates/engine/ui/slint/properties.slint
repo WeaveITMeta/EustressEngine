@@ -236,12 +236,12 @@ component PropRow inherits Rectangle {
                 enabled: root.editable;
                 text: root.value;
                 edited(text) => {
-                    // Fire focus callback on first edit (user started typing)
+                    // Mark as focused (prevents Rust sync from overwriting mid-edit)
                     root.focus-changed(true);
-                    root.value-changed(text);
                 }
-                accepted => {
-                    // Fire focus callback when user presses Enter (done editing)
+                accepted(text) => {
+                    // Commit the value only when user presses Enter
+                    root.value-changed(self.text);
                     root.focus-changed(false);
                 }
             }
@@ -346,9 +346,11 @@ component Vec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(t + ", " + y-edit.text + ", " + z-edit.text);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(self.text + ", " + y-edit.text + ", " + z-edit.text);
+                        root.focus-changed(false);
+                    }
                 }
             }
         }
@@ -394,9 +396,11 @@ component Vec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(x-edit.text + ", " + t + ", " + z-edit.text);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(x-edit.text + ", " + self.text + ", " + z-edit.text);
+                        root.focus-changed(false);
+                    }
                 }
             }
         }
@@ -442,9 +446,11 @@ component Vec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(x-edit.text + ", " + y-edit.text + ", " + t);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(x-edit.text + ", " + y-edit.text + ", " + self.text);
+                        root.focus-changed(false);
+                    }
                 }
             }
         }
@@ -524,9 +530,11 @@ component RotationVec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(t + ", " + ry-edit.text + ", " + rz-edit.text);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(self.text + ", " + ry-edit.text + ", " + rz-edit.text);
+                        root.focus-changed(false);
+                    }
                 }
 
                 Rectangle {
@@ -574,9 +582,11 @@ component RotationVec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(rx-edit.text + ", " + t + ", " + rz-edit.text);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(rx-edit.text + ", " + self.text + ", " + rz-edit.text);
+                        root.focus-changed(false);
+                    }
                 }
 
                 Rectangle {
@@ -624,9 +634,11 @@ component RotationVec3Row inherits Rectangle {
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
-                        root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + t);
                     }
-                    accepted => { root.focus-changed(false); }
+                    accepted(t) => {
+                        root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + self.text);
+                        root.focus-changed(false);
+                    }
                 }
 
                 Rectangle {
@@ -729,9 +741,11 @@ component ColorRow inherits Rectangle {
                 text: root.value;
                 edited(text) => {
                     root.focus-changed(true);
-                    root.value-changed(text);
                 }
-                accepted => { root.focus-changed(false); }
+                accepted(text) => {
+                    root.value-changed(self.text);
+                    root.focus-changed(false);
+                }
             }
         }
         
@@ -748,7 +762,7 @@ component ColorRow inherits Rectangle {
 // Bool property row with true/false toggle - polished design
 component BoolRow inherits Rectangle {
     in property <string> label: "";
-    in property <string> value: "false";
+    in-out property <string> value: "false";
     in property <bool> editable: true;
     in property <string> description: "";
     in property <string> learn-url: "";
@@ -757,6 +771,9 @@ component BoolRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     
+    // Derived: is the value currently "true"?
+    property <bool> checked: root.value == "true";
+    
     height: 28px;
     border-radius: 2px;
     
@@ -764,7 +781,9 @@ component BoolRow inherits Rectangle {
         mouse-cursor: root.editable ? pointer : default;
         clicked => {
             if root.editable {
-                root.value-changed(root.value == "true" ? "false" : "true");
+                // Toggle immediately so UI updates without waiting for Rust sync
+                root.value = root.checked ? "false" : "true";
+                root.value-changed(root.value);
             }
         }
     }
@@ -791,33 +810,36 @@ component BoolRow inherits Rectangle {
             overflow: elide;
         }
         
-        // Checkbox — vertically centered, checkmark when true
+        // Checkbox — vertically centered, checkmark icon when true, empty box when false
         VerticalLayout {
             alignment: center;
             Rectangle {
-                width: 15px;
-                height: 15px;
-                background: root.value == "true" ? Theme.accent-blue : Theme.input-background;
+                width: 16px;
+                height: 16px;
+                background: root.checked ? Theme.accent-blue : Theme.input-background;
                 border-radius: 3px;
                 border-width: 1px;
-                border-color: root.value == "true" ? Theme.accent-blue : Theme.input-border;
+                border-color: touch.has-hover
+                    ? Theme.accent-blue
+                    : root.checked ? Theme.accent-blue : Theme.input-border;
                 
+                // Checkmark icon (visible only when checked)
                 Text {
-                    text: root.value == "true" ? "✓" : "";
+                    text: root.checked ? "✓" : "";
                     color: white;
-                    font-size: 11px;
-                    font-weight: 700;
+                    font-size: 12px;
+                    font-weight: 900;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
             }
         }
         
-        // State label — "Enabled"/"Disabled" instead of raw "true"/"false"
+        // State label
         Text {
             horizontal-stretch: 1;
-            text: root.value == "true" ? "Enabled" : "Disabled";
-            color: root.value == "true" ? Theme.text-primary : Theme.text-secondary;
+            text: root.checked ? "Enabled" : "Disabled";
+            color: root.checked ? Theme.text-primary : Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
         }

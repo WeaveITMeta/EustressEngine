@@ -1427,12 +1427,12 @@ export component StudioWindow inherits Window {
                         }
                     }
                     
-                    // Script Editor (shown when a script tab is active)
-                    if root.active-tab-type == "script": ScriptEditor {
+                    // Script/Code Editor (shown when a script or code tab is active)
+                    if root.active-tab-type == "script" || root.active-tab-type == "code": ScriptEditor {
                         show-tab-bar: false;
                         tabs: root.center-tabs;
                         active-tab: root.center-active-tab - 1;
-                        current-content <=> root.script-editor-content;
+                        current-content: root.script-editor-content;
                         line-numbers-text: root.script-line-numbers;
                         scroll-to-top-trigger <=> root.script-scroll-to-top;
                         highlight-lines: root.script-highlight-lines;

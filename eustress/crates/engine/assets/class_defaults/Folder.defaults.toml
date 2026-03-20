@@ -1,0 +1,5 @@
+# Folder — Non-visual organizational container
+
+[metadata]
+class_name = "Folder"
+archivable = true

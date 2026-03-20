@@ -51,14 +51,16 @@ component ToolButton inherits Rectangle {
         padding: 4px;
         spacing: 2px;
         alignment: center;
+        horizontal-stretch: 1;
         
-        Image {
-            source: root.icon;
-            width: 24px;
-            height: 24px;
-            image-fit: contain;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: root.icon;
+                width: 24px;
+                height: 24px;
+                image-fit: contain;
+            }
         }
         
         Text {

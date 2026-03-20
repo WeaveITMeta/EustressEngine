@@ -70,6 +70,7 @@ pub mod platform_support;
 pub mod network_benchmark;
 pub mod math_utils;
 pub mod entity_utils;
+pub mod spatial_query_bridge;
 pub mod usd_loader;
 pub mod physics_proxy;
 pub mod generative_pipeline;

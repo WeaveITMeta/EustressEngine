@@ -34,6 +34,8 @@ pub mod scene;
 pub mod scene_ops;
 pub mod services;
 pub mod soul;
+#[cfg(feature = "luau")]
+pub mod luau;
 pub mod terrain;
 pub mod types;
 pub mod usd;

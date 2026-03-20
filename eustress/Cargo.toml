@@ -61,8 +61,11 @@ loro = "1.4"  # High-perf CRDT library
 bevy_quinnet = "0.14"  # QUIC client/server for P2P (Bevy 0.19 compatible)
 quinn = "0.11"  # Underlying QUIC transport
 
-# Physics (Avian from git main - supports Bevy 0.18.0)
-avian3d = { git = "https://github.com/avianphysics/avian", branch = "main", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene"] }
+# Physics (Avian 0.6.0 — crates.io release, Bevy 0.18 compatible)
+avian3d = { version = "0.6", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene", "xpbd_joints"] }
+
+# Luau scripting runtime (Roblox Luau via mlua)
+mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
 
 [profile.dev]
 opt-level = 2

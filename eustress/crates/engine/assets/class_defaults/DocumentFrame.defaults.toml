@@ -1,0 +1,28 @@
+# DocumentFrame — UI element to display documents (PDF, DOCX, etc.)
+
+[gui]
+visible = true
+background_color = [255, 255, 255]
+background_transparency = 0.0
+border_color = [27, 27, 27]
+border_size_pixel = 1
+z_index = 1
+layout_order = 0
+anchor_point = [0.0, 0.0]
+position_scale = [0.0, 0.0]
+position_offset = [0.0, 0.0]
+size_scale = [0.0, 0.0]
+size_offset = [400.0, 600.0]
+active = true
+
+[document]
+source = ""
+page_mode = "SinglePage"
+zoom = 1.0
+scrolling_enabled = true
+document_color = [255, 255, 255]
+document_transparency = 0.0
+
+[metadata]
+class_name = "DocumentFrame"
+archivable = true

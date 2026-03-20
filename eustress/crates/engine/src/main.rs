@@ -51,6 +51,7 @@ mod startup;            // Command-line args and file associations
 mod studio_plugins;     // Studio plugin system (MindSpace, etc.)
 mod math_utils;         // Shared math utilities (ray intersection, AABB, etc.)
 mod entity_utils;       // Entity ID helpers
+mod spatial_query_bridge; // Unified raycasting bridge for Rune + Luau scripting
 mod io_manager;         // Async data fetching for Parameters
 mod space;              // Space file-system-first architecture
 mod simulation;         // Tick-based simulation with time compression

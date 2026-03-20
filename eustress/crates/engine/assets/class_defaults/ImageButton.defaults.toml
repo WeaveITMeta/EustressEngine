@@ -1,0 +1,35 @@
+# ImageButton — Clickable image (child of GUI container)
+# Bevy: Node + Button + Interaction + UiImage
+
+[gui]
+visible = true
+background_color = [255, 255, 255]
+background_transparency = 1.0
+border_color = [27, 27, 27]
+border_size_pixel = 0
+border_mode = "Outline"
+clips_descendants = false
+z_index = 1
+layout_order = 0
+rotation = 0.0
+anchor_point = [0.0, 0.0]
+position_scale = [0.0, 0.0]
+position_offset = [0.0, 0.0]
+size_scale = [0.0, 0.0]
+size_offset = [100.0, 100.0]
+automatic_size = "None"
+active = true
+auto_button_color = true
+
+[image]
+image = ""
+image_color = [255, 255, 255]
+image_transparency = 0.0
+scale_type = "Stretch"
+slice_center = [0.0, 0.0, 0.0, 0.0]
+slice_scale = 1.0
+tile_size = [1.0, 1.0]
+
+[metadata]
+class_name = "ImageButton"
+archivable = true

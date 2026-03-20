@@ -10,6 +10,7 @@
 use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 
+pub mod class_defaults;
 pub mod file_loader;
 pub mod file_watcher;
 pub mod gui_loader;
@@ -130,6 +131,8 @@ pub use file_watcher::{
 pub use instance_loader::{
     InstanceDefinition, InstanceFile, AssetReference,
     TransformData, InstanceProperties, InstanceMetadata,
-    load_instance_definition, write_instance_definition,
+    load_instance_definition, load_instance_definition_with_defaults,
+    write_instance_definition,
 };
+pub use class_defaults::ClassDefaultsRegistry;
 

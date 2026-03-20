@@ -1284,6 +1284,46 @@ Analyze screenshots and reference images to understand spatial context, then gen
 ## Finding Entities
 - find_entity_by_name(name) -> entity_id  // Returns 0 if not found
 
+## Raycasting (Spatial Queries)
+Cast rays to detect colliders in the world. Roblox-compatible API using Avian3D SpatialQuery.
+
+### Types
+- Vector3::new(x, y, z) -> Vector3           // 3D vector with .x, .y, .z fields
+- RaycastParams::new() -> RaycastParams      // Filter configuration object
+- RaycastResult                               // Hit result with .instance, .position, .normal, .distance, .material
+
+### RaycastParams methods
+- params.add_exclude("EntityName")            // Exclude entity by name from results
+- params.add_include("EntityName")            // Include ONLY named entities in results
+- params.max_distance = 500.0                 // Max ray distance (default 1000.0)
+- params.ignore_water = true                  // Skip water volumes
+- params.respect_can_collide = false          // Include non-collidable entities
+
+### Single Raycast (closest hit)
+- workspace_raycast(origin, direction) -> Option<RaycastResult>
+- workspace_raycast(origin, direction, params) -> Option<RaycastResult>
+  Returns Some(result) if hit, None if no hit
+  Result fields: .instance (name), .entity_id, .position (Vector3), .normal (Vector3), .distance, .material
+
+### Multi-hit Raycast
+- workspace_raycast_all(origin, direction, params, max_hits) -> Vec<RaycastResult>
+  Returns Vec of results sorted by distance
+
+### Example: Find ground below a point
+  use eustress::{Vector3, RaycastParams};
+  
+  let origin = Vector3::new(0.0, 50.0, 0.0);
+  let direction = Vector3::new(0.0, -100.0, 0.0);
+  
+  let mut params = RaycastParams::new();
+  params.add_exclude("Player");
+  params.max_distance = 500.0;
+  
+  if let Some(hit) = workspace_raycast(origin, direction, params) {
+      log_info(&format!("Ground: {} at distance {}", hit.instance, hit.distance));
+      set_position(entity_id, hit.position.x, hit.position.y + 0.5, hit.position.z);
+  }
+
 # OUTPUT FORMAT
 Output ONLY valid Rune script code. No explanations, no markdown.
 Start with pub fn main() { ... }"#.to_string()

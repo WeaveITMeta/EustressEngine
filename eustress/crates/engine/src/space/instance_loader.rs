@@ -109,7 +109,10 @@ impl From<Transform> for TransformData {
 /// Instance-specific properties
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceProperties {
-    #[serde(default = "default_color")]
+    /// RGBA color (0.0-1.0 floats internally).
+    /// TOML accepts both 0-255 integer arrays `[163, 162, 165]` (RGB)
+    /// and legacy 0.0-1.0 float arrays `[0.5, 0.5, 0.5, 1.0]` (RGBA).
+    #[serde(default = "default_color", deserialize_with = "deserialize_color_flexible", serialize_with = "serialize_color_as_u8")]
     pub color: [f32; 4], // RGBA
     #[serde(default)]
     pub transparency: f32,
@@ -134,7 +137,82 @@ fn default_material_name_plastic() -> String {
 }
 
 fn default_color() -> [f32; 4] {
-    [0.5, 0.5, 0.5, 1.0]
+    // Default: medium gray [163, 162, 165] in 0-255 → 0.0-1.0
+    [163.0 / 255.0, 162.0 / 255.0, 165.0 / 255.0, 1.0]
+}
+
+/// Custom deserializer that accepts both 0-255 integer RGB/RGBA and 0.0-1.0 float RGBA arrays.
+/// - `[163, 162, 165]`     → RGB integers, alpha defaults to 1.0
+/// - `[163, 162, 165, 200]` → RGBA integers
+/// - `[0.639, 0.635, 0.647, 1.0]` → legacy RGBA floats (values ≤ 1.0)
+/// Detection heuristic: if ALL values are integers, treat as 0-255. Otherwise treat as floats.
+fn deserialize_color_flexible<'de, D>(deserializer: D) -> Result<[f32; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values: Vec<toml::Value> = serde::Deserialize::deserialize(deserializer)?;
+
+    if values.len() < 3 {
+        return Err(serde::de::Error::custom(
+            "color array must have at least 3 elements (RGB)",
+        ));
+    }
+
+    // Check if all values are integers (0-255 format)
+    let all_integers = values.iter().all(|v| v.is_integer());
+
+    if all_integers {
+        // 0-255 integer format
+        let r = values[0].as_integer().unwrap_or(128) as f32 / 255.0;
+        let g = values[1].as_integer().unwrap_or(128) as f32 / 255.0;
+        let b = values[2].as_integer().unwrap_or(128) as f32 / 255.0;
+        let a = if values.len() >= 4 {
+            values[3].as_integer().unwrap_or(255) as f32 / 255.0
+        } else {
+            1.0
+        };
+        Ok([r, g, b, a])
+    } else {
+        // 0.0-1.0 float format (legacy)
+        let r = values[0].as_float().or_else(|| values[0].as_integer().map(|i| i as f64)).unwrap_or(0.5) as f32;
+        let g = values[1].as_float().or_else(|| values[1].as_integer().map(|i| i as f64)).unwrap_or(0.5) as f32;
+        let b = values[2].as_float().or_else(|| values[2].as_integer().map(|i| i as f64)).unwrap_or(0.5) as f32;
+        let a = if values.len() >= 4 {
+            values[3].as_float().or_else(|| values[3].as_integer().map(|i| i as f64)).unwrap_or(1.0) as f32
+        } else {
+            1.0
+        };
+        Ok([r, g, b, a])
+    }
+}
+
+/// Custom serializer that writes color as 0-255 RGB integer array.
+/// If alpha is not 1.0 (fully opaque), writes RGBA; otherwise just RGB.
+fn serialize_color_as_u8<S>(color: &[f32; 4], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let r = (color[0] * 255.0).round() as u8;
+    let g = (color[1] * 255.0).round() as u8;
+    let b = (color[2] * 255.0).round() as u8;
+    let a = (color[3] * 255.0).round() as u8;
+    if a == 255 {
+        // Opaque — write compact RGB
+        let mut seq = serializer.serialize_seq(Some(3))?;
+        seq.serialize_element(&r)?;
+        seq.serialize_element(&g)?;
+        seq.serialize_element(&b)?;
+        seq.end()
+    } else {
+        // Semi-transparent — write RGBA
+        let mut seq = serializer.serialize_seq(Some(4))?;
+        seq.serialize_element(&r)?;
+        seq.serialize_element(&g)?;
+        seq.serialize_element(&b)?;
+        seq.serialize_element(&a)?;
+        seq.end()
+    }
 }
 
 fn default_true() -> bool {
@@ -563,12 +641,54 @@ pub struct InstanceFile {
 
 /// Load instance definition from .glb.toml file
 pub fn load_instance_definition(toml_path: &Path) -> Result<InstanceDefinition, String> {
+    load_instance_definition_with_defaults(toml_path, None)
+}
+
+/// Load instance definition from .glb.toml file, merging class defaults for any missing fields.
+///
+/// When a ClassDefaultsRegistry is provided, the loader:
+/// 1. Parses the raw TOML into a generic toml::Value
+/// 2. Reads `metadata.class_name` to determine which class defaults to apply
+/// 3. Deep-merges missing keys from the class defaults
+/// 4. Deserializes the merged TOML into InstanceDefinition
+///
+/// This ensures that TOML files on disk only need to specify the properties that
+/// differ from the class defaults — everything else is filled in automatically.
+pub fn load_instance_definition_with_defaults(
+    toml_path: &Path,
+    registry: Option<&super::class_defaults::ClassDefaultsRegistry>,
+) -> Result<InstanceDefinition, String> {
     let toml_str = std::fs::read_to_string(toml_path)
         .map_err(|e| format!("Failed to read {}: {}", toml_path.display(), e))?;
-    
-    let instance: InstanceDefinition = toml::from_str(&toml_str)
-        .map_err(|e| format!("Failed to parse {}: {}", toml_path.display(), e))?;
-    
+
+    // If no registry, skip the merge step and deserialize directly
+    let Some(registry) = registry else {
+        let instance: InstanceDefinition = toml::from_str(&toml_str)
+            .map_err(|e| format!("Failed to parse {}: {}", toml_path.display(), e))?;
+        return Ok(instance);
+    };
+
+    // Parse into generic TOML value for merge
+    let mut toml_value: toml::Value = toml_str.parse()
+        .map_err(|e: toml::de::Error| format!("Failed to parse {}: {}", toml_path.display(), e))?;
+
+    // Extract class_name to look up defaults
+    let class_name = toml_value
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("Part")
+        .to_string();
+
+    // Merge class defaults for missing fields
+    if let Some(defaults) = registry.get(&class_name) {
+        super::class_defaults::merge_defaults(&mut toml_value, defaults);
+    }
+
+    // Deserialize the merged TOML
+    let instance: InstanceDefinition = toml_value.try_into()
+        .map_err(|e: toml::de::Error| format!("Failed to deserialize merged {}: {}", toml_path.display(), e))?;
+
     Ok(instance)
 }
 

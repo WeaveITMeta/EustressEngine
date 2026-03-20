@@ -3001,6 +3001,11 @@ fn drain_slint_actions(
                                 bp.can_collide = val == "true";
                             }
                         }
+                        "Locked" => {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
+                                bp.locked = val == "true";
+                            }
+                        }
                         _ => {
                             // TODO: UI class ECS component live mutation via PropertyAccess
                             // This requires ui_queries ParamSet which is not available in drain_slint_actions
@@ -3630,6 +3635,10 @@ fn drain_slint_actions(
                     "insert:wedge"           => Some("wedge"),
                     "insert:cone"            => Some("cone"),
                     "insert:corner_wedge"    => Some("corner_wedge"),
+                    "insert:spawnlocation"   => Some("block"),
+                    "insert:seat"            => Some("block"),
+                    "insert:vehicleseat"     => Some("block"),
+                    "insert:unionoperation"  => Some("block"),
                     _ => None,
                 };
 
@@ -3760,7 +3769,26 @@ fn drain_slint_actions(
                     };
 
                     if let Some((class_name_str, file_ext, service)) = ui_insert {
-                        // Find the service entity (StarterGui root)
+                        // Check if a ScreenGui (or other GUI container) is selected — parent UI children there
+                        let selected_gui_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
+                            match &es.selected {
+                                SelectedItem::Entity(e) => {
+                                    queries.instances.get(*e).ok().and_then(|(ent, inst)| {
+                                        match inst.class_name {
+                                            eustress_common::classes::ClassName::ScreenGui
+                                            | eustress_common::classes::ClassName::BillboardGui
+                                            | eustress_common::classes::ClassName::SurfaceGui
+                                            | eustress_common::classes::ClassName::Frame
+                                            | eustress_common::classes::ClassName::ScrollingFrame => Some(ent),
+                                            _ => None,
+                                        }
+                                    })
+                                }
+                                _ => None,
+                            }
+                        } else { None };
+
+                        // Find the service entity (StarterGui root) as fallback
                         let service_entity = queries.loaded_from_file.iter().find_map(|(e, lff)| {
                             if lff.service == service
                                 && lff.path.file_name()
@@ -3773,8 +3801,11 @@ fn drain_slint_actions(
                             }
                         });
 
+                        // Prefer selected GUI container, fall back to service root
+                        let parent_entity = selected_gui_entity.or(service_entity);
+
                         let space_root = crate::space::default_space_root();
-                        let write_dir = service_entity
+                        let write_dir = parent_entity
                             .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                             .map(|(_, lff)| {
                                 if lff.path.is_dir() { lff.path.clone() }
@@ -3811,7 +3842,7 @@ fn drain_slint_actions(
                                     &toml_path,
                                     &gui_def,
                                 );
-                                if let Some(parent) = service_entity {
+                                if let Some(parent) = parent_entity {
                                     commands.entity(entity).insert(ChildOf(parent));
                                 }
                                 if let Some(ref mut registry) = res.file_registry {
@@ -4015,6 +4046,30 @@ fn sync_bevy_to_slint(
         }
     }
 
+    // ── Pre-throttle: tool and transform mode must sync every frame for responsiveness ──
+    if let Some(ref state) = state {
+        let tool_str = match state.current_tool {
+            Tool::Select => "select",
+            Tool::Move => "move",
+            Tool::Rotate => "rotate",
+            Tool::Scale => "scale",
+            Tool::Terrain => "terrain",
+        };
+        let current_tool: String = ui.get_current_tool().into();
+        if current_tool != tool_str {
+            ui.set_current_tool(tool_str.into());
+        }
+        
+        let mode_str = match state.transform_mode {
+            TransformMode::World => "world",
+            TransformMode::Local => "local",
+        };
+        let current_mode: String = ui.get_transform_mode().into();
+        if current_mode != mode_str {
+            ui.set_transform_mode(mode_str.into());
+        }
+    }
+
     // ── Throttled (every 10 frames): everything that rarely changes ──
     // Avoids marking Slint dirty every frame for stable state, which forces
     // the software renderer to repaint the full overlay every frame.
@@ -4032,34 +4087,6 @@ fn sync_bevy_to_slint(
     
     // Get mutable reference to state
     let Some(mut state) = state else { return };
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // Individual change detection: only set each property when it actually changes
-    // This prevents Slint from marking the UI dirty when nothing changed
-    // ══════════════════════════════════════════════════════════════════════════
-    
-    // Tool selection - always sync immediately (critical for responsiveness)
-    let tool_str = match state.current_tool {
-        Tool::Select => "select",
-        Tool::Move => "move",
-        Tool::Rotate => "rotate",
-        Tool::Scale => "scale",
-        Tool::Terrain => "terrain",
-    };
-    let current_tool: String = ui.get_current_tool().into();
-    if current_tool != tool_str {
-        ui.set_current_tool(tool_str.into());
-    }
-    
-    // Transform mode
-    let mode_str = match state.transform_mode {
-        TransformMode::World => "world",
-        TransformMode::Local => "local",
-    };
-    let current_mode: String = ui.get_transform_mode().into();
-    if current_mode != mode_str {
-        ui.set_transform_mode(mode_str.into());
-    }
     
     // Boolean flags - only set when changed
     if ui.get_show_exit_confirmation() != state.show_exit_confirmation {
@@ -5613,8 +5640,10 @@ fn sync_properties_to_slint(
                 }
             } else {
             // -- Properties section (BasePart / non-UI) --
-            add_prop("Appearance", "Color", format!("{:.3}, {:.3}, {:.3}, {:.3}", 
-                toml_def.properties.color[0], toml_def.properties.color[1], toml_def.properties.color[2], toml_def.properties.color[3]), "color", true);
+            add_prop("Appearance", "Color", format!("{}, {}, {}", 
+                (toml_def.properties.color[0] * 255.0).round() as u8,
+                (toml_def.properties.color[1] * 255.0).round() as u8,
+                (toml_def.properties.color[2] * 255.0).round() as u8), "color", true);
             add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
             add_prop("Appearance", "Reflectance", format!("{:.3}", toml_def.properties.reflectance), "float", true);
             add_prop("Appearance", "CastShadow", toml_def.properties.cast_shadow.to_string(), "bool", true);
@@ -5623,6 +5652,7 @@ fn sync_properties_to_slint(
             // -- Physics section --
             add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
             add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
+            add_prop("Physics", "Locked", toml_def.properties.locked.to_string(), "bool", true);
             } // end non-UI branch
             
             // -- Material section (realism, optional) --
@@ -5946,9 +5976,19 @@ fn update_toml_property(
         
         // Appearance (properties section)
         "Color" => {
+            // Accept 0-255 integer RGB input from Properties panel, convert to 0.0-1.0 internal
             let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
             if parts.len() >= 3 {
-                def.properties.color = [parts[0], parts[1], parts[2], parts.get(3).copied().unwrap_or(1.0)]; true
+                // Heuristic: if any value > 1.0, treat all as 0-255 integers
+                let is_u8 = parts.iter().any(|&v| v > 1.0);
+                if is_u8 {
+                    def.properties.color = [
+                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
+                        parts.get(3).map(|&a| a / 255.0).unwrap_or(1.0),
+                    ]; true
+                } else {
+                    def.properties.color = [parts[0], parts[1], parts[2], parts.get(3).copied().unwrap_or(1.0)]; true
+                }
             } else { false }
         }
         "Transparency" => { if let Ok(v) = val.parse() { def.properties.transparency = v; true } else { false } }
@@ -5959,6 +5999,7 @@ fn update_toml_property(
         // Physics (properties section)
         "Anchored" => { def.properties.anchored = val == "true"; true }
         "CanCollide" => { def.properties.can_collide = val == "true"; true }
+        "Locked" => { def.properties.locked = val == "true"; true }
         
         // Material section (realism)
         k if k.starts_with("Material.") || is_material_prop(k) => {

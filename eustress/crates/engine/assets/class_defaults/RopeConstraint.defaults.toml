@@ -1,0 +1,16 @@
+# RopeConstraint — Inextensible rope between two Attachments
+# Avian 0.6: DistanceJoint with max length only
+
+[constraint]
+enabled = true
+attachment0 = ""
+attachment1 = ""
+length = 5.0
+restitution = 0.0
+visible = true
+thickness = 0.2
+color = [128, 96, 64]
+
+[metadata]
+class_name = "RopeConstraint"
+archivable = true

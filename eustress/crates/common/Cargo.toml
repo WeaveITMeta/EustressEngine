@@ -89,6 +89,9 @@ notify = { version = "6.1", optional = true }
 wgpu = { version = "28", optional = true }
 encase = { version = "0.10", optional = true }
 
+# Luau scripting runtime (Roblox Luau via mlua) - optional
+mlua = { workspace = true, optional = true }
+
 # Pure Rust AI Generation (Candle + FLUX.1 Kontext) - December 2025
 # Note: Candle main branch required for latest Flux support
 # These are optional and only enabled with the "generation-candle" feature
@@ -136,3 +139,5 @@ realism-spatial = ["realism", "kiddo", "rkyv"]
 # realism-quantum = ["realism-symbolic"]
 # Enable full realism system with all features (excludes quantum)
 realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
+# Enable Luau scripting runtime (Roblox Luau compatibility)
+luau = ["mlua"]

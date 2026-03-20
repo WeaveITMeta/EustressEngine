@@ -366,6 +366,12 @@ pub enum ClassId {
     Attachment = 30,
     WeldConstraint = 31,
     Motor6D = 32,
+    HingeConstraint = 33,
+    DistanceConstraint = 34,
+    PrismaticConstraint = 35,
+    BallSocketConstraint = 36,
+    SpringConstraint = 37,
+    RopeConstraint = 38,
     // Effects (40-49)
     ParticleEmitter = 40,
     Beam = 41,
@@ -404,6 +410,14 @@ pub enum ClassId {
     WebFrame = 122,
     // Scripting (140-149)
     SoulScript = 140,
+    LuauScript = 141,
+    LuauLocalScript = 142,
+    LuauModuleScript = 143,
+    // Networking Primitives (144-147)
+    RemoteEvent = 144,
+    RemoteFunction = 145,
+    BindableEvent = 146,
+    BindableFunction = 147,
     // Gameplay (150-169)
     SpawnLocation = 150,
     Seat = 151,
@@ -439,6 +453,12 @@ impl ClassId {
             ClassName::Attachment => ClassId::Attachment,
             ClassName::WeldConstraint => ClassId::WeldConstraint,
             ClassName::Motor6D => ClassId::Motor6D,
+            ClassName::HingeConstraint => ClassId::HingeConstraint,
+            ClassName::DistanceConstraint => ClassId::DistanceConstraint,
+            ClassName::PrismaticConstraint => ClassId::PrismaticConstraint,
+            ClassName::BallSocketConstraint => ClassId::BallSocketConstraint,
+            ClassName::SpringConstraint => ClassId::SpringConstraint,
+            ClassName::RopeConstraint => ClassId::RopeConstraint,
             // Effects
             ClassName::ParticleEmitter => ClassId::ParticleEmitter,
             ClassName::Beam => ClassId::Beam,
@@ -477,6 +497,14 @@ impl ClassId {
             ClassName::WebFrame => ClassId::WebFrame,
             // Scripting
             ClassName::SoulScript => ClassId::SoulScript,
+            ClassName::LuauScript => ClassId::LuauScript,
+            ClassName::LuauLocalScript => ClassId::LuauLocalScript,
+            ClassName::LuauModuleScript => ClassId::LuauModuleScript,
+            // Networking Primitives
+            ClassName::RemoteEvent => ClassId::RemoteEvent,
+            ClassName::RemoteFunction => ClassId::RemoteFunction,
+            ClassName::BindableEvent => ClassId::BindableEvent,
+            ClassName::BindableFunction => ClassId::BindableFunction,
             // Gameplay
             ClassName::SpawnLocation => ClassId::SpawnLocation,
             ClassName::Seat => ClassId::Seat,
@@ -538,6 +566,12 @@ impl ClassId {
             ClassId::Attachment => ClassName::Attachment,
             ClassId::WeldConstraint => ClassName::WeldConstraint,
             ClassId::Motor6D => ClassName::Motor6D,
+            ClassId::HingeConstraint => ClassName::HingeConstraint,
+            ClassId::DistanceConstraint => ClassName::DistanceConstraint,
+            ClassId::PrismaticConstraint => ClassName::PrismaticConstraint,
+            ClassId::BallSocketConstraint => ClassName::BallSocketConstraint,
+            ClassId::SpringConstraint => ClassName::SpringConstraint,
+            ClassId::RopeConstraint => ClassName::RopeConstraint,
             // Effects
             ClassId::ParticleEmitter => ClassName::ParticleEmitter,
             ClassId::Beam => ClassName::Beam,
@@ -576,6 +610,14 @@ impl ClassId {
             ClassId::WebFrame => ClassName::WebFrame,
             // Scripting
             ClassId::SoulScript => ClassName::SoulScript,
+            ClassId::LuauScript => ClassName::LuauScript,
+            ClassId::LuauLocalScript => ClassName::LuauLocalScript,
+            ClassId::LuauModuleScript => ClassName::LuauModuleScript,
+            // Networking Primitives
+            ClassId::RemoteEvent => ClassName::RemoteEvent,
+            ClassId::RemoteFunction => ClassName::RemoteFunction,
+            ClassId::BindableEvent => ClassName::BindableEvent,
+            ClassId::BindableFunction => ClassName::BindableFunction,
             // Gameplay
             ClassId::SpawnLocation => ClassName::SpawnLocation,
             ClassId::Seat => ClassName::Seat,
@@ -650,6 +692,14 @@ impl ClassId {
             122 => Some(ClassId::WebFrame),
             // Scripting (140-149)
             140 => Some(ClassId::SoulScript),
+            141 => Some(ClassId::LuauScript),
+            142 => Some(ClassId::LuauLocalScript),
+            143 => Some(ClassId::LuauModuleScript),
+            // Networking Primitives (144-147)
+            144 => Some(ClassId::RemoteEvent),
+            145 => Some(ClassId::RemoteFunction),
+            146 => Some(ClassId::BindableEvent),
+            147 => Some(ClassId::BindableFunction),
             // Gameplay (150-169)
             150 => Some(ClassId::SpawnLocation),
             151 => Some(ClassId::Seat),
@@ -2039,6 +2089,7 @@ pub fn load_binary_scene_to_world(
                                 generated_code,
                                 build_status,
                                 errors: Vec::new(),
+                                run_context: Default::default(),
                             };
                             world.spawn((instance, soul_script, Name::new(name))).id()
                         } else {

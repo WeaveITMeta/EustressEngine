@@ -420,14 +420,23 @@ export component ScriptEditor inherits Rectangle {
                 }
 
                 // Code editor — fills remaining width
+                // NOTE: Do NOT use `text <=> root.current-content` here.
+                // A two-way binding causes Slint property recursion when Rust
+                // programmatically sets content (set → edited → callback → set).
+                // Instead, use one-way `text: root.current-content` so Rust can
+                // push content without triggering `edited`, and let `edited`
+                // only fire on actual user keystrokes.
                 editor-area := TextEdit {
                     horizontal-stretch: 1;
-                    text <=> root.current-content;
+                    text: root.current-content;
                     font-size: 13px;
                     font-family: "Consolas";
                     wrap: no-wrap;
 
-                    edited(text) => { root.on-content-changed(text); }
+                    edited(text) => {
+                        root.current-content = text;
+                        root.on-content-changed(text);
+                    }
                 }
 
                 // Invisible sentinel: watches scroll-to-top-trigger, jumps to line 1

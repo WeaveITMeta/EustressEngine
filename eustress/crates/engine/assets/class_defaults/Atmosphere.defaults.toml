@@ -1,0 +1,14 @@
+# Atmosphere — Atmospheric effects (fog, haze, sky tinting)
+# Bevy: Custom atmosphere shader / fog
+
+[atmosphere]
+density = 0.395
+offset = 0.0
+color = [173, 215, 255]
+decay_color = [105, 123, 142]
+glare = 0.0
+haze = 0.0
+
+[metadata]
+class_name = "Atmosphere"
+archivable = true

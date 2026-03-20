@@ -394,6 +394,7 @@ pub fn spawn_file_entry(
     space_path: &Path,
     file_meta: &FileMetadata,
     parent_entity: Option<Entity>,
+    class_defaults: Option<&super::class_defaults::ClassDefaultsRegistry>,
 ) -> Option<Entity> {
     // Skip if already loaded
     if registry.is_loaded(&file_meta.path) {
@@ -449,7 +450,7 @@ pub fn spawn_file_entry(
                 }
             } else {
                 // Load as instance entity
-                match super::instance_loader::load_instance_definition(&file_meta.path) {
+                match super::instance_loader::load_instance_definition_with_defaults(&file_meta.path, class_defaults) {
                     Ok(instance) => {
                         let e = super::instance_loader::spawn_instance(
                             commands,
@@ -537,6 +538,7 @@ pub fn spawn_file_entry(
                             generated_code: None,
                             build_status: crate::soul::SoulBuildStatus::NotBuilt,
                             errors: Vec::new(),
+                            run_context: Default::default(),
                         },
                         LoadedFromFile {
                             path: file_meta.path.clone(),
@@ -575,6 +577,7 @@ pub fn spawn_file_entry(
                             generated_code: None,
                             build_status: crate::soul::SoulBuildStatus::NotBuilt,
                             errors: Vec::new(),
+                            run_context: Default::default(),
                         },
                         LoadedFromFile {
                             path: file_meta.path.clone(),
@@ -690,6 +693,7 @@ pub fn spawn_directory_entry(
     space_path: &Path,
     dir_meta: &FileMetadata,
     parent_entity: Option<Entity>,
+    class_defaults: Option<&super::class_defaults::ClassDefaultsRegistry>,
 ) {
     // Skip if this directory path already has an entity registered
     if registry.is_loaded(&dir_meta.path) {
@@ -723,12 +727,14 @@ pub fn spawn_directory_entry(
                             spawn_directory_entry(
                                 commands, asset_server, meshes, materials, registry,
                                 material_registry, space_path, child, Some(service_entity),
+                                class_defaults,
                             );
                         }
                         _ => {
                             spawn_file_entry(
                                 commands, asset_server, meshes, materials, registry,
                                 material_registry, space_path, child, Some(service_entity),
+                                class_defaults,
                             );
                         }
                     }
@@ -828,12 +834,14 @@ pub fn spawn_directory_entry(
                 spawn_directory_entry(
                     commands, asset_server, meshes, materials, registry,
                     material_registry, space_path, child, Some(folder_entity),
+                    class_defaults,
                 );
             }
             _ => {
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
                     material_registry, space_path, child, Some(folder_entity),
+                    class_defaults,
                 );
             }
         }
@@ -849,6 +857,7 @@ pub fn load_space_files_system(
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
     space_root: Res<super::SpaceRoot>,
+    class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
 ) {
     let space_path = &space_root.0;
     
@@ -861,6 +870,7 @@ pub fn load_space_files_system(
     let entries = scan_space_directory(space_path);
     info!("🔍 Discovered {} top-level entries in Space", entries.len());
     
+    let cd_ref = class_defaults.as_deref();
     for entry in &entries {
         match entry.file_type {
             // Subdirectory → Folder entity + children parented to it
@@ -868,6 +878,7 @@ pub fn load_space_files_system(
                 spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
                     &mut registry, &mut material_registry, space_path, entry, None,
+                    cd_ref,
                 );
             }
             // Regular file → entity at service root level (no parent)
@@ -875,6 +886,7 @@ pub fn load_space_files_system(
                 spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
                     &mut registry, &mut material_registry, space_path, entry, None,
+                    cd_ref,
                 );
             }
         }
@@ -895,6 +907,7 @@ impl Plugin for SpaceFileLoaderPlugin {
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .add_systems(Startup, (
+                super::class_defaults::startup_load_class_defaults,
                 load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,
             ))

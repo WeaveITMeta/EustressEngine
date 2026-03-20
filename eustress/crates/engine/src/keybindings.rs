@@ -390,8 +390,8 @@ fn handle_menu_action_events(
     // Read selection directly from SelectionSyncManager to avoid ordering dependency
     // on sync_selection_boxes (which adds SelectionBox component one frame later).
     selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
-    // Query all entities that could be selected — look up by stable ID at focus time.
-    entity_query: Query<(Entity, &GlobalTransform, Option<&eustress_common::classes::BasePart>),
+    // Query all entities that could be selected — look up by stable ID at delete/focus time.
+    entity_query: Query<(Entity, Option<&GlobalTransform>, Option<&eustress_common::classes::BasePart>),
         Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
     // Query Instance to detect Camera class deletion for camera respawn.
     instance_query: Query<&eustress_common::classes::Instance>,
@@ -440,11 +440,10 @@ fn handle_menu_action_events(
 
                 if !selected_ids.is_empty() {
                     for (entity, transform, base_part) in entity_query.iter() {
-                        // Build the stable ID string for this entity
                         let id = format!("{}v{}", entity.index(), entity.generation());
                         if !selected_ids.contains(&id) { continue; }
 
-                        let pos = transform.translation();
+                        let pos = transform.map(|t| t.translation()).unwrap_or(Vec3::ZERO);
                         let half_size = base_part
                             .map(|bp| bp.size * 0.5)
                             .unwrap_or(Vec3::splat(0.5));

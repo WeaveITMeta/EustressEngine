@@ -185,6 +185,7 @@ pub fn process_file_changes(
     file_entities: Query<(Entity, &super::file_loader::LoadedFromFile)>,
     // Query for Soul scripts
     mut soul_scripts: Query<&mut crate::soul::SoulScriptData>,
+    class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
 ) {
     let Some(watcher) = watcher else {
         return;
@@ -220,7 +221,7 @@ pub fn process_file_changes(
                 );
             }
             FileChangeType::Created => {
-                handle_file_created(&event, &mut registry, &mut material_registry, &mut commands, &asset_server, &mut materials, &space_root.0);
+                handle_file_created(&event, &mut registry, &mut material_registry, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
             }
             FileChangeType::Removed => {
                 handle_file_removed(&event, &mut registry, &mut commands);
@@ -349,6 +350,7 @@ fn handle_file_created(
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
     space_root: &std::path::Path,
+    class_defaults: Option<&super::class_defaults::ClassDefaultsRegistry>,
 ) {
     // Check if file type should spawn an entity
     if !event.file_type.spawns_entity_in_service(&event.service) {
@@ -430,6 +432,7 @@ fn handle_file_created(
                             generated_code: None,
                             build_status: crate::soul::SoulBuildStatus::NotBuilt,
                             errors: Vec::new(),
+                            run_context: Default::default(),
                         },
                         super::file_loader::LoadedFromFile {
                             path: event.path.clone(),
@@ -461,7 +464,7 @@ fn handle_file_created(
         
         FileType::Toml => {
             // Load .part.toml, .model.toml, .instance.toml files
-            match super::instance_loader::load_instance_definition(&event.path) {
+            match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
                 Ok(instance) => {
                     let entity = super::instance_loader::spawn_instance(
                         commands,

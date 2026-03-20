@@ -1,0 +1,6 @@
+# BindableEvent — In-process one-way event (same context)
+# Pure ECS marker, no additional properties
+
+[metadata]
+class_name = "BindableEvent"
+archivable = true

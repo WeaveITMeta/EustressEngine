@@ -1,0 +1,17 @@
+# Motor6D — Animation joint for rigs (rotates/translates between bones)
+# Avian 0.6: RevoluteJoint with motor
+
+[constraint]
+enabled = true
+part0 = ""
+part1 = ""
+max_velocity = 0.0
+
+[motor]
+target_velocity = 0.0
+max_torque = 100.0
+model = "AccelerationBased"
+
+[metadata]
+class_name = "Motor6D"
+archivable = true

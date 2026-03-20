@@ -1,0 +1,21 @@
+# Part — Fundamental 3D primitive (block, ball, cylinder, wedge, cone, corner_wedge)
+# All colors are 0-255 RGB integers. Transparency is 0.0-1.0 float.
+
+[properties]
+color = [163, 162, 165]           # Medium gray (Plastic default)
+transparency = 0.0
+anchored = false
+can_collide = true
+cast_shadow = true
+reflectance = 0.0
+material = "Plastic"
+locked = false
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]  # Quaternion (x, y, z, w)
+scale = [4.0, 1.2, 2.0]
+
+[metadata]
+class_name = "Part"
+archivable = true

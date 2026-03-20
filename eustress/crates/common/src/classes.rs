@@ -161,6 +161,13 @@ pub enum ClassName {
     Attachment,
     WeldConstraint,
     Motor6D,
+    // Avian 0.6.0 Joint Constraints
+    HingeConstraint,        // Revolute joint — rotation around a single axis
+    DistanceConstraint,     // Distance joint — maintains min/max distance between two parts
+    PrismaticConstraint,    // Prismatic joint — sliding along a single axis
+    BallSocketConstraint,   // Spherical joint — rotation around all axes
+    SpringConstraint,       // Spring — distance joint with compliance (stiffness/damping)
+    RopeConstraint,         // Rope — distance joint with max length only (no min)
     SpecialMesh,
     Decal,
     Folder,
@@ -184,6 +191,15 @@ pub enum ClassName {
     UnionOperation,
     // Soul Scripting - Single unified script class
     SoulScript,
+    // Luau Scripting - Roblox-compatible script types
+    LuauScript,         // Server-side Luau script
+    LuauLocalScript,    // Client-side Luau script
+    LuauModuleScript,   // Reusable Luau module
+    // Networking Primitives - Client↔Server communication
+    RemoteEvent,        // One-way event channel (client↔server)
+    RemoteFunction,     // Request-response channel (client↔server)
+    BindableEvent,      // In-process one-way event (same context)
+    BindableFunction,   // In-process request-response (same context)
     // Service/Environment Classes
     Lighting,       // Scene lighting container (like Roblox's Lighting service)
     Atmosphere,     // Atmospheric effects (fog, haze, etc.)
@@ -253,6 +269,12 @@ impl ClassName {
             ClassName::Attachment => "Attachment",
             ClassName::WeldConstraint => "WeldConstraint",
             ClassName::Motor6D => "Motor6D",
+            ClassName::HingeConstraint => "HingeConstraint",
+            ClassName::DistanceConstraint => "DistanceConstraint",
+            ClassName::PrismaticConstraint => "PrismaticConstraint",
+            ClassName::BallSocketConstraint => "BallSocketConstraint",
+            ClassName::SpringConstraint => "SpringConstraint",
+            ClassName::RopeConstraint => "RopeConstraint",
             ClassName::SpecialMesh => "SpecialMesh",
             ClassName::Decal => "Decal",
             ClassName::Folder => "Folder",
@@ -275,6 +297,13 @@ impl ClassName {
             ClassName::Sky => "Sky",
             ClassName::UnionOperation => "UnionOperation",
             ClassName::SoulScript => "SoulScript",
+            ClassName::LuauScript => "LuauScript",
+            ClassName::LuauLocalScript => "LuauLocalScript",
+            ClassName::LuauModuleScript => "LuauModuleScript",
+            ClassName::RemoteEvent => "RemoteEvent",
+            ClassName::RemoteFunction => "RemoteFunction",
+            ClassName::BindableEvent => "BindableEvent",
+            ClassName::BindableFunction => "BindableFunction",
             ClassName::Lighting => "Lighting",
             ClassName::Atmosphere => "Atmosphere",
             ClassName::SpawnLocation => "SpawnLocation",
@@ -337,6 +366,12 @@ impl ClassName {
             "Attachment" => Ok(ClassName::Attachment),
             "WeldConstraint" => Ok(ClassName::WeldConstraint),
             "Motor6D" => Ok(ClassName::Motor6D),
+            "HingeConstraint" => Ok(ClassName::HingeConstraint),
+            "DistanceConstraint" => Ok(ClassName::DistanceConstraint),
+            "PrismaticConstraint" => Ok(ClassName::PrismaticConstraint),
+            "BallSocketConstraint" => Ok(ClassName::BallSocketConstraint),
+            "SpringConstraint" => Ok(ClassName::SpringConstraint),
+            "RopeConstraint" => Ok(ClassName::RopeConstraint),
             "SpecialMesh" => Ok(ClassName::SpecialMesh),
             "Decal" => Ok(ClassName::Decal),
             "Folder" => Ok(ClassName::Folder),
@@ -359,6 +394,13 @@ impl ClassName {
             "Sky" => Ok(ClassName::Sky),
             "UnionOperation" => Ok(ClassName::UnionOperation),
             "SoulScript" => Ok(ClassName::SoulScript),
+            "LuauScript" | "Script" => Ok(ClassName::LuauScript),
+            "LuauLocalScript" | "LocalScript" => Ok(ClassName::LuauLocalScript),
+            "LuauModuleScript" | "ModuleScript" => Ok(ClassName::LuauModuleScript),
+            "RemoteEvent" => Ok(ClassName::RemoteEvent),
+            "RemoteFunction" => Ok(ClassName::RemoteFunction),
+            "BindableEvent" => Ok(ClassName::BindableEvent),
+            "BindableFunction" => Ok(ClassName::BindableFunction),
             "Lighting" => Ok(ClassName::Lighting),
             "Atmosphere" => Ok(ClassName::Atmosphere),
             "SpawnLocation" => Ok(ClassName::SpawnLocation),
@@ -1703,6 +1745,249 @@ impl Default for Motor6D {
             transform: Transform::IDENTITY,
             desired_angle: 0.0,
             max_velocity: 0.1,
+        }
+    }
+}
+
+// ============================================================================
+// 13a. HingeConstraint (Avian RevoluteJoint — single-axis rotation)
+// ============================================================================
+
+/// Revolute joint — allows rotation around a single axis.
+/// Avian: RevoluteJoint (without motor)
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct HingeConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Rotation axis (local to Part0), normalized
+    pub axis: Vec3,
+    /// Lower angle limit in radians (None = unlimited)
+    pub lower_angle: Option<f32>,
+    /// Upper angle limit in radians (None = unlimited)
+    pub upper_angle: Option<f32>,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for HingeConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            axis: Vec3::Y,
+            lower_angle: None,
+            upper_angle: None,
+            enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13b. DistanceConstraint (Avian DistanceJoint — min/max distance)
+// ============================================================================
+
+/// Maintains a distance range between two parts.
+/// Avian: DistanceJoint
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DistanceConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Minimum distance (0.0 = no minimum)
+    pub min_distance: f32,
+    /// Maximum distance (f32::MAX = no maximum)
+    pub max_distance: f32,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for DistanceConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            min_distance: 0.0,
+            max_distance: 5.0,
+            enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13c. PrismaticConstraint (Avian PrismaticJoint — sliding axis)
+// ============================================================================
+
+/// Allows sliding along a single axis (like a piston).
+/// Avian: PrismaticJoint (with optional motor)
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct PrismaticConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Sliding axis (local to Part0), normalized
+    pub axis: Vec3,
+    /// Lower translation limit (None = unlimited)
+    pub lower_limit: Option<f32>,
+    /// Upper translation limit (None = unlimited)
+    pub upper_limit: Option<f32>,
+    /// Motor target velocity (0.0 = no motor)
+    pub motor_velocity: f32,
+    /// Motor max force (0.0 = no motor)
+    pub motor_max_force: f32,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for PrismaticConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            axis: Vec3::X,
+            lower_limit: None,
+            upper_limit: None,
+            motor_velocity: 0.0,
+            motor_max_force: 0.0,
+            enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13d. BallSocketConstraint (Avian SphericalJoint — free rotation)
+// ============================================================================
+
+/// Spherical joint — allows rotation around all axes from a shared pivot.
+/// Avian: SphericalJoint
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BallSocketConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Cone angle limit in radians (None = unlimited)
+    pub cone_angle: Option<f32>,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for BallSocketConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            cone_angle: None,
+            enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13e. SpringConstraint (Avian DistanceJoint with compliance)
+// ============================================================================
+
+/// Spring — behaves like a distance joint with stiffness and damping.
+/// Avian: DistanceJoint with compliance parameters
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct SpringConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Rest length of the spring
+    pub rest_length: f32,
+    /// Spring stiffness (higher = stiffer, 0.0 = infinitely stiff)
+    pub stiffness: f32,
+    /// Damping coefficient (higher = more damped)
+    pub damping: f32,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for SpringConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            rest_length: 5.0,
+            stiffness: 100.0,
+            damping: 1.0,
+            enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13f. RopeConstraint (Avian DistanceJoint — max length only)
+// ============================================================================
+
+/// Rope — enforces a maximum distance (slack allowed, no minimum).
+/// Avian: DistanceJoint with min_distance = 0 and max_distance = length
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RopeConstraint {
+    /// Parent part entity ID
+    pub part0: Option<u32>,
+    /// Child part entity ID
+    pub part1: Option<u32>,
+    /// Local anchor on Part0
+    pub c0: Transform,
+    /// Local anchor on Part1
+    pub c1: Transform,
+    /// Maximum rope length
+    pub length: f32,
+    /// Toggle joint
+    pub enabled: bool,
+}
+
+impl Default for RopeConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+            length: 10.0,
+            enabled: true,
         }
     }
 }

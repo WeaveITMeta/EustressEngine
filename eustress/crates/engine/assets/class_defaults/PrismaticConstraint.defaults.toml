@@ -1,0 +1,19 @@
+# PrismaticConstraint — Sliding joint along one axis between two Attachments
+# Avian 0.6: PrismaticJoint with optional motor
+
+[constraint]
+enabled = true
+attachment0 = ""
+attachment1 = ""
+lower_limit = 0.0
+upper_limit = 0.0
+limits_enabled = false
+
+[motor]
+target_velocity = 0.0
+max_force = 100.0
+model = "AccelerationBased"
+
+[metadata]
+class_name = "PrismaticConstraint"
+archivable = true

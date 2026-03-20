@@ -204,6 +204,30 @@ impl SoulServiceSettings {
 // Soul Script Data Component
 // ============================================================================
 
+/// Determines the scripting runtime for a SoulScript.
+/// Rune is the primary/recommended runtime for Soul scripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
+pub enum SoulRunContext {
+    /// Rune VM — primary Soul scripting runtime (compiled from markdown → Rune)
+    #[default]
+    Rune,
+    /// Server-side execution context
+    Server,
+    /// Client-side execution context
+    Client,
+}
+
+impl SoulRunContext {
+    /// String representation for display and TOML serialization
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SoulRunContext::Rune => "Rune",
+            SoulRunContext::Server => "Server",
+            SoulRunContext::Client => "Client",
+        }
+    }
+}
+
 /// Component attached to SoulScript entities containing the script source and compiled state
 #[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
@@ -222,6 +246,9 @@ pub struct SoulScriptData {
     pub build_status: SoulBuildStatus,
     /// Errors from last build attempt
     pub errors: Vec<String>,
+    /// Scripting runtime context — defaults to Rune (primary Soul runtime)
+    #[serde(default)]
+    pub run_context: SoulRunContext,
 }
 
 /// Build status for a Soul script

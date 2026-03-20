@@ -556,6 +556,7 @@ pub fn apply_space_rescan(
     mut registry: ResMut<crate::space::SpaceFileRegistry>,
     mut material_registry: ResMut<crate::space::material_loader::MaterialRegistry>,
     space_root: Res<crate::space::SpaceRoot>,
+    class_defaults: Option<Res<crate::space::class_defaults::ClassDefaultsRegistry>>,
 ) {
     if !rescan.0 { return; }
     rescan.0 = false;
@@ -572,18 +573,21 @@ pub fn apply_space_rescan(
     let entries = scan_space_directory(space_path);
     info!("🔍 Discovered {} top-level entries", entries.len());
 
+    let cd_ref = class_defaults.as_deref();
     for entry in &entries {
         match entry.file_type {
             FileType::Directory => {
                 crate::space::file_loader::spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
                     &mut registry, &mut material_registry, space_path, entry, None,
+                    cd_ref,
                 );
             }
             _ => {
                 crate::space::file_loader::spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
                     &mut registry, &mut material_registry, space_path, entry, None,
+                    cd_ref,
                 );
             }
         }

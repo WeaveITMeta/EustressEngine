@@ -1,0 +1,13 @@
+# Terrain — Voxel-based landscape system
+# Bevy: Custom terrain mesh generation
+
+[terrain]
+water_color = [88, 147, 172]
+water_transparency = 0.3
+water_wave_size = 0.15
+water_wave_speed = 10.0
+decoration = true
+
+[metadata]
+class_name = "Terrain"
+archivable = true
