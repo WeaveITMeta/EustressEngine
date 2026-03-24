@@ -1,0 +1,54 @@
+[package]
+name    = "instance-capacity"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmark: full-stack instance capacity — TOML → binary cache → ECS → GPU → physics"
+
+[[bin]]
+name = "instance-capacity"
+path = "src/main.rs"
+
+[dependencies]
+# ── TOML (canonical Eustress source format) ──────────────────────────────────
+toml  = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+
+# ── Binary cache (workspace version matches eustress-common) ─────────────────
+bincode = "1.3"
+
+# ── Compression (zstd level-1, fast decode path) ─────────────────────────────
+zstd = "0.13"
+
+# ── Filesystem + temp dirs ────────────────────────────────────────────────────
+tempfile = "3.10"
+
+# ── Parallel generation + query (mirrors engine's Rayon usage) ───────────────
+rayon = "1.10"
+
+# ── Bevy — headless GPU render + ECS (no window, no audio, no UI) ────────────
+# bevy_render submits real GPU draw calls; bevy_pbr spawns real PbrBundle meshes.
+# multi_threaded enables the Bevy task pool (mirrors engine config).
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_log",
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_asset",
+    "bevy_color",      # required by bevy_pbr StandardMaterial
+    "multi_threaded",  # Bevy task pool — mirrors engine config
+    "zstd_rust",       # asset decompression
+    # warmup=5 frames handles pipeline compilation settling before measurement.
+] }
+
+# ── Physics — Avian3D 0.6 (workspace version, parry-f32 broad+narrow phase) ──
+avian3d = { version = "0.6", default-features = false, features = [
+    "3d", "f32", "parry-f32", "parallel",
+] }
+
+# ── Byte casting (GPU buffer alignment) ──────────────────────────────────────
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# ── wgpu direct — GPU-driven indirect draw bench (matches Bevy 0.18 version) ─
+wgpu = { version = "27.0.1", default-features = false, features = ["wgsl", "vulkan", "dx12"] }
+
+# ── pollster — minimal async executor for wgpu block_on calls ─────────────────
+pollster = "0.3"

@@ -2011,6 +2011,8 @@ struct DrainResources<'w> {
     workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
     /// Material registry for resolving material names on spawned parts
     material_registry: Option<ResMut<'w, crate::space::material_loader::MaterialRegistry>>,
+    /// Primitive mesh handle cache — avoids per-entity asset_server.load() for same GLB
+    mesh_cache: Option<ResMut<'w, crate::space::instance_loader::PrimitiveMeshCache>>,
     /// Asset Manager panel state (expand/collapse, search, category filter)
     asset_manager_state: Option<ResMut<'w, AssetManagerState>>,
     /// Terrain brush settings (size, strength, falloff)
@@ -3386,13 +3388,16 @@ fn drain_slint_actions(
                         match crate::space::load_instance_definition(&toml_path) {
                             Ok(instance) => {
                                 // Step 3: Spawn entity inline
-                                let default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
-                                let mat_reg_ref = res.material_registry.as_deref().unwrap_or(&default_mat_reg);
+                                let mut default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
+                                let mat_reg_ref = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg);
+                                let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
+                                let mesh_cache_ref = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache);
                                 let entity = crate::space::instance_loader::spawn_instance(
                                     &mut commands,
                                     &asset_server,
                                     &mut res.materials,
                                     mat_reg_ref,
+                                    mesh_cache_ref,
                                     toml_path.clone(),
                                     instance,
                                 );
@@ -3696,13 +3701,16 @@ fn drain_slint_actions(
                         Ok(toml_path) => {
                             match crate::space::load_instance_definition(&toml_path) {
                                 Ok(instance) => {
-                                    let default_mat_reg2 = crate::space::material_loader::MaterialRegistry::default();
-                                    let mat_reg_ref2 = res.material_registry.as_deref().unwrap_or(&default_mat_reg2);
+                                    let mut default_mat_reg2 = crate::space::material_loader::MaterialRegistry::default();
+                                    let mat_reg_ref2 = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg2);
+                                    let mut default_mesh_cache2 = crate::space::instance_loader::PrimitiveMeshCache::default();
+                                    let mesh_cache_ref2 = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache2);
                                     let entity = crate::space::instance_loader::spawn_instance(
                                         &mut commands,
                                         &asset_server,
                                         &mut res.materials,
                                         mat_reg_ref2,
+                                        mesh_cache_ref2,
                                         toml_path.clone(),
                                         instance,
                                     );

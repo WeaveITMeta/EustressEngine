@@ -40,15 +40,15 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox Type | Luau Status | Rune Status | Notes |
 |-------------|-------------|-------------|-------|
-| `Vector3.new(x, y, z)` | 🔶 Table | ✅ Struct | Rune has proper Vector3 type |
-| `Vector3.X/Y/Z` fields | 🔶 Table | ✅ Native | |
-| `Vector3 + - * /` operators | ❌ | ❌ | Need operator overloading |
-| `Vector3:Dot()` | ❌ | ❌ | |
-| `Vector3:Cross()` | ❌ | ❌ | |
-| `Vector3.Magnitude` | ❌ | ❌ | |
-| `Vector3.Unit` | ❌ | ❌ | |
-| `Vector3:Lerp()` | ❌ | ❌ | |
-| `Vector2.new(x, y)` | ❌ | ❌ | |
+| `Vector3.new(x, y, z)` | ✅ UserData | ✅ Struct | Both have proper Vector3 type |
+| `Vector3.X/Y/Z` fields | ✅ UserData | ✅ Native | |
+| `Vector3 + - * /` operators | ✅ Metamethods | ✅ Methods | `add()`, `sub()`, `mul()`, `div()` |
+| `Vector3:Dot()` | ✅ | ✅ | |
+| `Vector3:Cross()` | ✅ | ✅ | |
+| `Vector3.Magnitude` | ✅ | ✅ | |
+| `Vector3.Unit` | ✅ | ✅ | |
+| `Vector3:Lerp()` | ✅ | ✅ | |
+| `Vector2.new(x, y)` | ❌ | ❌ | In shared types module |
 | `Vector2int16` | ❌ | ❌ | |
 | `Vector3int16` | ❌ | ❌ | |
 
@@ -56,37 +56,40 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox Type | Luau Status | Rune Status | Notes |
 |-------------|-------------|-------------|-------|
-| `CFrame.new()` | ❌ | ❌ | Critical for transforms |
-| `CFrame.Angles()` | ❌ | ❌ | |
-| `CFrame.fromEulerAngles()` | ❌ | ❌ | |
-| `CFrame.lookAt()` | ❌ | ❌ | |
-| `CFrame * CFrame` | ❌ | ❌ | |
-| `CFrame:Inverse()` | ❌ | ❌ | |
-| `CFrame:ToWorldSpace()` | ❌ | ❌ | |
-| `CFrame:ToObjectSpace()` | ❌ | ❌ | |
-| `CFrame.Position` | ❌ | ❌ | |
-| `CFrame.LookVector` | ❌ | ❌ | |
-| `CFrame.RightVector` | ❌ | ❌ | |
-| `CFrame.UpVector` | ❌ | ❌ | |
+| `CFrame.new()` | ✅ UserData | ✅ | Position-only constructor |
+| `CFrame.Angles()` | ✅ | ✅ | Euler angles constructor |
+| `CFrame.fromEulerAngles()` | ✅ | ✅ | Same as Angles |
+| `CFrame.lookAt()` | ✅ | ✅ | |
+| `CFrame * CFrame` | ✅ Metamethod | ✅ | `mul()` method |
+| `CFrame:Inverse()` | ✅ | ✅ | |
+| `CFrame:ToWorldSpace()` | ✅ | ✅ | `point_to_world_space()` |
+| `CFrame:ToObjectSpace()` | ✅ | ✅ | `point_to_object_space()` |
+| `CFrame.Position` | ✅ | ✅ | |
+| `CFrame.LookVector` | ✅ | ✅ | |
+| `CFrame.RightVector` | ✅ | ✅ | |
+| `CFrame.UpVector` | ✅ | ✅ | |
 
 ### Color Types
 
 | Roblox Type | Luau Status | Rune Status | Notes |
 |-------------|-------------|-------------|-------|
-| `Color3.new(r, g, b)` | ❌ | ❌ | 0-1 floats |
-| `Color3.fromRGB(r, g, b)` | ❌ | ❌ | 0-255 integers |
-| `Color3.fromHSV(h, s, v)` | ❌ | ❌ | |
-| `Color3:Lerp()` | ❌ | ❌ | |
+| `Color3.new(r, g, b)` | ✅ UserData | ✅ | 0-1 floats |
+| `Color3.fromRGB(r, g, b)` | ✅ | ✅ | 0-255 integers |
+| `Color3.fromHSV(h, s, v)` | ✅ | ✅ | |
+| `Color3.fromHex()` | ✅ | ✅ | Eustress extension |
+| `Color3:Lerp()` | ✅ | ✅ | |
+| `Color3:ToHSV()` | ✅ | ✅ | |
 | `BrickColor.new()` | ➖ | ➖ | Deprecated, use Color3 |
 
 ### UI Types
 
 | Roblox Type | Luau Status | Rune Status | Notes |
 |-------------|-------------|-------------|-------|
-| `UDim.new(scale, offset)` | ❌ | ❌ | |
-| `UDim2.new(xs, xo, ys, yo)` | ❌ | ❌ | |
-| `UDim2.fromScale()` | ❌ | ❌ | |
-| `UDim2.fromOffset()` | ❌ | ❌ | |
+| `UDim.new(scale, offset)` | ✅ UserData | ✅ | P1 implemented |
+| `UDim2.new(xs, xo, ys, yo)` | ✅ UserData | ✅ | P1 implemented |
+| `UDim2.fromScale()` | ✅ | ✅ | |
+| `UDim2.fromOffset()` | ✅ | ✅ | |
+| `UDim2:Lerp()` | ✅ | ✅ | |
 | `Rect.new()` | ❌ | ❌ | |
 
 ### Other Types
@@ -145,30 +148,30 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Instance.new("ClassName")` | 🔶 Stub | ❌ | Core spawning |
-| `instance:Clone()` | ❌ | ❌ | |
-| `instance:Destroy()` | ❌ | ❌ | |
-| `instance:ClearAllChildren()` | ❌ | ❌ | |
-| `instance.Parent` | ❌ | ❌ | |
-| `instance.Name` | ❌ | ❌ | |
-| `instance.ClassName` | ❌ | ❌ | |
-| `instance:IsA("ClassName")` | ❌ | ❌ | |
-| `instance:IsDescendantOf()` | ❌ | ❌ | |
+| `Instance.new("ClassName")` | ✅ | ✅ | P0 implemented |
+| `instance:Clone()` | ✅ | ✅ | `clone_instance()` |
+| `instance:Destroy()` | ✅ | ✅ | |
+| `instance:ClearAllChildren()` | ✅ | ❌ | |
+| `instance.Parent` | ✅ | ✅ | `parent()` |
+| `instance.Name` | ✅ | ✅ | `name()`, `set_name()` |
+| `instance.ClassName` | ✅ | ✅ | `class_name()` |
+| `instance:IsA("ClassName")` | ✅ | ✅ | `is_a()` |
+| `instance:IsDescendantOf()` | ✅ | ❌ | |
 | `instance:IsAncestorOf()` | ❌ | ❌ | |
 
 ### Instance Finding
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `instance:FindFirstChild()` | ❌ | ❌ | |
-| `instance:FindFirstChildOfClass()` | ❌ | ❌ | |
+| `instance:FindFirstChild()` | ✅ | ✅ | `find_first_child()` |
+| `instance:FindFirstChildOfClass()` | ✅ | ✅ | `find_first_child_of_class()` |
 | `instance:FindFirstChildWhichIsA()` | ❌ | ❌ | |
 | `instance:FindFirstAncestor()` | ❌ | ❌ | |
 | `instance:FindFirstDescendant()` | ❌ | ❌ | |
-| `instance:GetChildren()` | ❌ | ❌ | |
-| `instance:GetDescendants()` | ❌ | ❌ | |
+| `instance:GetChildren()` | ✅ | ✅ | `get_children()` |
+| `instance:GetDescendants()` | ✅ | ❌ | |
 | `instance:WaitForChild()` | ❌ | ❌ | Async |
-| `instance:GetFullName()` | ❌ | ❌ | |
+| `instance:GetFullName()` | ✅ | ❌ | |
 | `instance:GetAttribute()` | ❌ | ❌ | |
 | `instance:SetAttribute()` | ❌ | ❌ | |
 | `instance:GetAttributes()` | ❌ | ❌ | |
@@ -235,63 +238,63 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `RunService.Heartbeat` | ❌ | ❌ | Per-frame after physics |
-| `RunService.Stepped` | ❌ | ❌ | Per-frame before physics |
-| `RunService.RenderStepped` | ❌ | ❌ | Per-frame render (client) |
-| `RunService:IsClient()` | ❌ | ❌ | |
-| `RunService:IsServer()` | ❌ | ❌ | |
-| `RunService:IsStudio()` | ❌ | ❌ | |
-| `RunService:IsRunning()` | ❌ | ❌ | |
-| `RunService:BindToRenderStep()` | ❌ | ❌ | |
-| `RunService:UnbindFromRenderStep()` | ❌ | ❌ | |
+| `RunService.Heartbeat` | ✅ | ❌ | Per-frame after physics |
+| `RunService.Stepped` | ✅ | ❌ | Per-frame before physics |
+| `RunService.RenderStepped` | ✅ | ❌ | Per-frame render (client) |
+| `RunService:IsClient()` | ✅ | ❌ | |
+| `RunService:IsServer()` | ✅ | ❌ | |
+| `RunService:IsStudio()` | ✅ | ❌ | |
+| `RunService:IsRunning()` | ✅ | ❌ | |
+| `RunService:BindToRenderStep()` | ✅ | ❌ | |
+| `RunService:UnbindFromRenderStep()` | ✅ | ❌ | |
 
 ### Players Service
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Players.LocalPlayer` | ❌ | ❌ | Client only |
-| `Players:GetPlayers()` | ❌ | ❌ | |
-| `Players:GetPlayerByUserId()` | ❌ | ❌ | |
-| `Players:GetPlayerFromCharacter()` | ❌ | ❌ | |
-| `Players.PlayerAdded` | ❌ | ❌ | |
-| `Players.PlayerRemoving` | ❌ | ❌ | |
-| `Player.Character` | ❌ | ❌ | |
+| `Players.LocalPlayer` | ✅ | ❌ | Client only |
+| `Players:GetPlayers()` | ✅ | ❌ | |
+| `Players:GetPlayerByUserId()` | ✅ | ❌ | |
+| `Players:GetPlayerFromCharacter()` | ✅ | ❌ | |
+| `Players.PlayerAdded` | ✅ | ❌ | Signal |
+| `Players.PlayerRemoving` | ✅ | ❌ | Signal |
+| `Player.Character` | ✅ | ❌ | |
 | `Player.CharacterAdded` | ❌ | ❌ | |
-| `Player.UserId` | ❌ | ❌ | |
-| `Player.Name` | ❌ | ❌ | |
-| `Player.Team` | ❌ | ❌ | |
-| `Player:Kick()` | ❌ | ❌ | |
+| `Player.UserId` | ✅ | ❌ | |
+| `Player.Name` | ✅ | ❌ | |
+| `Player.Team` | ✅ | ❌ | |
+| `Player:Kick()` | ✅ | ❌ | No-op stub |
 | `Player:LoadCharacter()` | ❌ | ❌ | |
 
 ### TweenService (P1 - Animation)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `TweenService:Create()` | ❌ | ❌ | |
-| `TweenInfo.new()` | ❌ | ❌ | |
-| `Tween:Play()` | ❌ | ❌ | |
-| `Tween:Pause()` | ❌ | ❌ | |
-| `Tween:Cancel()` | ❌ | ❌ | |
-| `Tween.Completed` | ❌ | ❌ | |
-| `Enum.EasingStyle.*` | ❌ | ❌ | |
-| `Enum.EasingDirection.*` | ❌ | ❌ | |
+| `TweenService:Create()` | ✅ | ✅ | P1 implemented |
+| `TweenInfo.new()` | ✅ UserData | ✅ | All 6 params |
+| `Tween:Play()` | ✅ | ✅ | |
+| `Tween:Pause()` | ✅ | ✅ | |
+| `Tween:Cancel()` | ✅ | ✅ | |
+| `Tween.Completed` | ❌ | ❌ | Signal not wired |
+| `Enum.EasingStyle.*` | ✅ Integer | ✅ Integer | 0-10 codes |
+| `Enum.EasingDirection.*` | ✅ Integer | ✅ Integer | 0-2 codes |
 
 ### UserInputService (P1 - Input)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `UserInputService.InputBegan` | ❌ | ❌ | |
+| `UserInputService.InputBegan` | ❌ | ❌ | Signal not wired |
 | `UserInputService.InputEnded` | ❌ | ❌ | |
 | `UserInputService.InputChanged` | ❌ | ❌ | |
-| `UserInputService:IsKeyDown()` | ❌ | ❌ | |
-| `UserInputService:IsMouseButtonPressed()` | ❌ | ❌ | |
-| `UserInputService:GetMouseLocation()` | ❌ | ❌ | |
-| `UserInputService:GetMouseDelta()` | ❌ | ❌ | |
+| `UserInputService:IsKeyDown()` | ✅ | ✅ | P1 implemented |
+| `UserInputService:IsMouseButtonPressed()` | ✅ | ✅ | |
+| `UserInputService:GetMouseLocation()` | ✅ | ✅ | Returns {X,Y} / (x,y) |
+| `UserInputService:GetMouseDelta()` | ✅ | ✅ | |
 | `UserInputService.MouseBehavior` | ❌ | ❌ | |
 | `UserInputService.TouchEnabled` | ❌ | ❌ | |
 | `UserInputService.KeyboardEnabled` | ❌ | ❌ | |
 | `UserInputService.GamepadEnabled` | ❌ | ❌ | |
-| `Enum.KeyCode.*` | ❌ | ❌ | |
+| `Enum.KeyCode.*` | ✅ Integer | ✅ Integer | Use raw key codes |
 | `Enum.UserInputType.*` | ❌ | ❌ | |
 
 ### ContextActionService
@@ -307,18 +310,18 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `ReplicatedStorage` access | 🔶 Stub | ❌ | |
-| `ServerStorage` access | 🔶 Stub | ❌ | Server only |
-| `ServerScriptService` access | 🔶 Stub | ❌ | Server only |
+| `ReplicatedStorage` access | ✅ | ❌ | P1 implemented |
+| `ServerStorage` access | ✅ | ❌ | Server only |
+| `ServerScriptService` access | ✅ | ❌ | Server only |
 
 ### CollectionService (Tags)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `CollectionService:AddTag()` | ❌ | ❌ | |
-| `CollectionService:RemoveTag()` | ❌ | ❌ | |
-| `CollectionService:HasTag()` | ❌ | ❌ | |
-| `CollectionService:GetTagged()` | ❌ | ❌ | |
+| `CollectionService:AddTag()` | ✅ | ✅ | P2 implemented |
+| `CollectionService:RemoveTag()` | ✅ | ✅ | |
+| `CollectionService:HasTag()` | ✅ | ✅ | |
+| `CollectionService:GetTagged()` | ✅ | ✅ | |
 | `CollectionService:GetTags()` | ❌ | ❌ | |
 | `CollectionService:GetInstanceAddedSignal()` | ❌ | ❌ | |
 | `CollectionService:GetInstanceRemovedSignal()` | ❌ | ❌ | |
@@ -327,17 +330,24 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Debris:AddItem(instance, lifetime)` | ❌ | ❌ | Auto-destroy |
+| `Debris:AddItem(instance, lifetime)` | ✅ Stub | 🔶 Shared | P1 shared service |
 
-### HttpService
+### HttpService (Full Roblox Parity)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `HttpService:GetAsync()` | ❌ | ❌ | |
-| `HttpService:PostAsync()` | ❌ | ❌ | |
-| `HttpService:JSONEncode()` | ❌ | ❌ | |
-| `HttpService:JSONDecode()` | ❌ | ❌ | |
-| `HttpService:GenerateGUID()` | ❌ | ❌ | |
+| `HttpService:GetAsync()` | ✅ | ✅ | P2 implemented via ureq |
+| `HttpService:PostAsync()` | ✅ | ✅ | JSON content-type |
+| `HttpService:RequestAsync()` | ✅ | ✅ | Full: GET/POST/PUT/DELETE/PATCH/HEAD, custom headers |
+| `HttpService:JSONEncode()` | 🔶 Strings | 🔶 Strings | Tables not yet supported |
+| `HttpService:JSONDecode()` | 🔶 Basic | 🔶 Basic | |
+| `HttpService:GenerateGUID()` | ✅ | ✅ | UUID v4, optional curly braces |
+| `HttpService:UrlEncode()` | ✅ | ✅ | RFC 3986 compliant |
+| `HttpResponse.Success` | ✅ | ✅ | Boolean (2xx = true) |
+| `HttpResponse.StatusCode` | ✅ | ✅ | Integer |
+| `HttpResponse.StatusMessage` | ✅ | ✅ | String |
+| `HttpResponse.Headers` | ✅ | ✅ | Table/HashMap |
+| `HttpResponse.Body` | ✅ | ✅ | String |
 
 ### MarketplaceService
 
@@ -368,17 +378,17 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 ## 6. Events & Signals
 
-### task Library (P0 - Critical)
+### task Library (P1 - Implemented)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `task.wait(n)` | 🔶 Stub | ❌ | Yield for n seconds |
-| `task.spawn(fn)` | 🔶 Stub | ❌ | New thread |
-| `task.defer(fn)` | 🔶 Stub | ❌ | End of frame |
-| `task.delay(n, fn)` | ❌ | ❌ | Delayed spawn |
+| `task.wait(n)` | ✅ | ✅ | P1 implemented |
+| `task.spawn(fn)` | 🔶 Stub | 🔶 Placeholder | Closures complex |
+| `task.defer(fn)` | 🔶 Stub | 🔶 Placeholder | |
+| `task.delay(n, fn)` | ❌ | 🔶 Placeholder | |
 | `task.desynchronize()` | ❌ | ❌ | Parallel Luau |
 | `task.synchronize()` | ❌ | ❌ | |
-| `task.cancel(thread)` | ❌ | ❌ | |
+| `task.cancel(thread)` | ❌ | ✅ | |
 
 ### Remote Events/Functions (P0 - Networking)
 
@@ -553,19 +563,19 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Sound.SoundId` | ❌ | ❌ | |
-| `Sound.Volume` | ❌ | ❌ | |
-| `Sound.Playing` | ❌ | ❌ | |
-| `Sound.Looped` | ❌ | ❌ | |
+| `Sound.SoundId` | ✅ Table | ✅ Struct | P2 implemented |
+| `Sound.Volume` | ✅ | ✅ | 0.0-1.0 |
+| `Sound.Playing` | ✅ | ✅ | |
+| `Sound.Looped` | ✅ | ✅ | |
 | `Sound.PlaybackSpeed` | ❌ | ❌ | |
 | `Sound.TimePosition` | ❌ | ❌ | |
-| `Sound:Play()` | ❌ | ❌ | |
+| `Sound:Play()` | ✅ | ✅ | |
 | `Sound:Pause()` | ❌ | ❌ | |
 | `Sound:Resume()` | ❌ | ❌ | |
-| `Sound:Stop()` | ❌ | ❌ | |
+| `Sound:Stop()` | ✅ | ✅ | |
 | `Sound.Ended` | ❌ | ❌ | |
 | `Sound.Played` | ❌ | ❌ | |
-| `SoundService:PlayLocalSound()` | ❌ | ❌ | |
+| `SoundService:PlayLocalSound()` | ✅ | ❌ | Luau only |
 
 ---
 
@@ -587,13 +597,13 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `DataStoreService:GetDataStore()` | ❌ | ❌ | |
-| `DataStore:GetAsync()` | ❌ | ❌ | |
-| `DataStore:SetAsync()` | ❌ | ❌ | |
-| `DataStore:UpdateAsync()` | ❌ | ❌ | |
-| `DataStore:RemoveAsync()` | ❌ | ❌ | |
-| `DataStore:IncrementAsync()` | ❌ | ❌ | |
-| `OrderedDataStore` | ❌ | ❌ | Leaderboards |
+| `DataStoreService:GetDataStore()` | ✅ | ✅ | P2 implemented (AWS DynamoDB) |
+| `DataStore:GetAsync()` | ✅ | ✅ | Local cache fallback |
+| `DataStore:SetAsync()` | ✅ | ✅ | |
+| `DataStore:UpdateAsync()` | ❌ | ✅ Shared | Transform function |
+| `DataStore:RemoveAsync()` | ✅ | ✅ | |
+| `DataStore:IncrementAsync()` | ✅ | ✅ | Atomic increment |
+| `OrderedDataStore:GetSortedAsync()` | ✅ | ✅ | Leaderboards |
 | `MemoryStoreService` | ❌ | ❌ | Temporary data |
 
 ---
@@ -602,14 +612,22 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Animator:LoadAnimation()` | ❌ | ❌ | |
-| `AnimationTrack:Play()` | ❌ | ❌ | |
-| `AnimationTrack:Stop()` | ❌ | ❌ | |
-| `AnimationTrack:AdjustSpeed()` | ❌ | ❌ | |
-| `AnimationTrack:AdjustWeight()` | ❌ | ❌ | |
-| `AnimationTrack.KeyframeReached` | ❌ | ❌ | |
-| `AnimationTrack.Stopped` | ❌ | ❌ | |
-| `AnimationTrack.Priority` | ❌ | ❌ | |
+| `Animator:LoadAnimation()` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack:Play()` | ✅ | ❌ | P3 implemented (fadeTime, weight, speed) |
+| `AnimationTrack:Stop()` | ✅ | ❌ | P3 implemented (fadeTime) |
+| `AnimationTrack:AdjustSpeed()` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack:AdjustWeight()` | ✅ | ❌ | P3 implemented (weight, fadeTime) |
+| `AnimationTrack.IsPlaying` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.Length` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.Looped` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.Speed` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.TimePosition` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.WeightCurrent` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack.WeightTarget` | ✅ | ❌ | P3 implemented |
+| `AnimationTrack:GetMarkerReachedSignal()` | 🔶 | ❌ | P3 stub (signal not wired) |
+| `AnimationTrack.KeyframeReached` | ❌ | ❌ | Event not wired |
+| `AnimationTrack.Stopped` | ❌ | ❌ | Event not wired |
+| `AnimationTrack.Priority` | ✅ | ❌ | P3 implemented |
 
 ---
 
@@ -617,21 +635,24 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Humanoid.Health` | ❌ | ❌ | |
-| `Humanoid.MaxHealth` | ❌ | ❌ | |
-| `Humanoid.WalkSpeed` | ❌ | ❌ | |
-| `Humanoid.JumpPower` | ❌ | ❌ | |
-| `Humanoid.JumpHeight` | ❌ | ❌ | |
-| `Humanoid:TakeDamage()` | ❌ | ❌ | |
-| `Humanoid:MoveTo()` | ❌ | ❌ | |
-| `Humanoid:Move()` | ❌ | ❌ | |
-| `Humanoid.Died` | ❌ | ❌ | |
-| `Humanoid.Running` | ❌ | ❌ | |
-| `Humanoid.Jumping` | ❌ | ❌ | |
-| `Humanoid.MoveToFinished` | ❌ | ❌ | |
-| `Humanoid:ChangeState()` | ❌ | ❌ | |
-| `Humanoid:GetState()` | ❌ | ❌ | |
-| `Humanoid.StateChanged` | ❌ | ❌ | |
+| `Humanoid.Health` | ✅ | ❌ | P3 implemented |
+| `Humanoid.MaxHealth` | ✅ | ❌ | P3 implemented |
+| `Humanoid.WalkSpeed` | ✅ | ❌ | P3 implemented |
+| `Humanoid.JumpPower` | ✅ | ❌ | P3 implemented |
+| `Humanoid.JumpHeight` | ✅ | ❌ | P3 implemented |
+| `Humanoid.HipHeight` | ✅ | ❌ | P3 implemented |
+| `Humanoid.AutoRotate` | ✅ | ❌ | P3 implemented |
+| `Humanoid.AutoJumpEnabled` | ✅ | ❌ | P3 implemented |
+| `Humanoid:TakeDamage()` | ✅ | ❌ | P3 implemented |
+| `Humanoid:MoveTo()` | ✅ | ❌ | P3 stub (not wired to pathfinding) |
+| `Humanoid:Move()` | ✅ | ❌ | P3 stub (not wired to controller) |
+| `Humanoid:ChangeState()` | ✅ | ❌ | P3 stub |
+| `Humanoid:GetState()` | ✅ | ❌ | P3 stub (returns Running) |
+| `Humanoid.Died` | ❌ | ❌ | Event not wired |
+| `Humanoid.Running` | ❌ | ❌ | Event not wired |
+| `Humanoid.Jumping` | ❌ | ❌ | Event not wired |
+| `Humanoid.MoveToFinished` | ❌ | ❌ | Event not wired |
+| `Humanoid.StateChanged` | ❌ | ❌ | Event not wired |
 | `HumanoidRootPart` | ❌ | ❌ | |
 
 ---
@@ -640,15 +661,16 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Camera.CFrame` | ❌ | ❌ | |
-| `Camera.CameraType` | ❌ | ❌ | |
-| `Camera.CameraSubject` | ❌ | ❌ | |
-| `Camera.FieldOfView` | ❌ | ❌ | |
-| `Camera.Focus` | ❌ | ❌ | |
-| `Camera:ViewportPointToRay()` | ❌ | ❌ | |
-| `Camera:ScreenPointToRay()` | ❌ | ❌ | |
+| `Camera.CFrame` | ✅ | ❌ | P3 implemented |
+| `Camera.CameraType` | ✅ | ❌ | P3 implemented |
+| `Camera.CameraSubject` | ✅ | ❌ | P3 implemented |
+| `Camera.FieldOfView` | ✅ | ❌ | P3 implemented |
+| `Camera.Focus` | ✅ | ❌ | P3 implemented |
+| `Camera.ViewportSize` | ✅ | ❌ | P3 implemented (Eustress extension) |
+| `Camera:ViewportPointToRay()` | ✅ | ❌ | P3 implemented |
+| `Camera:ScreenPointToRay()` | ✅ | ❌ | P3 implemented |
 | `Camera:WorldToViewportPoint()` | ❌ | ❌ | |
-| `Camera:WorldToScreenPoint()` | ❌ | ❌ | |
+| `Camera:WorldToScreenPoint()` | ✅ | ❌ | P3 implemented |
 
 ---
 
@@ -656,12 +678,15 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Mouse.Hit` | ❌ | ❌ | CFrame at cursor |
-| `Mouse.Target` | ❌ | ❌ | Part under cursor |
-| `Mouse.X / Y` | ❌ | ❌ | Screen position |
-| `Mouse.Button1Down` | ❌ | ❌ | |
-| `Mouse.Button1Up` | ❌ | ❌ | |
-| `Mouse.Move` | ❌ | ❌ | |
+| `Mouse.Hit` | ✅ | ❌ | P3 implemented (CFrame at cursor) |
+| `Mouse.Target` | ✅ | ❌ | P3 implemented (Part under cursor) |
+| `Mouse.TargetSurface` | ✅ | ❌ | P3 implemented |
+| `Mouse.X / Y` | ✅ | ❌ | P3 implemented (Screen position) |
+| `Mouse.UnitRay` | ✅ | ❌ | P3 implemented |
+| `Mouse.Icon` | ✅ | ❌ | P3 implemented |
+| `Mouse.Button1Down` | ❌ | ❌ | Event not wired |
+| `Mouse.Button1Up` | ❌ | ❌ | Event not wired |
+| `Mouse.Move` | ❌ | ❌ | Event not wired |
 | `Mouse.WheelForward` | ❌ | ❌ | |
 | `Mouse.WheelBackward` | ❌ | ❌ | |
 | `ClickDetector.MouseClick` | ❌ | ❌ | |

@@ -7,6 +7,13 @@
 //! 1. **VmPool** — Thread-safe pool of reusable VM instances
 //! 2. **PooledVm** — RAII guard that returns VM to pool on drop
 //! 3. **Performance** — 5-10x speedup by avoiding VM creation overhead
+//!
+//! ## Thread Safety
+//!
+//! Rune's `RuntimeContext` contains non-Send types, so we use a different approach:
+//! - `VmPoolInner` holds the actual pool data (not Send)
+//! - `VmPoolHandle` is a Send+Sync wrapper using indices
+//! - VMs are created lazily per-thread when needed
 
 use bevy::prelude::*;
 use crossbeam::queue::ArrayQueue;
@@ -15,7 +22,7 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 
 #[cfg(feature = "realism-scripting")]
-use rune::{Vm, Unit, runtime::RuntimeContext, ContextError};
+use rune::{Vm, Unit, runtime::RuntimeContext};
 
 /// VM pool configuration
 #[derive(Debug, Clone)]
@@ -39,17 +46,75 @@ impl Default for VmPoolConfig {
 ///
 /// VMs are expensive to create (~5ms), so we pool them for reuse.
 /// Each script hash gets its own pool to avoid context switching.
+///
+/// Note: This struct does NOT derive Resource because RuntimeContext is not Send.
+/// Use `VmPoolResource` wrapper for Bevy integration.
 #[cfg(feature = "realism-scripting")]
-#[derive(Resource)]
 pub struct VmPool {
     /// Shared runtime context for all VMs
     context: Arc<RuntimeContext>,
     /// Compiled units by script hash
     units: Arc<Mutex<HashMap<String, Arc<Unit>>>>,
-    /// VM pools by script hash
+    /// VM pools by script hash (using thread-local storage pattern)
     pools: Arc<Mutex<HashMap<String, Arc<ArrayQueue<Vm>>>>>,
     /// Configuration
     config: VmPoolConfig,
+}
+
+/// Send+Sync wrapper for VmPool that can be used as a Bevy Resource.
+/// Contains only the configuration and unit registry, not the RuntimeContext.
+#[cfg(feature = "realism-scripting")]
+#[derive(Resource)]
+pub struct VmPoolResource {
+    /// Compiled units by script hash (Send+Sync)
+    units: Arc<Mutex<HashMap<String, Arc<Unit>>>>,
+    /// Configuration
+    pub config: VmPoolConfig,
+}
+
+#[cfg(feature = "realism-scripting")]
+impl VmPoolResource {
+    /// Create a new VM pool resource
+    pub fn new(config: VmPoolConfig) -> Self {
+        Self {
+            units: Arc::new(Mutex::new(HashMap::new())),
+            config,
+        }
+    }
+
+    /// Register a compiled script unit
+    pub fn register_unit(&self, hash: String, unit: Arc<Unit>) {
+        let mut units = self.units.lock();
+        units.insert(hash, unit);
+    }
+
+    /// Get a compiled unit by hash
+    pub fn get_unit(&self, hash: &str) -> Option<Arc<Unit>> {
+        let units = self.units.lock();
+        units.get(hash).cloned()
+    }
+
+    /// Check if a unit is registered
+    pub fn has_unit(&self, hash: &str) -> bool {
+        let units = self.units.lock();
+        units.contains_key(hash)
+    }
+
+    /// Get statistics
+    pub fn stats(&self) -> VmPoolStats {
+        let units = self.units.lock();
+        VmPoolStats {
+            registered_scripts: units.len(),
+            total_pooled_vms: 0, // VMs are thread-local now
+            max_vms_per_script: self.config.max_vms_per_script,
+        }
+    }
+
+    /// Clear all registered units
+    pub fn clear(&self) {
+        let mut units = self.units.lock();
+        units.clear();
+    }
 }
 
 #[cfg(feature = "realism-scripting")]
@@ -74,11 +139,10 @@ impl VmPool {
         if !pools.contains_key(&hash) {
             let queue = Arc::new(ArrayQueue::new(self.config.max_vms_per_script));
             
-            // Create initial VMs
+            // Create initial VMs - Vm::new returns Vm directly in Rune 0.14
             for _ in 0..self.config.initial_pool_size {
-                if let Ok(vm) = Vm::new(self.context.clone(), unit.clone()) {
-                    let _ = queue.push(vm);
-                }
+                let vm = Vm::new(self.context.clone(), unit.clone());
+                let _ = queue.push(vm);
             }
             
             pools.insert(hash, queue);
@@ -101,9 +165,8 @@ impl VmPool {
 
         let vm = pool.pop()
             .unwrap_or_else(|| {
-                // Pool empty, create new VM
+                // Pool empty, create new VM - Vm::new returns Vm directly
                 Vm::new(self.context.clone(), unit.clone())
-                    .expect("Failed to create VM")
             });
 
         Ok(PooledVm {

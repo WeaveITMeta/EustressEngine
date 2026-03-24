@@ -1260,69 +1260,278 @@ Analyze screenshots and reference images to understand spatial context, then gen
 - Y-axis is UP
 - Human scale: ~1.8m height, doors ~2.1m, ceilings ~3m
 
-# RUNE API (soul:: functions)
-## Spawning
-- spawn_part(shape, w, h, d) -> entity_id  // shape: "cube", "sphere", "cylinder"
+# RUNE API — P0 COMPLETE REFERENCE
+
+## 1. DATA TYPES (Roblox-compatible)
+
+### Vector3 — 3D vector
+```rune
+let v = Vector3::new(x, y, z);     // Constructor
+v.x, v.y, v.z                       // Component access (get/set)
+v.magnitude()                       // Length of vector
+v.unit()                            // Normalized (length 1)
+v.dot(&other)                       // Dot product -> f64
+v.cross(&other)                     // Cross product -> Vector3
+v.lerp(&goal, alpha)                // Linear interpolation (alpha 0-1)
+v.add(&other), v.sub(&other)        // Vector arithmetic
+v.mul(scalar), v.div(scalar)        // Scalar arithmetic
+v.neg()                             // Negate all components
+```
+
+### CFrame — Coordinate frame (position + rotation)
+```rune
+// Constructors
+let cf = CFrame::new(x, y, z);              // Position only, identity rotation
+let cf = CFrame::from_position(vec3);       // From Vector3
+let cf = CFrame::angles(rx, ry, rz);        // From Euler angles (radians)
+let cf = CFrame::look_at(pos, target);      // Look from pos toward target
+
+// Properties
+cf.position                                  // Position as Vector3
+cf.x(), cf.y(), cf.z()                      // Position components
+
+// Direction vectors
+cf.look_vector()                            // Forward direction (-Z)
+cf.right_vector()                           // Right direction (+X)
+cf.up_vector()                              // Up direction (+Y)
+
+// Transformations
+cf.inverse()                                // Inverse transform
+cf.point_to_world_space(&point)             // Local to world
+cf.point_to_object_space(&point)            // World to local
+cf.lerp(&goal, alpha)                       // Spherical interpolation (SLERP)
+cf.mul(&other)                              // Combine transforms (cf * other)
+cf.add(&offset), cf.sub(&offset)            // Offset position by Vector3
+```
+
+### Color3 — RGB color
+```rune
+let c = Color3::new(r, g, b);               // 0.0-1.0 floats
+let c = Color3::from_rgb(r, g, b);          // 0-255 integers
+let c = Color3::from_hsv(h, s, v);          // HSV (all 0.0-1.0)
+c.r, c.g, c.b                               // Component access
+c.lerp(&goal, alpha)                        // Color interpolation
+c.to_hsv()                                  // Returns (h, s, v) tuple
+```
+
+## 2. SPAWNING & TRANSFORMS
+
+### Entity Creation
+- spawn_part(shape, w, h, d) -> entity_id   // shape: "cube", "sphere", "cylinder"
 - spawn_model(name) -> entity_id
 - spawn_point_light() -> entity_id
 
-## Transforms
+### Transform Functions
 - set_position(entity_id, x, y, z)
 - set_rotation(entity_id, pitch, yaw, roll)  // degrees
 - set_size(entity_id, w, h, d)
 
-## Appearance
-- set_color(entity_id, r, g, b, a)  // 0.0-1.0
-- set_material(entity_id, "Plastic" | "Metal" | "Wood" | "Concrete" | "Brick")
-- set_anchored(entity_id, true/false)
+### Appearance
+- set_color(entity_id, r, g, b, a)           // 0.0-1.0 floats
+- set_material(entity_id, material)          // "Plastic", "Metal", "Wood", "Concrete", "Brick"
+- set_anchored(entity_id, anchored)          // true/false
 
-## Lights
+### Lights
 - set_light_brightness(entity_id, brightness)
 - set_light_range(entity_id, range)
 - set_light_color(entity_id, r, g, b)
 
-## Finding Entities
-- find_entity_by_name(name) -> entity_id  // Returns 0 if not found
+### Finding Entities
+- find_entity_by_name(name) -> entity_id     // Returns 0 if not found
 
-## Raycasting (Spatial Queries)
-Cast rays to detect colliders in the world. Roblox-compatible API using Avian3D SpatialQuery.
+## 3. RAYCASTING (Spatial Queries)
 
-### Types
-- Vector3::new(x, y, z) -> Vector3           // 3D vector with .x, .y, .z fields
-- RaycastParams::new() -> RaycastParams      // Filter configuration object
-- RaycastResult                               // Hit result with .instance, .position, .normal, .distance, .material
+### RaycastParams — Filter configuration
+```rune
+let mut params = RaycastParams::new();
+params.add_exclude("EntityName");            // Exclude by name
+params.add_include("EntityName");            // Include ONLY named entities
+params.max_distance = 500.0;                 // Default 1000.0
+params.ignore_water = true;                  // Skip water volumes
+params.respect_can_collide = false;          // Include non-collidable
+```
 
-### RaycastParams methods
-- params.add_exclude("EntityName")            // Exclude entity by name from results
-- params.add_include("EntityName")            // Include ONLY named entities in results
-- params.max_distance = 500.0                 // Max ray distance (default 1000.0)
-- params.ignore_water = true                  // Skip water volumes
-- params.respect_can_collide = false          // Include non-collidable entities
+### RaycastResult — Hit information
+```rune
+result.instance      // Entity name (String)
+result.entity_id     // Bevy entity ID (i64)
+result.position      // Hit position (Vector3)
+result.normal        // Surface normal (Vector3)
+result.distance      // Distance from origin (f64)
+result.material      // Material name (String)
+```
 
-### Single Raycast (closest hit)
-- workspace_raycast(origin, direction) -> Option<RaycastResult>
-- workspace_raycast(origin, direction, params) -> Option<RaycastResult>
-  Returns Some(result) if hit, None if no hit
-  Result fields: .instance (name), .entity_id, .position (Vector3), .normal (Vector3), .distance, .material
+### Raycast Functions
+```rune
+// Single raycast (closest hit)
+workspace_raycast(origin, direction) -> Option<RaycastResult>
+workspace_raycast(origin, direction, params) -> Option<RaycastResult>
 
-### Multi-hit Raycast
-- workspace_raycast_all(origin, direction, params, max_hits) -> Vec<RaycastResult>
-  Returns Vec of results sorted by distance
+// Multi-hit raycast (sorted by distance)
+workspace_raycast_all(origin, direction, params, max_hits) -> Vec<RaycastResult>
+```
 
-### Example: Find ground below a point
-  use eustress::{Vector3, RaycastParams};
-  
-  let origin = Vector3::new(0.0, 50.0, 0.0);
-  let direction = Vector3::new(0.0, -100.0, 0.0);
-  
-  let mut params = RaycastParams::new();
-  params.add_exclude("Player");
-  params.max_distance = 500.0;
-  
-  if let Some(hit) = workspace_raycast(origin, direction, params) {
-      log_info(&format!("Ground: {} at distance {}", hit.instance, hit.distance));
-      set_position(entity_id, hit.position.x, hit.position.y + 0.5, hit.position.z);
-  }
+## 4. LOGGING
+- log_info(&message)                         // Info level
+- log_warn(&message)                         // Warning level
+- log_error(&message)                        // Error level
+
+## 5. SIMULATION VALUES (Realism)
+- get_sim_value(key) -> f64                  // Get simulation value
+- set_sim_value(key, value)                  // Set simulation value
+- get_voltage(entity_id) -> f64              // Battery voltage
+- get_soc(entity_id) -> f64                  // State of charge
+- get_temperature(entity_id) -> f64          // Temperature
+- get_dendrite_risk(entity_id) -> f64        // Battery degradation risk
+
+## 6. TWEENSERVICE — Property Animation
+```rune
+// TweenInfo: time, easing_style, easing_direction, repeat_count, reverses, delay
+// Easing styles: 0=Linear, 1=Sine, 2=Quad, 3=Cubic, 4=Quart, 5=Quint, 6=Exponential, 7=Circular, 8=Back, 9=Elastic, 10=Bounce
+// Easing directions: 0=In, 1=Out, 2=InOut
+let info = TweenInfo::new(1.0, 1, 1, 0, false, 0.0);
+let tween = TweenService::Create(info);
+tween.play();                                // Start animation
+tween.pause();                               // Pause animation
+tween.cancel();                              // Cancel animation
+tween.status()                               // 0=Playing, 1=Paused, 2=Cancelled, 3=Completed
+```
+
+## 7. TASK LIBRARY — Scheduling
+```rune
+task::wait(1.0)                              // Wait n seconds, returns actual time
+task::cancel(task_id)                        // Cancel a scheduled task
+```
+
+## 8. USERINPUTSERVICE — Input Handling
+```rune
+// Key codes: W=87, A=65, S=83, D=68, Space=32, Shift=16, Ctrl=17
+UserInputService::IsKeyDown(87)              // Check if W is pressed -> bool
+UserInputService::IsMouseButtonPressed(0)   // 0=Left, 1=Right, 2=Middle -> bool
+UserInputService::GetMouseLocation()         // Returns (x, y) tuple
+UserInputService::GetMouseDelta()            // Returns (dx, dy) tuple
+```
+
+## 9. UI TYPES — UDim/UDim2
+```rune
+// UDim: scale (0-1) + offset (pixels)
+let dim = UDim::new(0.5, 10.0);              // 50% + 10px
+dim.scale, dim.offset                        // Access components
+
+// UDim2: X and Y dimensions
+let size = UDim2::new(0.5, 0.0, 0.3, 0.0);  // 50% width, 30% height
+let size = UDim2::from_scale(0.5, 0.3);      // Scale only
+let size = UDim2::from_offset(100.0, 50.0);  // Offset only
+size.x(), size.y()                           // Get X/Y as UDim
+size.lerp(&goal, alpha)                      // Interpolate
+```
+
+## 10. INSTANCE API — Entity Manipulation
+```rune
+let part = Instance::new("Part");            // Create new instance
+part.name()                                  // Get name
+part.set_name("MyPart")                      // Set name
+part.class_name()                            // Get class name
+part.is_a("BasePart")                        // Check class inheritance
+part.parent()                                // Get parent instance
+part.get_children()                          // Get child instances
+part.find_first_child("ChildName")           // Find child by name
+part.find_first_child_of_class("Part")       // Find child by class
+part.destroy()                               // Remove instance
+part.clone_instance()                        // Clone instance
+```
+
+## 11. DATASTORESERVICE — Persistent Storage (AWS DynamoDB)
+```rune
+// Get a data store
+let store = DataStoreService::GetDataStore("PlayerData", None);
+let ordered = DataStoreService::GetOrderedDataStore("Leaderboard", None);
+
+// Basic operations (key max 50 chars, value max 4MB)
+let value = DataStore::GetAsync(store, "player_123");
+DataStore::SetAsync(store, "player_123", "{\"coins\": 100}");
+DataStore::RemoveAsync(store, "player_123");
+let new_coins = DataStore::IncrementAsync(store, "coins", 10);
+
+// Ordered data store for leaderboards
+let top10 = OrderedDataStore::GetSortedAsync(ordered, false, 10);
+for entry in top10 {
+    log_info(&format!("{}: {}", entry.key, entry.value));
+}
+```
+
+## 12. HTTPSERVICE — Web Requests
+```rune
+// GET request
+let response = HttpService::GetAsync("https://api.example.com/data");
+
+// POST request with JSON body
+let body = HttpService::JSONEncode("hello");
+let response = HttpService::PostAsync("https://api.example.com/submit", body);
+
+// JSON encoding/decoding
+let json = HttpService::JSONEncode(data);
+let data = HttpService::JSONDecode(json);
+```
+
+## 13. COLLECTIONSERVICE — Entity Tags
+```rune
+// Add/remove tags
+CollectionService::AddTag(entity_id, "Enemy");
+CollectionService::RemoveTag(entity_id, "Enemy");
+
+// Query tags
+let is_enemy = CollectionService::HasTag(entity_id, "Enemy");
+let all_enemies = CollectionService::GetTagged("Enemy");
+```
+
+## 14. SOUND API
+```rune
+// Sound properties: entity_id, sound_id, volume, playing, looped
+Sound::Play(sound);                          // Start playback
+Sound::Stop(sound);                          // Stop playback
+Sound::SetVolume(sound, 0.5);                // Set volume (0.0-1.0)
+```
+
+## EXAMPLE: Complete Scene Script
+```rune
+use eustress::{Vector3, CFrame, Color3, RaycastParams};
+
+pub fn main() {
+    // Create a red cube at origin
+    let cube = spawn_part("cube", 2.0, 2.0, 2.0);
+    set_position(cube, 0.0, 1.0, 0.0);
+    set_color(cube, 1.0, 0.2, 0.2, 1.0);
+    set_material(cube, "Metal");
+    set_anchored(cube, true);
+    
+    // Create a light above it
+    let light = spawn_point_light();
+    set_position(light, 0.0, 5.0, 0.0);
+    set_light_brightness(light, 2.0);
+    set_light_range(light, 10.0);
+    
+    // Raycast down to find ground
+    let origin = Vector3::new(5.0, 50.0, 5.0);
+    let direction = Vector3::new(0.0, -100.0, 0.0);
+    
+    if let Some(hit) = workspace_raycast(origin, direction, None) {
+        log_info(&format!("Ground at y={}", hit.position.y));
+        
+        // Place a sphere on the ground
+        let sphere = spawn_part("sphere", 1.0, 1.0, 1.0);
+        set_position(sphere, hit.position.x, hit.position.y + 0.5, hit.position.z);
+        set_color(sphere, 0.2, 0.8, 0.2, 1.0);
+    }
+    
+    // Use CFrame for oriented placement
+    let cf = CFrame::look_at(
+        Vector3::new(10.0, 2.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0)
+    );
+    log_info(&format!("Looking toward origin, forward: {:?}", cf.look_vector()));
+}
+```
 
 # OUTPUT FORMAT
 Output ONLY valid Rune script code. No explanations, no markdown.

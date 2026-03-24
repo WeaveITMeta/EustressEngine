@@ -35,12 +35,14 @@ pub mod runtime;
 pub mod bridge;
 pub mod compat;
 pub mod raycast;
+pub mod types;
 
 pub use components::*;
 pub use runtime::*;
 pub use bridge::*;
 pub use compat::*;
 pub use raycast::*;
+pub use types::*;
 
 use bevy::prelude::*;
 use tracing::{info, error};

@@ -36,6 +36,7 @@ pub mod services;
 pub mod soul;
 #[cfg(feature = "luau")]
 pub mod luau;
+pub mod scripting;
 pub mod terrain;
 pub mod types;
 pub mod usd;
@@ -45,6 +46,8 @@ pub mod orbital;
 pub mod physics;
 pub mod realism;
 pub mod simulation;
+#[cfg(feature = "streaming")]
+pub mod streaming;
 
 // Re-export Attributes and Parameters for convenience
 pub use attributes::{
@@ -112,7 +115,7 @@ pub use scene::{
     Scene, SceneMetadata, AtmosphereSettings,
     Entity, EntityClass, TransformData,
     DetailLevel, NodeCategory, GenerationStatus,
-    Connection, ConnectionType,
+    Connection as SceneConnection, ConnectionType,
     // Class data types
     PartData, ModelData, HumanoidData,
     PointLightData, SpotLightData, SurfaceLightData,
@@ -144,4 +147,19 @@ pub use orbital::{
 // Re-export orbital class components
 pub use classes::{
     SolarSystem, CelestialBodyClass, RegionChunk,
+};
+
+// Re-export scripting types for Rune/Luau API
+pub use scripting::{
+    // Data types
+    Vector2, Vector3, CFrame, Color3, UDim, UDim2, Ray, NumberRange,
+    TweenInfo, EasingStyle, EasingDirection,
+    // Events
+    Signal, Connection, SignalArg, BindableEvent, BindableFunction,
+    RemoteEvent, RemoteFunction, PropertyChangedSignal,
+    // Instance API
+    InstanceRef, InstanceData, InstanceRegistry, InstanceFactory, PropertyValue,
+    // Services
+    RunService, FrameTime, TaskScheduler, DebrisService, TweenService, Tween, TweenStatus,
+    ScriptingServices,
 };

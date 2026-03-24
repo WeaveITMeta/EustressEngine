@@ -1,0 +1,577 @@
+openapi: 3.1.0
+info:
+  title: Eustress Manufacturing API
+  version: 1.0.0
+  description: |
+    AI-driven manufacturing network API for hardware sourcing, investor matching, and deal pipeline management.
+    
+    **Zero manufacturing capital** — equity + royalty model (USPTO fees $300-$800 paid by inventor)
+    **6-8 week time-to-market** — vs 4-9 months traditional sourcing
+    **500+ manufacturers** across 40 countries
+    **200+ investors** — seed to Series A, $10k-$5M checks
+    
+  contact:
+    name: Eustress Manufacturing Support
+    email: manufacturing@eustress.dev
+    url: https://manufacturing.eustress.dev
+  license:
+    name: Proprietary
+    url: https://eustress.dev/legal
+
+servers:
+  - url: https://manufacturing.eustress.dev/api/v1
+    description: Production API
+
+tags:
+  - name: Manufacturers
+    description: Search and query manufacturer registry
+  - name: Investors
+    description: Search and query investor registry
+  - name: Deals
+    description: Propose, track, and manage manufacturing deals
+
+paths:
+  /manufacturers:
+    get:
+      operationId: searchManufacturers
+      summary: Search manufacturer registry
+      description: |
+        Search 500+ manufacturers by capabilities, materials, certifications, and location.
+        AI scores manufacturers on 5 dimensions: Capability Match (40%), Quality (25%), Cost (20%), Speed (10%), Risk (5%).
+      tags:
+        - Manufacturers
+      parameters:
+        - name: process
+          in: query
+          description: Required manufacturing processes (comma-separated)
+          schema:
+            type: string
+          example: "ceramic_sintering,battery_cell_assembly"
+        - name: material
+          in: query
+          description: Required materials (comma-separated)
+          schema:
+            type: string
+          example: "NASICON_ceramics,aluminum_alloys"
+        - name: country
+          in: query
+          description: ISO 3166-1 alpha-2 country code
+          schema:
+            type: string
+            pattern: '^[A-Z]{2}$'
+          example: "JP"
+        - name: min_qty
+          in: query
+          description: Minimum order quantity
+          schema:
+            type: integer
+            minimum: 1
+          example: 1000
+        - name: max_lead_time_days
+          in: query
+          description: Maximum acceptable lead time in days
+          schema:
+            type: integer
+            minimum: 1
+          example: 45
+        - name: certifications
+          in: query
+          description: Required certifications (comma-separated)
+          schema:
+            type: string
+          example: "ul_battery_certified,iso_9001"
+        - name: status
+          in: query
+          description: Filter by manufacturer status
+          schema:
+            type: string
+            enum: [approved, pending_audit, suspended]
+            default: approved
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: List of matching manufacturers
+          content:
+            application/ld+json:
+              schema:
+                $ref: '#/components/schemas/ManufacturerList'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /investors:
+    get:
+      operationId: searchInvestors
+      summary: Search investor registry
+      description: |
+        Search 200+ investors by vertical focus, geography, check size, and investment stage.
+        Returns investors ranked by days-to-close and check size fit.
+      tags:
+        - Investors
+      parameters:
+        - name: vertical
+          in: query
+          description: Industry verticals (comma-separated)
+          schema:
+            type: string
+          example: "energy_storage,clean_tech"
+        - name: geography
+          in: query
+          description: ISO country codes or 'any' (comma-separated)
+          schema:
+            type: string
+          example: "US,CA"
+        - name: min_check_usd
+          in: query
+          description: Minimum check size in USD
+          schema:
+            type: number
+            minimum: 0
+          example: 10000
+        - name: max_check_usd
+          in: query
+          description: Maximum check size in USD
+          schema:
+            type: number
+            minimum: 0
+          example: 250000
+        - name: stage
+          in: query
+          description: Investment stage preference
+          schema:
+            type: string
+            enum: [seed, pilot, series_a, any]
+          example: "pilot"
+        - name: status
+          in: query
+          description: Filter by investor status
+          schema:
+            type: string
+            enum: [active, inactive]
+            default: active
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: List of matching investors
+          content:
+            application/ld+json:
+              schema:
+                $ref: '#/components/schemas/InvestorList'
+        '400':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /deals:
+    post:
+      operationId: proposeDeal
+      summary: Propose a new manufacturing deal
+      description: |
+        Submit a product for AI allocation. System selects optimal manufacturer set (2-4 specialized manufacturers)
+        and minimum investor set. Returns deal proposal with confidence score.
+      tags:
+        - Deals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DealProposal'
+      responses:
+        '201':
+          description: Deal created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DealResponse'
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /deals/{deal_id}:
+    get:
+      operationId: getDeal
+      summary: Get deal status
+      description: Retrieve current status and metadata for a specific deal
+      tags:
+        - Deals
+      parameters:
+        - name: deal_id
+          in: path
+          required: true
+          description: Unique deal identifier
+          schema:
+            type: string
+          example: "deal_v-cell-4680_20260321"
+      responses:
+        '200':
+          description: Deal details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deal'
+        '404':
+          description: Deal not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    patch:
+      operationId: updateDeal
+      summary: Update deal status
+      description: |
+        Manufacturer or investor action: accept, reject, or counter-propose.
+        Requires authentication as the specified actor.
+      tags:
+        - Deals
+      parameters:
+        - name: deal_id
+          in: path
+          required: true
+          description: Unique deal identifier
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DealUpdate'
+      responses:
+        '200':
+          description: Deal updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DealResponse'
+        '400':
+          description: Invalid update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Unauthorized actor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Deal not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /deals/{deal_id}/timeline:
+    get:
+      operationId: getDealTimeline
+      summary: Get deal event timeline
+      description: |
+        Retrieve full event log for a deal showing all status changes, actor actions, and timestamps.
+        Real-time updates available via WebTransport at wt://manufacturing.eustress.dev:4433/deals/{deal_id}
+      tags:
+        - Deals
+      parameters:
+        - name: deal_id
+          in: path
+          required: true
+          description: Unique deal identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deal timeline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DealTimeline'
+        '404':
+          description: Deal not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    ManufacturerList:
+      type: object
+      properties:
+        '@context':
+          type: string
+          example: "https://schema.org"
+        '@type':
+          type: string
+          example: "ItemList"
+        numberOfItems:
+          type: integer
+        itemListElement:
+          type: array
+          items:
+            $ref: '#/components/schemas/Manufacturer'
+
+    Manufacturer:
+      type: object
+      properties:
+        '@type':
+          type: string
+          example: "Organization"
+        '@id':
+          type: string
+          example: "mfr_042"
+        name:
+          type: string
+        country:
+          type: string
+        capabilities:
+          type: object
+          properties:
+            processes:
+              type: array
+              items:
+                type: string
+            materials:
+              type: array
+              items:
+                type: string
+        certifications:
+          type: array
+          items:
+            type: string
+        pricing:
+          type: array
+          items:
+            type: object
+            properties:
+              min_qty:
+                type: integer
+              max_qty:
+                type: integer
+              price_per_unit_usd:
+                type: number
+        quality:
+          type: object
+          properties:
+            defect_rate_pct:
+              type: number
+            on_time_delivery_rate_pct:
+              type: number
+            audit_score:
+              type: integer
+
+    InvestorList:
+      type: object
+      properties:
+        '@context':
+          type: string
+        '@type':
+          type: string
+        numberOfItems:
+          type: integer
+        itemListElement:
+          type: array
+          items:
+            $ref: '#/components/schemas/Investor'
+
+    Investor:
+      type: object
+      properties:
+        '@type':
+          type: string
+          example: "Organization"
+        '@id':
+          type: string
+          example: "inv_001"
+        name:
+          type: string
+        investmentFocus:
+          type: object
+          properties:
+            verticals:
+              type: array
+              items:
+                type: string
+            geographyPreference:
+              type: array
+              items:
+                type: string
+        investmentCapacity:
+          type: object
+          properties:
+            minCheckUSD:
+              type: number
+            maxCheckUSD:
+              type: number
+            availableCapitalUSD:
+              type: number
+        trackRecord:
+          type: object
+          properties:
+            dealsFunded:
+              type: integer
+            avgReturnMultiple:
+              type: number
+            daysToCloseAvg:
+              type: integer
+
+    DealProposal:
+      type: object
+      required:
+        - product_id
+        - product_name
+        - ideation_brief_url
+        - deal_structure
+      properties:
+        product_id:
+          type: string
+          example: "v-cell-4680"
+        product_name:
+          type: string
+          example: "V-Cell 4680"
+        ideation_brief_url:
+          type: string
+          format: uri
+        deal_structure:
+          type: object
+          properties:
+            unit_price_usd:
+              type: number
+            unit_cost_usd:
+              type: number
+            pilot_minimum_units:
+              type: integer
+            manufacturing_program_royalty_pct:
+              type: number
+            inventor_royalty_pct:
+              type: number
+
+    DealResponse:
+      type: object
+      properties:
+        deal_id:
+          type: string
+        status:
+          type: string
+          enum: [proposed, manufacturer_accepted, investor_accepted, legal_approved, signed, manufacturing, complete]
+        created_at:
+          type: string
+          format: date-time
+        timeline_url:
+          type: string
+          format: uri
+        dashboard_url:
+          type: string
+          format: uri
+
+    Deal:
+      type: object
+      properties:
+        deal_id:
+          type: string
+        product_name:
+          type: string
+        current_status:
+          type: string
+        manufacturers:
+          type: array
+          items:
+            type: object
+            properties:
+              manufacturer_id:
+                type: string
+              role:
+                type: string
+                description: "e.g., 'PCB Assembly', 'Injection Molding', 'Final Assembly'"
+              score:
+                type: number
+        investors:
+          type: array
+          items:
+            type: object
+            properties:
+              investor_id:
+                type: string
+              check_amount_usd:
+                type: number
+              equity_pct:
+                type: number
+
+    DealUpdate:
+      type: object
+      required:
+        - actor
+        - actor_id
+        - action
+      properties:
+        actor:
+          type: string
+          enum: [manufacturer, investor]
+        actor_id:
+          type: string
+        action:
+          type: string
+          enum: [accept, reject, counter_proposal]
+        details:
+          type: object
+
+    DealTimeline:
+      type: object
+      properties:
+        deal_id:
+          type: string
+        product_name:
+          type: string
+        current_status:
+          type: string
+        timeline:
+          type: array
+          items:
+            type: object
+            properties:
+              event_id:
+                type: string
+              timestamp:
+                type: string
+                format: date-time
+              event_type:
+                type: string
+              actor:
+                type: string
+              actor_id:
+                type: string
+              details:
+                type: object
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        code:
+          type: integer

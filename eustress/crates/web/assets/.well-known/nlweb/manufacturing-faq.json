@@ -1,0 +1,176 @@
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "name": "Eustress Manufacturing FAQ",
+  "description": "Frequently asked questions about AI-driven manufacturing sourcing, zero-capital hardware production, and enterprise-scale manufacturing operations.",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How can I manufacture hardware with zero upfront capital?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress Manufacturing uses an equity + royalty model for manufacturing costs. You keep 40% equity and earn 5% royalty on net sales. The Manufacturing Program takes 25% equity + 8% royalty (funds future pilots). Bliss Contributor Pool takes 20% equity + 5% royalty (rewards ecosystem builders). Investors provide the pilot capital ($10k-$250k typical) in exchange for remaining equity. You pay no manufacturing costs until units ship and sell. Note: USPTO patent filing fees ($300-$800) are paid by the inventor upfront since you own the patent. The Bliss equity/royalty ensures contributors who helped you build the product share in its success."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does AI allocation work and how fast is it?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "AI allocation takes <5 seconds. The system searches 500+ manufacturers across 40 countries and scores them on 5 dimensions: Capability Match (40%), Quality Metrics (25%), Cost Optimization (20%), Lead Time (10%), Risk Mitigation (5%). It selects the optimal manufacturer set for your BOM—typically 2-4 specialized manufacturers (e.g., one for PCB assembly, one for injection molding, one for final assembly). AI minimizes manufacturer count while respecting specialization constraints. It also selects the minimum investor set (prefer 1 investor) whose combined check covers pilot capital. You receive a ranked list with confidence scores and can override if needed."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What if I need to scale from 1,000 units to 100,000 units?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Volume pricing tiers unlock automatically. At 5k units, you save $2-5/unit. At 10k+ units, you can reserve a dedicated production line (setup takes 2-4 weeks). At 50k+ units, you can negotiate custom deal structures with lower royalty percentages or equity buybacks. The same manufacturer scales with you—no need to re-source. If capacity constraints arise, AI maintains 2-3 backup manufacturers per product category for supply chain resilience."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do you ensure manufacturer quality at Amazon scale?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Quality SLA enforcement is automated. Every manufacturer has tracked metrics: defect rate, on-time delivery rate, non-conformance reports (NCRs), and audit scores. If defect rate exceeds 3% over 90 days, the manufacturer is auto-suspended and your product is reallocated to a backup manufacturer at no cost to you. Quality inspection happens before shipment. You're not charged for defective units. All manufacturers undergo $2k facility audits (ISO 9001, quality systems, IP compliance) before joining the network."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I white-label manufacturing for my enterprise brand?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. White-label manufacturing is available for enterprises. Your brand, our network. You can customize packaging, labeling, and documentation. Manufacturers sign NDAs and are prohibited from disclosing client relationships. For Fortune 500 clients, we offer dedicated account management, custom SLAs, and priority allocation. You can also negotiate custom deal structures (e.g., 50% equity retained, 3% royalty, board seats for strategic investors)."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does JIT inventory management work with API integration?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress Manufacturing provides REST API + WebTransport endpoints for real-time integration with your ERP, CRM, or inventory management system. Sync production schedules with sales forecasts. Trigger manufacturing runs when inventory drops below threshold. Receive sub-100ms status updates via WebTransport (no polling). API supports: GET /manufacturers (search), GET /investors (search), POST /deals (propose), GET /deals/{id} (status), GET /deals/{id}/timeline (event log), PATCH /deals/{id} (update). OpenAPI 3.1 spec available at eustress.dev/.well-known/openapi.yaml."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What compliance certifications are tracked automatically?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Compliance automation covers: REACH (EU chemical restrictions), RoHS (hazardous substance limits), UL (safety certifications including UL Battery for energy storage), FCC (electromagnetic interference), CE (European conformity), ISO 9001 (quality management), ISO 14001 (environmental management), IATF 16949 (automotive), AS9100D (aerospace). Certifications are verified annually via third-party audits. Manufacturers must hold required certifications for your product category (e.g., UL Battery Certified is mandatory for lithium-ion battery products). Compliance status is tracked per SKU and updated in real-time."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How fast is time-to-market compared to traditional sourcing?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Traditional sourcing: 4-9 months (2-6 weeks finding manufacturers, 1-3 weeks getting quotes, 1-2 weeks negotiating MOQ, 2-4 weeks quality audit, immediate tooling deposit $5k-$50k, 2-3 weeks first article inspection, 6-12 weeks production, 2-6 weeks shipping). Eustress Manufacturing: 6-8 weeks total (<5 seconds AI allocation, 18 hours avg manufacturer review, 3-7 days investor funding, 1-5 days legal review, 30-45 days manufacturing, 3-5 days warehousing). You save 3-8 months and $10k-$85k in upfront costs."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What if the manufacturer delivers defective units?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Quality inspection happens before shipment. If defects are found, units are rejected and manufacturer must rework at their cost. If defect rate exceeds 3% over 90 days, manufacturer is auto-suspended and your product is reallocated to a backup manufacturer. You are not charged for defective units. Defect tracking is updated after every order. Manufacturers with >5 NCRs in 12 months are flagged for re-audit. Audit scores must remain ≥80/100 to maintain Approved status."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I use my own manufacturer if they're not in the network?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Your manufacturer must join the network and pass the $2k facility audit (refundable after first successful delivery). If they're already vetted, AI will score them alongside other candidates. If they win on capability/cost/quality, they'll be allocated. If they don't win, you can override the AI allocation and manually select them, but you'll see the score gap and rationale for why another manufacturer ranked higher."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do you prevent IP theft at scale?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "IP protection: (1) Patent filing before manufacturer contact (inventor pays USPTO fees $300-$800, legal team handles submission). (2) NDA signed by manufacturer before receiving BOM. (3) Manufacturers audited and rated on IP compliance history. (4) Design files held in escrow—manufacturer receives only production specs, not full CAD. (5) Legal recourse via international arbitration if theft occurs. (6) Manufacturers with IP violations are permanently blacklisted. (7) Split manufacturing inherently protects IP—no single manufacturer sees the complete design (e.g., PCB maker doesn't see enclosure CAD, final assembler doesn't see PCB schematics)."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What if my product doesn't sell after manufacturing?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "You owe nothing. No debt. Investors take the loss on their equity stake. Manufacturing Program takes the loss on its 25% equity. You keep your 60% equity (worth $0 if no sales, but no personal liability). Units remain in warehouse for 12 months, then liquidated or donated. This is why investors pre-screen products and AI validates feasibility via simulation before allocation. Typical success rate: 75% of pilots generate positive ROI within 6 months."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I buy out the royalty later to own 100% of revenue?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Royalty buyout formula: (Annual Revenue × Royalty %) × 5-year multiplier. Example: $100k annual revenue, 5% inventor royalty = $5k/year. Buyout = $5k × 5 = $25k lump sum. You can buy out your 5% royalty, the Manufacturing Program's 8% royalty, or the Bliss Pool's 5% royalty (or all three). Equity stakes are separate and can be purchased via secondary market (launching Q1 2027). Note: Buying out Bliss royalty removes your contribution to the ecosystem that enabled your product. For enterprises doing $10M+ annual revenue, we offer custom buyout terms with 3-year multipliers."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does multi-geography sourcing work for tariff optimization?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "AI can allocate manufacturers in multiple geographies to optimize for tariffs, shipping costs, and lead times. Example: Manufacture PCBs in Taiwan, injection mold enclosures in Mexico, final assembly in US to qualify for USMCA tariff exemption. You specify target markets (US, EU, Asia) and AI selects the optimal manufacturing + logistics network. For enterprises, we offer dedicated supply chain consultants who model tariff scenarios and recommend the lowest-cost configuration."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the self-funding flywheel and when does it become self-sustaining?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The Manufacturing Program charges 8% royalty on net sales of all shipped products. This revenue funds new pilot programs. Round 0: $500k seed capital from external investors funds 20 pilots. After 12-18 months, 15 products ship and generate $120k in royalties. This funds 5 new pilots without external capital. By month 24, the fund has $200k balance and is self-sustaining. Every successful product funds 2-3 new inventors. Compounding effect. After 18-24 months, no more external investors needed—the program runs indefinitely on royalties from its portfolio."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does this compare to Alibaba or traditional contract manufacturers?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Alibaba: You pay cash upfront, negotiate MOQs (often 5k-10k minimum), quality is a gamble (no SLA enforcement), no investor network, no legal review, no patent filing, coordination hell with 5-10 suppliers for a complex BOM. Eustress Manufacturing: Zero upfront capital (equity model), start at 100 units, quality SLA enforced (auto-suspend bad manufacturers), single-source manufacturing (one manufacturer for entire BOM), investor network included, patent filing + legal review included, real-time visibility via WebTransport dashboard. You save 3-8 months and $10k-$85k in upfront costs."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What scale can you handle for Fortune 500 / Amazon-level operations?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress Manufacturing scales from 100 units (DIY hobbyist) to 1M+ units (Fortune 500 production runs). At 10k+ units, you get dedicated production lines. At 50k+ units, you can negotiate custom deal structures (lower royalty %, equity buybacks, board seats). At 100k+ units, you get white-label manufacturing, multi-geography sourcing, JIT inventory sync, and dedicated account management. We've designed the system for Amazon-scale operations: API-first architecture for ERP integration, compliance automation for 40+ countries, supply chain resilience with 2-3 backup manufacturers per category, and real-time visibility for logistics coordination."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What use cases and product categories do you support?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Energy Storage (custom battery packs, supercapacitors, fuel cells, solid-state batteries). Robotics (actuators, servos, motor controllers, sensor arrays, embedded systems). Consumer Electronics (smart home devices, wearables, audio equipment, IoT sensors). Industrial Hardware (control systems, PLCs, HMIs, SCADA, custom tooling). Clean Tech (solar inverters, charge controllers, water filtration, air quality monitors). Automotive (EV components, battery management systems, power electronics). Aerospace (avionics, satellite components, UAV systems). Medical Devices (diagnostic equipment, patient monitoring, surgical tools)."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I get started as an inventor, manufacturer, or investor?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Inventors: Install Eustress Engine (free at eustress.dev/download), open Workshop panel, describe your product in natural language, review AI-generated patent/BOM/mesh/deal, pay USPTO filing fee ($300-$800), approve allocation, track progress via dashboard. Manufacturers: Create Eustress account at eustress.dev/manufacturers/apply, fill out profile via web form (processes, materials, certifications, pricing tiers), submit for $2k audit (facility inspection + quality review), get approved and added to registry, receive deal proposals via email/web portal, accept/reject/counter-propose. Your profile is saved as TOML in the backend and you receive a downloadable copy. Investors: Create Eustress account at eustress.dev/investors/apply, fill out profile via web form (verticals, geography, check size, terms), submit for KYC verification (accredited investor status required in US), get approved and added to registry, receive deal proposals, review product brief, wire capital, track portfolio via dashboard. Your profile is saved as TOML in the backend and you receive a downloadable copy."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What real-time visibility and status tracking do I get?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "WebTransport protocol provides sub-100ms real-time updates. Dashboard shows 10-step pipeline: Proposed → Manufacturer Review → Investor Review → Legal Review → Term Sheet Signing → Manufacturing → Quality Inspection → Warehousing → Sales → Royalty Distribution. Each step has status icons (⏳ waiting, 🔄 in progress, ✅ done, ❌ rejected, 🔁 counter-proposal). Event timeline logs every action with timestamps and actor IDs. Server pushes updates to all connected parties (inventor, manufacturer, investor, legal, logistics) instantly—no polling, no page refresh. API endpoints: GET /deals/{id}/timeline returns full event log."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How does the two-layer distribution model work (royalties vs profit)?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Eustress Manufacturing uses a two-layer distribution system. Layer 1 (Royalties): 18% of gross revenue paid immediately on each sale before expenses. Manufacturing Program gets 8%, Bliss Pool gets 5%, Inventor gets 5%. This guarantees cash flow regardless of profitability. Layer 2 (Profit Distribution): Net profit (revenue minus royalties minus expenses) distributed to equity holders quarterly/annually. Inventor gets 40%, Manufacturing Program 25%, Bliss Pool 20%, Logistics Partner 10%, Reserve Pool 5%. Example: $500k revenue, $90k royalties (18%), $200k expenses = $210k net profit. Inventor receives $25k royalty + $84k profit = $109k total (21.8% of revenue). If product breaks even (0% margin), inventor still gets $25k royalty minimum. If product loses money, royalties partially offset losses. This model protects downside with royalties and rewards upside with profit distribution."
+      }
+    }
+  ]
+}

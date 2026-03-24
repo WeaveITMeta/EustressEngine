@@ -78,6 +78,7 @@ pub mod viga;
 pub mod scenarios;
 pub mod circumstances;
 pub mod workshop;
+pub mod manufacturing;
 pub mod class_conversion;
 pub mod txt_to_toml_watcher;
 

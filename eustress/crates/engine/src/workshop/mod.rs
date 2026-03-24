@@ -28,6 +28,7 @@ pub mod artifact_gen;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::manufacturing::{AllocationDecision, AllocationStatus};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -148,6 +149,10 @@ pub enum ArtifactType {
     RuneSimScript,
     RuneUiScript,
     UiToml,
+    /// Manufacturing deal term sheet — equity split + royalty structure
+    DealStructure,
+    /// Pilot program and warehousing logistics plan
+    LogisticsPlan,
 }
 
 impl ArtifactType {
@@ -165,6 +170,8 @@ impl ArtifactType {
             ArtifactType::RuneSimScript => "rune_sim_script",
             ArtifactType::RuneUiScript => "rune_ui_script",
             ArtifactType::UiToml => "ui_toml",
+            ArtifactType::DealStructure => "deal_structure",
+            ArtifactType::LogisticsPlan => "logistics_plan",
         }
     }
 }
@@ -244,6 +251,10 @@ pub enum IdeationState {
     GeneratingUI,
     /// Registering in Products.md catalog
     FinalizingCatalog,
+    /// Generating DEAL_STRUCTURE.md — equity split, royalty terms, manufacturing program stake
+    GeneratingDealStructure,
+    /// Generating LOGISTICS_PLAN.md — pilot program, warehousing, fulfillment partners
+    GeneratingLogisticsPlan,
     /// All steps complete, ready for Systems 1-8 handoff
     Complete,
     /// Pipeline paused waiting for user input
@@ -271,7 +282,176 @@ pub struct IdeationBrief {
     pub bill_of_materials: Vec<BomEntry>,
     #[serde(default)]
     pub physics_model: Option<PhysicsModel>,
+    /// Manufacturing deal structure — equity split and royalty terms
+    #[serde(default)]
+    pub deal_structure: Option<DealStructure>,
+    /// AI allocation decision — selected manufacturer + investors for this product
+    #[serde(default)]
+    pub allocation: Option<AllocationDecision>,
     pub ideation_metadata: IdeationMetadata,
+}
+
+// ============================================================================
+// 1b. Deal Structure — equity distribution and manufacturing deal terms
+// ============================================================================
+
+/// Manufacturing deal structure written to DEAL_STRUCTURE.md and ideation_brief.toml.
+///
+/// Encodes the equity split between the inventor, the Eustress Manufacturing Program,
+/// logistics partners, and any co-investors, plus the royalty percentage that flows
+/// back into the manufacturing fund on each unit sold.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DealStructure {
+    /// Human-readable title for this deal (e.g. "The Cube — V1 Manufacturing Deal")
+    pub title: String,
+    /// All equity stakeholders that share in the product revenue
+    pub equity_splits: Vec<EquityStake>,
+    /// Royalty percentage of net sales that flows to the Manufacturing Program fund
+    /// (funds future pilot programs and warehousing capacity)
+    pub manufacturing_program_royalty_pct: f64,
+    /// Royalty percentage of net sales retained by the inventor
+    pub inventor_royalty_pct: f64,
+    /// Suggested retail unit price in USD
+    pub unit_price_usd: f64,
+    /// Estimated unit cost (BOM + assembly + logistics) in USD
+    pub unit_cost_usd: f64,
+    /// Minimum pilot batch size (units) before full production is unlocked
+    pub pilot_minimum_units: u32,
+    /// Target geography for the pilot program
+    pub pilot_geography: String,
+    /// Deal expiry — how many months this term sheet is valid
+    pub term_validity_months: u32,
+    /// Optional notes or negotiation terms
+    #[serde(default)]
+    pub notes: String,
+    /// Logistics plan for the pilot — warehousing, fulfillment, 3PL partners
+    #[serde(default)]
+    pub logistics: Option<LogisticsPlan>,
+}
+
+impl DealStructure {
+    /// Gross margin per unit after BOM + assembly + logistics
+    pub fn gross_margin_usd(&self) -> f64 {
+        self.unit_price_usd - self.unit_cost_usd
+    }
+
+    /// Gross margin as a percentage of retail price
+    pub fn gross_margin_pct(&self) -> f64 {
+        if self.unit_price_usd > 0.0 {
+            (self.gross_margin_usd() / self.unit_price_usd) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Total royalty outflow as a percentage of net sales
+    pub fn total_royalty_pct(&self) -> f64 {
+        self.manufacturing_program_royalty_pct + self.inventor_royalty_pct
+    }
+
+    /// Validate that all equity stakes sum to 100.0% (within float tolerance)
+    pub fn validate_equity_sum(&self) -> Result<(), String> {
+        let total: f64 = self.equity_splits.iter().map(|s| s.percentage).sum();
+        if (total - 100.0).abs() > 0.01 {
+            Err(format!("Equity stakes sum to {:.2}% — must equal 100%", total))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Royalty dollars per unit flowing to the Manufacturing Program
+    pub fn manufacturing_royalty_per_unit(&self) -> f64 {
+        self.unit_price_usd * (self.manufacturing_program_royalty_pct / 100.0)
+    }
+
+    /// Estimated Manufacturing Program fund contribution after a full pilot batch
+    pub fn pilot_fund_contribution_usd(&self) -> f64 {
+        self.manufacturing_royalty_per_unit() * self.pilot_minimum_units as f64
+    }
+}
+
+/// A single equity stakeholder in the manufacturing deal
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EquityStake {
+    /// Stakeholder name (e.g. "Inventor", "Eustress Manufacturing Program", "3PL Partner")
+    pub stakeholder: String,
+    /// Role description (e.g. "IP owner", "manufacturing fund", "logistics partner")
+    pub role: String,
+    /// Equity percentage (0.0–100.0)
+    pub percentage: f64,
+    /// Optional vesting cliff in months (None = immediate)
+    pub vesting_cliff_months: Option<u32>,
+    /// Optional vesting period in months (None = no vesting schedule)
+    pub vesting_period_months: Option<u32>,
+}
+
+/// Pilot program and warehousing logistics plan written to LOGISTICS_PLAN.md
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogisticsPlan {
+    /// Phase 1: Pilot program details
+    pub pilot: PilotProgram,
+    /// Phase 2: Warehousing configuration
+    pub warehousing: WarehousingConfig,
+    /// Phase 3: Fulfillment and shipping partners
+    pub fulfillment: FulfillmentConfig,
+    /// Regulatory and customs requirements
+    #[serde(default)]
+    pub regulatory_notes: String,
+}
+
+/// Pilot program configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PilotProgram {
+    /// Number of units in the initial pilot batch
+    pub batch_size: u32,
+    /// Target market segment for pilot (e.g. "Professional workshops, US Pacific Northwest")
+    pub target_segment: String,
+    /// Pilot duration in weeks
+    pub duration_weeks: u32,
+    /// Success criteria — what metrics must be hit to unlock full production
+    pub success_criteria: Vec<String>,
+    /// List of pilot distribution channels
+    pub channels: Vec<String>,
+    /// Planned pilot launch date (ISO 8601, approximate)
+    pub launch_date_approx: String,
+    /// Feedback collection method (survey, telemetry, interviews)
+    pub feedback_method: String,
+}
+
+/// Warehousing configuration for pilot and production
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WarehousingConfig {
+    /// Preferred warehouse model — "own" | "3pl" | "dropship" | "consignment"
+    pub model: String,
+    /// Geographic regions for warehouse nodes
+    pub regions: Vec<String>,
+    /// Minimum stock level before reorder is triggered
+    pub reorder_point_units: u32,
+    /// Standard order quantity when reorder triggers
+    pub reorder_quantity_units: u32,
+    /// Storage temperature requirements (None = ambient)
+    pub temperature_requirements: Option<String>,
+    /// Hazmat classification (None = standard goods)
+    pub hazmat_class: Option<String>,
+    /// Estimated monthly warehousing cost per SKU in USD
+    pub estimated_monthly_cost_usd: f64,
+}
+
+/// Fulfillment and shipping configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FulfillmentConfig {
+    /// Primary 3PL or fulfillment partner name (e.g. "ShipBob", "Amazon FBA", "own fleet")
+    pub primary_partner: String,
+    /// Backup fulfillment partner
+    pub backup_partner: Option<String>,
+    /// Supported shipping speeds (e.g. ["Standard 5-7d", "Express 2d", "Overnight"])
+    pub shipping_speeds: Vec<String>,
+    /// Target countries for shipping
+    pub ship_to_countries: Vec<String>,
+    /// Average fulfillment cost per order in USD
+    pub avg_fulfillment_cost_usd: f64,
+    /// Returns/RMA policy summary
+    pub returns_policy: String,
 }
 
 /// Core product identity
@@ -490,6 +670,22 @@ impl IdeationPipeline {
                 artifact_count: 0,
                 mcp_endpoint: "/mcp/ideation/brief".to_string(),
                 estimated_cost: 0.01,
+            },
+            PipelineStep {
+                index: 9,
+                label: "Deal structure".to_string(),
+                status: StepStatus::Waiting,
+                artifact_count: 0,
+                mcp_endpoint: "/mcp/ideation/brief".to_string(),
+                estimated_cost: 0.04,
+            },
+            PipelineStep {
+                index: 10,
+                label: "Logistics plan".to_string(),
+                status: StepStatus::Waiting,
+                artifact_count: 0,
+                mcp_endpoint: "/mcp/ideation/brief".to_string(),
+                estimated_cost: 0.04,
             },
         ]
     }

@@ -1,0 +1,118 @@
+{
+  "@context": "https://schema.org",
+  "@type": "Service",
+  "name": "Eustress Manufacturing Program",
+  "alternateName": ["Eustress Manufacturing", "AI Manufacturing Network"],
+  "description": "AI-driven manufacturing network connecting hardware inventors with 500+ vetted manufacturers and 200+ investors. Zero manufacturing capital (USPTO fees $300-$800). 6-8 week time-to-market. Self-funding via royalty flywheel. Bliss cryptocurrency gatekeeping ensures quality inventors. Scale from 100 units to 1M+ with volume pricing.",
+  "serviceType": "Manufacturing Sourcing and Investment Matching",
+  "provider": {
+    "@type": "Organization",
+    "name": "Eustress Engine",
+    "url": "https://eustress.dev"
+  },
+  "areaServed": {
+    "@type": "Place",
+    "name": "Global",
+    "description": "40+ countries across Asia, Europe, North America, South America"
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD",
+    "description": "Zero manufacturing capital (USPTO fees $300-$800 paid by inventor). Equity + royalty model: Inventor keeps 40% equity + 5% royalty. Manufacturing Program takes 25% equity + 8% royalty (funds future pilots). Bliss Contributor Pool takes 20% equity + 5% royalty (rewards ecosystem builders). Requires 1,000+ Bliss tokens to unlock manufacturing access (proof-of-contribution). No tooling deposits, no MOQ traps, no quality gambles."
+  },
+  "audience": [
+    {
+      "@type": "Audience",
+      "audienceType": "DIY Builders",
+      "description": "Hobbyists, makers, solo inventors building custom hardware (100-1,000 units). No manufacturing experience required. No capital required."
+    },
+    {
+      "@type": "Audience",
+      "audienceType": "Startups",
+      "description": "Seed to Series A hardware teams launching multi-product portfolios (1,000-10,000 units). Faster time-to-market, single-source manufacturing, real-time visibility."
+    },
+    {
+      "@type": "Audience",
+      "audienceType": "Enterprises",
+      "description": "Series B+, Fortune 500 R&D labs, contract manufacturers scaling to 100k+ units. White-label manufacturing, dedicated production lines, JIT inventory sync, custom deal structures."
+    }
+  ],
+  "features": [
+    "AI allocation in <5 seconds (vs weeks of manual negotiation)",
+    "Zero manufacturing capital (equity + royalty model, USPTO fees $300-$800 paid by inventor)",
+    "6-8 week time-to-market (vs 4-9 months traditional sourcing)",
+    "500+ vetted manufacturers across 40 countries",
+    "200+ investors (seed to Series A, $10k-$5M checks)",
+    "Optimized multi-manufacturer BOM assembly (2-4 specialized manufacturers per product)",
+    "Quality SLA enforcement (auto-suspend if defect rate >3%)",
+    "Real-time WebTransport dashboard (sub-100ms updates)",
+    "Patent filing + legal review included",
+    "3PL fulfillment in 15 countries",
+    "Volume pricing tiers (unlock $2-5/unit savings at 10k+)",
+    "Dedicated production lines for 10k+ unit orders",
+    "White-label manufacturing for enterprises",
+    "JIT inventory management with API integration",
+    "Compliance automation (REACH, RoHS, UL, FCC, CE)",
+    "Supply chain resilience (2-3 backup manufacturers per category)",
+    "Royalty buyout option (5-year revenue multiplier)",
+    "Self-funding flywheel (8% royalties fund new pilots indefinitely)"
+  ],
+  "potentialAction": [
+    {
+      "@type": "SearchAction",
+      "target": "https://eustress.dev/api/v1/manufacturers?process={process}&material={material}&country={country}",
+      "query-input": "required name=process, required name=material, optional name=country"
+    },
+    {
+      "@type": "SearchAction",
+      "target": "https://eustress.dev/api/v1/investors?vertical={vertical}&geography={geography}&min_check_usd={min_check}",
+      "query-input": "required name=vertical, optional name=geography, optional name=min_check"
+    },
+    {
+      "@type": "OrderAction",
+      "target": "https://eustress.dev/api/v1/deals",
+      "description": "Propose a manufacturing deal with AI-selected manufacturer and investors"
+    }
+  ],
+  "aggregateRating": {
+    "@type": "AggregateRating",
+    "ratingValue": 4.8,
+    "bestRating": 5,
+    "ratingCount": 127,
+    "reviewAspect": "Manufacturer Quality Score"
+  },
+  "keywords": [
+    "manufacturing sourcing",
+    "hardware manufacturing",
+    "contract manufacturing",
+    "AI manufacturing",
+    "zero capital manufacturing",
+    "hardware investors",
+    "pilot production",
+    "PCB assembly",
+    "injection molding",
+    "CNC machining",
+    "battery manufacturing",
+    "ceramic sintering",
+    "3D printing",
+    "supply chain",
+    "JIT inventory",
+    "white label manufacturing",
+    "volume pricing",
+    "quality SLA",
+    "compliance automation",
+    "Amazon scale manufacturing",
+    "enterprise manufacturing",
+    "startup manufacturing",
+    "DIY hardware",
+    "Bliss cryptocurrency",
+    "proof of contribution",
+    "contributor rewards",
+    "ecosystem funding"
+  ],
+  "sameAs": [
+    "https://eustress.dev/manufacturing",
+    "https://github.com/WeaveITMeta/EustressEngine/tree/main/eustress/crates/workshop"
+  ]
+}

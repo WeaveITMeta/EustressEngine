@@ -159,6 +159,43 @@ pub struct MaterialRegistry {
     definitions: HashMap<String, MaterialDefinition>,
     /// Name → source .mat.toml path (for writeback and hot-reload)
     source_paths: HashMap<String, PathBuf>,
+    /// Deduplication cache: quantized material parameters → shared handle.
+    /// Entities with identical visual parameters share one GPU material,
+    /// enabling Bevy's automatic batching to merge draw calls.
+    dedup_cache: HashMap<MaterialCacheKey, Handle<StandardMaterial>>,
+}
+
+/// Cache key for material deduplication. Quantizes floating-point material
+/// parameters into integer bits so identical-looking materials hash together.
+/// Two parts with the same color, preset, transparency, and reflectance
+/// will share a single GPU material handle → single draw call batch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MaterialCacheKey {
+    /// RGBA color quantized to 8-bit per channel (4 bytes packed into u32)
+    color_bits: u32,
+    /// Material preset name (e.g. "Plastic", "Glass", "Neon")
+    preset: String,
+    /// Transparency quantized to 0-1000 (0.1% precision)
+    transparency_millipct: u32,
+    /// Reflectance quantized to 0-1000 (0.1% precision)
+    reflectance_millipct: u32,
+}
+
+impl MaterialCacheKey {
+    /// Build a cache key from the same parameters resolve_material receives.
+    fn new(base_color: Color, preset_name: &str, transparency: f32, reflectance: f32) -> Self {
+        let srgba = base_color.to_srgba();
+        let r = (srgba.red.clamp(0.0, 1.0) * 255.0) as u32;
+        let g = (srgba.green.clamp(0.0, 1.0) * 255.0) as u32;
+        let b = (srgba.blue.clamp(0.0, 1.0) * 255.0) as u32;
+        let a = (srgba.alpha.clamp(0.0, 1.0) * 255.0) as u32;
+        Self {
+            color_bits: (r << 24) | (g << 16) | (b << 8) | a,
+            preset: preset_name.to_string(),
+            transparency_millipct: (transparency.clamp(0.0, 1.0) * 1000.0) as u32,
+            reflectance_millipct: (reflectance.clamp(0.0, 1.0) * 1000.0) as u32,
+        }
+    }
 }
 
 impl MaterialRegistry {
@@ -200,6 +237,20 @@ impl MaterialRegistry {
     /// Number of loaded materials.
     pub fn len(&self) -> usize {
         self.materials.len()
+    }
+
+    /// Number of deduplicated material handles (shared across entities).
+    pub fn dedup_cache_len(&self) -> usize {
+        self.dedup_cache.len()
+    }
+
+    /// Look up or insert a deduplicated material handle by cache key.
+    pub fn dedup_get_or_insert(
+        &mut self,
+        key: MaterialCacheKey,
+        handle: Handle<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        self.dedup_cache.entry(key).or_insert(handle).clone()
     }
 }
 
@@ -369,7 +420,7 @@ fn load_texture(
 /// 3. Default to `Material::Plastic`
 pub fn resolve_material(
     material_name: &str,
-    registry: &MaterialRegistry,
+    registry: &mut MaterialRegistry,
     materials: &mut Assets<StandardMaterial>,
     base_color: Color,
     transparency: f32,
@@ -380,7 +431,13 @@ pub fn resolve_material(
         return handle;
     }
 
-    // 2. Enum fallback — create from Material preset scalars
+    // 2. Dedup cache lookup — return existing handle if same visual params
+    let cache_key = MaterialCacheKey::new(base_color, material_name, transparency, reflectance);
+    if let Some(handle) = registry.dedup_cache.get(&cache_key) {
+        return handle.clone();
+    }
+
+    // 3. Enum fallback — create from Material preset scalars
     let preset = PresetMaterial::from_string(material_name);
     let (roughness, metallic, preset_reflectance) = preset.pbr_params();
 
@@ -407,7 +464,9 @@ pub fn resolve_material(
         mat.emissive = LinearRgba::from(base_color) * 2.0;
     }
 
-    materials.add(mat)
+    let handle = materials.add(mat);
+    // Cache for future entities with identical visual parameters
+    registry.dedup_get_or_insert(cache_key, handle)
 }
 
 // ============================================================================

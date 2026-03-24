@@ -21,6 +21,9 @@ pub struct SpaceFileWatcher {
     receiver: Receiver<DebounceEventResult>,
     /// Space root path being watched
     space_path: PathBuf,
+    /// Timestamp when the watcher was created — used to ignore spurious
+    /// Modify events that `notify` fires for pre-existing files on startup.
+    created_at: std::time::Instant,
 }
 
 impl SpaceFileWatcher {
@@ -51,6 +54,7 @@ impl SpaceFileWatcher {
             _watcher: debouncer,
             receiver: rx,
             space_path,
+            created_at: std::time::Instant::now(),
         })
     }
     
@@ -179,6 +183,7 @@ pub fn process_file_changes(
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
     mut recently_written: ResMut<RecentlyWrittenFiles>,
     space_root: Res<super::SpaceRoot>,
     // Query for entities loaded from files
@@ -196,6 +201,11 @@ pub fn process_file_changes(
     
     let events = watcher.poll_events();
     
+    // Grace period: ignore Modified events for the first 5 seconds after watcher
+    // creation. `notify` fires spurious Modify events for pre-existing files when
+    // the watcher starts — those files were already loaded by load_space_files_system.
+    let in_grace_period = watcher.created_at.elapsed() < Duration::from_secs(5);
+
     for event in events {
         // Skip files that were recently written by the engine (prevents hot-reload loops)
         if recently_written.was_recently_written(&event.path) {
@@ -205,6 +215,10 @@ pub fn process_file_changes(
         
         match event.change_type {
             FileChangeType::Modified => {
+                // During startup grace period, skip spurious modify events
+                if in_grace_period {
+                    continue;
+                }
                 // Mark as recently written BEFORE hot-reload to prevent write-back loop
                 // When we hot-reload and insert Transform, it triggers Changed<Transform>,
                 // which would trigger write_instance_changes_system. By marking it here,
@@ -221,7 +235,7 @@ pub fn process_file_changes(
                 );
             }
             FileChangeType::Created => {
-                handle_file_created(&event, &mut registry, &mut material_registry, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
+                handle_file_created(&event, &mut registry, &mut material_registry, &mut mesh_cache, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
             }
             FileChangeType::Removed => {
                 handle_file_removed(&event, &mut registry, &mut commands);
@@ -314,7 +328,7 @@ fn handle_file_modified(
                                         commands.entity(entity).insert(echem.to_component());
                                     }
                                     
-                                    info!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
+                                    debug!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
                                 }
                                 Err(e) => {
                                     error!("Failed to parse TOML instance {:?}: {}", event.path, e);
@@ -346,6 +360,7 @@ fn handle_file_created(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,
     material_registry: &mut super::material_loader::MaterialRegistry,
+    mesh_cache: &mut super::instance_loader::PrimitiveMeshCache,
     commands: &mut Commands,
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
@@ -471,6 +486,7 @@ fn handle_file_created(
                         asset_server,
                         materials,
                         material_registry,
+                        mesh_cache,
                         event.path.clone(),
                         instance,
                     );

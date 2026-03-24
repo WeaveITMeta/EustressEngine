@@ -59,6 +59,39 @@ material = "Al 6061-T6"
 dimensions = [0.300, 0.100, 0.012]  # meters [L, W, H]
 role = "structural_enclosure"
 
+[deal_structure]
+title = "Product Name — V1 Manufacturing Deal"
+manufacturing_program_royalty_pct = 8.0   # % of net sales to Manufacturing Program fund
+inventor_royalty_pct = 5.0                # % of net sales retained by inventor
+unit_price_usd = 49.00                    # suggested retail price
+unit_cost_usd = 12.50                     # estimated BOM + assembly + logistics
+pilot_minimum_units = 1000                # units required before full production unlocks
+pilot_geography = "US"                    # target geography for pilot
+term_validity_months = 6                  # how long this term sheet is valid
+
+[[deal_structure.equity_splits]]
+stakeholder = "Inventor"
+role = "IP owner and product creator"
+percentage = 60.0
+# vesting_cliff_months — omit for immediate vesting
+
+[[deal_structure.equity_splits]]
+stakeholder = "Eustress Manufacturing Program"
+role = "Manufacturing fund, infrastructure, distribution"
+percentage = 25.0
+
+[[deal_structure.equity_splits]]
+stakeholder = "Logistics Partner"
+role = "3PL, warehousing, fulfillment operations"
+percentage = 10.0
+vesting_cliff_months = 12
+vesting_period_months = 24
+
+[[deal_structure.equity_splits]]
+stakeholder = "Reserve Pool"
+role = "Future co-investors, advisors, strategic partners"
+percentage = 5.0
+
 [ideation_metadata]
 source = "workshop_panel"
 
@@ -70,6 +103,9 @@ Rules:
 - Every BOM entry needs a role (what it does in the assembly)
 - Be precise with units and values — no rounding unless necessary
 - If information is ambiguous, pick the most likely interpretation
+- For deal_structure: estimate unit_price_usd and unit_cost_usd from BOM entries (unit cost = BOM total + 35% assembly + 15% logistics + 10% returns)
+- Adjust equity_splits percentages if the user mentioned co-investors, partners, or unusual IP arrangements
+- equity_splits percentages MUST sum to exactly 100.0
 "#;
 
 // ============================================================================

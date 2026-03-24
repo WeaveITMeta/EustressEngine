@@ -748,6 +748,29 @@ const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
     ("cone", "parts/cone.glb", eustress_common::classes::PartType::Cone),
 ];
 
+/// Cache of loaded primitive mesh handles to avoid repeated asset_server.load()
+/// calls for the same GLB path across thousands of entities.
+/// Without this cache, 10K entities each call `asset_server.load("parts/block.glb#Mesh0/Primitive0")`
+/// which involves string formatting + path resolution per entity.
+#[derive(Resource, Default)]
+pub struct PrimitiveMeshCache {
+    /// GLB asset path → loaded mesh handle
+    cache: HashMap<String, Handle<Mesh>>,
+}
+
+impl PrimitiveMeshCache {
+    /// Get or load a primitive mesh handle, caching the result.
+    pub fn get_or_load(
+        &mut self,
+        asset_server: &AssetServer,
+        glb_path: &str,
+    ) -> Handle<Mesh> {
+        self.cache.entry(glb_path.to_string()).or_insert_with(|| {
+            asset_server.load(format!("{}#Mesh0/Primitive0", glb_path))
+        }).clone()
+    }
+}
+
 /// Spawn entity from instance definition, loading actual GLB meshes.
 ///
 /// - **No asset** (`asset: None`): spawns a non-visual entity (Atmosphere, Sky, Moon, etc.)
@@ -760,7 +783,8 @@ pub fn spawn_instance(
     commands: &mut Commands,
     asset_server: &AssetServer,
     materials: &mut Assets<StandardMaterial>,
-    material_registry: &super::material_loader::MaterialRegistry,
+    material_registry: &mut super::material_loader::MaterialRegistry,
+    mesh_cache: &mut PrimitiveMeshCache,
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
@@ -851,7 +875,7 @@ pub fn spawn_instance(
     let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
     let absolute_mesh_path = toml_dir.join(&asset_ref.mesh);
     
-    info!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
+    debug!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
         name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
     
     // Build material from properties — registry-first, enum fallback
@@ -902,19 +926,11 @@ pub fn spawn_instance(
         // Load mesh and material directly instead of using SceneRoot (avoids unregistered type panic)
         let mesh_path = format!("space://{}#Mesh0/Primitive0", relative_mesh_path);
         let material_path = format!("space://{}#Material0", relative_mesh_path);
-        info!("🔧 Loading mesh from: {} (absolute: {:?}, space_root: {:?})", mesh_path, absolute_mesh_path, space_root);
+        debug!("🔧 Loading mesh from: {} (absolute: {:?}, space_root: {:?})", mesh_path, absolute_mesh_path, space_root);
         let mesh_handle: Handle<Mesh> = asset_server.load(mesh_path);
         let material_handle: Handle<StandardMaterial> = asset_server.load(material_path);
         
-        // Build collider at actual size for physics raycasting
-        let collider = match part_shape {
-            eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
-            eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-                Collider::cylinder(scale.x / 2.0, scale.y)
-            }
-            _ => Collider::cuboid(scale.x, scale.y, scale.z),
-        };
-
+        // Spawn the core visual entity first (no physics — added conditionally below)
         let entity = commands.spawn((
             Mesh3d(mesh_handle),
             MeshMaterial3d(material_handle),
@@ -930,8 +946,6 @@ pub fn spawn_instance(
             base_part,
             eustress_common::classes::Part { shape: part_shape },
             PartEntity { part_id: String::new() }, // filled in below
-            collider,
-            RigidBody::Static,
             Attributes::new(),
             Tags::new(),
             InstanceFile {
@@ -944,22 +958,36 @@ pub fn spawn_instance(
         let part_id = format!("{}v{}", entity.index(), entity.generation());
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
+
+        // Only add physics collider when can_collide is true — avoids broadphase
+        // overhead for thousands of static decorative parts
+        if instance.properties.can_collide {
+            let collider = match part_shape {
+                eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+                eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
+                    Collider::cylinder(scale.x / 2.0, scale.y)
+                }
+                _ => Collider::cuboid(scale.x, scale.y, scale.z),
+            };
+            ec.insert((collider, RigidBody::Static));
+        }
+
         // Attach realism components if present in TOML
         if let Some(ref mat) = instance.material {
             ec.insert(mat.to_component());
-            info!("  + MaterialProperties: {}", mat.name);
+            debug!("  + MaterialProperties: {}", mat.name);
         }
         if let Some(ref thermo) = instance.thermodynamic {
             ec.insert(thermo.to_component());
-            info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
+            debug!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
         }
         if let Some(ref echem) = instance.electrochemical {
             ec.insert(echem.to_component());
-            info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+            debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
         }
         // Attach UI ECS component if this is a UI class
         attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
-        info!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        debug!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
         }
     }
@@ -971,19 +999,9 @@ pub fn spawn_instance(
     } else {
         "parts/block.glb" // fallback
     };
-    let mesh_handle: Handle<Mesh> = asset_server.load(
-        format!("{}#Mesh0/Primitive0", glb_path)
-    );
+    let mesh_handle: Handle<Mesh> = mesh_cache.get_or_load(asset_server, glb_path);
     
-    // Build collider at actual size for physics raycasting
-    let collider = match part_shape {
-        eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
-        eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-            Collider::cylinder(scale.x / 2.0, scale.y)
-        }
-        _ => Collider::cuboid(scale.x, scale.y, scale.z),
-    };
-
+    // Spawn the core visual entity first (no physics — added conditionally below)
     let entity = commands.spawn((
         Mesh3d(mesh_handle),
         MeshMaterial3d(material_handle),
@@ -999,8 +1017,6 @@ pub fn spawn_instance(
         base_part,
         eustress_common::classes::Part { shape: part_shape },
         PartEntity { part_id: String::new() }, // filled in below
-        collider,
-        RigidBody::Static,
         Attributes::new(),
         Tags::new(),
         InstanceFile {
@@ -1013,22 +1029,36 @@ pub fn spawn_instance(
     let part_id = format!("{}v{}", entity.index(), entity.generation());
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
+
+    // Only add physics collider when can_collide is true — avoids broadphase
+    // overhead for thousands of static decorative parts
+    if instance.properties.can_collide {
+        let collider = match part_shape {
+            eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+            eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
+                Collider::cylinder(scale.x / 2.0, scale.y)
+            }
+            _ => Collider::cuboid(scale.x, scale.y, scale.z),
+        };
+        ec.insert((collider, RigidBody::Static));
+    }
+
     // Attach realism components if present in TOML
     if let Some(ref mat) = instance.material {
         ec.insert(mat.to_component());
-        info!("  + MaterialProperties: {}", mat.name);
+        debug!("  + MaterialProperties: {}", mat.name);
     }
     if let Some(ref thermo) = instance.thermodynamic {
         ec.insert(thermo.to_component());
-        info!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
+        debug!("  + ThermodynamicState: T={:.1}K P={:.0}Pa", thermo.temperature, thermo.pressure);
     }
     if let Some(ref echem) = instance.electrochemical {
         ec.insert(echem.to_component());
-        info!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
+        debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
-    info!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+    debug!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
     entity
 }
 
@@ -1212,12 +1242,30 @@ pub fn attach_ui_component(
 // which properly creates folder hierarchy with parent-child relationships.
 // The load_instance_files_system was removed to avoid duplicate loading.
 
-/// System to write instance changes back to .glb.toml files
+/// System to write instance changes back to .glb.toml files.
+///
+/// PERF: Uses `Changed<Transform>` BUT excludes `Added<Transform>`.
+/// Bevy marks newly-inserted components as Changed, so without the exclusion
+/// ALL 10K entities would trigger 20K disk I/O ops on the first frame after
+/// spawn (read TOML + write TOML per entity = 1-second freeze).
+/// Only entities whose Transform was **modified** (gizmo, properties panel)
+/// after initial spawn will be written back.
 pub fn write_instance_changes_system(
-    instances: Query<(&Transform, &InstanceFile), Changed<Transform>>,
+    instances: Query<(Entity, &Transform, &InstanceFile), Changed<Transform>>,
+    added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
-    for (transform, instance_file) in instances.iter() {
+    // Collect entities that were just added this tick — skip them entirely.
+    // Bevy marks newly-inserted components as Changed, so without this check
+    // ALL 10K entities would trigger 20K disk I/O ops on their first frame.
+    let just_added: std::collections::HashSet<Entity> = added_instances.iter().collect();
+
+    for (entity, transform, instance_file) in instances.iter() {
+        // Skip freshly-spawned entities — their Transform is "changed" only because
+        // it was just inserted, not because the user moved anything
+        if just_added.contains(&entity) {
+            continue;
+        }
         // Skip if file was recently written (prevents hot-reload loop)
         // This happens when hot-reload inserts a Transform, triggering Changed<Transform>
         if recently_written.was_recently_written(&instance_file.toml_path) {

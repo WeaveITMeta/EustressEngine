@@ -85,6 +85,8 @@ kiddo = { version = "4.2", features = ["rkyv"], optional = true }
 rkyv = { version = "0.8", optional = true }
 # Notify for hot-reload file watching
 notify = { version = "6.1", optional = true }
+# Spatial R-tree indexing for streaming radius queries
+rstar = { version = "0.12", optional = true }
 # GPU compute for SPH (uses Bevy's wgpu 28)
 wgpu = { version = "28", optional = true }
 encase = { version = "0.10", optional = true }
@@ -140,4 +142,6 @@ realism-spatial = ["realism", "kiddo", "rkyv"]
 # Enable full realism system with all features (excludes quantum)
 realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
 # Enable Luau scripting runtime (Roblox Luau compatibility)
-luau = ["mlua"]
+luau = ["mlua", "ureq"]
+# Enable instance streaming (hot-cache, spatial chunking, TOML watcher, dirty-bit write-back)
+streaming = ["notify", "rstar"]

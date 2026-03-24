@@ -18,7 +18,8 @@ members = [
     "crates/spatial-llm",
     "crates/geo",
     "crates/texture-gen",
-    "crates/workshop"
+    "crates/workshop",
+    "benches/instance-capacity"
 ]
 
 resolver = "2"

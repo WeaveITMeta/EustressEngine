@@ -228,7 +228,8 @@ impl ScenarioScriptEngine {
         let mut vm = Vm::new(runtime, unit);
         
         // Call main function with context
-        let output: RuneValue = vm.call(["main"], (context.branch_id.to_string(),))
+        let output: RuneValue = vm.call(["main"], (context.current_branch_id.to_string(),))
+            .into_result()
             .map_err(|e| ScriptError::RuntimeError(e.to_string()))?;
 
         // Parse output into ScriptResult

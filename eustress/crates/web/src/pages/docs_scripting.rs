@@ -48,6 +48,28 @@ fn get_toc() -> Vec<TocSection> {
             ],
         },
         TocSection {
+            id: "rune",
+            title: "Rune API",
+            subsections: vec![
+                TocSubsection { id: "rune-vector3", title: "Vector3" },
+                TocSubsection { id: "rune-cframe", title: "CFrame" },
+                TocSubsection { id: "rune-color3", title: "Color3" },
+                TocSubsection { id: "rune-spawning", title: "Spawning & Transforms" },
+                TocSubsection { id: "rune-raycasting", title: "Raycasting" },
+                TocSubsection { id: "rune-logging", title: "Logging" },
+                TocSubsection { id: "rune-instance", title: "Instance API" },
+                TocSubsection { id: "rune-tweenservice", title: "TweenService" },
+                TocSubsection { id: "rune-task", title: "Task Library" },
+                TocSubsection { id: "rune-input", title: "UserInputService" },
+                TocSubsection { id: "rune-udim", title: "UDim & UDim2" },
+                TocSubsection { id: "rune-datastore", title: "DataStoreService" },
+                TocSubsection { id: "rune-http", title: "HttpService" },
+                TocSubsection { id: "rune-collection", title: "CollectionService" },
+                TocSubsection { id: "rune-sound", title: "Sound API" },
+                TocSubsection { id: "rune-example", title: "Complete Example" },
+            ],
+        },
+        TocSection {
             id: "ecs",
             title: "ECS Patterns",
             subsections: vec![
@@ -326,6 +348,358 @@ within the play area boundaries.
 
 When the player's score reaches 100, display the
 \"You Win!\" message and transition to the victory scene."}</code></pre>
+                        </div>
+                    </section>
+
+                    // ─────────────────────────────────────────────────────
+                    // Rune API — Complete Reference
+                    // ─────────────────────────────────────────────────────
+                    <section id="rune" class="docs-section">
+                        <h2 class="section-anchor">"Rune API"</h2>
+                        
+                        <div class="docs-callout info">
+                            <strong>"Soul Scripting:"</strong>
+                            " When you describe a scene in English, Soul compiles to these Rune APIs. 
+                            Understanding them helps you write more precise natural language descriptions."
+                        </div>
+
+                        <div id="rune-vector3" class="docs-block">
+                            <h3>"Vector3 — 3D Vector"</h3>
+                            <p>"Roblox-compatible 3D vector type for positions, directions, and sizes."</p>
+                            <pre class="code-block"><code>{"// Construction
+let v = Vector3::new(x, y, z);     // Create from components
+
+// Properties (get/set)
+v.x, v.y, v.z                       // Component access
+
+// Methods
+v.magnitude()                       // Length of vector -> f64
+v.unit()                            // Normalized (length 1) -> Vector3
+v.dot(&other)                       // Dot product -> f64
+v.cross(&other)                     // Cross product -> Vector3
+v.lerp(&goal, alpha)                // Linear interpolation (alpha 0-1)
+
+// Arithmetic
+v.add(&other)                       // v + other
+v.sub(&other)                       // v - other
+v.mul(scalar)                       // v * scalar
+v.div(scalar)                       // v / scalar
+v.neg()                             // -v"}</code></pre>
+                        </div>
+
+                        <div id="rune-cframe" class="docs-block">
+                            <h3>"CFrame — Coordinate Frame"</h3>
+                            <p>"Position + rotation combined. Essential for placing and orienting objects."</p>
+                            <pre class="code-block"><code>{"// Constructors
+let cf = CFrame::new(x, y, z);              // Position only, no rotation
+let cf = CFrame::from_position(vec3);       // From Vector3
+let cf = CFrame::angles(rx, ry, rz);        // From Euler angles (radians)
+let cf = CFrame::look_at(pos, target);      // Look from pos toward target
+
+// Position access
+cf.position                                  // Position as Vector3
+cf.x(), cf.y(), cf.z()                      // Position components
+
+// Direction vectors (unit vectors)
+cf.look_vector()                            // Forward direction (-Z)
+cf.right_vector()                           // Right direction (+X)
+cf.up_vector()                              // Up direction (+Y)
+
+// Transformations
+cf.inverse()                                // Inverse transform
+cf.point_to_world_space(&point)             // Local point -> world point
+cf.point_to_object_space(&point)            // World point -> local point
+cf.lerp(&goal, alpha)                       // Smooth interpolation (SLERP)
+
+// Combining transforms
+cf.mul(&other)                              // cf * other (chain transforms)
+cf.add(&offset)                             // Offset position by Vector3"}</code></pre>
+                        </div>
+
+                        <div id="rune-color3" class="docs-block">
+                            <h3>"Color3 — RGB Color"</h3>
+                            <p>"RGB color type with multiple construction methods."</p>
+                            <pre class="code-block"><code>{"// Constructors
+let c = Color3::new(r, g, b);               // 0.0-1.0 floats
+let c = Color3::from_rgb(r, g, b);          // 0-255 integers
+let c = Color3::from_hsv(h, s, v);          // HSV (all 0.0-1.0)
+
+// Properties
+c.r, c.g, c.b                               // Component access (0.0-1.0)
+
+// Methods
+c.lerp(&goal, alpha)                        // Color interpolation
+c.to_hsv()                                  // Returns (h, s, v) tuple"}</code></pre>
+                        </div>
+
+                        <div id="rune-spawning" class="docs-block">
+                            <h3>"Spawning & Transforms"</h3>
+                            <p>"Create entities and modify their properties."</p>
+                            <pre class="code-block"><code>{"// Entity Creation
+spawn_part(shape, w, h, d) -> entity_id     // \"cube\", \"sphere\", \"cylinder\"
+spawn_model(name) -> entity_id              // Load a model by name
+spawn_point_light() -> entity_id            // Create a point light
+
+// Transform Functions
+set_position(entity_id, x, y, z)            // Set world position
+set_rotation(entity_id, pitch, yaw, roll)   // Set rotation (degrees)
+set_size(entity_id, w, h, d)                // Set dimensions
+
+// Appearance
+set_color(entity_id, r, g, b, a)            // RGBA (0.0-1.0)
+set_material(entity_id, material)           // \"Plastic\", \"Metal\", \"Wood\", etc.
+set_anchored(entity_id, anchored)           // true = immovable
+
+// Lights
+set_light_brightness(entity_id, brightness)
+set_light_range(entity_id, range)
+set_light_color(entity_id, r, g, b)
+
+// Finding Entities
+find_entity_by_name(name) -> entity_id      // Returns 0 if not found"}</code></pre>
+                        </div>
+
+                        <div id="rune-raycasting" class="docs-block">
+                            <h3>"Raycasting"</h3>
+                            <p>"Cast rays to detect collisions and surfaces in the world."</p>
+                            <pre class="code-block"><code>{"// RaycastParams — Filter configuration
+let mut params = RaycastParams::new();
+params.add_exclude(\"EntityName\");            // Exclude by name
+params.add_include(\"EntityName\");            // Include ONLY named entities
+params.max_distance = 500.0;                 // Default 1000.0
+params.ignore_water = true;                  // Skip water volumes
+
+// Raycast Functions
+workspace_raycast(origin, direction) -> Option<RaycastResult>
+workspace_raycast(origin, direction, params) -> Option<RaycastResult>
+workspace_raycast_all(origin, direction, params, max_hits) -> Vec<RaycastResult>
+
+// RaycastResult fields
+result.instance      // Entity name (String)
+result.entity_id     // Bevy entity ID (i64)
+result.position      // Hit position (Vector3)
+result.normal        // Surface normal (Vector3)
+result.distance      // Distance from origin (f64)
+result.material      // Material name (String)"}</code></pre>
+                        </div>
+
+                        <div id="rune-logging" class="docs-block">
+                            <h3>"Logging"</h3>
+                            <p>"Output messages to the console for debugging."</p>
+                            <pre class="code-block"><code>{"log_info(&message)                         // Info level (white)
+log_warn(&message)                         // Warning level (yellow)
+log_error(&message)                        // Error level (red)
+
+// Example
+log_info(&format!(\"Player at position: {:?}\", position));"}</code></pre>
+                        </div>
+
+                        <div id="rune-instance" class="docs-block">
+                            <h3>"Instance API"</h3>
+                            <p>"Create and manipulate entities using the Roblox-compatible Instance API."</p>
+                            <pre class="code-block"><code>{"// Create a new instance
+let part = Instance::new(\"Part\");
+
+// Name and class
+part.name()                              // Get name -> String
+part.set_name(\"MyPart\")                  // Set name
+part.class_name()                        // Get class name -> String
+part.is_a(\"BasePart\")                    // Check class inheritance -> bool
+
+// Hierarchy
+part.parent()                            // Get parent -> Option<Instance>
+part.get_children()                      // Get children -> Vec<Instance>
+part.find_first_child(\"ChildName\")       // Find by name -> Option<Instance>
+part.find_first_child_of_class(\"Part\")   // Find by class -> Option<Instance>
+
+// Lifecycle
+part.destroy()                           // Remove instance
+part.clone_instance()                    // Clone -> Option<Instance>"}</code></pre>
+                        </div>
+
+                        <div id="rune-tweenservice" class="docs-block">
+                            <h3>"TweenService"</h3>
+                            <p>"Animate properties smoothly over time with easing functions."</p>
+                            <pre class="code-block"><code>{"// TweenInfo parameters:
+// time, easing_style, easing_direction, repeat_count, reverses, delay_time
+
+// Easing Styles (integer codes):
+// 0=Linear, 1=Sine, 2=Quad, 3=Cubic, 4=Quart, 5=Quint
+// 6=Exponential, 7=Circular, 8=Back, 9=Elastic, 10=Bounce
+
+// Easing Directions:
+// 0=In, 1=Out, 2=InOut
+
+// Create a 1-second tween with Sine easing out
+let info = TweenInfo::new(1.0, 1, 1, 0, false, 0.0);
+let tween = TweenService::Create(info);
+
+// Control playback
+tween.play();                            // Start animation
+tween.pause();                           // Pause animation
+tween.cancel();                          // Cancel animation
+
+// Check status (0=Playing, 1=Paused, 2=Cancelled, 3=Completed)
+let status = tween.status();"}</code></pre>
+                        </div>
+
+                        <div id="rune-task" class="docs-block">
+                            <h3>"Task Library"</h3>
+                            <p>"Schedule and manage asynchronous tasks."</p>
+                            <pre class="code-block"><code>{"// Wait for a duration (returns actual time waited)
+let waited = task::wait(1.0);            // Wait 1 second
+
+// Cancel a scheduled task
+task::cancel(task_id);                   // Cancel by ID"}</code></pre>
+                        </div>
+
+                        <div id="rune-input" class="docs-block">
+                            <h3>"UserInputService"</h3>
+                            <p>"Query keyboard and mouse input state."</p>
+                            <pre class="code-block"><code>{"// Common key codes:
+// W=87, A=65, S=83, D=68, Space=32, Shift=16, Ctrl=17, Escape=27
+
+// Check keyboard state
+let w_pressed = UserInputService::IsKeyDown(87);
+
+// Check mouse buttons (0=Left, 1=Right, 2=Middle)
+let clicking = UserInputService::IsMouseButtonPressed(0);
+
+// Get mouse position and movement
+let (x, y) = UserInputService::GetMouseLocation();
+let (dx, dy) = UserInputService::GetMouseDelta();"}</code></pre>
+                        </div>
+
+                        <div id="rune-udim" class="docs-block">
+                            <h3>"UDim & UDim2"</h3>
+                            <p>"UI dimension types combining scale (0-1) and offset (pixels)."</p>
+                            <pre class="code-block"><code>{"// UDim: single dimension
+let width = UDim::new(0.5, 10.0);        // 50% + 10 pixels
+width.scale                               // 0.5
+width.offset                              // 10.0
+
+// UDim2: X and Y dimensions
+let size = UDim2::new(0.5, 0.0, 0.3, 0.0);   // 50% width, 30% height
+let size = UDim2::from_scale(0.5, 0.3);       // Scale only
+let size = UDim2::from_offset(100.0, 50.0);   // Offset only
+
+// Access components
+let x_dim = size.x();                    // Get X as UDim
+let y_dim = size.y();                    // Get Y as UDim
+
+// Arithmetic and interpolation
+let combined = size.add(&other);
+let diff = size.sub(&other);
+let mid = size.lerp(&goal, 0.5);         // 50% between size and goal"}</code></pre>
+                        </div>
+
+                        <div id="rune-datastore" class="docs-block">
+                            <h3>"DataStoreService"</h3>
+                            <p>"Persistent key-value storage backed by AWS DynamoDB. Perfect for player saves, settings, and leaderboards."</p>
+                            <pre class="code-block"><code>{"// Get a data store (name, optional scope)
+let store = DataStoreService::GetDataStore(\"PlayerData\", None);
+let ordered = DataStoreService::GetOrderedDataStore(\"Leaderboard\", None);
+
+// Basic operations (key max 50 chars, value max 4MB)
+let value = DataStore::GetAsync(store, \"player_123\");
+DataStore::SetAsync(store, \"player_123\", \"{\\\"coins\\\": 100}\");
+DataStore::RemoveAsync(store, \"player_123\");
+
+// Atomic increment for counters
+let new_coins = DataStore::IncrementAsync(store, \"coins\", 10);
+
+// Ordered data store for leaderboards
+// GetSortedAsync(store, ascending, page_size)
+let top10 = OrderedDataStore::GetSortedAsync(ordered, false, 10);
+for entry in top10 {
+    log_info(&format!(\"{}: {}\", entry.key, entry.value));
+}"}</code></pre>
+                        </div>
+
+                        <div id="rune-http" class="docs-block">
+                            <h3>"HttpService"</h3>
+                            <p>"Make HTTP requests to external APIs and encode/decode JSON data."</p>
+                            <pre class="code-block"><code>{"// GET request
+let response = HttpService::GetAsync(\"https://api.example.com/data\");
+
+// POST request with body
+let body = \"{\\\"action\\\": \\\"submit\\\"}\";
+let response = HttpService::PostAsync(\"https://api.example.com/submit\", body);
+
+// JSON encoding/decoding
+let json = HttpService::JSONEncode(data);
+let data = HttpService::JSONDecode(json);"}</code></pre>
+                        </div>
+
+                        <div id="rune-collection" class="docs-block">
+                            <h3>"CollectionService"</h3>
+                            <p>"Tag entities for easy grouping and querying. Useful for game logic like finding all enemies or collectibles."</p>
+                            <pre class="code-block"><code>{"// Add and remove tags
+CollectionService::AddTag(entity_id, \"Enemy\");
+CollectionService::RemoveTag(entity_id, \"Enemy\");
+
+// Check if entity has a tag
+let is_enemy = CollectionService::HasTag(entity_id, \"Enemy\");
+
+// Get all entities with a specific tag
+let all_enemies = CollectionService::GetTagged(\"Enemy\");
+for enemy_id in all_enemies {
+    // Process each enemy
+}"}</code></pre>
+                        </div>
+
+                        <div id="rune-sound" class="docs-block">
+                            <h3>"Sound API"</h3>
+                            <p>"Play audio in your game with volume control and playback state."</p>
+                            <pre class="code-block"><code>{"// Sound properties: entity_id, sound_id, volume, playing, looped
+
+// Playback control
+Sound::Play(sound);                          // Start playback
+Sound::Stop(sound);                          // Stop playback
+
+// Volume control (0.0 to 1.0)
+Sound::SetVolume(sound, 0.5);                // 50% volume"}</code></pre>
+                        </div>
+
+                        <div id="rune-example" class="docs-block">
+                            <h3>"Complete Example"</h3>
+                            <p>"A full Rune script demonstrating the core APIs:"</p>
+                            <pre class="code-block"><code>{"use eustress::{Vector3, CFrame, Color3, RaycastParams};
+
+pub fn main() {
+    // Create a red metal cube
+    let cube = spawn_part(\"cube\", 2.0, 2.0, 2.0);
+    set_position(cube, 0.0, 1.0, 0.0);
+    set_color(cube, 1.0, 0.2, 0.2, 1.0);
+    set_material(cube, \"Metal\");
+    set_anchored(cube, true);
+    
+    // Create a light above it
+    let light = spawn_point_light();
+    set_position(light, 0.0, 5.0, 0.0);
+    set_light_brightness(light, 2.0);
+    set_light_range(light, 10.0);
+    
+    // Raycast down to find ground
+    let origin = Vector3::new(5.0, 50.0, 5.0);
+    let direction = Vector3::new(0.0, -100.0, 0.0);
+    
+    if let Some(hit) = workspace_raycast(origin, direction, None) {
+        log_info(&format!(\"Ground at y={}\", hit.position.y));
+        
+        // Place a sphere on the ground
+        let sphere = spawn_part(\"sphere\", 1.0, 1.0, 1.0);
+        set_position(sphere, hit.position.x, hit.position.y + 0.5, hit.position.z);
+        set_color(sphere, 0.2, 0.8, 0.2, 1.0);
+    }
+    
+    // Use CFrame for oriented placement
+    let cf = CFrame::look_at(
+        Vector3::new(10.0, 2.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0)
+    );
+    log_info(&format!(\"Forward: {:?}\", cf.look_vector()));
+}"}</code></pre>
                         </div>
                     </section>
 

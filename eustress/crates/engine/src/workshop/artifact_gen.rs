@@ -60,6 +60,10 @@ pub enum ArtifactStep {
     UiGeneration,
     /// Step 8: Generate README.md and update Products.md catalog
     CatalogEntry,
+    /// Step 9: Generate DEAL_STRUCTURE.md — equity split, royalty terms, manufacturing program stake
+    DealStructure,
+    /// Step 10: Generate LOGISTICS_PLAN.md — pilot program, warehousing, fulfillment partners
+    LogisticsPlan,
 }
 
 impl ArtifactStep {
@@ -75,6 +79,8 @@ impl ArtifactStep {
             6 => Some(Self::SimScripts),
             7 => Some(Self::UiGeneration),
             8 => Some(Self::CatalogEntry),
+            9 => Some(Self::DealStructure),
+            10 => Some(Self::LogisticsPlan),
             _ => None,
         }
     }
@@ -90,6 +96,8 @@ impl ArtifactStep {
             Self::SimScripts => 6,
             Self::UiGeneration => 7,
             Self::CatalogEntry => 8,
+            Self::DealStructure => 9,
+            Self::LogisticsPlan => 10,
         }
     }
 
@@ -104,6 +112,8 @@ impl ArtifactStep {
             Self::SimScripts => IdeationState::GeneratingSimScripts,
             Self::UiGeneration => IdeationState::GeneratingUI,
             Self::CatalogEntry => IdeationState::FinalizingCatalog,
+            Self::DealStructure => IdeationState::GeneratingDealStructure,
+            Self::LogisticsPlan => IdeationState::GeneratingLogisticsPlan,
         }
     }
 
@@ -118,6 +128,8 @@ impl ArtifactStep {
             Self::SimScripts => "sim_scripts",
             Self::UiGeneration => "ui",
             Self::CatalogEntry => "catalog",
+            Self::DealStructure => "deal_structure",
+            Self::LogisticsPlan => "logistics_plan",
         }
     }
 
@@ -133,6 +145,8 @@ impl ArtifactStep {
             Self::SimScripts => "__SOULSERVICE__",   // Written to Space/SoulService/{product}/
             Self::UiGeneration => "__STARTERGUI__",   // Written to Space/StarterGui/{product}/
             Self::CatalogEntry => "README.md",
+            Self::DealStructure => "DEAL_STRUCTURE.md",
+            Self::LogisticsPlan => "LOGISTICS_PLAN.md",
         }
     }
 
@@ -147,6 +161,8 @@ impl ArtifactStep {
             Self::SimScripts => ArtifactType::RuneSimScript,
             Self::UiGeneration => ArtifactType::UiToml,
             Self::CatalogEntry => ArtifactType::Catalog,
+            Self::DealStructure => ArtifactType::DealStructure,
+            Self::LogisticsPlan => ArtifactType::LogisticsPlan,
         }
     }
 
@@ -161,6 +177,8 @@ impl ArtifactStep {
             Self::SimScripts => 0.04,
             Self::UiGeneration => 0.04,
             Self::CatalogEntry => 0.01,
+            Self::DealStructure => 0.04,
+            Self::LogisticsPlan => 0.04,
         }
     }
 
@@ -175,6 +193,8 @@ impl ArtifactStep {
             Self::SimScripts => SIM_SCRIPTS_SYSTEM_PROMPT,
             Self::UiGeneration => UI_GENERATION_SYSTEM_PROMPT,
             Self::CatalogEntry => CATALOG_SYSTEM_PROMPT,
+            Self::DealStructure => DEAL_STRUCTURE_SYSTEM_PROMPT,
+            Self::LogisticsPlan => LOGISTICS_PLAN_SYSTEM_PROMPT,
         }
     }
 }
@@ -842,6 +862,155 @@ fn safe_product_name(product_name: &str) -> String {
         .replace('\\', "_")
         .replace(':', "_")
 }
+
+/// System prompt for DEAL_STRUCTURE.md generation
+const DEAL_STRUCTURE_SYSTEM_PROMPT: &str = r#"You are a manufacturing deal structuring advisor for the Eustress Manufacturing Program.
+
+Given the ideation brief (TOML), generate a DEAL_STRUCTURE.md that defines the equity distribution and royalty terms for bringing this product to market through the Eustress Manufacturing Program.
+
+## What DEAL_STRUCTURE.md must contain:
+
+### 1. Executive Summary
+- Product name and version
+- Deal type (Manufacturing Program partnership)
+- Term sheet validity period
+- One-paragraph summary of the deal
+
+### 2. Equity Distribution Table
+A precise table showing ALL stakeholders with their percentage. Must sum to exactly 100%.
+
+Standard Eustress Manufacturing Program template:
+| Stakeholder | Role | Equity % | Vesting |
+|---|---|---|---|
+| Inventor | IP owner and product creator | 60% | Immediate |
+| Eustress Manufacturing Program | Manufacturing fund, infrastructure, distribution | 25% | Immediate |
+| Logistics Partner | 3PL, warehousing, fulfillment operations | 10% | 12-month cliff, 24-month vest |
+| Reserve Pool | Future co-investors, advisors, strategic partners | 5% | Board discretion |
+
+Adjust percentages based on: product complexity, manufacturing capital required, IP strength, and market readiness indicated in the brief.
+
+### 3. Royalty Structure
+- **Manufacturing Program Royalty**: X% of net sales flows back to the Manufacturing Program fund. This funds future pilot programs, warehousing expansion, and new inventor onboarding. Default: 8% of net sales.
+- **Inventor Royalty**: Y% of net sales retained by inventor above and beyond equity. Default: 5% of net sales.
+- Clearly state what "net sales" means (gross revenue minus returns, chargebacks, and sales tax).
+
+### 4. Unit Economics
+| Metric | Value |
+|---|---|
+| Suggested Retail Price | $X.XX |
+| Estimated Unit Cost (BOM + assembly + logistics) | $X.XX |
+| Gross Margin per Unit | $X.XX (XX%) |
+| Manufacturing Program royalty per unit | $X.XX |
+| Inventor royalty per unit | $X.XX |
+| Net to equity pool per unit | $X.XX |
+
+Base unit cost on the BOM entries in the ideation brief. Add 35% for assembly labor, 15% for logistics/shipping, 10% for returns reserve.
+
+### 5. Pilot Program Terms
+- Minimum pilot batch: X units (minimum 500, recommend 1,000 for electronics)
+- Pilot geography: target region based on product type
+- Pilot duration: X weeks
+- Go/no-go criteria for full production unlock
+
+### 6. Intellectual Property Terms
+- IP remains owned by the inventor
+- Eustress Manufacturing Program receives an exclusive manufacturing license for the pilot period
+- License converts to non-exclusive after pilot if production targets are met
+- Patent filing costs split 50/50 between inventor and Manufacturing Program
+
+### 7. Governance
+- Product decisions during pilot: inventor has final say
+- Manufacturing decisions: Eustress Manufacturing Program has final say
+- Pricing decisions: joint approval required
+- Dispute resolution: binding arbitration, jurisdiction: [TBD by parties]
+
+### 8. Exit Terms
+- Inventor buyout: inventor may buy out Manufacturing Program stake at 3× invested capital after 24 months
+- Manufacturing Program exit: may sell stake to pre-approved third parties with inventor right-of-first-refusal
+
+Output ONLY the DEAL_STRUCTURE.md content. No preamble. No explanation. Use realistic numbers from the BOM and product specs in the brief.
+"#;
+
+/// System prompt for LOGISTICS_PLAN.md generation
+const LOGISTICS_PLAN_SYSTEM_PROMPT: &str = r#"You are a logistics and supply chain planner for the Eustress Manufacturing Program.
+
+Given the ideation brief (TOML), generate a LOGISTICS_PLAN.md covering the full logistics pipeline from pilot through production: pilot program design, warehousing strategy, fulfillment operations, and regulatory requirements.
+
+## What LOGISTICS_PLAN.md must contain:
+
+### 1. Phase Overview
+A three-phase timeline table:
+| Phase | Name | Duration | Units | Goal |
+|---|---|---|---|---|
+| Phase 1 | Pilot | 12 weeks | 500–1,000 | Validate market fit, gather telemetry |
+| Phase 2 | Limited Production | 6 months | 5,000–10,000 | Optimize fulfillment, reduce unit cost |
+| Phase 3 | Full Production | Ongoing | 10,000+/mo | Scale with demand signals |
+
+### 2. Pilot Program Design
+- **Batch size**: Recommend based on product type and BOM cost
+- **Target segment**: Specific customer profile (job title, industry, use case)
+- **Distribution channels**: Direct DTC, Amazon, specialty retailers, B2B
+- **Launch approach**: Pre-order campaign, waitlist, beta program, or direct sale
+- **Feedback collection**: In-app telemetry (if IoT product), surveys, interviews, return analysis
+- **Success criteria**: Specific measurable go/no-go gates (e.g., "<5% return rate", ">4.2 stars average", ">80% repurchase intent")
+- **Kill conditions**: When to stop the pilot and redesign
+
+### 3. Warehousing Strategy
+Recommend a warehousing model based on product characteristics:
+- **Model options**: 3PL (ShipBob, Flexport), Amazon FBA, own warehouse, consignment
+- **Primary recommendation** with justification
+- **Geographic nodes**: Which regions need stock (based on pilot geography)
+- **Inventory parameters**:
+  - Safety stock level
+  - Reorder point (units)
+  - Reorder quantity (economic order quantity calculation)
+  - Lead time from manufacturer to warehouse
+- **Storage requirements**: Temperature, humidity, hazmat if applicable
+- **Estimated monthly warehousing cost** per SKU
+
+### 4. Fulfillment Operations
+- **Primary fulfillment partner** with justification
+- **Backup partner** for redundancy
+- **Shipping speeds offered**: Standard / Express / Overnight with carrier
+- **Ship-to countries** for pilot vs full production
+- **Average order fulfillment cost** (pick + pack + ship)
+- **Returns/RMA process**: How returns are handled, restocked, or disposed
+
+### 5. Supply Chain Risk Assessment
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Component shortage | Medium | High | Dual-source critical BOM parts |
+| Manufacturer delay | Low | High | 8-week buffer stock maintained |
+| Customs delay | Low | Medium | Incoterms DDP for key markets |
+| Demand spike | Medium | Medium | Pre-negotiated surge capacity with 3PL |
+
+### 6. Regulatory and Customs
+- Import classifications (HTS codes) for target markets
+- Required certifications before shipping (FCC, CE, RoHS, etc. — infer from product type)
+- Country-of-origin documentation requirements
+- Any restricted goods considerations
+
+### 7. Technology Stack
+- Order management system recommendation
+- Inventory tracking method (barcode, RFID, IoT serial — match to product)
+- Integration with Eustress Workshop telemetry feed for IoT products
+- Customer-facing tracking portal
+
+### 8. Cost Summary Table
+| Cost Category | Pilot (per unit) | Production (per unit) |
+|---|---|---|
+| Manufacturing | $X.XX | $X.XX |
+| Inbound freight | $X.XX | $X.XX |
+| Warehousing (allocated) | $X.XX | $X.XX |
+| Pick + pack | $X.XX | $X.XX |
+| Outbound shipping | $X.XX | $X.XX |
+| Returns reserve | $X.XX | $X.XX |
+| **Total landed cost** | **$X.XX** | **$X.XX** |
+
+Base all costs on the BOM unit cost from the ideation brief. Inbound freight: 8% of unit cost. Warehousing: $0.50/unit/month. Pick+pack: $2.50 standard. Outbound shipping: $5–8 domestic.
+
+Output ONLY the LOGISTICS_PLAN.md content. No preamble. No explanation. Use realistic numbers derived from the product BOM and specs.
+"#;
 
 /// Append a catalog entry to a Products.md file at the given path (create if not exists)
 fn append_catalog_entry_to(catalog_path: &PathBuf, entry: &str) {

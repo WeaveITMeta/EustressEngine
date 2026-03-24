@@ -338,6 +338,11 @@ pub fn ProjectsPage() -> impl IntoView {
                 </Show>
             </section>
             
+            // API Keys Section (for signed-in users)
+            <Show when=move || app_state.is_authenticated.get()>
+                <ApiKeysSection />
+            </Show>
+            
             // AI Training Portal Section
             <section class="ai-training-section">
                 <div class="ai-section-header">
@@ -525,5 +530,332 @@ fn format_number(n: u64) -> String {
         format!("{:.1}K", n as f64 / 1_000.0)
     } else {
         n.to_string()
+    }
+}
+
+// -----------------------------------------------------------------------------
+// API Keys Section Component
+// -----------------------------------------------------------------------------
+
+/// API key data from backend
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ApiKeyData {
+    pub id: String,
+    pub name: String,
+    pub key_prefix: String,
+    pub key_type: String,
+    pub created_at: String,
+    pub last_used: Option<String>,
+    pub usage_count: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ApiKeysResponse {
+    pub keys: Vec<ApiKeyData>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct CreateKeyResponse {
+    pub id: String,
+    pub name: String,
+    pub key: String,
+    pub key_type: String,
+}
+
+/// API Keys management section for signed-in users.
+#[component]
+fn ApiKeysSection() -> impl IntoView {
+    let app_state = expect_context::<AppState>();
+    
+    // State
+    let api_keys = RwSignal::new(Vec::<ApiKeyData>::new());
+    let is_loading = RwSignal::new(true);
+    let show_create_modal = RwSignal::new(false);
+    let new_key_name = RwSignal::new(String::new());
+    let new_key_type = RwSignal::new("datastore".to_string());
+    let newly_created_key = RwSignal::new(None::<String>);
+    let copied_key_id = RwSignal::new(None::<String>);
+    
+    // Fetch API keys on mount
+    let api_url = app_state.api_url.clone();
+    Effect::new(move |_| {
+        let api_url = api_url.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let client = ApiClient::new(&api_url);
+            match client.get::<ApiKeysResponse>("/api/keys").await {
+                Ok(response) => {
+                    api_keys.set(response.keys);
+                }
+                Err(e) => {
+                    log::warn!("Failed to fetch API keys: {:?}", e);
+                }
+            }
+            is_loading.set(false);
+        });
+    });
+    
+    // Create new key handler
+    let create_key = move |_| {
+        let api_url = app_state.api_url.clone();
+        let name = new_key_name.get();
+        let key_type = new_key_type.get();
+        
+        wasm_bindgen_futures::spawn_local(async move {
+            let client = ApiClient::new(&api_url);
+            let body = serde_json::json!({
+                "name": name,
+                "key_type": key_type
+            });
+            
+            match client.post::<CreateKeyResponse>("/api/keys", &body).await {
+                Ok(response) => {
+                    newly_created_key.set(Some(response.key.clone()));
+                    // Refresh keys list
+                    if let Ok(keys_response) = client.get::<ApiKeysResponse>("/api/keys").await {
+                        api_keys.set(keys_response.keys);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to create API key: {:?}", e);
+                }
+            }
+        });
+    };
+    
+    // Copy key to clipboard
+    let copy_to_clipboard = move |key: String, key_id: String| {
+        if let Some(window) = web_sys::window() {
+            if let Some(navigator) = window.navigator().clipboard() {
+                let _ = navigator.write_text(&key);
+                copied_key_id.set(Some(key_id));
+                // Reset after 2 seconds
+                let copied_signal = copied_key_id;
+                wasm_bindgen_futures::spawn_local(async move {
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    copied_signal.set(None);
+                });
+            }
+        }
+    };
+    
+    view! {
+        <section class="api-keys-section">
+            <div class="section-header">
+                <div class="header-content">
+                    <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+                    </svg>
+                    <div>
+                        <h2>"API Keys"</h2>
+                        <p>"Manage your API keys for DataStoreService, HttpService, and AI Training"</p>
+                    </div>
+                </div>
+                <button 
+                    class="btn-create-key"
+                    on:click=move |_| {
+                        new_key_name.set(String::new());
+                        newly_created_key.set(None);
+                        show_create_modal.set(true);
+                    }
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    "Create Key"
+                </button>
+            </div>
+            
+            <Show when=move || is_loading.get()>
+                <div class="keys-loading">
+                    <div class="spinner"></div>
+                    "Loading API keys..."
+                </div>
+            </Show>
+            
+            <Show when=move || !is_loading.get() && api_keys.get().is_empty()>
+                <div class="keys-empty">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+                    </svg>
+                    <p>"No API keys yet. Create one to use DataStoreService or HttpService in your scripts."</p>
+                </div>
+            </Show>
+            
+            <Show when=move || !is_loading.get() && !api_keys.get().is_empty()>
+                <div class="keys-table">
+                    <div class="keys-header">
+                        <span class="col-name">"Name"</span>
+                        <span class="col-type">"Type"</span>
+                        <span class="col-key">"Key"</span>
+                        <span class="col-usage">"Usage"</span>
+                        <span class="col-created">"Created"</span>
+                        <span class="col-actions">"Actions"</span>
+                    </div>
+                    <For
+                        each=move || api_keys.get()
+                        key=|key| key.id.clone()
+                        children=move |key| {
+                            let key_id = key.id.clone();
+                            let key_id2 = key.id.clone();
+                            let key_prefix = key.key_prefix.clone();
+                            view! {
+                                <div class="key-row">
+                                    <span class="col-name">{key.name.clone()}</span>
+                                    <span class="col-type">
+                                        <span class="key-type-badge" class:datastore=key.key_type == "datastore" class:http=key.key_type == "http" class:ai=key.key_type == "ai">
+                                            {key.key_type.clone()}
+                                        </span>
+                                    </span>
+                                    <span class="col-key">
+                                        <code class="key-preview">{format!("{}...", key_prefix)}</code>
+                                    </span>
+                                    <span class="col-usage">{format_number(key.usage_count)}</span>
+                                    <span class="col-created">{key.created_at.clone()}</span>
+                                    <span class="col-actions">
+                                        <button 
+                                            class="action-icon"
+                                            title="Revoke Key"
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="3 6 5 6 21 6"/>
+                                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                            </svg>
+                                        </button>
+                                    </span>
+                                </div>
+                            }
+                        }
+                    />
+                </div>
+            </Show>
+            
+            // Create Key Modal
+            <Show when=move || show_create_modal.get()>
+                <div class="modal-overlay" on:click=move |_| show_create_modal.set(false)>
+                    <div class="modal-content" on:click=|e| e.stop_propagation()>
+                        <div class="modal-header">
+                            <h3>"Create API Key"</h3>
+                            <button class="modal-close" on:click=move |_| show_create_modal.set(false)>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="6" x2="6" y2="18"/>
+                                    <line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <Show when=move || newly_created_key.get().is_some()>
+                            <div class="key-created-success">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                                    <polyline points="22 4 12 14.01 9 11.01"/>
+                                </svg>
+                                <p>"Key created! Copy it now — you won't see it again."</p>
+                                <div class="key-display">
+                                    <code>{move || newly_created_key.get().unwrap_or_default()}</code>
+                                    <button 
+                                        class="copy-btn"
+                                        on:click=move |_| {
+                                            if let Some(key) = newly_created_key.get() {
+                                                copy_to_clipboard(key, "new".to_string());
+                                            }
+                                        }
+                                    >
+                                        <Show 
+                                            when=move || copied_key_id.get() == Some("new".to_string())
+                                            fallback=|| view! {
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                                </svg>
+                                            }
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <polyline points="20 6 9 17 4 12"/>
+                                            </svg>
+                                        </Show>
+                                    </button>
+                                </div>
+                                <button class="btn-done" on:click=move |_| show_create_modal.set(false)>
+                                    "Done"
+                                </button>
+                            </div>
+                        </Show>
+                        
+                        <Show when=move || newly_created_key.get().is_none()>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label>"Key Name"</label>
+                                    <input 
+                                        type="text"
+                                        placeholder="e.g., Production DataStore"
+                                        prop:value=move || new_key_name.get()
+                                        on:input=move |e| new_key_name.set(event_target_value(&e))
+                                    />
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label>"Key Type"</label>
+                                    <div class="key-type-options">
+                                        <button 
+                                            class="type-option"
+                                            class:selected=move || new_key_type.get() == "datastore"
+                                            on:click=move |_| new_key_type.set("datastore".to_string())
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                                                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                                                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                                            </svg>
+                                            <span>"DataStore"</span>
+                                            <small>"AWS DynamoDB persistence"</small>
+                                        </button>
+                                        <button 
+                                            class="type-option"
+                                            class:selected=move || new_key_type.get() == "http"
+                                            on:click=move |_| new_key_type.set("http".to_string())
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <circle cx="12" cy="12" r="10"/>
+                                                <line x1="2" y1="12" x2="22" y2="12"/>
+                                                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                                            </svg>
+                                            <span>"HttpService"</span>
+                                            <small>"External API requests"</small>
+                                        </button>
+                                        <button 
+                                            class="type-option"
+                                            class:selected=move || new_key_type.get() == "ai"
+                                            on:click=move |_| new_key_type.set("ai".to_string())
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                                                <path d="M2 17l10 5 10-5"/>
+                                                <path d="M2 12l10 5 10-5"/>
+                                            </svg>
+                                            <span>"AI Training"</span>
+                                            <small>"Spatial data export"</small>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="modal-footer">
+                                <button class="btn-cancel" on:click=move |_| show_create_modal.set(false)>
+                                    "Cancel"
+                                </button>
+                                <button 
+                                    class="btn-create"
+                                    disabled=move || new_key_name.get().is_empty()
+                                    on:click=create_key
+                                >
+                                    "Create Key"
+                                </button>
+                            </div>
+                        </Show>
+                    </div>
+                </div>
+            </Show>
+        </section>
     }
 }

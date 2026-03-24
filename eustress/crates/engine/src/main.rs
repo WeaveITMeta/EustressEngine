@@ -58,6 +58,8 @@ mod simulation;         // Tick-based simulation with time compression
 mod toolbox;            // Toolbox mesh insertion system
 mod txt_to_toml_watcher; // Automatic .txt to .toml converter
 mod workshop;           // Workshop Panel (System 0: Ideation)
+mod manufacturing;      // Manufacturing Program: investor + manufacturer registry + AI allocation
+mod frame_diagnostics;  // Frame time tracking to identify stutters
 
 mod plugins;
 mod shaders;
@@ -196,6 +198,11 @@ fn main() {
         .add_plugins(txt_to_toml_watcher::TxtToTomlWatcherPlugin)
         // Space file loader (dynamic file-system-first loading)
         .add_plugins(SpaceFileLoaderPlugin)
+        // Instance streaming (three-tier: Cold disk → Hot RAM → Active ECS)
+        .add_plugins(eustress_common::streaming::StreamingPlugin {
+            config: eustress_common::streaming::StreamingConfig::default(),
+            instances_dir: space::default_space_root().join("Workspace"),
+        })
         // Toolbox (mesh insertion system)
         .add_plugins(toolbox::ToolboxPlugin)
         // Camera controls
@@ -268,7 +275,9 @@ fn main() {
         // Startup
         .add_plugins(StartupPlugin)
         // Studio plugins
-        .add_plugins(studio_plugins::StudioPluginSystem);
+        .add_plugins(studio_plugins::StudioPluginSystem)
+        // Frame diagnostics to identify stutters
+        .add_plugins(frame_diagnostics::FrameDiagnosticsPlugin);
         
     // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]

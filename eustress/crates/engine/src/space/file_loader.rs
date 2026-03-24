@@ -391,6 +391,7 @@ pub fn spawn_file_entry(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     registry: &mut ResMut<SpaceFileRegistry>,
     material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
+    mesh_cache: &mut ResMut<super::instance_loader::PrimitiveMeshCache>,
     space_path: &Path,
     file_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -457,6 +458,7 @@ pub fn spawn_file_entry(
                             asset_server,
                             materials,
                             material_registry,
+                            mesh_cache,
                             file_meta.path.clone(),
                             instance,
                         );
@@ -690,6 +692,7 @@ pub fn spawn_directory_entry(
     materials: &mut ResMut<Assets<StandardMaterial>>,
     registry: &mut ResMut<SpaceFileRegistry>,
     material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
+    mesh_cache: &mut ResMut<super::instance_loader::PrimitiveMeshCache>,
     space_path: &Path,
     dir_meta: &FileMetadata,
     parent_entity: Option<Entity>,
@@ -726,14 +729,14 @@ pub fn spawn_directory_entry(
                         FileType::Directory => {
                             spawn_directory_entry(
                                 commands, asset_server, meshes, materials, registry,
-                                material_registry, space_path, child, Some(service_entity),
+                                material_registry, mesh_cache, space_path, child, Some(service_entity),
                                 class_defaults,
                             );
                         }
                         _ => {
                             spawn_file_entry(
                                 commands, asset_server, meshes, materials, registry,
-                                material_registry, space_path, child, Some(service_entity),
+                                material_registry, mesh_cache, space_path, child, Some(service_entity),
                                 class_defaults,
                             );
                         }
@@ -833,14 +836,14 @@ pub fn spawn_directory_entry(
             FileType::Directory => {
                 spawn_directory_entry(
                     commands, asset_server, meshes, materials, registry,
-                    material_registry, space_path, child, Some(folder_entity),
+                    material_registry, mesh_cache, space_path, child, Some(folder_entity),
                     class_defaults,
                 );
             }
             _ => {
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
-                    material_registry, space_path, child, Some(folder_entity),
+                    material_registry, mesh_cache, space_path, child, Some(folder_entity),
                     class_defaults,
                 );
             }
@@ -856,6 +859,7 @@ pub fn load_space_files_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut registry: ResMut<SpaceFileRegistry>,
     mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
 ) {
@@ -877,7 +881,7 @@ pub fn load_space_files_system(
             FileType::Directory => {
                 spawn_directory_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
                     cd_ref,
                 );
             }
@@ -885,7 +889,7 @@ pub fn load_space_files_system(
             _ => {
                 spawn_file_entry(
                     &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, space_path, entry, None,
+                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
                     cd_ref,
                 );
             }
@@ -904,6 +908,7 @@ impl Plugin for SpaceFileLoaderPlugin {
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
             .init_resource::<super::material_loader::MaterialRegistry>()
+            .init_resource::<super::instance_loader::PrimitiveMeshCache>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .add_systems(Startup, (
