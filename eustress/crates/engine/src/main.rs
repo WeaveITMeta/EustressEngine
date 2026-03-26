@@ -5,9 +5,17 @@ use bevy::prelude::*;
 #[allow(unused_imports)]
 use bevy::render::RenderPlugin;
 use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras};
+use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
+
+#[cfg(feature = "iggy-streaming")]
+use std::sync::Arc;
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::iggy_queue::{IggyConfig, IggyPlugin};
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_stream::SimStreamWriter;
 
 mod auth;
 mod terrain_plugin;
@@ -157,6 +165,9 @@ fn main() {
                         ..default()
                     }
                 ),
+                // Compile all shader pipelines synchronously to prevent mid-session
+                // GPU pipeline stall stutters (750ms spikes visible in frame diagnostics)
+                synchronous_pipeline_compilation: true,
                 ..default()
             })
             .set(AssetPlugin {
@@ -164,6 +175,13 @@ fn main() {
                 ..default()
             })
         )
+        // Diagnostic plugins for FPS and performance profiling
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(EntityCountDiagnosticsPlugin::default())
+        .add_plugins(LogDiagnosticsPlugin {
+            wait_duration: std::time::Duration::from_secs(5),
+            ..default()
+        })
         // Register GLTF types for scene spawning (prevents panic on unregistered types)
         .register_type::<GltfExtras>()
         .register_type::<GltfSceneExtras>()
@@ -177,6 +195,7 @@ fn main() {
         .add_plugins(NotificationPlugin)
         // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
         .add_plugins(UndoPlugin)
+        // (Iggy streaming registered below — cfg-block required, not inline chain)
         // Play mode (must be before SlintUiPlugin which uses PlayModeState)
         .add_plugins(PlayModePlugin)
         // Slint UI (software renderer overlay)
@@ -284,9 +303,58 @@ fn main() {
     {
         app.add_systems(Update, part_selection::part_selection_system);
     }
-    
+
+    // Iggy streaming — must use a separate block because #[cfg] cannot gate
+    // individual method calls inside a builder chain.
+    #[cfg(feature = "iggy-streaming")]
+    {
+        app.add_plugins(IggyPlugin);
+        app.add_systems(Startup, setup_sim_stream_writer);
+    }
+
     app.run();
     
     println!("✅ Eustress Engine closed gracefully");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Iggy SimStreamWriter — one persistent connection, shared via Arc<Resource>
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bevy Resource wrapper so `Arc<SimStreamWriter>` can be stored in ECS.
+#[cfg(feature = "iggy-streaming")]
+#[derive(Resource)]
+pub struct SimWriterResource(pub Arc<SimStreamWriter>);
+
+/// Startup system: connect `SimStreamWriter` once and insert as a Bevy Resource.
+///
+/// Task 10 call sites (`run_simulation`, `process_feedback`, `execute_and_apply`)
+/// read `Option<Res<SimWriterResource>>` and pass `Some(writer.0.clone())` to the
+/// `publish_*_sync` helpers, replacing the `None` fallback connect.
+///
+/// Silently skipped if Iggy is unavailable — engine continues without streaming.
+#[cfg(feature = "iggy-streaming")]
+fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<IggyConfig>>) {
+    let cfg = config.map(|c| c.clone()).unwrap_or_default();
+
+    let result = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("sim writer rt");
+        rt.block_on(SimStreamWriter::connect(&cfg))
+    })
+    .join()
+    .unwrap_or_else(|_| Err("SimStreamWriter init thread panicked".to_string()));
+
+    match result {
+        Ok(writer) => {
+            info!("SimStreamWriter: persistent connection ready.");
+            commands.insert_resource(SimWriterResource(Arc::new(writer)));
+        }
+        Err(e) => {
+            warn!(
+                "SimStreamWriter: Iggy unavailable ({e}). \
+                 Simulation records will use fallback one-shot connects."
+            );
+        }
+    }
 }
 

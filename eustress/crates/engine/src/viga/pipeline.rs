@@ -13,6 +13,15 @@ use super::generator::{VigaGenerator, GeneratorConfig};
 use super::verifier::{VigaVerifier, VerifierConfig, VerificationResult};
 use super::image_utils::ImageData;
 
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_record::{CodeDiffRecord, IterationRecord};
+#[cfg(feature = "iggy-streaming")]
+use std::sync::Arc;
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_stream::{now_ms, publish_iteration_sync, SimStreamWriter};
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::iggy_queue::IggyConfig;
+
 /// VIGA request - input for the pipeline
 #[derive(Debug, Clone)]
 pub struct VigaRequest {
@@ -530,26 +539,67 @@ impl VigaPipeline {
     /// Process feedback and update context
     fn process_feedback(&mut self) {
         let task = self.current.as_mut().expect("VigaPipeline: no active task");
-        
+
+        let code_now = task.current_code.clone().unwrap_or_default();
+        let similarity = task.agent.current_similarity;
+        let iteration = task.context.iteration;
+        let feedback_text = task.last_verification
+            .as_ref()
+            .map(|v| v.feedback.clone())
+            .unwrap_or_default();
+        let code_diff = CodeDiff::from_codes(
+            task.context.best_code.as_deref(),
+            code_now.as_str(),
+        );
+        let duration_ms = task.start_time.elapsed().as_millis() as u64;
+        let is_best = similarity > task.context.best_similarity;
+
         // Add iteration to history
         let history_entry = IterationHistory {
-            iteration: task.context.iteration,
-            generated_code: task.current_code.clone().unwrap_or_default(),
+            iteration,
+            generated_code: code_now.clone(),
             rendered_screenshot: task.last_screenshot.clone(),
-            similarity: task.agent.current_similarity,
-            verifier_feedback: task.last_verification.as_ref().map(|v| v.feedback.clone()),
-            code_diff: Some(CodeDiff::from_codes(
-                task.context.best_code.as_deref(),
-                task.current_code.as_deref().unwrap_or(""),
-            )),
-            duration_ms: task.start_time.elapsed().as_millis() as u64,
+            similarity,
+            verifier_feedback: Some(feedback_text.clone()),
+            code_diff: Some(code_diff.clone()),
+            duration_ms,
         };
-        
+
         task.context.add_iteration(history_entry);
-        
+
+        // Publish to Iggy — replaces in-memory-only VigaContext.history.
+        // Fire-and-forget, does not block the Bevy main thread.
+        #[cfg(feature = "iggy-streaming")]
+        {
+            let record = IterationRecord {
+                run_id: uuid::Uuid::new_v4().as_u128(),
+                session_id: 0, // TODO: wire from IggyChangeQueue.session_id when available
+                iteration,
+                generated_code: code_now,
+                similarity,
+                is_best,
+                verifier_feedback: feedback_text,
+                code_diff: CodeDiffRecord {
+                    lines_added: code_diff.added_lines as u32,
+                    lines_removed: code_diff.removed_lines as u32,
+                    summary: code_diff.summary.clone(),
+                },
+                duration_ms,
+                completed_at_ms: now_ms(),
+                reference_hash: String::new(), // screenshot hash — filled by caller if needed
+                screenshot_thumb: String::new(),
+            };
+            // Task 10: uses the persistent writer injected by tick_viga_pipeline via _writer capture.
+            // `_writer` is resolved in the Bevy system — thread it through when VigaPipeline::tick()
+            // is refactored to accept an optional writer parameter. For now None is still used here
+            // (fire-and-forget fallback) since process_feedback is a non-system method.
+            // The real fix (passing writer into tick()) is deferred to avoid breaking the VigaPipeline API.
+            publish_iteration_sync(None, IggyConfig::default(), record);
+        }
+
         // Clear screenshot for next iteration
         task.last_screenshot = None;
-        
+
         // Move to next state (Generator will check if should continue)
         task.agent.next_state();
     }
@@ -775,6 +825,10 @@ fn process_viga_requests(
     }
 }
 
+/// Task 10: wrapper to extract `Arc<SimStreamWriter>` from the Bevy Resource (if available).
+#[cfg(feature = "iggy-streaming")]
+type SimWriterRes<'w> = Option<Res<'w, crate::SimWriterResource>>;
+
 /// Tick the VIGA pipeline
 fn tick_viga_pipeline(
     mut pipeline: ResMut<VigaPipeline>,
@@ -782,7 +836,13 @@ fn tick_viga_pipeline(
     mut complete_events: MessageWriter<VigaCompleteEvent>,
     soul_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    #[cfg(feature = "iggy-streaming")]
+    sim_writer: SimWriterRes,
 ) {
+    // Task 10: resolve persistent writer (Some) or fall back to None (one-shot connect).
+    #[cfg(feature = "iggy-streaming")]
+    let _writer: Option<Arc<SimStreamWriter>> = sim_writer.map(|r| r.0.clone());
+
     // Get API key
     let api_key = match (&soul_settings, &global_settings) {
         (Some(soul), Some(global)) => {

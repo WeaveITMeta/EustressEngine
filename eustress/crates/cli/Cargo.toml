@@ -1,0 +1,58 @@
+[package]
+name = "eustress-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Headless CLI tool for Eustress Engine — agent-in-the-loop via Apache Iggy datastreams"
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "eustress"
+path = "src/main.rs"
+
+[dependencies]
+# Shared types + Iggy streaming + TOML materializer
+eustress-common = { path = "../common", features = ["iggy-streaming", "async-assets"] }
+
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Async runtime (full features for signal handling + fs)
+tokio = { version = "1", features = ["full"] }
+
+# Apache Iggy streaming SDK
+iggy = { workspace = true }
+
+# bytes — Iggy SDK payload type
+bytes = { version = "1.7" }
+
+# Zero-copy serialization for agent commands / observations
+rkyv = { workspace = true }
+
+# Serialization for config files
+serde = { workspace = true }
+toml = "0.8"
+serde_json = "1"
+
+# UUID for command IDs
+uuid = { workspace = true }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Colored terminal output
+colored = "2.1"
+
+# Terminal progress / spinners
+indicatif = "0.17"
+
+# Human-readable duration display
+humantime = "2.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+[features]
+default = []

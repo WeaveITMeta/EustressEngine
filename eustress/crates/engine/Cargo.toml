@@ -22,11 +22,14 @@ path = "src/bin/generate_benchmark_map.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["physics", "realism", "luau", "streaming"] }
+eustress-common = { path = "../common", features = ["physics", "realism", "luau", "streaming", "iggy-streaming"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
 # TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
 # eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
+
+# bevy_shader provides ShaderRef, used in MaterialExtension implementations (Bevy 0.18)
+bevy_shader = { version = "0.18", default-features = false }
 
 # Workspace dependencies (Bevy 0.18) - without audio to avoid windows conflicts
 bevy = { workspace = true, default-features = false, features = [
@@ -132,3 +135,5 @@ cef = ["bevy_cef"]
 webview = ["wry"]
 # Rune scripting with VM pooling and ECS bindings
 realism-scripting = []
+# Iggy streaming: simulation results, iteration history, Rune audit trail
+iggy-streaming = ["eustress-common/iggy-streaming"]

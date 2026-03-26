@@ -20,8 +20,8 @@ bevy = { workspace = true, default-features = false, features = [
     "multi_threaded",
 ] }
 
-# Shared types
-eustress-common = { path = "../common" }
+# Shared types (with Iggy streaming + async-assets for tokio)
+eustress-common = { path = "../common", features = ["iggy-streaming", "async-assets"] }
 
 # Runtime (character, physics, ownership)
 eustress-runtime = { path = "../runtime", default-features = false, features = ["networking"] }
@@ -40,6 +40,15 @@ uuid = { workspace = true }
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
+
+# Apache Iggy streaming
+iggy = { workspace = true }
+
+# bytes — Iggy SDK payload type
+bytes = { version = "1.7" }
+
+# Zero-copy delta serialization
+rkyv = { workspace = true }
 
 # Logging
 tracing = "0.1"

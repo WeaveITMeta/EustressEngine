@@ -21,6 +21,13 @@ use uuid::Uuid;
 
 use super::types::{BranchNode, BranchStatus, Evidence, Scenario};
 
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_record::{BranchPosterior, SimRecord};
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_stream::{publish_sim_result_sync, now_ms};
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::iggy_queue::IggyConfig;
+
 // ─────────────────────────────────────────────
 // 1. SimulationConfig
 // ─────────────────────────────────────────────
@@ -209,7 +216,7 @@ pub fn run_simulation(scenario: &mut Scenario, config: &SimulationConfig) -> Sim
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    SimulationResult {
+    let result = SimulationResult {
         config: config.clone(),
         total_samples: total,
         branch_hits,
@@ -217,7 +224,47 @@ pub fn run_simulation(scenario: &mut Scenario, config: &SimulationConfig) -> Sim
         leaf_distribution,
         duration_ms,
         completed_at: Utc::now(),
+    };
+
+    // Publish to Iggy history — replaces the removed bincode+zstd file cache.
+    // Fire-and-forget: does not block the simulation thread.
+    #[cfg(feature = "iggy-streaming")]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let uuid_to_pair = |id: Uuid| -> (u64, u64) {
+            let bytes = id.as_u128();
+            ((bytes >> 64) as u64, bytes as u64)
+        };
+        let (s_hi, s_lo) = uuid_to_pair(scenario.id);
+        let sim_record = SimRecord {
+            run_id: uuid::Uuid::new_v4().as_u128(),
+            scenario_id: ((s_hi as u128) << 64) | (s_lo as u128),
+            scenario_name: scenario.name.clone(),
+            seed: config.seed.unwrap_or(0),
+            total_samples: result.total_samples,
+            posteriors: scenario.branches.values().map(|b| {
+                let (bhi, blo) = uuid_to_pair(b.id);
+                BranchPosterior {
+                    uuid_hi: bhi,
+                    uuid_lo: blo,
+                    label: b.label.clone(),
+                    posterior: b.posterior,
+                    mc_hits: b.mc_hits,
+                    is_leaf: b.is_leaf(),
+                    is_pruned: b.status == BranchStatus::Collapsed,
+                }
+            }).collect(),
+            duration_ms: result.duration_ms,
+            completed_at_ms: now_ms(),
+            applied_bayesian: config.apply_bayesian,
+            applied_soft_prune: config.soft_prune,
+            session_seq: 0, // Caller may set a meaningful seq via wrapping helper
+        };
+        // None = fallback connect; replace with Some(writer) once Arc<SimStreamWriter> Resource is wired.
+        publish_sim_result_sync(None, IggyConfig::default(), sim_record);
     }
+
+    result
 }
 
 // ─────────────────────────────────────────────

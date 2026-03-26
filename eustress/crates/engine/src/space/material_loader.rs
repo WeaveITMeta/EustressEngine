@@ -1,12 +1,15 @@
 //! # Material Loader
 //!
-//! Parses `.mat.toml` files from MaterialService into Bevy `StandardMaterial` handles.
-//! Maintains a `MaterialRegistry` resource mapping material names to cached handles.
+//! Parses `.mat.toml` files from MaterialService into StandardMaterial handles.
+//! Materials are deduplicated by (preset, color, transparency, reflectance) so
+//! entities sharing identical visual properties share one GPU material handle,
+//! enabling Bevy to batch their draw calls.
 //!
 //! ## Resolution Order (for Parts)
 //! 1. MaterialRegistry — exact name match against loaded `.mat.toml` files
-//! 2. Material enum fallback — `Material::from_string()` for 18 built-in presets
-//! 3. Default — `Material::Plastic`
+//! 2. Deduplication cache — share handles for identical (preset, color, transparency)
+//! 3. Material enum fallback — `Material::from_string()` for 18 built-in presets
+//! 4. Default — `Material::Plastic`
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,127 +29,85 @@ pub struct MaterialDefinition {
     #[serde(default)]
     pub pbr: PbrProperties,
     #[serde(default)]
-    pub textures: TextureReferences,
+    pub textures: TextureProperties,
 }
 
-/// [material] section — name, preset, description
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// `[material]` section — name, preset, description
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MaterialMetadata {
-    /// Display name (defaults to filename stem if empty)
     #[serde(default)]
     pub name: String,
-    /// Optional preset — inherit PBR defaults from Material enum variant
     #[serde(default)]
     pub preset: Option<String>,
-    /// Human-readable description
     #[serde(default)]
     pub description: String,
-    /// Searchable tags
-    #[serde(default)]
-    pub tags: Vec<String>,
 }
 
-/// [pbr] section — scalar PBR properties for StandardMaterial
+/// `[pbr]` section — PBR visual properties
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PbrProperties {
-    /// Base color RGBA linear [0.0–1.0]
     #[serde(default = "default_base_color")]
     pub base_color: [f32; 4],
-    /// 0.0 = dielectric, 1.0 = metal
-    #[serde(default)]
-    pub metallic: Option<f32>,
-    /// 0.0 = mirror, 1.0 = matte
-    #[serde(default)]
     pub roughness: Option<f32>,
-    /// Fresnel reflectance at normal incidence
-    #[serde(default)]
+    pub metallic: Option<f32>,
     pub reflectance: Option<f32>,
-    /// Emissive color RGBA
-    #[serde(default)]
-    pub emissive: Option<[f32; 4]>,
-    /// "Opaque" | "Blend" | "Mask"
     #[serde(default = "default_alpha_mode")]
     pub alpha_mode: String,
-    /// Alpha cutoff for Mask mode
-    #[serde(default = "default_alpha_cutoff")]
+    #[serde(default)]
     pub alpha_cutoff: f32,
-    /// Index of refraction
-    #[serde(default)]
-    pub ior: Option<f32>,
-    /// Specular transmission (glass-like)
-    #[serde(default)]
-    pub specular_transmission: Option<f32>,
-    /// Diffuse transmission (thin translucent)
-    #[serde(default)]
-    pub diffuse_transmission: Option<f32>,
-    /// Transmission thickness
-    #[serde(default)]
-    pub thickness: Option<f32>,
-    /// Render both faces
     #[serde(default)]
     pub double_sided: bool,
-    /// Skip PBR lighting (for Neon-like glow)
     #[serde(default)]
     pub unlit: bool,
+    pub emissive: Option<[f32; 4]>,
+    pub ior: Option<f32>,
+    pub specular_transmission: Option<f32>,
+    pub diffuse_transmission: Option<f32>,
+    pub thickness: Option<f32>,
 }
 
-fn default_base_color() -> [f32; 4] {
-    [0.5, 0.5, 0.5, 1.0]
-}
-
-fn default_alpha_mode() -> String {
-    "Opaque".to_string()
-}
-
-fn default_alpha_cutoff() -> f32 {
-    0.5
-}
+fn default_base_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
+fn default_alpha_mode() -> String { "opaque".to_string() }
 
 impl Default for PbrProperties {
     fn default() -> Self {
         Self {
             base_color: default_base_color(),
-            metallic: None,
             roughness: None,
+            metallic: None,
             reflectance: None,
-            emissive: None,
             alpha_mode: default_alpha_mode(),
-            alpha_cutoff: default_alpha_cutoff(),
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            unlit: false,
+            emissive: None,
             ior: None,
             specular_transmission: None,
             diffuse_transmission: None,
             thickness: None,
-            double_sided: false,
-            unlit: false,
         }
     }
 }
 
-/// [textures] section — relative paths to texture image files
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TextureReferences {
-    /// Albedo / base color map
+/// `[textures]` section — optional PBR texture paths
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TextureProperties {
     #[serde(default)]
     pub base_color: String,
-    /// Normal map
     #[serde(default)]
     pub normal: String,
-    /// Combined metallic (B) / roughness (G) map (glTF convention)
     #[serde(default)]
     pub metallic_roughness: String,
-    /// Emissive map
     #[serde(default)]
     pub emissive: String,
-    /// Ambient occlusion map
     #[serde(default)]
     pub occlusion: String,
-    /// Depth / parallax / displacement map
     #[serde(default)]
     pub depth: String,
 }
 
 // ============================================================================
-// MaterialRegistry — central material cache resource
+// MaterialRegistry — central handle cache
 // ============================================================================
 
 /// Central cache mapping material names to Bevy material handles.
@@ -155,13 +116,12 @@ pub struct TextureReferences {
 pub struct MaterialRegistry {
     /// Name → loaded Bevy material handle
     materials: HashMap<String, Handle<StandardMaterial>>,
-    /// Name → parsed definition (for future property panel editing)
+    /// Name → parsed definition (for property panel editing)
     definitions: HashMap<String, MaterialDefinition>,
     /// Name → source .mat.toml path (for writeback and hot-reload)
     source_paths: HashMap<String, PathBuf>,
-    /// Deduplication cache: quantized material parameters → shared handle.
-    /// Entities with identical visual parameters share one GPU material,
-    /// enabling Bevy's automatic batching to merge draw calls.
+    /// Deduplication cache: share handles for identical visual properties.
+    /// Entities with the same color+preset share one GPU material → batched draws.
     dedup_cache: HashMap<MaterialCacheKey, Handle<StandardMaterial>>,
 }
 
@@ -182,13 +142,12 @@ struct MaterialCacheKey {
 }
 
 impl MaterialCacheKey {
-    /// Build a cache key from the same parameters resolve_material receives.
-    fn new(base_color: Color, preset_name: &str, transparency: f32, reflectance: f32) -> Self {
-        let srgba = base_color.to_srgba();
-        let r = (srgba.red.clamp(0.0, 1.0) * 255.0) as u32;
-        let g = (srgba.green.clamp(0.0, 1.0) * 255.0) as u32;
-        let b = (srgba.blue.clamp(0.0, 1.0) * 255.0) as u32;
-        let a = (srgba.alpha.clamp(0.0, 1.0) * 255.0) as u32;
+    fn new(color: Color, preset_name: &str, transparency: f32, reflectance: f32) -> Self {
+        let lin = LinearRgba::from(color);
+        let r = (lin.red.clamp(0.0, 1.0) * 255.0) as u32;
+        let g = (lin.green.clamp(0.0, 1.0) * 255.0) as u32;
+        let b = (lin.blue.clamp(0.0, 1.0) * 255.0) as u32;
+        let a = (lin.alpha.clamp(0.0, 1.0) * 255.0) as u32;
         Self {
             color_bits: (r << 24) | (g << 16) | (b << 8) | a,
             preset: preset_name.to_string(),
@@ -263,29 +222,18 @@ pub fn load_material_definition(path: &Path) -> Result<MaterialDefinition, Strin
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let mut definition: MaterialDefinition = toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-
-    // Default name to filename stem if not set
-    if definition.material.name.is_empty() {
-        definition.material.name = material_name_from_path(path);
-    }
-
-    Ok(definition)
+    toml::from_str::<MaterialDefinition>(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
 }
 
-/// Extract material name from a `.mat.toml` path.
-/// Example: `RustyMetal.mat.toml` → `"RustyMetal"`
+/// Extract a material name from its file path (stem before first dot).
 pub fn material_name_from_path(path: &Path) -> String {
-    path.file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("Unknown")
-        .strip_suffix(".mat.toml")
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-        })
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed")
+        .split('.')
+        .next()
+        .unwrap_or("unnamed")
         .to_string()
 }
 
@@ -399,14 +347,16 @@ fn load_texture(
         warn!("Texture not found: {:?} (referenced from material)", absolute_path);
         return None;
     }
-    // Convert to space-relative path for AssetServer
-    let space_relative = absolute_path
-        .strip_prefix(space_root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| absolute_path.to_string_lossy().replace('\\', "/"));
 
-    let asset_path = format!("space://{}", space_relative);
-    Some(asset_server.load(asset_path))
+    // Build a space:// relative path for the AssetServer
+    if let Ok(rel) = absolute_path.strip_prefix(space_root) {
+        let asset_path = format!("space://{}", rel.to_string_lossy().replace('\\', "/"));
+        Some(asset_server.load(asset_path))
+    } else {
+        // Fallback: use absolute path directly
+        let asset_path = absolute_path.to_string_lossy().into_owned();
+        Some(asset_server.load(asset_path))
+    }
 }
 
 // ============================================================================
@@ -416,8 +366,8 @@ fn load_texture(
 /// Resolve a material name to a `Handle<StandardMaterial>`.
 ///
 /// 1. Check `MaterialRegistry` for a loaded `.mat.toml` handle
-/// 2. Fall back to creating a `StandardMaterial` from the `Material` enum preset
-/// 3. Default to `Material::Plastic`
+/// 2. Check deduplication cache — share handles for identical visual properties
+/// 3. Fall back to creating a new material from the `Material` enum preset
 pub fn resolve_material(
     material_name: &str,
     registry: &mut MaterialRegistry,
@@ -431,17 +381,17 @@ pub fn resolve_material(
         return handle;
     }
 
-    // 2. Dedup cache lookup — return existing handle if same visual params
+    // 2. Dedup cache lookup — share handles for identical (preset, color, transparency)
     let cache_key = MaterialCacheKey::new(base_color, material_name, transparency, reflectance);
     if let Some(handle) = registry.dedup_cache.get(&cache_key) {
         return handle.clone();
     }
 
-    // 3. Enum fallback — create from Material preset scalars
+    // 3. Build a new material from preset
     let preset = PresetMaterial::from_string(material_name);
     let (roughness, metallic, preset_reflectance) = preset.pbr_params();
 
-    let alpha = base_color.alpha() * (1.0 - transparency);
+    let alpha = 1.0 - transparency;
     let mut mat = StandardMaterial {
         base_color: base_color.with_alpha(alpha),
         alpha_mode: if alpha < 1.0 { AlphaMode::Blend } else { AlphaMode::Opaque },
@@ -461,11 +411,12 @@ pub fn resolve_material(
 
     // Special handling for Neon — emissive glow
     if matches!(preset, PresetMaterial::Neon) {
-        mat.emissive = LinearRgba::from(base_color) * 2.0;
+        let lin = LinearRgba::from(base_color);
+        mat.emissive = lin * 2.0;
     }
 
     let handle = materials.add(mat);
-    // Cache for future entities with identical visual parameters
+    // Cache for future entities with identical properties
     registry.dedup_get_or_insert(cache_key, handle)
 }
 
@@ -498,24 +449,10 @@ pub fn spawn_material_entity(
     };
 
     commands.spawn((
-        eustress_common::classes::Instance {
-            name: name.clone(),
-            class_name: eustress_common::classes::ClassName::Folder, // Use Folder until MaterialDefinition ClassName is added
-            archivable: true,
-            id: 0,
-            ai: false,
-        },
+        Name::new(name.clone()),
         MaterialDefinitionComponent {
-            name: name.clone(),
-            source_path: path.clone(),
+            name,
+            source_path: path,
         },
-        super::file_loader::LoadedFromFile {
-            path: path.clone(),
-            file_type: super::file_loader::FileType::Material,
-            service: "MaterialService".to_string(),
-        },
-        Name::new(name),
-        Transform::default(),
-        Visibility::default(),
     )).id()
 }

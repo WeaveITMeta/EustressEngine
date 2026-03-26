@@ -8,7 +8,7 @@
 //   4. Space open (folder picker → scan + load instances)
 //   5. TOML serialization helpers
 //   6. Simulation readiness (simulation.toml scaffolding)
-//   7. Binary cache validation
+//   7. (Cache removed)
 // ============================================================================
 
 use std::path::{Path, PathBuf};
@@ -82,11 +82,6 @@ pub struct ScaffoldResult {
 /// │   ├── package-index.toml
 /// │   ├── publish.toml
 /// │   ├── publish-journal.toml
-/// │   └── cache/          (gitignored)
-/// │       ├── blobs/
-/// │       ├── packages/
-/// │       ├── staging/
-/// │       └── recordings/
 /// ├── .eustress/local/
 /// ├── Workspace/
 /// │   ├── _service.toml
@@ -117,11 +112,6 @@ pub fn scaffold_new_space(
 
     // ── Top-level directories ──────────────────────────────────────────────
     create_dir_all(&space_root)?;
-    create_dir_all(&space_root.join(".eustress").join("cache"))?;
-    create_dir_all(&space_root.join(".eustress").join("cache").join("blobs"))?;
-    create_dir_all(&space_root.join(".eustress").join("cache").join("packages"))?;
-    create_dir_all(&space_root.join(".eustress").join("cache").join("staging"))?;
-    create_dir_all(&space_root.join(".eustress").join("cache").join("recordings"))?;
     create_dir_all(&space_root.join(".eustress").join("local"))?;
     create_dir_all(&space_root.join("src"))?;
 
@@ -702,10 +692,6 @@ pub fn new_space(world: &mut World) {
 
 fn ensure_manifest_set(space_root: &Path, preferred_name: Option<&str>, preferred_author: Option<&str>) {
     let project_dir = space_root.join(".eustress");
-    let _ = std::fs::create_dir_all(project_dir.join("cache").join("blobs"));
-    let _ = std::fs::create_dir_all(project_dir.join("cache").join("packages"));
-    let _ = std::fs::create_dir_all(project_dir.join("cache").join("staging"));
-    let _ = std::fs::create_dir_all(project_dir.join("cache").join("recordings"));
     let _ = std::fs::create_dir_all(project_dir.join("local"));
 
     let now = Utc::now().to_rfc3339();
@@ -778,7 +764,7 @@ auto_start = false\n\
 \n\
 [simulation.recording]\n\
 enabled = false\n\
-output_dir = \".eustress/cache/recordings\"\n\
+output_dir = \".eustress/local/recordings\"\n\
 format = \"both\"\n\
 auto_export = false\n\
 \n\
@@ -963,8 +949,7 @@ haze = 0.0
 }
 
 const GITIGNORE: &str = r#"# Eustress — gitignore
-# Derived / ephemeral data — fully rebuildable, never commit
-.eustress/cache/
+# User-local state — not committed
 .eustress/local/
 
 # OS artifacts
@@ -977,46 +962,7 @@ target/
 "#;
 
 // ============================================================================
-// 7. Binary cache validation
-// ============================================================================
-
-/// Verify that the .eustress/cache directory exists and is writable.
-/// Creates it if missing. Returns true if ready for simulation use.
-pub fn validate_cache_dir(space_root: &Path) -> bool {
-    let cache_dir = space_root.join(".eustress").join("cache");
-    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-        error!("❌ Cannot create cache directory {:?}: {}", cache_dir, e);
-        return false;
-    }
-    // Write a sentinel file to confirm write access
-    let sentinel = cache_dir.join(".write_test");
-    match std::fs::write(&sentinel, b"ok") {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&sentinel);
-            true
-        }
-        Err(e) => {
-            error!("❌ Cache directory not writable {:?}: {}", cache_dir, e);
-            false
-        }
-    }
-}
-
-/// Invalidate the mesh cache for a specific file (forces re-derive on next load).
-pub fn invalidate_mesh_cache(space_root: &Path, relative_path: &Path) {
-    let cache_path = space_root
-        .join(".eustress")
-        .join("cache")
-        .join(relative_path)
-        .with_extension("cache");
-    if cache_path.exists() {
-        if let Err(e) = std::fs::remove_file(&cache_path) {
-            warn!("Failed to invalidate cache {:?}: {}", cache_path, e);
-        } else {
-            debug!("🗑️ Cache invalidated: {:?}", cache_path);
-        }
-    }
-}
+// 7. (Cache removed — Bevy World is the sole runtime source of truth)
 
 // ============================================================================
 // Utilities

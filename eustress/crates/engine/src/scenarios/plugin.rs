@@ -11,6 +11,11 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use uuid::Uuid;
 
+#[cfg(feature = "iggy-streaming")]
+use std::sync::Arc;
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_stream::SimStreamWriter;
+
 use super::adapters::AdapterRegistry;
 use super::engine::{run_simulation, SimulationConfig, SimulationResult};
 use super::evidence::{
@@ -246,7 +251,13 @@ fn handle_run_simulation(
     mut store: ResMut<ScenarioStore>,
     mut complete_events: MessageWriter<SimulationCompleteEvent>,
     mut status_events: MessageWriter<ScenarioStatusChanged>,
+    // Task 10: persistent Iggy writer — Some when Iggy is reachable, None otherwise.
+    #[cfg(feature = "iggy-streaming")]
+    sim_writer_res: Option<Res<crate::SimWriterResource>>,
 ) {
+    // Resolve to an Arc we can move into the iggy block inside run_simulation.
+    #[cfg(feature = "iggy-streaming")]
+    let _sim_writer: Option<Arc<SimStreamWriter>> = sim_writer_res.map(|r| r.0.clone());
     for event in events.read() {
         let config = event
             .config

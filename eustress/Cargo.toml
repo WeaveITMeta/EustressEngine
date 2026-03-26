@@ -19,6 +19,7 @@ members = [
     "crates/geo",
     "crates/texture-gen",
     "crates/workshop",
+    "crates/cli",
     "benches/instance-capacity"
 ]
 
@@ -67,6 +68,15 @@ avian3d = { version = "0.6", default-features = false, features = ["3d", "f32", 
 
 # Luau scripting runtime (Roblox Luau via mlua)
 mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
+
+# Apache Iggy — Rust-native 1M+ msg/s append-only streaming platform
+iggy = { version = "0.9", default-features = false, features = ["tokio-runtime"] }
+
+# bytes — shared buffer type used by Iggy SDK payloads
+bytes = "1.7"
+
+# Zero-copy serialization for ECS scene deltas (rkyv 0.8)
+rkyv = { version = "0.8", features = ["std"] }
 
 [profile.dev]
 opt-level = 2

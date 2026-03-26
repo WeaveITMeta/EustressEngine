@@ -21,6 +21,21 @@
 pub mod adornments;
 pub mod assets;
 pub mod attributes;
+// Iggy streaming: scene delta types (always available — rkyv is non-optional)
+pub mod iggy_delta;
+// Iggy streaming: Bevy Resource + producer/consumer tasks (feature-gated)
+#[cfg(feature = "iggy-streaming")]
+pub mod iggy_queue;
+// Iggy streaming: background TOML materializer (feature-gated)
+#[cfg(feature = "iggy-streaming")]
+pub mod toml_materializer;
+// Simulation record types — rkyv payload structs for all simulation data
+// (always available — rkyv is non-optional; replaces removed file cache)
+pub mod sim_record;
+// Simulation stream — Iggy read/write for SimRecord, IterationRecord, RuneScriptRecord
+// and WorkshopIterationRecord (feature-gated: requires iggy + tokio + bytes)
+#[cfg(feature = "iggy-streaming")]
+pub mod sim_stream;
 pub mod classes;
 pub mod default_scene;
 pub mod eustress_format;

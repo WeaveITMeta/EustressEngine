@@ -16,7 +16,7 @@ noise = "0.9"
 sha2 = "0.10"
 bs58 = "0.5"
 dashmap = "6.1"
-tokio = { version = "1.42", features = ["fs", "sync"], optional = true }
+tokio = { version = "1.42", features = ["fs", "sync", "rt", "rt-multi-thread", "macros", "sync", "time"], optional = true }
 reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
 anyhow = "1.0"
 thiserror = "2.0"
@@ -81,8 +81,12 @@ rune-modules = { version = "0.14", optional = true }
 rune-wasm = { version = "0.14", optional = true }
 # Spatial data structures for neighbor queries (4.2+ with rkyv zero-copy)
 kiddo = { version = "4.2", features = ["rkyv"], optional = true }
-# Zero-copy serialization for spatial data
-rkyv = { version = "0.8", optional = true }
+# Zero-copy serialization for spatial data + Iggy scene deltas
+rkyv = { workspace = true }
+# Apache Iggy streaming platform (1M+ msg/s)
+iggy = { workspace = true, optional = true }
+# bytes — shared buffer type used by Iggy SDK payloads
+bytes = { version = "1.7", optional = true }
 # Notify for hot-reload file watching
 notify = { version = "6.1", optional = true }
 # Spatial R-tree indexing for streaming radius queries
@@ -136,7 +140,9 @@ realism-wasm = ["realism-scripting", "rune-wasm"]
 # Enable GPU compute for SPH fluid simulation
 realism-gpu = ["realism", "wgpu", "encase"]
 # Enable advanced spatial queries with zero-copy serialization
-realism-spatial = ["realism", "kiddo", "rkyv"]
+realism-spatial = ["realism", "kiddo"]
+# Enable Apache Iggy streaming for scene delta emission + TOML materializer
+iggy-streaming = ["iggy", "tokio", "bytes"]
 # Enable quantum effects module (DISABLED — future work)
 # realism-quantum = ["realism-symbolic"]
 # Enable full realism system with all features (excludes quantum)

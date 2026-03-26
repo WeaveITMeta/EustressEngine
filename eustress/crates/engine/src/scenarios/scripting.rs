@@ -21,6 +21,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_record::RuneScriptRecord;
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::sim_stream::{now_ms, publish_rune_script_sync};
+#[cfg(feature = "iggy-streaming")]
+use eustress_common::iggy_queue::IggyConfig;
+
 #[cfg(feature = "realism-scripting")]
 use rune::{Context, Vm, Source, Sources, Value as RuneValue, Unit, runtime::RuntimeContext};
 
@@ -267,14 +274,69 @@ impl ScenarioScriptEngine {
     }
 
     /// Execute a script and apply its results to a scenario.
+    /// Publishes a `RuneScriptRecord` to Iggy (fire-and-forget) when `iggy-streaming` is active.
     pub fn execute_and_apply(
         &self,
         source: &str,
         scenario: &mut Scenario,
         branch_id: Uuid,
     ) -> Result<ScriptResult, ScriptError> {
+        let t_start = std::time::Instant::now();
         let context = ScriptContext::from_scenario(scenario, branch_id)?;
-        let result = self.execute(source, &context)?;
+        let result = self.execute(source, &context);
+        let execution_us = t_start.elapsed().as_micros() as u64;
+
+        // Publish audit record to Iggy before applying (captures pre-apply state).
+        #[cfg(feature = "iggy-streaming")]
+        {
+            let uuid_to_u128 = |id: Uuid| id.as_u128();
+            let (success, error_msg) = match &result {
+                Ok(_) => (true, String::new()),
+                Err(e) => (false, e.to_string()),
+            };
+            let (log_messages, prob_overrides, collapsed, new_branches) = match &result {
+                Ok(r) => (
+                    r.log_messages.clone(),
+                    r.probability_overrides.iter().map(|(id, &p)| {
+                        let label = scenario.branches.get(id)
+                            .map(|b| b.label.clone())
+                            .unwrap_or_else(|| id.to_string());
+                        (label, p)
+                    }).collect::<Vec<_>>(),
+                    r.status_changes.iter().filter_map(|(id, &s)| {
+                        if s == super::types::BranchStatus::Collapsed {
+                            scenario.branches.get(id).map(|b| b.label.clone())
+                        } else { None }
+                    }).collect::<Vec<_>>(),
+                    r.new_branches.iter().map(|nb| {
+                        let parent_label = scenario.branches.get(&nb.parent_id)
+                            .map(|b| b.label.clone())
+                            .unwrap_or_default();
+                        (parent_label, nb.label.clone(), nb.prior)
+                    }).collect::<Vec<_>>(),
+                ),
+                Err(_) => (vec![], vec![], vec![], vec![]),
+            };
+            let record = RuneScriptRecord {
+                record_id: uuid::Uuid::new_v4().as_u128(),
+                scenario_id: uuid_to_u128(scenario.id),
+                branch_id: uuid_to_u128(branch_id),
+                source: source.to_string(),
+                success,
+                error: error_msg,
+                log_messages,
+                probability_overrides: prob_overrides,
+                collapsed_branches: collapsed,
+                new_branches,
+                execution_us,
+                executed_at_ms: now_ms(),
+                session_seq: 0,
+            };
+            // None = fallback connect; replace with Some(writer) once Arc<SimStreamWriter> Resource is wired.
+            publish_rune_script_sync(None, IggyConfig::default(), record);
+        }
+
+        let result = result?;
         Self::apply_result(scenario, &result);
         Ok(result)
     }

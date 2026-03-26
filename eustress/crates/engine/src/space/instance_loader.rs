@@ -1255,11 +1255,13 @@ pub fn write_instance_changes_system(
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
+    let _start = std::time::Instant::now();
     // Collect entities that were just added this tick — skip them entirely.
     // Bevy marks newly-inserted components as Changed, so without this check
     // ALL 10K entities would trigger 20K disk I/O ops on their first frame.
     let just_added: std::collections::HashSet<Entity> = added_instances.iter().collect();
 
+    let mut write_count = 0;
     for (entity, transform, instance_file) in instances.iter() {
         // Skip freshly-spawned entities — their Transform is "changed" only because
         // it was just inserted, not because the user moved anything
@@ -1295,6 +1297,12 @@ pub fn write_instance_changes_system(
             error!("Failed to write instance: {}", e);
         } else {
             debug!("💾 Wrote transform changes to {:?}", instance_file.toml_path);
+            write_count += 1;
         }
+    }
+    
+    let elapsed = _start.elapsed();
+    if write_count > 0 && elapsed.as_millis() > 50 {
+        warn!("🐌 write_instance_changes_system took {:.1}ms ({} writes)", elapsed.as_secs_f64() * 1000.0, write_count);
     }
 }

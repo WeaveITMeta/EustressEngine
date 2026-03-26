@@ -192,13 +192,6 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
         }
     }
 
-    // Validate / create the binary cache directory before loading
-    if !space_ops::validate_cache_dir(&path) {
-        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
-            n.warning("Cache directory not writable — simulation recordings will not be available");
-        }
-    }
-
     space_ops::open_space(world, &path);
 }
 
@@ -208,16 +201,13 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
 
 /// Write all ECS entities back to their TOML files in the current SpaceRoot.
 fn do_save_space(world: &mut World) {
-    // Validate cache before saving so simulation.toml is always present
     if let Some(sr) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) {
-        // Ensure simulation.toml exists (simulation readiness)
         let sim_toml = sr.join("simulation.toml");
         if !sim_toml.exists() {
             if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
                 warn!("Could not write simulation.toml: {}", e);
             }
         }
-        let _ = space_ops::validate_cache_dir(&sr);
     }
 
     space_ops::save_space(world);

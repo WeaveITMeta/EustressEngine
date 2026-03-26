@@ -1475,6 +1475,9 @@ impl Plugin for PlayModePlugin {
             .add_message::<StopEmbeddedServerEvent>()
             .add_message::<EmbeddedServerStateChanged>()
             
+            // Startup: Pause physics in Edit mode (eliminates 500-750ms stutter from Avian3D)
+            .add_systems(Startup, pause_physics_on_startup)
+            
             // Systems (always run) - split into groups to avoid tuple size limits
             // handle_play_mode_ui_buttons must run after drain_slint_actions sets
             // the play_solo_requested / pause_requested / stop_requested flags.
@@ -1847,10 +1850,17 @@ fn activate_physics_for_unanchored_parts(
     }
 }
 
+/// Pause physics on startup (Edit mode doesn't need physics simulation)
+fn pause_physics_on_startup(mut physics_time: ResMut<Time<avian3d::prelude::Physics>>) {
+    physics_time.pause();
+    info!("⏸️ Physics paused in Edit mode (will unpause in Play mode)");
+}
+
 /// Deactivate physics for parts when exiting play mode (restore to Static)
 fn deactivate_physics_for_parts(
     mut commands: Commands,
     parts_query: Query<Entity, With<PlayModePhysicsActivated>>,
+    mut physics_time: ResMut<Time<avian3d::prelude::Physics>>,
 ) {
     let mut deactivated_count = 0;
     
@@ -1860,6 +1870,10 @@ fn deactivate_physics_for_parts(
             .remove::<PlayModePhysicsActivated>();
         deactivated_count += 1;
     }
+    
+    // Pause physics when exiting Play mode
+    physics_time.pause();
+    info!("⏸️ Physics paused (Edit mode)");
     
     if deactivated_count > 0 {
         info!("🛑 Deactivated physics for {} parts", deactivated_count);

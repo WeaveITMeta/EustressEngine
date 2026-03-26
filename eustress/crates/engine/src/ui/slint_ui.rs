@@ -2019,6 +2019,9 @@ struct DrainResources<'w> {
     brush_state: Option<ResMut<'w, BrushState>>,
     /// Standard materials for spawning instances
     materials: ResMut<'w, Assets<StandardMaterial>>,
+    /// Task 12: Iggy change queue — emit SceneDeltas on property write-back (iggy-streaming feature only).
+    #[cfg(feature = "iggy-streaming")]
+    iggy_queue: Option<Res<'w, eustress_common::iggy_queue::IggyChangeQueue>>,
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -3115,6 +3118,122 @@ fn drain_slint_actions(
                             } else if let Some(ref mut out) = res.output {
                                 out.info(format!("💾 Saved {} to {:?}", key, service.toml_path.file_name().unwrap_or_default()));
                             }
+                        }
+                    }
+
+                    // ══════════════════════════════════════════════════════════
+                    // Task 12: Iggy delta emission — stream property change to
+                    // IggyChangeQueue so TOML materializers and remote agents
+                    // observe every write-back in real time.
+                    //
+                    // DeltaKind selection:
+                    //   Position.* / Scale.* / Rotation.* → TransformChanged
+                    //   Name → Renamed
+                    //   everything else → PartPropertiesChanged
+                    // ══════════════════════════════════════════════════════════
+                    #[cfg(feature = "iggy-streaming")]
+                    if let Some(ref iggy) = res.iggy_queue {
+                        use eustress_common::iggy_delta::{
+                            DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload,
+                        };
+
+                        let entity_id = entity.to_bits();
+                        let seq = iggy.next_seq();
+                        let ts  = iggy.now_ms();
+
+                        let delta = match key.as_str() {
+                            "Position.X" | "Position.Y" | "Position.Z"
+                            | "Scale.X" | "Scale.Y" | "Scale.Z"
+                            | "Rotation.X" | "Rotation.Y" | "Rotation.Z" => {
+                                // Read live transform from ECS for a consistent snapshot.
+                                let t = queries.transforms.get(entity).ok();
+                                let pos = t.map(|t| [t.translation.x, t.translation.y, t.translation.z])
+                                    .unwrap_or([0.0, 0.0, 0.0]);
+                                let rot = t.map(|t| [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w])
+                                    .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                                let scl = t.map(|t| [t.scale.x, t.scale.y, t.scale.z])
+                                    .unwrap_or([1.0, 1.0, 1.0]);
+                                Some(SceneDelta::transform(
+                                    entity_id, seq, ts,
+                                    TransformPayload { position: pos, rotation: rot, scale: scl },
+                                ))
+                            }
+                            "Name" => {
+                                Some(SceneDelta {
+                                    entity: entity_id,
+                                    kind: DeltaKind::Renamed,
+                                    seq,
+                                    timestamp_ms: ts,
+                                    transform: None,
+                                    part: None,
+                                    name: Some(NamePayload { name: val.clone() }),
+                                    new_parent: None,
+                                })
+                            }
+                            "Transparency" => {
+                                let v = val.parse::<f32>().ok();
+                                Some(SceneDelta {
+                                    entity: entity_id,
+                                    kind: DeltaKind::PartPropertiesChanged,
+                                    seq,
+                                    timestamp_ms: ts,
+                                    transform: None,
+                                    part: Some(PartPayload {
+                                        color: None, material: None, size: None,
+                                        name: None, anchored: None, can_collide: None,
+                                        transparency: v, reflectance: None,
+                                    }),
+                                    name: None,
+                                    new_parent: None,
+                                })
+                            }
+                            "Anchored" => {
+                                Some(SceneDelta {
+                                    entity: entity_id,
+                                    kind: DeltaKind::PartPropertiesChanged,
+                                    seq,
+                                    timestamp_ms: ts,
+                                    transform: None,
+                                    part: Some(PartPayload {
+                                        color: None, material: None, size: None,
+                                        name: None, anchored: Some(val == "true"),
+                                        can_collide: None, transparency: None, reflectance: None,
+                                    }),
+                                    name: None,
+                                    new_parent: None,
+                                })
+                            }
+                            "CanCollide" => {
+                                Some(SceneDelta {
+                                    entity: entity_id,
+                                    kind: DeltaKind::PartPropertiesChanged,
+                                    seq,
+                                    timestamp_ms: ts,
+                                    transform: None,
+                                    part: Some(PartPayload {
+                                        color: None, material: None, size: None,
+                                        name: None, anchored: None,
+                                        can_collide: Some(val == "true"),
+                                        transparency: None, reflectance: None,
+                                    }),
+                                    name: None,
+                                    new_parent: None,
+                                })
+                            }
+                            _ => {
+                                // Remaining property — emit PartPropertiesChanged as a presence
+                                // signal so materializers know the entity was touched this frame.
+                                Some(SceneDelta::lifecycle(
+                                    entity_id,
+                                    DeltaKind::PartPropertiesChanged,
+                                    seq,
+                                    ts,
+                                ))
+                            }
+                        };
+
+                        if let Some(d) = delta {
+                            iggy.send_delta(d);
                         }
                     }
                 }

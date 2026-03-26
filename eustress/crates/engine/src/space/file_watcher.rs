@@ -60,12 +60,15 @@ impl SpaceFileWatcher {
     
     /// Poll for file events (non-blocking)
     pub fn poll_events(&self) -> Vec<FileChangeEvent> {
+        let _start = std::time::Instant::now();
         let mut events = Vec::new();
+        let mut raw_event_count = 0;
         
         // Drain all pending events
         while let Ok(result) = self.receiver.try_recv() {
             match result {
                 Ok(debounced_events) => {
+                    raw_event_count += debounced_events.len();
                     for event in debounced_events {
                         if let Some(change_event) = self.process_event(event.event) {
                             events.push(change_event);
@@ -73,11 +76,17 @@ impl SpaceFileWatcher {
                     }
                 }
                 Err(errors) => {
-                    for error in errors {
-                        warn!("File watcher error: {}", error);
+                    for err in errors {
+                        error!("File watcher error: {}", err);
                     }
                 }
             }
+        }
+        
+        let elapsed = _start.elapsed();
+        if raw_event_count > 0 {
+            warn!("🔍 File watcher received {} raw events, processed {} change events in {:.1}ms", 
+                raw_event_count, events.len(), elapsed.as_secs_f64() * 1000.0);
         }
         
         events
@@ -192,6 +201,7 @@ pub fn process_file_changes(
     mut soul_scripts: Query<&mut crate::soul::SoulScriptData>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
 ) {
+    let _start = std::time::Instant::now();
     let Some(watcher) = watcher else {
         return;
     };
@@ -200,6 +210,13 @@ pub fn process_file_changes(
     recently_written.cleanup();
     
     let events = watcher.poll_events();
+    
+    if !events.is_empty() {
+        let elapsed = _start.elapsed();
+        if elapsed.as_millis() > 50 {
+            warn!("🐌 process_file_changes took {:.1}ms ({} events)", elapsed.as_secs_f64() * 1000.0, events.len());
+        }
+    }
     
     // Grace period: ignore Modified events for the first 5 seconds after watcher
     // creation. `notify` fires spurious Modify events for pre-existing files when
