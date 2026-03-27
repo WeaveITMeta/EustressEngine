@@ -287,6 +287,10 @@ pub const IGGY_TOPIC_RUNE_SCRIPTS: &str = "rune_scripts";
 /// one full optimize→simulate→Rune→result cycle for workshop convergence analysis.
 pub const IGGY_TOPIC_WORKSHOP_ITERATIONS: &str = "workshop_iterations";
 
+/// Topic for ARC-AGI-3 (and gym-style) episode records (ArcEpisodeRecord).
+/// One message per completed episode — carries step history, final score, and efficiency ratio.
+pub const IGGY_TOPIC_ARC_EPISODES: &str = "arc_episodes";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent command / observation types (for CLI agent-in-the-loop)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +338,24 @@ pub enum AgentAction {
     SimulateNTicks { ticks: u32 },
     /// Request the agent observation log to be flushed.
     FlushObservations,
+    /// Submit an action back to an external interactive environment.
+    EnvironmentAction {
+        /// Opaque action label matching the env's action space (e.g. "ACTION1", "UP", "PLACE_0_0").
+        action: String,
+        /// Step this action is responding to (for correlation).
+        step: u32,
+    },
+    /// Begin an interactive environment episode. Session will emit EnvironmentState
+    /// observations and wait for EnvironmentAction commands in a step loop.
+    BeginEpisode {
+        task_id: String,
+        max_steps: u32,
+    },
+    /// End the current episode and record the final score.
+    EndEpisode {
+        final_score: f32,
+        goal_reached: bool,
+    },
 }
 
 /// An observation emitted by the session back to the CLI agent.
@@ -381,6 +403,15 @@ pub enum ObservationPayload {
     Ack { message: String },
     /// Error that prevented the command from executing.
     Error { message: String },
+    /// Raw environment observation from an external interactive benchmark (ARC-AGI-3, gym, etc.).
+    EnvironmentState {
+        /// Opaque JSON blob of the env observation (grid, goal, available_actions, step, score).
+        json: String,
+        /// Step number within the current episode.
+        step: u32,
+        /// Whether the episode is terminated (goal reached or max steps hit).
+        terminated: bool,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

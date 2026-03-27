@@ -390,6 +390,53 @@ impl WorkshopIterationRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ArcEpisodeRecord — one complete ARC-AGI-3 / gym-style episode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One complete ARC-AGI-3 (or any gym-style) episode.
+/// Published to Iggy topic `eustress/arc_episodes`.
+#[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[rkyv(derive(Debug, PartialEq))]
+pub struct ArcEpisodeRecord {
+    /// Unique episode identifier (UUID v4 as u128).
+    pub episode_id: u128,
+    /// ARC task identifier e.g. "ls20".
+    pub task_id: String,
+    /// Steps taken in this episode.
+    pub total_steps: u32,
+    /// Whether the goal was reached.
+    pub goal_reached: bool,
+    /// Final score 0.0–1.0 per ARC scorecard.
+    pub final_score: f32,
+    /// Human baseline step count from ARC benchmark metadata.
+    pub human_baseline_steps: u32,
+    /// total_steps / human_baseline_steps (lower = better).
+    pub efficiency_ratio: f32,
+    /// Ordered list of action labels taken each step.
+    pub actions_taken: Vec<String>,
+    /// JSON observation snapshots per step (one per step).
+    pub observations: Vec<String>,
+    /// Wall-clock duration of this episode in milliseconds.
+    pub duration_ms: u64,
+    /// Unix timestamp in ms when this episode completed.
+    pub completed_at_ms: u64,
+    /// Session this episode belongs to.
+    pub session_id: u128,
+}
+
+impl ArcEpisodeRecord {
+    /// Serialize to rkyv bytes for Iggy publishing.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, rkyv::rancor::Error> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self).map(|b| b.to_vec())
+    }
+
+    /// Deserialize from rkyv bytes polled from Iggy.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, rkyv::rancor::Error> {
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(bytes)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -486,6 +533,27 @@ mod tests {
         };
         let bytes = r.to_bytes().expect("serialize");
         let back = RuneScriptRecord::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn arc_episode_record_round_trip() {
+        let r = ArcEpisodeRecord {
+            episode_id: 0xabcd_1234_5678_9abc_def0_1234_5678_9abc,
+            task_id: "ls20".to_string(),
+            total_steps: 12,
+            goal_reached: true,
+            final_score: 0.95,
+            human_baseline_steps: 10,
+            efficiency_ratio: 1.2,
+            actions_taken: vec!["ACTION1".to_string(), "PLACE_0_0".to_string()],
+            observations: vec!["{\"grid\":[]}".to_string()],
+            duration_ms: 4200,
+            completed_at_ms: 1_700_000_003_000,
+            session_id: 7,
+        };
+        let bytes = r.to_bytes().expect("serialize");
+        let back = ArcEpisodeRecord::from_bytes(&bytes).expect("deserialize");
         assert_eq!(r, back);
     }
 }

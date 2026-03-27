@@ -39,11 +39,11 @@ use iggy::prelude::{
 };
 
 use crate::iggy_delta::{
-    IGGY_TOPIC_ITERATION_HISTORY, IGGY_TOPIC_RUNE_SCRIPTS,
+    IGGY_TOPIC_ARC_EPISODES, IGGY_TOPIC_ITERATION_HISTORY, IGGY_TOPIC_RUNE_SCRIPTS,
     IGGY_TOPIC_SIM_RESULTS, IGGY_TOPIC_WORKSHOP_ITERATIONS,
 };
 use crate::iggy_queue::IggyConfig;
-use crate::sim_record::{IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
+use crate::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SimStreamConfig — Layer 7: type alias to IggyConfig (single source of truth)
@@ -122,6 +122,15 @@ impl SimStreamWriter {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv RuneScriptRecord: {e}"))?;
         let part = Partitioning::messages_key_u32(record.scenario_id as u32);
         self.send_keyed(IGGY_TOPIC_RUNE_SCRIPTS, bytes, part).await
+    }
+
+    /// Publish an `ArcEpisodeRecord` (one complete ARC-AGI-3 episode) to `eustress/arc_episodes`.
+    ///
+    /// Sharded by `session_id` — co-locates all episodes from the same session.
+    pub async fn publish_arc_episode(&self, record: &ArcEpisodeRecord) -> Result<(), String> {
+        let bytes = record.to_bytes().map_err(|e| format!("rkyv ArcEpisodeRecord: {e}"))?;
+        let part = Partitioning::messages_key_u32((record.session_id % 2) as u32);
+        self.send_keyed(IGGY_TOPIC_ARC_EPISODES, bytes, part).await
     }
 
     /// Publish a `WorkshopIterationRecord` to `eustress/workshop_iterations`.
@@ -317,6 +326,31 @@ impl SimStreamReader {
         records
     }
 
+    /// Return all `ArcEpisodeRecord`s from the Iggy log, sorted by `completed_at_ms`.
+    pub async fn replay_arc_episodes(&self, query: &SimQuery) -> Vec<ArcEpisodeRecord> {
+        let raw = self.poll_all(IGGY_TOPIC_ARC_EPISODES, query.from_offset, query.limit).await;
+        let mut records: Vec<ArcEpisodeRecord> = raw
+            .iter()
+            .filter_map(|b| ArcEpisodeRecord::from_bytes(b.as_ref()).ok())
+            .collect();
+        records.sort_by_key(|r| r.completed_at_ms);
+        records
+    }
+
+    /// Return the `ArcEpisodeRecord` with the lowest `efficiency_ratio` for a given `task_id`.
+    pub async fn best_arc_episode(&self, task_id: &str) -> Option<ArcEpisodeRecord> {
+        let query = SimQuery { limit: 0, ..Default::default() };
+        let records = self.replay_arc_episodes(&query).await;
+        records
+            .into_iter()
+            .filter(|r| r.task_id == task_id)
+            .min_by(|a, b| {
+                a.efficiency_ratio
+                    .partial_cmp(&b.efficiency_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
     /// Return the best `WorkshopIterationRecord` (highest fitness) for a product.
     pub async fn best_workshop_generation(
         &self,
@@ -421,12 +455,13 @@ pub async fn bootstrap_sim_topics(client: &IggyClient, stream_name: &str, sim_pa
         }
     }
 
-    // (topic, partition_count) — sim/rune use sim_partitions, history/workshop use 2.
+    // (topic, partition_count) — sim/rune use sim_partitions, history/workshop/arc use 2.
     let topics: &[(&str, u32)] = &[
         (IGGY_TOPIC_SIM_RESULTS,        sim_partitions.max(1)),
         (IGGY_TOPIC_ITERATION_HISTORY,  2),
         (IGGY_TOPIC_RUNE_SCRIPTS,       sim_partitions.max(1)),
         (IGGY_TOPIC_WORKSHOP_ITERATIONS, 2),
+        (IGGY_TOPIC_ARC_EPISODES,       2),
     ];
 
     for (topic, partitions) in topics {

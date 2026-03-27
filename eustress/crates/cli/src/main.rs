@@ -43,7 +43,7 @@ use iggy::prelude::{
     Consumer, Identifier, IggyMessage, MessageClient, Partitioning,
     PollingStrategy, TopicClient,
 };
-use eustress_common::sim_record::{IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
+use eustress_common::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 use eustress_common::sim_stream::{SimQuery, SimStreamConfig, SimStreamReader};
 
 use eustress_common::iggy_delta::{
@@ -285,6 +285,29 @@ enum SimCommands {
         /// Maximum records to show (0 = all).
         #[arg(long, default_value = "20")]
         limit: u32,
+        /// Output raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Replay ARC-AGI-3 episode records from Iggy history.
+    Arc {
+        /// Filter by ARC task ID (exact or substring match).
+        #[arg(long)]
+        task: Option<String>,
+        /// Maximum records to show (0 = all).
+        #[arg(long, default_value = "20")]
+        limit: u32,
+        /// Output raw JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the best (lowest efficiency_ratio) episode for a given ARC task.
+    ArcBest {
+        /// ARC task ID to query (e.g. "ls20").
+        #[arg(long)]
+        task: String,
         /// Output raw JSON.
         #[arg(long)]
         json: bool,
@@ -652,6 +675,14 @@ fn print_observation(obs: &AgentObservation, as_json: bool) {
         }
         ObservationPayload::Error { message } => {
             println!("{} {}", "Error:".red().bold(), message);
+        }
+        ObservationPayload::EnvironmentState { json, step, terminated } => {
+            println!("{} step={} terminated={}", "EnvState:".cyan().bold(), step, terminated);
+            if json.len() <= 200 {
+                println!("  {json}");
+            } else {
+                println!("  {}…", &json[..200]);
+            }
         }
     }
 
@@ -1122,6 +1153,74 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
             }
             if records.is_empty() {
                 println!("  {}", "(no Rune script records yet)".dimmed());
+            }
+        }
+
+        SimCommands::Arc { task, limit, json } => {
+            let query = SimQuery { limit, ..Default::default() };
+            let records = reader.replay_arc_episodes(&query).await;
+
+            let records: Vec<&ArcEpisodeRecord> = records.iter()
+                .filter(|r| {
+                    task.as_deref().map_or(true, |f| {
+                        r.task_id.to_lowercase().contains(&f.to_lowercase())
+                    })
+                })
+                .collect();
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&records).unwrap_or_default());
+                return Ok(());
+            }
+
+            println!("{}", format!("ARC-AGI-3 episodes — {} found", records.len()).bold());
+            println!("{}", "─".repeat(80).dimmed());
+            println!(
+                "  {:<32}  {:<8}  {:>6}  {:>8}  {:>10}  {:>10}",
+                "episode_id".dimmed(), "task_id".dimmed(), "steps".dimmed(),
+                "eff_ratio".dimmed(), "goal".dimmed(), "duration_ms".dimmed()
+            );
+            for r in &records {
+                println!(
+                    "  {:<32}  {:<8}  {:>6}  {:>8.3}  {:>10}  {:>10}",
+                    format!("{:032x}", r.episode_id).dimmed(),
+                    r.task_id.cyan(),
+                    r.total_steps.to_string().yellow(),
+                    r.efficiency_ratio,
+                    if r.goal_reached { "✓".green().to_string() } else { "✗".red().to_string() },
+                    r.duration_ms,
+                );
+            }
+            if records.is_empty() {
+                println!("  {}", "(no ARC episode records yet)".dimmed());
+            }
+        }
+
+        SimCommands::ArcBest { task, json } => {
+            match reader.best_arc_episode(&task).await {
+                Some(r) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                        return Ok(());
+                    }
+                    println!("{}", format!("Best ARC episode — task: {}", task).bold());
+                    println!("{}", "─".repeat(60).dimmed());
+                    println!("  episode_id     : {:032x}", r.episode_id);
+                    println!("  task_id        : {}", r.task_id.cyan());
+                    println!("  steps          : {}", r.total_steps.to_string().yellow());
+                    println!("  efficiency     : {:.3}", r.efficiency_ratio);
+                    println!("  goal_reached   : {}", if r.goal_reached { "yes".green().to_string() } else { "no".red().to_string() });
+                    println!("  final_score    : {:.3}", r.final_score);
+                    println!("  duration_ms    : {}", r.duration_ms);
+                    println!("  actions ({}):", r.actions_taken.len());
+                    for (i, a) in r.actions_taken.iter().enumerate().take(20) {
+                        println!("    [{i:>3}] {a}");
+                    }
+                    if r.actions_taken.len() > 20 {
+                        println!("    {}", "... (truncated)".dimmed());
+                    }
+                }
+                None => println!("{}", format!("(no ARC episodes recorded for task '{task}')").dimmed()),
             }
         }
     }
