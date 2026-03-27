@@ -25,15 +25,16 @@ tracing = "0.1"
 # Async runtime (optional, for persistence)
 tokio = { workspace = true, optional = true }
 
-# Sled embedded database (optional, for persistence)
-sled = { version = "0.34", optional = true }
+# RocksDB embedded database (optional, for cold-tier persistence)
+rocksdb = { version = "0.22", optional = true }
 
 [features]
-default = ["persistence"]
-# Enable sled-based persistence
-persistence = ["sled", "tokio"]
-# Enable RocksDB persistence (better for large indices)
-persistence-rocksdb = ["tokio"]
+default = []
+# Enable RocksDB-based persistence (cold-tier, column-family layout).
+# Requires libclang on the build host (LLVM). Set LIBCLANG_PATH if not in PATH.
+persistence-rocksdb = ["rocksdb", "tokio"]
+# Legacy alias — kept for any downstream crates that declare `persistence`
+persistence = ["persistence-rocksdb"]
 # Enable SIMD acceleration
 simd = ["embedvec/simd"]
 # Full feature set

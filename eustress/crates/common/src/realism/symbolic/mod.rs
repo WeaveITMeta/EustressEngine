@@ -24,6 +24,10 @@ pub mod expressions;
 pub mod codegen;
 #[cfg(feature = "realism-symbolic")]
 pub mod nonlinear;
+#[cfg(feature = "realism-symbolic")]
+pub mod resolver;
+#[cfg(feature = "realism-symbolic")]
+pub mod causal;
 
 pub mod prelude {
     #[cfg(feature = "realism-symbolic")]
@@ -32,6 +36,10 @@ pub mod prelude {
     pub use super::expressions::*;
     #[cfg(feature = "realism-symbolic")]
     pub use super::nonlinear::*;
+    #[cfg(feature = "realism-symbolic")]
+    pub use super::resolver::{SymbolResolver, EquivalenceCache, DerivSignature, EquivEntry};
+    #[cfg(feature = "realism-symbolic")]
+    pub use super::causal::{CausalModel, CausalEdge, CausalGraph, CounterfactualResult};
     #[cfg(feature = "realism-symbolic")]
     pub use super::SymbolicPlugin;
 }

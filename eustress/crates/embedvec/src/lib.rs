@@ -24,6 +24,8 @@ mod error;
 mod ontology;
 #[cfg(feature = "persistence")]
 mod persistence;
+#[cfg(feature = "persistence-rocksdb")]
+mod rocksdb_store;
 mod plugin;
 mod resource;
 mod spatial;
@@ -35,6 +37,8 @@ pub use error::*;
 pub use ontology::*;
 #[cfg(feature = "persistence")]
 pub use persistence::*;
+#[cfg(feature = "persistence-rocksdb")]
+pub use rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
 pub use plugin::*;
 pub use resource::*;
 pub use spatial::*;
@@ -48,6 +52,8 @@ pub mod prelude {
     pub use crate::ontology::{OntologyTree, OntologyNode, OntologyIndex, PropertySchema, PropertyType, InstancePath};
     #[cfg(feature = "persistence")]
     pub use crate::persistence::{PersistentIndex, PersistentOntologyIndex, PersistenceConfig, IndexStats};
+    #[cfg(feature = "persistence-rocksdb")]
+    pub use crate::rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
     pub use crate::plugin::{AutoIndexPlugin, EmbedvecPlugin};
     pub use crate::resource::{EmbedvecIndex, EmbedvecResource, SearchResult};
     pub use crate::spatial::{SpatialContextEmbedder, SpatialFeatures, SpatialTrainingRecord};

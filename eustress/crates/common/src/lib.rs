@@ -18,6 +18,11 @@
 //! - **Services**: Runtime resources (PlayerService, LightingService, etc.)
 //! - **Scene**: Serialization format for saving/loading
 
+// World model: goal hierarchy, salience filtering, memory tier routing
+pub mod goals;
+pub mod salience;
+pub mod memory;
+
 pub mod adornments;
 pub mod assets;
 pub mod attributes;

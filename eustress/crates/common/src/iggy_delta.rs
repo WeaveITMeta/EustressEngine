@@ -377,6 +377,17 @@ pub struct AgentObservation {
 
     /// Timestamp in Unix ms.
     pub timestamp_ms: u64,
+
+    /// Overall world-model confidence for this observation [0.0–1.0].
+    /// Derived from the salience score of the triggering SceneDelta and the
+    /// EquivalenceCache confidence for any resolved causal formulas.
+    /// 0.0 = no estimate available.
+    pub confidence: f32,
+
+    /// Per-field uncertainty estimates: (field_name, uncertainty_[0,1]).
+    /// High uncertainty → the world model has little prior data on this field.
+    /// Empty when no uncertainty information is available.
+    pub uncertainty: Vec<(String, f32)>,
 }
 
 /// What the session observed / what happened as a result of the command.
@@ -411,6 +422,19 @@ pub enum ObservationPayload {
         step: u32,
         /// Whether the episode is terminated (goal reached or max steps hit).
         terminated: bool,
+    },
+    /// World-model confidence update: per-field salience/uncertainty snapshot.
+    ///
+    /// Emitted by the `MemoryTierController` after routing a batch of `ScoredEvent`s.
+    /// The CLI and any downstream consumer can display or log this to track how
+    /// well the world model understands the current scene state.
+    ConfidenceUpdate {
+        /// Per-field confidence scores: (field_name, confidence_[0,1]).
+        field_scores: Vec<(String, f32)>,
+        /// Overall composite confidence for this step.
+        composite: f32,
+        /// Step number this update corresponds to.
+        step: u32,
     },
 }
 
@@ -464,5 +488,61 @@ mod tests {
         let restored = rkyv::from_bytes::<AgentCommand, rkyv::rancor::Error>(&bytes)
             .expect("deserialize");
         assert_eq!(cmd, restored);
+    }
+
+    #[test]
+    fn round_trip_agent_observation_with_confidence() {
+        let obs = AgentObservation {
+            command_id: 42,
+            payload: ObservationPayload::ConfidenceUpdate {
+                field_scores: vec![
+                    ("position".to_string(), 0.9),
+                    ("velocity".to_string(), 0.6),
+                ],
+                composite: 0.75,
+                step: 3,
+            },
+            seq: 1,
+            timestamp_ms: 5000,
+            confidence: 0.75,
+            uncertainty: vec![("velocity".to_string(), 0.4)],
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&obs)
+            .expect("serialize")
+            .to_vec();
+        let restored = rkyv::from_bytes::<AgentObservation, rkyv::rancor::Error>(&bytes)
+            .expect("deserialize");
+        assert_eq!(obs, restored);
+        assert!((restored.confidence - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn round_trip_arc_agent_actions() {
+        let begin = AgentCommand {
+            command_id: 1,
+            action: AgentAction::BeginEpisode {
+                task_id: "arc_t01".to_string(),
+                max_steps: 50,
+            },
+            script: None,
+            issued_at_ms: 0,
+        };
+        let end = AgentCommand {
+            command_id: 2,
+            action: AgentAction::EndEpisode {
+                final_score: 0.95,
+                goal_reached: true,
+            },
+            script: None,
+            issued_at_ms: 10_000,
+        };
+        for cmd in [begin, end] {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cmd)
+                .expect("serialize")
+                .to_vec();
+            let restored = rkyv::from_bytes::<AgentCommand, rkyv::rancor::Error>(&bytes)
+                .expect("deserialize");
+            assert_eq!(cmd, restored);
+        }
     }
 }
