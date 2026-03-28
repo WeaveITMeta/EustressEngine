@@ -22,6 +22,8 @@
 pub mod goals;
 pub mod salience;
 pub mod memory;
+// Sandbox: WorldState trait + Hypothesis/Branch search tree for external solvers
+pub mod sandbox;
 
 pub mod adornments;
 pub mod assets;
