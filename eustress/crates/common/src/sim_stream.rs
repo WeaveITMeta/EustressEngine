@@ -34,7 +34,7 @@ use tracing::{info, warn};
 
 use iggy::clients::client::IggyClient;
 use iggy::prelude::{
-    CompressionAlgorithm, Consumer, Identifier, IggyExpiry, IggyMessage, MaxTopicSize,
+    Client, CompressionAlgorithm, Consumer, Identifier, IggyExpiry, IggyMessage, MaxTopicSize,
     MessageClient, Partitioning, PollingStrategy, StreamClient, TopicClient,
 };
 

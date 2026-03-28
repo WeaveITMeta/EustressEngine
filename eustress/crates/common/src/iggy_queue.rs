@@ -31,7 +31,7 @@ use tokio::sync::mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedR
 use tracing::{error, info, warn};
 
 use iggy::prelude::{
-    CompressionAlgorithm, Consumer, IggyExpiry, IggyMessage, Identifier,
+    Client, CompressionAlgorithm, Consumer, IggyExpiry, IggyMessage, Identifier,
     MaxTopicSize, MessageClient, Partitioning, PollingStrategy, StreamClient, TopicClient,
 };
 use iggy::clients::client::IggyClient;

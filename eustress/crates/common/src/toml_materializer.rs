@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use iggy::clients::client::IggyClient;
-use iggy::prelude::{Consumer, Identifier, MessageClient, PollingStrategy};
+use iggy::prelude::{Client, Consumer, Identifier, MessageClient, PollingStrategy};
 
 use crate::iggy_delta::{ArchivedSceneDelta, DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload, IGGY_DEFAULT_URL, IGGY_TOPIC_SCENE_DELTAS};
 
