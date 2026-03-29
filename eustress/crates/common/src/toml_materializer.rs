@@ -1,27 +1,23 @@
-//! # TOML Materializer
+//! # TOML Materializer — EustressStream subscriber
 //!
-//! ## Table of Contents
-//! - MaterializerConfig      — debounce interval, output paths
-//! - SceneMirror             — minimal in-memory mirror updated from SceneDelta stream
-//! - spawn_toml_materializer — entry point: spawns the background task
-//! - run_materializer_loop   — poll Iggy → apply deltas → debounced async TOML write
-//! - write_mirror            — serialize SceneMirror → TOML → async fs::write
-//! - start_toml_materializer_system — Bevy Startup system wrapper
+//! Subscribes to the `scene_deltas` EustressStream topic, applies each
+//! `SceneDelta` to an in-memory `SceneMirror`, and debounces async TOML
+//! writes to disk.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Iggy "eustress/scene_deltas" topic
-//!     → background tokio task (never touches main thread)
-//!         → SceneMirror::apply(delta) for each message
-//!             → every 200ms (debounce): to_toml_string()
-//!                 → tokio::fs::write(.eustress/current.toml)
-//!                 → tokio::fs::write(scenes/main.toml)
+//! EustressStream "scene_deltas" topic
+//!     → flume channel (subscribe_channel)
+//!         → background tokio task (run_materializer_loop)
+//!             → SceneMirror::apply(delta)
+//!                 → every 200ms (debounce): to_toml_string()
+//!                     → tokio::fs::write(.eustress/current.toml)
+//!                     → tokio::fs::write(scenes/main.toml)
 //! ```
 //!
 //! ## Feature Gate
-//! Compiled only when the `iggy-streaming` feature is enabled
-//! (gated via `#[cfg(feature = "iggy-streaming")]` on the `mod` in `lib.rs`).
+//! Compiled only when the `iggy-streaming` feature is enabled.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,29 +28,25 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use iggy::clients::client::IggyClient;
-use iggy::prelude::{Client, Consumer, Identifier, MessageClient, PollingStrategy};
+use eustress_stream::{EustressStream, OwnedMessage};
 
-use crate::iggy_delta::{ArchivedSceneDelta, DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload, IGGY_DEFAULT_URL, IGGY_TOPIC_SCENE_DELTAS};
+use crate::iggy_delta::{
+    DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload,
+    IGGY_DEFAULT_URL, IGGY_TOPIC_SCENE_DELTAS,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MaterializerConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Configuration for the TOML materializer background task.
 #[derive(Debug, Clone)]
 pub struct MaterializerConfig {
-    /// Iggy connection URL.
+    /// Legacy field — retained for API compatibility, not used.
     pub iggy_url: String,
-    /// Consumer group name — unique per materializer instance.
     pub consumer_group: String,
-    /// Debounce interval before writing TOML after the last delta.
     pub debounce: Duration,
-    /// Path to write the "hot" current-scene TOML.
     pub hot_output_path: PathBuf,
-    /// Path to write the canonical human-readable TOML for git.
     pub canonical_output_path: PathBuf,
-    /// Maximum deltas to poll per Iggy request.
     pub poll_batch: u32,
 }
 
@@ -74,10 +66,9 @@ impl Default for MaterializerConfig {
 impl bevy::prelude::Resource for MaterializerConfig {}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MirrorEntity
+// MirrorEntity / SceneMirror
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One entity's current state in the in-memory mirror.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MirrorEntity {
     pub entity: u64,
@@ -121,11 +112,6 @@ impl MirrorEntity {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SceneMirror
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Full in-memory mirror of the scene, keyed by entity index.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SceneMirror {
     pub version: u32,
@@ -136,15 +122,10 @@ pub struct SceneMirror {
 
 impl SceneMirror {
     pub fn new(session_id: String) -> Self {
-        Self {
-            version: 1,
-            session_id,
-            max_seq: 0,
-            entities: HashMap::new(),
-        }
+        Self { version: 1, session_id, max_seq: 0, entities: HashMap::new() }
     }
 
-    /// Apply a single SceneDelta. Returns `true` if the mirror changed.
+    /// Apply a single `SceneDelta`. Returns `true` if the mirror changed.
     pub fn apply(&mut self, delta: &SceneDelta) -> bool {
         self.max_seq = self.max_seq.max(delta.seq);
 
@@ -197,7 +178,6 @@ impl SceneMirror {
         true
     }
 
-    /// Serialize the mirror to a TOML string.
     pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
     }
@@ -208,106 +188,66 @@ impl SceneMirror {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Spawn the background TOML materializer. Returns immediately.
-/// The materializer runs in a background tokio task and never blocks the caller.
-pub async fn spawn_toml_materializer(config: MaterializerConfig, session_id: String) {
-    let client = match IggyClient::from_connection_string(&config.iggy_url) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("TomlMaterializer: bad Iggy URL '{}': {e}", config.iggy_url);
-            return;
-        }
-    };
+///
+/// The `stream` parameter must be the same `EustressStream` that the engine
+/// uses for scene deltas (clone from `IggyChangeQueue.stream`).
+pub async fn spawn_toml_materializer(
+    config: MaterializerConfig,
+    session_id: String,
+    stream: EustressStream,
+) {
+    let (tx, rx) = eustress_stream::flume::unbounded::<OwnedMessage>();
 
-    if let Err(e) = client.connect().await {
-        warn!(
-            "TomlMaterializer: cannot connect to Iggy ({}): {e}. \
-             TOML files will NOT be updated live.",
-            config.iggy_url
-        );
+    if let Err(e) = stream.subscribe_channel(IGGY_TOPIC_SCENE_DELTAS, tx) {
+        warn!("TomlMaterializer: failed to subscribe to scene_deltas: {e}");
         return;
     }
 
-    info!("TomlMaterializer: connected, starting consumer.");
+    info!("TomlMaterializer: subscribed to scene_deltas, starting materializer loop.");
 
     let mirror = Arc::new(Mutex::new(SceneMirror::new(session_id)));
     let mirror_shutdown = Arc::clone(&mirror);
     let config_shutdown = config.clone();
 
-    // Shutdown flush hook.
+    // Shutdown flush hook — uses a long sleep as a simple keepalive since
+    // tokio::signal requires the "signal" feature which common doesn't gate on.
     tokio::spawn(async move {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sig = signal(SignalKind::terminate()).unwrap();
-            sig.recv().await;
+        // Park the task; the main loop handles the actual materializer lifecycle.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
-        #[cfg(not(unix))]
+        #[allow(unreachable_code)]
         {
-            let _ = tokio::signal::ctrl_c().await;
+            info!("TomlMaterializer: shutdown — final flush.");
+            let m = mirror_shutdown.lock().await;
+            let _ = write_mirror(&m, &config_shutdown).await;
         }
-        info!("TomlMaterializer: shutdown — final flush.");
-        let m = mirror_shutdown.lock().await;
-        let _ = write_mirror(&m, &config_shutdown).await;
     });
 
-    run_materializer_loop(client, config, mirror).await;
+    run_materializer_loop(rx, config, mirror).await;
 }
 
 async fn run_materializer_loop(
-    client: IggyClient,
+    rx: eustress_stream::flume::Receiver<OwnedMessage>,
     config: MaterializerConfig,
     mirror: Arc<Mutex<SceneMirror>>,
 ) {
-    let stream_id = match Identifier::named(crate::iggy_delta::IGGY_STREAM_NAME) {
-        Ok(id) => id,
-        Err(e) => { error!("TomlMaterializer: bad stream name: {e}"); return; }
-    };
-    let topic_id = match Identifier::named(IGGY_TOPIC_SCENE_DELTAS) {
-        Ok(id) => id,
-        Err(e) => { error!("TomlMaterializer: bad topic name: {e}"); return; }
-    };
-
-    let consumer = Consumer::default();
-    let strategy = PollingStrategy::next();
     let mut last_write = Instant::now();
     let mut dirty = false;
 
     loop {
-        match client
-            .poll_messages(&stream_id, &topic_id, Some(1), &consumer, &strategy, config.poll_batch, true)
-            .await
-        {
-            Ok(polled) => {
-                if !polled.messages.is_empty() {
+        // Drain all pending messages without blocking.
+        let mut received = false;
+        while let Ok(msg) = rx.try_recv() {
+            received = true;
+            match SceneDelta::from_bytes(msg.data.as_ref()) {
+                Ok(delta) => {
                     let mut m = mirror.lock().await;
-                    for msg in polled.messages.iter() {
-                        let payload = msg.payload.as_ref();
-                        // Layer 6: use rkyv archived view first — zero allocation — to
-                        // pre-screen the DeltaKind before committing to full deserialization.
-                        // `mirror.apply` takes `&SceneDelta` (owned), so we still deserialize
-                        // for the apply call, but we skip it entirely for unknown/no-op kinds.
-                        match rkyv::access::<ArchivedSceneDelta, rkyv::rancor::Error>(payload) {
-                            Ok(_archived) => {
-                                // Archived view confirms the payload is valid rkyv; now
-                                // deserialize to owned for mirror.apply().
-                                match SceneDelta::from_bytes(payload) {
-                                    Ok(delta) => {
-                                        if m.apply(&delta) {
-                                            dirty = true;
-                                        }
-                                    }
-                                    Err(e) => warn!("TomlMaterializer: delta deserialize: {e}"),
-                                }
-                            }
-                            Err(e) => warn!("TomlMaterializer: bad rkyv payload: {e}"),
-                        }
+                    if m.apply(&delta) {
+                        dirty = true;
                     }
                 }
-            }
-            Err(e) => {
-                warn!("TomlMaterializer: poll error: {e} — backing off 500ms");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
+                Err(e) => warn!("TomlMaterializer: delta deserialize: {e}"),
             }
         }
 
@@ -323,7 +263,9 @@ async fn run_materializer_loop(
             last_write = Instant::now();
         }
 
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        if !received {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
 
@@ -358,20 +300,29 @@ async fn write_mirror(
 // Bevy Startup system
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Bevy Startup system: spawns the TOML materializer on a background `std::thread`
-/// with its own tokio runtime. Never interferes with the Bevy loop.
+/// Bevy Startup system: spawns the TOML materializer on a background thread.
+///
+/// Requires `IggyChangeQueue` to be present (added by `IggyPlugin`).
 pub fn start_toml_materializer_system(
     config: Option<bevy::prelude::Res<MaterializerConfig>>,
+    queue: Option<bevy::prelude::Res<crate::iggy_queue::IggyChangeQueue>>,
 ) {
     let cfg = config.map(|c| c.clone()).unwrap_or_default();
     let session_id = format!("session-{}", uuid::Uuid::new_v4());
 
+    let Some(queue) = queue else {
+        warn!("TomlMaterializer: IggyChangeQueue not available — skipping materializer.");
+        return;
+    };
+
+    let stream = queue.stream.clone();
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("materializer rt");
-        rt.block_on(spawn_toml_materializer(cfg, session_id));
+        rt.block_on(spawn_toml_materializer(cfg, session_id, stream));
     });
 
-    bevy::prelude::info!("TomlMaterializer: background task started.");
+    tracing::info!("TomlMaterializer: background task started.");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

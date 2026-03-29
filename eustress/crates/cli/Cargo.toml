@@ -20,12 +20,6 @@ clap = { version = "4.4", features = ["derive", "env"] }
 # Async runtime (full features for signal handling + fs)
 tokio = { version = "1", features = ["full"] }
 
-# Apache Iggy streaming SDK
-iggy = { workspace = true }
-
-# bytes — Iggy SDK payload type
-bytes = { version = "1.7" }
-
 # Zero-copy serialization for agent commands / observations
 rkyv = { workspace = true }
 

@@ -81,11 +81,11 @@ rune-modules = { version = "0.14", optional = true }
 rune-wasm = { version = "0.14", optional = true }
 # Spatial data structures for neighbor queries (4.2+ with rkyv zero-copy)
 kiddo = { version = "4.2", features = ["rkyv"], optional = true }
-# Zero-copy serialization for spatial data + Iggy scene deltas
+# Zero-copy serialization for spatial data + scene deltas
 rkyv = { workspace = true }
-# Apache Iggy streaming platform (1M+ msg/s)
-iggy = { workspace = true, optional = true }
-# bytes — shared buffer type used by Iggy SDK payloads
+# EustressStream — embedded cross-platform in-process streaming core
+eustress-stream = { path = "../stream", optional = true }
+# bytes — payload buffer type used by streaming code
 bytes = { version = "1.7", optional = true }
 # Notify for hot-reload file watching
 notify = { version = "6.1", optional = true }
@@ -141,8 +141,8 @@ realism-wasm = ["realism-scripting", "rune-wasm"]
 realism-gpu = ["realism", "wgpu", "encase"]
 # Enable advanced spatial queries with zero-copy serialization
 realism-spatial = ["realism", "kiddo"]
-# Enable Apache Iggy streaming for scene delta emission + TOML materializer
-iggy-streaming = ["iggy", "tokio", "bytes"]
+# Enable EustressStream for scene delta emission + TOML materializer
+iggy-streaming = ["dep:eustress-stream", "tokio", "bytes"]
 # Enable quantum effects module (DISABLED — future work)
 # realism-quantum = ["realism-symbolic"]
 # Enable full realism system with all features (excludes quantum)
