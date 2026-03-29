@@ -31,21 +31,27 @@ use std::path::PathBuf;
 pub struct StartupArgs {
     /// Scene file to load on startup (if any)
     pub scene_file: Option<PathBuf>,
-    
+
     /// Whether to register file associations (Windows only)
     pub register_associations: bool,
-    
+
     /// Whether to unregister file associations (Windows only)
     pub unregister_associations: bool,
-    
+
     /// Start in play mode immediately
     pub play_mode: bool,
-    
+
     /// Start as server (headless)
     pub server_mode: bool,
-    
+
     /// Verbose logging
     pub verbose: bool,
+
+    /// Open a specific Space directory directly (overrides SpaceRoot auto-discovery)
+    pub space_dir: Option<PathBuf>,
+
+    /// Open the first Space found inside a Universe directory
+    pub universe_dir: Option<PathBuf>,
 }
 
 impl StartupArgs {
@@ -73,6 +79,18 @@ impl StartupArgs {
                 }
                 "--verbose" | "-v" => {
                     result.verbose = true;
+                }
+                "--space" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.space_dir = Some(PathBuf::from(&args[i]));
+                    }
+                }
+                "--universe" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.universe_dir = Some(PathBuf::from(&args[i]));
+                    }
                 }
                 "--help" | "-h" => {
                     print_help();
@@ -119,18 +137,22 @@ ARGUMENTS:
     [SCENE_FILE]    Path to a .eustress or .ron scene file to open
 
 OPTIONS:
-    -h, --help          Show this help message
-    -r, --register      Register file associations (Windows, requires admin)
-    -u, --unregister    Unregister file associations (Windows, requires admin)
-    -p, --play          Start in play mode immediately
-    -s, --server        Start as headless server
-    -v, --verbose       Enable verbose logging
+    -h, --help              Show this help message
+    -r, --register          Register file associations (Windows, requires admin)
+    -u, --unregister        Unregister file associations (Windows, requires admin)
+    -p, --play              Start in play mode immediately
+    -s, --server            Start as headless server
+    -v, --verbose           Enable verbose logging
+        --space <PATH>      Open a specific Space directory directly
+        --universe <PATH>   Open the first Space found inside a Universe directory
 
 EXAMPLES:
-    eustress-engine.exe                         # Start with empty scene
-    eustress-engine.exe my_game.eustress        # Open a scene file
-    eustress-engine.exe --play level1.eustress  # Open and immediately play
-    eustress-engine.exe --register              # Register .eustress extension
+    eustress-engine.exe                                        # Start with auto-discovered space
+    eustress-engine.exe my_game.eustress                      # Open a scene file
+    eustress-engine.exe --play level1.eustress                # Open and immediately play
+    eustress-engine.exe --register                            # Register .eustress extension
+    eustress-engine.exe --space "~/Documents/Eustress/ARC-AGI-3/spaces/Puzzle01"
+    eustress-engine.exe --universe "~/Documents/Eustress/ARC-AGI-3"
 
 FILE EXTENSIONS:
     .eustress   Eustress scene file (recommended)
@@ -635,6 +657,19 @@ impl Plugin for StartupPlugin {
             }
         }
         
+        // Override SpaceRoot from --space / --universe flags
+        if let Some(ref space_dir) = args.space_dir {
+            info!("📁 --space override: {:?}", space_dir);
+            app.insert_resource(crate::space::SpaceRoot(space_dir.clone()));
+        } else if let Some(ref universe_dir) = args.universe_dir {
+            if let Some(space) = crate::space::first_space_root_in_universe(universe_dir) {
+                info!("📁 --universe override → space: {:?}", space);
+                app.insert_resource(crate::space::SpaceRoot(space));
+            } else {
+                warn!("--universe {:?}: no Space found inside", universe_dir);
+            }
+        }
+
         // Add startup system to load scene if specified
         if args.scene_file.is_some() {
             app.add_systems(Startup, load_startup_scene.after(crate::default_scene::setup_default_scene));

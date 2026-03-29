@@ -127,6 +127,11 @@ pub struct BridgeState {
     pub viewport_y: Option<f32>,
     pub viewport_width: Option<f32>,
     pub viewport_height: Option<f32>,
+
+    // ---- Universe Browser ----
+    pub show_universe_browser: Option<bool>,
+    pub universe_items: Option<Vec<UniverseItemData>>,
+    pub active_space_path: Option<String>,
 }
 
 impl BridgeState {
@@ -244,6 +249,23 @@ pub struct WorkshopStepData {
     pub name: String,
     pub status: String,
     pub description: String,
+}
+
+/// One Space entry inside a UniverseItemData
+#[derive(Clone, Debug)]
+pub struct SpaceItemData {
+    pub name: String,
+    pub path: String,
+    pub is_active: bool,
+}
+
+/// One Universe entry for the UniverseBrowser sidebar
+#[derive(Clone, Debug)]
+pub struct UniverseItemData {
+    pub name: String,
+    pub path: String,
+    pub spaces: Vec<SpaceItemData>,
+    pub is_expanded: bool,
 }
 
 // ============================================================================

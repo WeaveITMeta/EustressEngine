@@ -421,6 +421,27 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
         ui.set_workshop_pipeline_steps(slint::ModelRc::from(model));
     }
 
+    // Universe browser
+    if let Some(v) = state.show_universe_browser { ui.set_show_universe_browser(v); }
+    if let Some(v) = state.active_space_path { ui.set_active_space_path(v.into()); }
+    if let Some(items) = state.universe_items {
+        let slint_items: Vec<UniverseItem> = items.into_iter().map(|u| {
+            let spaces: Vec<SpaceItem> = u.spaces.into_iter().map(|s| SpaceItem {
+                name: s.name.into(),
+                path: s.path.into(),
+                is_active: s.is_active,
+            }).collect();
+            UniverseItem {
+                name: u.name.into(),
+                path: u.path.into(),
+                spaces: std::rc::Rc::new(slint::VecModel::from(spaces)).into(),
+                is_expanded: u.is_expanded,
+            }
+        }).collect();
+        let model = std::rc::Rc::new(slint::VecModel::from(slint_items));
+        ui.set_universe_items(slint::ModelRc::from(model));
+    }
+
     // Center tabs
     if let Some(tabs) = state.center_tabs {
         let slint_tabs: Vec<CenterTab> = tabs.into_iter().map(|t| CenterTab {

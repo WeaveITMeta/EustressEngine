@@ -40,6 +40,7 @@ import { DataSourcesDialog } from "data_sources.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.slint";
+import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
 // ============================================================================
 // Main Studio Window Component
@@ -75,7 +76,15 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-history: false;
     in-out property <bool> show-ai-generation: false;
     in-out property <bool> show-workshop-panel: false;
-    
+    in-out property <bool> show-universe-browser: false;
+
+    // Universe browser data
+    in property <[UniverseItem]> universe-items: [];
+    in property <string> active-space-path: "";
+
+    // Callback: user selected a Space from the browser
+    callback space-selected(string);
+
     // HUD visibility (toggle all Eustress Engine UI, keep Bevy UI)
     in-out property <bool> show-hud: true;
     
@@ -597,7 +606,7 @@ export component StudioWindow inherits Window {
             // ================================================================
             // Left Panel (Explorer, Toolbox, Assets, etc.)
             // ================================================================
-            if root.show-explorer || root.show-toolbox || root.show-assets || root.show-terrain-editor: Rectangle {
+            if root.show-explorer || root.show-toolbox || root.show-assets || root.show-terrain-editor || root.show-universe-browser: Rectangle {
                 width: root.left-panel-width;
                 background: Theme.panel-background;
                 border-width: 0px;
@@ -688,15 +697,35 @@ export component StudioWindow inherits Window {
                                 background: root.left-tab-index == 3 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.left-tab-index = 3; }
                                 }
-                                
+
                                 Text {
                                     text: "Terrain";
                                     color: root.left-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            if root.show-universe-browser: Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.left-tab-index == 4 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.left-tab-index = 4; }
+                                }
+
+                                Text {
+                                    text: "Universes";
+                                    color: root.left-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -767,6 +796,12 @@ export component StudioWindow inherits Window {
                             on-category-changed(cat) => { root.asset-category-changed(cat); }
                         }
                         
+                        if root.left-tab-index == 4 && root.show-universe-browser: UniverseBrowser {
+                            universe-items: root.universe-items;
+                            active-space-path: root.active-space-path;
+                            space-selected(path) => { root.space-selected(path); }
+                        }
+
                         if root.left-tab-index == 3: TerrainEditor {
                             has-terrain: root.has-terrain;
                             edit-mode: root.terrain-edit-mode;

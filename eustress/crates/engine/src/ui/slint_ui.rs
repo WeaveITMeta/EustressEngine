@@ -445,6 +445,9 @@ pub enum SlintAction {
     WorkshopResumePipeline,
     WorkshopCancelPipeline,
     WorkshopOptimizeAndBuild,
+
+    // Universe browser
+    OpenSpacePath(String),
 }
 
 /// Shared action queue between Slint callbacks and Bevy systems
@@ -1107,6 +1110,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, update_slint_ui_focus)
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
             // Window resize handling
             .add_systems(Update, handle_window_resize)
@@ -1498,7 +1502,11 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
     let q = queue.clone();
     ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
-    
+
+    // Universe browser
+    let q = queue.clone();
+    ui.on_space_selected(move |path| q.push(SlintAction::OpenSpacePath(path.to_string())));
+
     // Store queue as Bevy resource
     world.insert_resource(queue);
     
@@ -1699,6 +1707,52 @@ struct SlintStagingBuffer {
 #[derive(Resource, Default)]
 struct SlintCursorState {
     position: Option<LogicalPosition>,
+}
+
+/// Sync UniverseRegistry → Slint UniverseBrowser panel.
+/// Runs as a separate system to avoid the sync_bevy_to_slint parameter count limit.
+fn sync_universe_browser(
+    slint_context: Option<NonSend<SlintUiState>>,
+    registry: Option<Res<crate::space::UniverseRegistry>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(registry) = registry else { return };
+
+    // Only rebuild the model when something actually changed
+    let registry_changed = registry.is_changed();
+    let space_changed = space_root.as_ref().map(|sr| sr.is_changed()).unwrap_or(false);
+    if !registry_changed && !space_changed {
+        return;
+    }
+
+    let ui = &slint_context.window;
+    let active_path = space_root
+        .as_ref()
+        .map(|sr| sr.0.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let slint_items: Vec<UniverseItem> = registry.universes.iter().map(|u| {
+        let spaces: Vec<SpaceItem> = u.spaces.iter().map(|s| {
+            let path_str = s.path.to_string_lossy().to_string();
+            SpaceItem {
+                name: s.name.clone().into(),
+                path: path_str.clone().into(),
+                is_active: space_root.as_ref().map(|sr| sr.0 == s.path).unwrap_or(false),
+            }
+        }).collect();
+        UniverseItem {
+            name: u.name.clone().into(),
+            path: u.path.to_string_lossy().to_string().into(),
+            spaces: std::rc::Rc::new(slint::VecModel::from(spaces)).into(),
+            is_expanded: true,
+        }
+    }).collect();
+
+    let model = std::rc::Rc::new(slint::VecModel::from(slint_items));
+    ui.set_universe_items(slint::ModelRc::from(model));
+    ui.set_active_space_path(active_path.into());
+    ui.set_show_universe_browser(!registry.universes.is_empty());
 }
 
 /// Frame counter for one-time debug logging
@@ -4100,6 +4154,16 @@ fn drain_slint_actions(
             }
             SlintAction::ForceExit => {
                 events.exit_events.write(bevy::app::AppExit::Success);
+            }
+
+            SlintAction::OpenSpacePath(path) => {
+                let space_path = std::path::PathBuf::from(&path);
+                if crate::space::looks_like_space_root(&space_path) {
+                    info!("UniverseBrowser: switching to space {:?}", space_path);
+                    commands.insert_resource(crate::space::SpaceRoot(space_path));
+                } else {
+                    warn!("UniverseBrowser: {:?} is not a valid Space root", space_path);
+                }
             }
         }
     }

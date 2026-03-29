@@ -19,6 +19,7 @@ pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;
 pub mod space_ops;
+pub mod universe_registry;
 
 /// Resource holding the current Space root path
 #[derive(Resource, Debug, Clone)]
@@ -135,4 +136,5 @@ pub use instance_loader::{
     write_instance_definition,
 };
 pub use class_defaults::ClassDefaultsRegistry;
+pub use universe_registry::{UniverseInfo, UniverseRegistry, UniverseRegistryPlugin, SpaceInfo};
 

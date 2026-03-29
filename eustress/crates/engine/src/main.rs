@@ -102,6 +102,7 @@ use startup::{StartupPlugin, StartupArgs};
 use soul::EngineSoulPlugin;
 use workshop::WorkshopPlugin;
 use space::SpaceFileLoaderPlugin;
+use space::{SpaceRoot, UniverseRegistryPlugin};
 
 fn main() {
     println!("Starting Eustress Engine...");
@@ -291,8 +292,12 @@ fn main() {
         .add_plugins(eustress_geo::GeoPlugin)
         // Window focus
         .add_plugins(WindowFocusPlugin)
+        // Universe registry (periodic Universe→Space tree scan)
+        .add_plugins(UniverseRegistryPlugin)
         // Startup
         .add_plugins(StartupPlugin)
+        // Window title: derives "Universe > Space - Eustress Engine" from SpaceRoot
+        .add_systems(Update, update_window_title)
         // Studio plugins
         .add_plugins(studio_plugins::StudioPluginSystem)
         // Frame diagnostics to identify stutters
@@ -320,6 +325,46 @@ fn main() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Iggy SimStreamWriter — one persistent connection, shared via Arc<Resource>
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Window title — "Universe > Space - Eustress Engine"
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Update the primary window title whenever `SpaceRoot` changes.
+fn update_window_title(
+    space_root: Option<Res<SpaceRoot>>,
+    mut windows: Query<&mut bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+) {
+    let Some(sr) = space_root else { return };
+    if !sr.is_changed() { return; }
+
+    let title = derive_window_title(&sr.0);
+    for mut window in &mut windows {
+        window.title = title.clone();
+    }
+}
+
+fn derive_window_title(space_path: &std::path::Path) -> String {
+    let space_name = space_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Untitled".to_string());
+
+    // Walk up: if immediate parent is "spaces/", skip it to get the Universe folder.
+    let universe_name = space_path.parent().and_then(|p| {
+        let pname = p.file_name()?.to_string_lossy().to_string();
+        if pname == "spaces" {
+            p.parent()?.file_name().map(|n| n.to_string_lossy().to_string())
+        } else {
+            Some(pname)
+        }
+    });
+
+    match universe_name {
+        Some(u) => format!("{u} > {space_name} - Eustress Engine"),
+        None => format!("{space_name} - Eustress Engine"),
+    }
+}
 
 /// Bevy Resource wrapper so `Arc<SimStreamWriter>` can be stored in ECS.
 #[cfg(feature = "iggy-streaming")]
