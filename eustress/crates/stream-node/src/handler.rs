@@ -77,6 +77,16 @@ impl ConnectionHandler {
                 self.send(ServerFrame::Ack { offset }).await?;
             }
 
+            ClientFrame::PublishBatch { messages } => {
+                let offsets: Vec<u64> = messages
+                    .into_iter()
+                    .map(|(topic, payload)| {
+                        self.stream.producer(&topic).send_bytes(Bytes::from(payload))
+                    })
+                    .collect();
+                self.send(ServerFrame::BatchAck { offsets }).await?;
+            }
+
             ClientFrame::Subscribe { topic, from_offset } => {
                 if self.subscriptions.contains_key(&topic) {
                     // Already subscribed — re-use existing subscription.

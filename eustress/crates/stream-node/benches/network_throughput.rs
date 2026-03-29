@@ -271,6 +271,129 @@ fn bench_cluster_publish_1_sub(c: &mut Criterion) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Round 1: Batch publish over TCP
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn bench_tcp_batch_publish(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let (node, addr) = rt.block_on(start_node());
+    let client = rt.block_on(connect(addr));
+
+    let payload_100b = Bytes::from(vec![0u8; 100]);
+
+    let mut group = c.benchmark_group("tcp_batch");
+
+    for batch_size in [1usize, 8, 16, 64, 256] {
+        let msgs: Vec<(String, Bytes)> = (0..batch_size)
+            .map(|_| ("batch_topic".to_string(), payload_100b.clone()))
+            .collect();
+        let msgs = Arc::new(msgs);
+
+        // Throughput = batch_size elements per sample
+        group.throughput(Throughput::Elements(batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("batch_100b_no_sub", batch_size),
+            &batch_size,
+            |b, _| {
+                let msgs = Arc::clone(&msgs);
+                b.to_async(&rt).iter(|| async {
+                    client.publish_batch((*msgs).clone()).await.unwrap()
+                });
+            },
+        );
+    }
+
+    group.finish();
+    node.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round 5: QUIC single publish + batch
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn bench_quic_single_publish(c: &mut Criterion) {
+    use eustress_stream_node::quic::{QuicNode, QuicNodeClient};
+
+    let rt = Runtime::new().unwrap();
+
+    let (quic_node, cert) = rt.block_on(async {
+        let cfg = fast_config(65536);
+        let n = QuicNode::start(cfg).await.expect("quic node");
+        let cert = n.cert_der().clone();
+        (n, cert)
+    });
+
+    let quic_addr: SocketAddr = format!("127.0.0.1:{}", quic_node.listen_addr().port())
+        .parse()
+        .unwrap();
+
+    let client = rt.block_on(async {
+        QuicNodeClient::connect(quic_addr, &cert).await.expect("quic connect")
+    });
+
+    let payload_100b = Bytes::from(vec![0u8; 100]);
+
+    let mut group = c.benchmark_group("quic");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("publish_100b_no_sub", |b| {
+        b.to_async(&rt).iter(|| async {
+            client.publish("quic_bench", payload_100b.clone()).await.unwrap()
+        });
+    });
+
+    group.finish();
+    quic_node.shutdown();
+}
+
+fn bench_quic_batch_publish(c: &mut Criterion) {
+    use eustress_stream_node::quic::{QuicNode, QuicNodeClient};
+
+    let rt = Runtime::new().unwrap();
+
+    let (quic_node, cert) = rt.block_on(async {
+        let cfg = fast_config(65536);
+        let n = QuicNode::start(cfg).await.expect("quic node");
+        let cert = n.cert_der().clone();
+        (n, cert)
+    });
+
+    let quic_addr: SocketAddr = format!("127.0.0.1:{}", quic_node.listen_addr().port())
+        .parse()
+        .unwrap();
+
+    let client = rt.block_on(async {
+        QuicNodeClient::connect(quic_addr, &cert).await.expect("quic connect")
+    });
+
+    let payload_100b = Bytes::from(vec![0u8; 100]);
+
+    let mut group = c.benchmark_group("quic");
+
+    for batch_size in [1usize, 8, 16, 64, 256] {
+        let msgs: Vec<(String, Bytes)> = (0..batch_size)
+            .map(|_| ("quic_batch".to_string(), payload_100b.clone()))
+            .collect();
+        let msgs = Arc::new(msgs);
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("batch_100b_no_sub", batch_size),
+            &batch_size,
+            |b, _| {
+                let msgs = Arc::clone(&msgs);
+                b.to_async(&rt).iter(|| async {
+                    client.publish_batch((*msgs).clone()).await.unwrap()
+                });
+            },
+        );
+    }
+
+    group.finish();
+    quic_node.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Criterion registration
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -286,6 +409,9 @@ criterion_group! {
         bench_single_node_8_subs,
         bench_cluster_publish_no_sub,
         bench_cluster_publish_1_sub,
+        bench_tcp_batch_publish,
+        bench_quic_single_publish,
+        bench_quic_batch_publish,
 }
 
 criterion_main!(benches);

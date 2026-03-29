@@ -43,6 +43,7 @@ pub mod error;
 pub mod handler;
 pub mod mcp;
 pub mod protocol;
+pub mod quic;
 pub mod rest;
 pub mod server;
 

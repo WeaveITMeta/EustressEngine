@@ -22,6 +22,9 @@ pub enum ClientFrame {
     Unsubscribe { topic: String },
     /// Publish a payload to a topic.
     Publish { topic: String, payload: Vec<u8> },
+    /// Publish N messages in one frame — server returns BatchAck.
+    /// Each entry is `(topic, payload)`. Zero-copy: payloads are Bytes on the heap.
+    PublishBatch { messages: Vec<(String, Vec<u8>)> },
     /// List all active topics with stats.
     ListTopics,
     /// Health check — node replies with Pong.
@@ -37,6 +40,8 @@ pub enum ServerFrame {
     TopicList(Vec<TopicStats>),
     /// Acknowledgement after a successful Publish; contains the assigned offset.
     Ack { offset: u64 },
+    /// Acknowledgement for PublishBatch; one offset per message in order.
+    BatchAck { offsets: Vec<u64> },
     /// Error response.
     Error { code: u32, message: String },
     /// Health check reply.

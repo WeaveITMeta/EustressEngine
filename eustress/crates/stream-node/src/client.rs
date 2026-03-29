@@ -29,6 +29,8 @@ struct ClientInner {
     writer: Mutex<tokio::net::tcp::OwnedWriteHalf>,
     // Pending ack waiters — one-shot senders in FIFO order (TCP preserves order).
     ack_queue: Mutex<VecDeque<oneshot::Sender<u64>>>,
+    // Pending batch ack waiters — parallel to ack_queue, carries Vec<u64>.
+    batch_ack_queue: Mutex<VecDeque<oneshot::Sender<Vec<u64>>>>,
     // Pending ListTopics waiter.
     topic_list_waiter: Mutex<Option<oneshot::Sender<Vec<TopicStats>>>>,
     // Per-topic subscriber channels.
@@ -44,6 +46,7 @@ impl StreamNodeClient {
         let inner = Arc::new(ClientInner {
             writer: Mutex::new(write_half),
             ack_queue: Mutex::new(VecDeque::new()),
+            batch_ack_queue: Mutex::new(VecDeque::new()),
             topic_list_waiter: Mutex::new(None),
             sub_channels: DashMap::new(),
         });
@@ -71,6 +74,27 @@ impl StreamNodeClient {
                 &ClientFrame::Publish {
                     topic: topic.to_string(),
                     payload: payload.to_vec(),
+                },
+            )
+            .await?;
+        }
+        rx.await.map_err(|_| NodeError::ConnectionClosed)
+    }
+
+    /// Publish a batch of `(topic, payload)` pairs in one round trip.
+    /// Returns the assigned offsets in order.
+    pub async fn publish_batch(&self, messages: Vec<(String, Bytes)>) -> Result<Vec<u64>, NodeError> {
+        let (tx, rx) = oneshot::channel::<Vec<u64>>();
+        {
+            let mut queue = self.inner.batch_ack_queue.lock().await;
+            queue.push_back(tx);
+        }
+        {
+            let mut writer = self.inner.writer.lock().await;
+            write_client_frame(
+                &mut *writer,
+                &ClientFrame::PublishBatch {
+                    messages: messages.into_iter().map(|(t, p)| (t, p.to_vec())).collect(),
                 },
             )
             .await?;
@@ -150,6 +174,12 @@ async fn reader_task(
                     if entry.try_send((offset, timestamp, payload)).is_err() {
                         // Channel full — drop (ring semantics).
                     }
+                }
+            }
+            Ok(ServerFrame::BatchAck { offsets }) => {
+                let mut queue = inner.batch_ack_queue.lock().await;
+                if let Some(tx) = queue.pop_front() {
+                    let _ = tx.send(offsets);
                 }
             }
             Ok(ServerFrame::TopicList(list)) => {
