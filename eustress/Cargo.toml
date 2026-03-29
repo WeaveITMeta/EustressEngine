@@ -20,6 +20,7 @@ members = [
     "crates/texture-gen",
     "crates/workshop",
     "crates/cli",
+    "crates/stream",
     "benches/instance-capacity"
 ]
 
