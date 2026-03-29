@@ -110,6 +110,8 @@ rcgen = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
 # DashMap for concurrent collections
 dashmap = "6"
+# Bytes for EustressStream payload publishing
+bytes = "1"
 # Async channels for Slint+Bevy integration
 smol = "2"
 spin_on = "0.1"

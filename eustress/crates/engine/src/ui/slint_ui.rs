@@ -1124,6 +1124,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
             // Asset Manager sync: scan Universe + Space directories (throttled internally)
             .add_systems(Update, sync_asset_manager_to_slint)
+            // Output log → EustressStream topic "log/output" (fires only when console changes)
+            .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
@@ -4435,6 +4437,34 @@ fn sync_bevy_to_slint(
     // (runs on its own schedule to avoid adding workshop as a parameter here)
 }
 
+/// Publishes new `OutputConsole` log entries to the EustressStream `"log/output"` topic.
+///
+/// External subscribers (AI agents, remote debuggers, CLI) can subscribe to this topic
+/// to receive live engine log output without polling. Runs only when the console changes.
+fn publish_output_logs(
+    console: Option<Res<OutputConsole>>,
+    queue: Option<Res<eustress_common::iggy_queue::IggyChangeQueue>>,
+) {
+    let (Some(console), Some(queue)) = (console, queue) else { return };
+    if !console.is_changed() { return; }
+    let Some(entry) = console.entries.last() else { return };
+
+    // Simple wire encoding: 1-byte level | timestamp (null-terminated) | message
+    let level_byte: u8 = match entry.level {
+        LogLevel::Info  => 0,
+        LogLevel::Warn  => 1,
+        LogLevel::Error => 2,
+        LogLevel::Debug => 3,
+    };
+    let mut payload = Vec::with_capacity(1 + entry.timestamp.len() + 1 + entry.message.len());
+    payload.push(level_byte);
+    payload.extend_from_slice(entry.timestamp.as_bytes());
+    payload.push(0); // null separator between timestamp and message
+    payload.extend_from_slice(entry.message.as_bytes());
+
+    queue.stream.producer("log/output").send_bytes(bytes::Bytes::from(payload));
+}
+
 /// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
 /// Only runs when the pipeline resource has actually changed (Bevy change detection).
 fn sync_workshop_to_slint(
@@ -4732,7 +4762,18 @@ fn sync_unified_explorer_to_slint(
     // Terrain entities for Explorer tree (TerrainRoot + Chunks)
     terrain_roots: Query<(Entity, &eustress_common::terrain::TerrainConfig), With<eustress_common::terrain::TerrainRoot>>,
     terrain_chunks: Query<(Entity, &eustress_common::terrain::Chunk)>,
+    // EustressStream change-detection dirty flag
+    mut panel_dirty: Option<ResMut<eustress_common::iggy_queue::PanelDirtyFlags>>,
 ) {
+    // EustressStream change-detection: if any entity was added/removed/renamed/reparented,
+    // bypass throttling and rebuild the tree immediately.
+    if let Some(ref mut d) = panel_dirty {
+        if d.explorer {
+            d.explorer = false;
+            explorer_state.needs_immediate_sync = true;
+        }
+    }
+
     // Bypass throttle when a user interaction (select/expand/collapse) demands
     // an immediate refresh; otherwise throttle to every 30 frames.
     if explorer_state.needs_immediate_sync {
@@ -5673,22 +5714,34 @@ fn sync_properties_to_slint(
         Query<&eustress_common::classes::ImageButton>,
         Query<&eustress_common::classes::ScrollingFrame>,
     )>,
+    // EustressStream change-detection dirty flag
+    mut panel_dirty: Option<ResMut<eustress_common::iggy_queue::PanelDirtyFlags>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
-    
+
     // Skip sync entirely if user is actively editing an input field
     // This prevents overwriting user input while they're typing
     if ui.get_any_input_has_focus() {
         return;
     }
-    
+
+    // EustressStream change-detection: if a BasePart or Transform changed,
+    // force an immediate properties rebuild regardless of frame throttling.
+    if let Some(ref mut d) = panel_dirty {
+        if d.properties {
+            d.properties = false;
+            studio_state.last_properties_hash = 0;
+            studio_state.frames_since_selection_change = 0;
+        }
+    }
+
     // Detect selection changes to trigger immediate sync
     let current_selected = match &explorer_state.selected {
         SelectedItem::Entity(e) => Some(*e),
         _ => None,
     };
-    
+
     let selection_changed = current_selected != studio_state.last_selected_entity;
     if selection_changed {
         studio_state.last_selected_entity = current_selected;

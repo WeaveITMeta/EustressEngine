@@ -29,10 +29,11 @@ use tracing::{info, warn};
 use eustress_stream::{EustressStream, OwnedMessage, Producer, StreamConfig};
 
 use crate::iggy_delta::{
-    AgentCommand, AgentObservation, SceneDelta,
+    AgentCommand, AgentObservation, DeltaKind, PartPayload, SceneDelta, TransformPayload,
     IGGY_DEFAULT_URL, IGGY_STREAM_NAME,
     IGGY_TOPIC_AGENT_COMMANDS, IGGY_TOPIC_AGENT_OBSERVATIONS, IGGY_TOPIC_SCENE_DELTAS,
 };
+use crate::classes::BasePart;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IggyConfig  (kept for API compatibility — url/stream_name fields are ignored)
@@ -212,8 +213,16 @@ pub struct IggyPlugin;
 
 impl Plugin for IggyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_iggy_queue)
-           .add_systems(Update, (poll_agent_commands, emit_lifecycle_deltas));
+        app.init_resource::<PanelDirtyFlags>()
+           .add_systems(Startup, setup_iggy_queue)
+           .add_systems(Update, (
+               poll_agent_commands,
+               emit_lifecycle_deltas,
+               emit_transform_deltas,
+               emit_part_property_deltas,
+               emit_name_deltas,
+               emit_parent_deltas,
+           ));
     }
 }
 
@@ -263,28 +272,139 @@ fn emit_lifecycle_deltas(
     queue: Option<Res<IggyChangeQueue>>,
     added: Query<Entity, Added<bevy::prelude::Name>>,
     mut removed: RemovedComponents<bevy::prelude::Name>,
+    mut dirty: ResMut<PanelDirtyFlags>,
 ) {
-    let Some(queue) = queue else { return };
+    let added_list: Vec<Entity> = added.iter().collect();
+    let removed_list: Vec<Entity> = removed.read().collect();
 
-    for entity in added.iter() {
-        let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::lifecycle(
-            entity.to_bits(),
-            crate::iggy_delta::DeltaKind::PartAdded,
-            seq,
-            ts,
-        ));
+    if added_list.is_empty() && removed_list.is_empty() {
+        return;
     }
 
-    for entity in removed.read() {
+    dirty.explorer = true;
+
+    let Some(queue) = queue else { return };
+
+    for entity in added_list {
         let seq = queue.next_seq();
         let ts  = IggyChangeQueue::unix_ms();
-        queue.send_delta(SceneDelta::lifecycle(
-            entity.to_bits(),
-            crate::iggy_delta::DeltaKind::PartRemoved,
-            seq,
-            ts,
+        queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartAdded, seq, ts));
+    }
+    for entity in removed_list {
+        let seq = queue.next_seq();
+        let ts  = IggyChangeQueue::unix_ms();
+        queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartRemoved, seq, ts));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PanelDirtyFlags — bridges change detection → UI sync systems
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Set by ECS change-detection systems; cleared by UI sync systems.
+///
+/// - `explorer`: tree needs immediate rebuild (entity added/removed/reparented/renamed)
+/// - `properties`: panel needs immediate refresh (selected entity's Transform or BasePart changed)
+///
+/// The engine systems `sync_unified_explorer_to_slint` and `sync_properties_to_slint`
+/// read these flags to bypass their normal throttling and fire immediately.
+#[derive(Resource, Default)]
+pub struct PanelDirtyFlags {
+    pub explorer: bool,
+    pub properties: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transform / BasePart / Name / Hierarchy change-detection producers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn emit_transform_deltas(
+    queue: Option<Res<IggyChangeQueue>>,
+    changed: Query<(Entity, &bevy::prelude::Transform), (
+        bevy::prelude::Changed<bevy::prelude::Transform>,
+        bevy::prelude::With<BasePart>,
+    )>,
+    mut dirty: ResMut<PanelDirtyFlags>,
+) {
+    if changed.is_empty() { return; }
+    dirty.properties = true;
+    let Some(queue) = queue else { return };
+    for (entity, t) in changed.iter() {
+        let seq = queue.next_seq();
+        let ts  = IggyChangeQueue::unix_ms();
+        queue.send_delta(SceneDelta::transform(
+            entity.to_bits(), seq, ts,
+            TransformPayload {
+                position: t.translation.to_array(),
+                rotation: t.rotation.to_array(),
+                scale:    t.scale.to_array(),
+            },
         ));
+    }
+}
+
+fn emit_part_property_deltas(
+    queue: Option<Res<IggyChangeQueue>>,
+    changed: Query<(Entity, &BasePart), bevy::prelude::Changed<BasePart>>,
+    mut dirty: ResMut<PanelDirtyFlags>,
+) {
+    if changed.is_empty() { return; }
+    dirty.properties = true;
+    let Some(queue) = queue else { return };
+    for (entity, bp) in changed.iter() {
+        let seq = queue.next_seq();
+        let ts  = IggyChangeQueue::unix_ms();
+        queue.send_delta(SceneDelta::part_props(
+            entity.to_bits(), seq, ts,
+            PartPayload {
+                color:        Some(bp.color.to_linear().to_f32_array()),
+                material:     Some(bp.material as u16),
+                size:         Some(bp.size.to_array()),
+                name:         None,
+                anchored:     Some(bp.anchored),
+                can_collide:  Some(bp.can_collide),
+                transparency: Some(bp.transparency),
+                reflectance:  Some(bp.reflectance),
+            },
+        ));
+    }
+}
+
+fn emit_name_deltas(
+    queue: Option<Res<IggyChangeQueue>>,
+    changed: Query<(Entity, &bevy::prelude::Name), bevy::prelude::Changed<bevy::prelude::Name>>,
+    mut dirty: ResMut<PanelDirtyFlags>,
+) {
+    if changed.is_empty() { return; }
+    dirty.explorer = true;
+    let Some(queue) = queue else { return };
+    for (entity, name) in changed.iter() {
+        let seq = queue.next_seq();
+        let ts  = IggyChangeQueue::unix_ms();
+        queue.send_delta(SceneDelta::rename(entity.to_bits(), seq, ts, name.to_string()));
+    }
+}
+
+fn emit_parent_deltas(
+    queue: Option<Res<IggyChangeQueue>>,
+    changed: Query<(Entity, &bevy::prelude::ChildOf), bevy::prelude::Changed<bevy::prelude::ChildOf>>,
+    mut dirty: ResMut<PanelDirtyFlags>,
+) {
+    if changed.is_empty() { return; }
+    dirty.explorer = true;
+    let Some(queue) = queue else { return };
+    for (entity, child_of) in changed.iter() {
+        let seq = queue.next_seq();
+        let ts  = IggyChangeQueue::unix_ms();
+        queue.send_delta(SceneDelta {
+            entity:       entity.to_bits(),
+            kind:         DeltaKind::Reparented,
+            seq,
+            timestamp_ms: ts,
+            transform:    None,
+            part:         None,
+            name:         None,
+            new_parent:   Some(child_of.0.to_bits()),
+        });
     }
 }
