@@ -67,3 +67,7 @@ tempfile   = "3"
 name             = "network_throughput"
 harness          = false
 required-features = ["quic"]
+
+[[bench]]
+name    = "uds_throughput"
+harness = false

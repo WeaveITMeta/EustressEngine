@@ -46,6 +46,7 @@ pub mod protocol;
 pub mod quic;
 pub mod rest;
 pub mod server;
+pub mod uds;
 
 pub use cluster::{ClusterStats, ForgeCluster};
 pub use client::StreamNodeClient;
