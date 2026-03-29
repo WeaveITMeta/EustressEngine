@@ -360,7 +360,7 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
 
     let reader = SimStreamReader::connect(&config)
         .await
-        .context("SimStreamReader init failed")?;
+        .map_err(|e| anyhow::anyhow!("SimStreamReader init failed: {e}"))?;
 
     match action {
         SimCommands::Replay { scenario, limit, json } => {

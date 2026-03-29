@@ -80,7 +80,7 @@ pub async fn call_ollama(
         .post(format!("{}/api/generate", endpoint))
         .json(&request)
         .timeout(std::time::Duration::from_secs(60))
-        .write()
+        .send()
         .await
         .map_err(|e| BackendError::Network(e.to_string()))?;
     
@@ -140,7 +140,7 @@ pub async fn queue_comfyui_workflow(
     let response = client
         .post(format!("{}/prompt", endpoint))
         .json(&prompt_request)
-        .write()
+        .send()
         .await
         .map_err(|e| BackendError::Network(e.to_string()))?;
     
@@ -179,7 +179,7 @@ pub async fn poll_comfyui_result(
         // Check history
         let response = client
             .get(format!("{}/history/{}", endpoint, prompt_id))
-            .write()
+            .send()
             .await
             .map_err(|e| BackendError::Network(e.to_string()))?;
         
@@ -207,7 +207,7 @@ pub async fn poll_comfyui_result(
                         
                         let image_response = client
                             .get(&image_url)
-                            .write()
+                            .send()
                             .await
                             .map_err(|e| BackendError::Network(e.to_string()))?;
                         
@@ -291,7 +291,7 @@ pub async fn generate_meshy_mesh(
         .post("https://api.meshy.ai/v2/text-to-3d")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&request)
-        .write()
+        .send()
         .await
         .map_err(|e| BackendError::Network(e.to_string()))?;
     
@@ -319,7 +319,7 @@ pub async fn generate_meshy_mesh(
         let status_response = client
             .get(format!("https://api.meshy.ai/v2/text-to-3d/{}", task_id))
             .header("Authorization", format!("Bearer {}", api_key))
-            .write()
+            .send()
             .await
             .map_err(|e| BackendError::Network(e.to_string()))?;
         
@@ -335,7 +335,7 @@ pub async fn generate_meshy_mesh(
                     if let Some(glb_url) = urls.glb {
                         let glb_response = client
                             .get(&glb_url)
-                            .write()
+                            .send()
                             .await
                             .map_err(|e| BackendError::Network(e.to_string()))?;
                         
@@ -391,7 +391,7 @@ pub async fn generate_tripo3d_mesh(
         .post("https://api.tripo3d.ai/v2/openapi/task")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&request)
-        .write()
+        .send()
         .await
         .map_err(|e| BackendError::Network(e.to_string()))?;
     
@@ -421,7 +421,7 @@ pub async fn generate_tripo3d_mesh(
         let status_response = client
             .get(format!("https://api.tripo3d.ai/v2/openapi/task/{}", task_id))
             .header("Authorization", format!("Bearer {}", api_key))
-            .write()
+            .send()
             .await
             .map_err(|e| BackendError::Network(e.to_string()))?;
         
@@ -438,7 +438,7 @@ pub async fn generate_tripo3d_mesh(
                 if let Some(model_url) = status["data"]["output"]["model"].as_str() {
                     let model_response = client
                         .get(model_url)
-                        .write()
+                        .send()
                         .await
                         .map_err(|e| BackendError::Network(e.to_string()))?;
                     
@@ -542,7 +542,7 @@ pub async fn generate_asset(
             
             let response = req
                 .timeout(std::time::Duration::from_secs(300))
-                .write()
+                .send()
                 .await
                 .map_err(|e| BackendError::Network(e.to_string()))?;
             

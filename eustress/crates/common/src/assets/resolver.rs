@@ -197,7 +197,7 @@ impl AssetResolver {
                 {
                     // Use blocking reqwest
                     let client = reqwest::blocking::Client::new();
-                    let response = client.get(url).write()
+                    let response = client.get(url).send()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
                     if !response.status().is_success() {
@@ -226,7 +226,7 @@ impl AssetResolver {
                         .build()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
-                    let response = client.get(&url).write()
+                    let response = client.get(&url).send()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
                     response.bytes()
@@ -260,7 +260,7 @@ impl AssetResolver {
                         .build()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
-                    let response = client.get(&url).write()
+                    let response = client.get(&url).send()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
                     if !response.status().is_success() {
@@ -286,7 +286,7 @@ impl AssetResolver {
                     let url = format!("https://{}.r2.cloudflarestorage.com/{}/{}", account_id, bucket, key);
                     
                     let client = reqwest::blocking::Client::new();
-                    let response = client.get(&url).write()
+                    let response = client.get(&url).send()
                         .map_err(|e| ResolveError::Network(e.to_string()))?;
                     
                     if !response.status().is_success() {
@@ -470,7 +470,7 @@ impl AssetResolver {
             AssetSource::Embedded(data) => Ok(data.clone()),
             
             AssetSource::Url(url) => {
-                let response = client.get(url).write().await
+                let response = client.get(url).send().await
                     .map_err(|e| ResolveError::Network(e.to_string()))?;
                 
                 response.bytes().await
@@ -482,7 +482,7 @@ impl AssetResolver {
                 let url = format!("{}/ipfs/{}", gateway, cid);
                 let response = client.get(&url)
                     .timeout(std::time::Duration::from_secs(30))
-                    .write().await
+                    .send().await
                     .map_err(|e| ResolveError::Network(e.to_string()))?;
                 
                 response.bytes().await
