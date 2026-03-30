@@ -284,7 +284,7 @@ impl mlua::UserData for LuauEventBus {
         // EventBus:Fire(name, message_string)
         methods.add_method("Fire", |_lua, this, (name, msg): (String, mlua::Value)| {
             let arg = match msg {
-                mlua::Value::String(s) => SignalArg::String(s.to_str().unwrap_or("").to_string()),
+                mlua::Value::String(s) => SignalArg::String(s.to_string_lossy().to_string()),
                 mlua::Value::Number(n) => SignalArg::Number(n),
                 mlua::Value::Boolean(b) => SignalArg::Bool(b),
                 mlua::Value::Integer(i) => SignalArg::Number(i as f64),
