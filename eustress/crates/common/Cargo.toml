@@ -112,7 +112,7 @@ ureq = { version = "2.10", optional = true }
 base64 = { version = "0.22", optional = true }
 
 [features]
-default = ["model-import", "geotiff"]
+default = ["model-import", "geotiff", "streaming"]
 # Enable physics for terrain collisions
 physics = ["avian3d"]
 # Enable async asset loading (HTTP, IPFS, etc.)
