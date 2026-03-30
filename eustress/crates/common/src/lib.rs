@@ -25,6 +25,8 @@ pub mod memory;
 // Sandbox: WorldState trait + Hypothesis/Branch search tree for external solvers
 pub mod sandbox;
 
+// Named event bus — bridges Rust, Luau, Rune, and EustressStream
+pub mod events;
 pub mod adornments;
 pub mod assets;
 pub mod attributes;
@@ -169,6 +171,13 @@ pub use orbital::{
 // Re-export orbital class components
 pub use classes::{
     SolarSystem, CelestialBodyClass, RegionChunk,
+};
+
+// Re-export event bus for convenience
+pub use events::{
+    EventBus, EventBusResource, EventBusPlugin,
+    set_event_bus_for_rune, clear_event_bus_for_rune, with_event_bus,
+    topics as event_topics,
 };
 
 // Re-export scripting types for Rune/Luau API

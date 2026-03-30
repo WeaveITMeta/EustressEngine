@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use super::services::{RunService, TaskScheduler, DebrisService, TweenService, ScriptingServices, FrameTime};
 use super::instance::InstanceRegistry;
+use crate::events::EventBusPlugin;
 
 // ============================================================================
 // 1. Bevy Resources wrapping shared services
@@ -173,6 +174,9 @@ impl Plugin for ScriptingServicesPlugin {
             inner: services.instance_registry.clone(),
         });
         app.insert_resource(services);
+
+        // Register the shared EventBus
+        app.add_plugins(EventBusPlugin);
 
         // Register messages
         app.add_message::<HeartbeatEvent>();

@@ -16,6 +16,9 @@ use std::sync::Arc;
 use crate::spatial_query_bridge::{
     ScriptSpatialQuery, RaycastParams, RaycastResult,
 };
+use eustress_common::events::{
+    set_event_bus_for_rune, clear_event_bus_for_rune, event_bus_rune_module, EventBus,
+};
 
 #[cfg(feature = "realism-scripting")]
 use rune::{Module, ContextError, runtime::Function};
@@ -201,9 +204,19 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(sound_play)?;
     module.function_meta(sound_stop)?;
     module.function_meta(sound_set_volume)?;
-    
+
     Ok(module)
 }
+
+/// Build and return the `event_bus` Rune module.
+/// Register alongside `create_ecs_module()` in the Rune context builder.
+#[cfg(feature = "realism-scripting")]
+pub fn create_event_bus_module() -> Result<rune::Module, rune::ContextError> {
+    event_bus_rune_module()
+}
+
+/// Re-export for use by Bevy systems that run Rune scripts.
+pub use eustress_common::events::{set_event_bus_for_rune, clear_event_bus_for_rune};
 
 // ============================================================================
 // Entity Component Access (existing stubs)
