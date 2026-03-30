@@ -6,6 +6,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use super::protocol::ReplicationPriority;
+
 /// Network ID component - assigned to replicated entities
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkId(pub u64);
@@ -38,31 +40,7 @@ pub struct ReplicatedEntity {
     pub last_tick: u64,
 }
 
-/// Replication priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReplicationPriority {
-    /// Low priority - static objects, infrequent updates
-    Low,
-    /// Normal priority - most game objects
-    #[default]
-    Normal,
-    /// High priority - player characters, important objects
-    High,
-    /// Critical - always replicate every tick
-    Critical,
-}
-
-impl ReplicationPriority {
-    /// Get update interval in ticks
-    pub fn interval(&self) -> u32 {
-        match self {
-            Self::Low => 30,      // ~2 times per second at 60 tick
-            Self::Normal => 6,    // ~10 times per second
-            Self::High => 2,      // ~30 times per second
-            Self::Critical => 1,  // Every tick
-        }
-    }
-}
+// ReplicationPriority is defined in protocol.rs and re-exported above.
 
 /// Replicated component data (serializable subset of components)
 #[derive(Component, Debug, Clone, Default, Serialize, Deserialize)]

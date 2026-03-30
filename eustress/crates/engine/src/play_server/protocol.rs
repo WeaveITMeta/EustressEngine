@@ -293,6 +293,169 @@ impl Default for TickConfig {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NetworkTickRate — validated server sync frequencies
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Validated server tick rate. Clients must sustain at least `min_client_fps()`
+/// to stay in sync; the server remains authoritative regardless.
+///
+/// | Variant  | Hz  | Interval  | Bandwidth multiplier vs 24 Hz |
+/// |----------|-----|-----------|-------------------------------|
+/// | `Hz24`   | 24  | 41.7 ms   | 1×  (minimum viable)          |
+/// | `Hz60`   | 60  | 16.7 ms   | 2.5× (recommended)            |
+/// | `Hz144`  | 144 | 6.9 ms    | 6×  (competitive / physics)   |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkTickRate {
+    /// 24 Hz — minimum viable sync. Suitable for slow-paced or low-bandwidth worlds.
+    Hz24,
+    /// 60 Hz — standard. Recommended for most worlds. **(default)**
+    #[default]
+    Hz60,
+    /// 144 Hz — maximum. Competitive play and physics-intensive worlds.
+    Hz144,
+}
+
+impl NetworkTickRate {
+    /// Ticks per second.
+    pub fn hz(self) -> u32 {
+        match self {
+            Self::Hz24  => 24,
+            Self::Hz60  => 60,
+            Self::Hz144 => 144,
+        }
+    }
+
+    /// Duration of one tick in seconds.
+    pub fn tick_dt(self) -> f32 {
+        1.0 / self.hz() as f32
+    }
+
+    /// Minimum client FPS required to stay synchronised.
+    pub fn min_client_fps(self) -> u32 {
+        self.hz()
+    }
+
+    /// Replication interval in ticks for a given priority.
+    ///
+    /// Intervals are chosen so the effective **Hz is the same** regardless of
+    /// tick rate — e.g. `Normal` always replicates at ~10 Hz:
+    ///
+    /// | Priority | Target Hz | Hz24 interval | Hz60 interval | Hz144 interval |
+    /// |----------|-----------|---------------|---------------|----------------|
+    /// | Critical | full rate | 1             | 1             | 1              |
+    /// | High     | ~30 Hz    | 1             | 2             | 5              |
+    /// | Normal   | ~10 Hz    | 2             | 6             | 14             |
+    /// | Low      | ~2 Hz     | 12            | 30            | 72             |
+    pub fn replication_interval(self, priority: ReplicationPriority) -> u32 {
+        let hz = self.hz() as f32;
+        match priority {
+            ReplicationPriority::Critical => 1,
+            ReplicationPriority::High     => (hz / 30.0).round().max(1.0) as u32,
+            ReplicationPriority::Normal   => (hz / 10.0).round().max(1.0) as u32,
+            ReplicationPriority::Low      => (hz / 2.0 ).round().max(1.0) as u32,
+        }
+    }
+
+    /// Upstream per-player bandwidth in bytes/s (48-byte input packet).
+    pub fn upstream_bps(self) -> u32 {
+        48 * self.hz()
+    }
+
+    /// Downstream per-player bandwidth in bytes/s for `visible` nearby players
+    /// (56-byte entity update per visible entity per tick).
+    pub fn downstream_bps(self, visible: u32) -> u32 {
+        56 * visible * self.hz()
+    }
+
+    /// Maximum players given a total outbound bandwidth cap (bytes/s) and
+    /// average visible player count.
+    ///
+    /// ```
+    /// use eustress_engine::play_server::protocol::NetworkTickRate;
+    /// let max = NetworkTickRate::Hz60.max_players(100_000_000 / 8, 20);
+    /// assert!(max > 1_000);
+    /// ```
+    pub fn max_players(self, bandwidth_bytes_per_sec: u64, visible: u32) -> u64 {
+        let per_player = self.downstream_bps(visible) as u64;
+        if per_player == 0 { return u64::MAX; }
+        bandwidth_bytes_per_sec / per_player
+    }
+
+    /// **Auto-select** the appropriate tick rate based on the nature of the
+    /// content being replicated.
+    ///
+    /// Rules (highest match wins):
+    /// - Player characters, projectiles, vehicles → `Hz144`
+    /// - Standard interactive objects, NPCs → `Hz60`
+    /// - Environmental / ambient / physics simulation → `Hz24`
+    ///
+    /// Pass an optional measured RTT (ms) to cap the rate when the link is
+    /// too slow — if RTT > 40 ms the rate is capped at `Hz24`.
+    pub fn auto(class: TickRateClass, rtt_ms: Option<u32>) -> Self {
+        let rate = match class {
+            TickRateClass::Competitive  => Self::Hz144,
+            TickRateClass::Interactive  => Self::Hz60,
+            TickRateClass::Environmental => Self::Hz24,
+        };
+        // Cap when the link can't sustain full-rate updates.
+        if let Some(rtt) = rtt_ms {
+            if rtt > 40 {
+                return rate.min(Self::Hz24);
+            } else if rtt > 16 {
+                return rate.min(Self::Hz60);
+            }
+        }
+        rate
+    }
+
+    fn min(self, other: Self) -> Self {
+        if self.hz() <= other.hz() { self } else { other }
+    }
+}
+
+/// Content class used by `NetworkTickRate::auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickRateClass {
+    /// Player characters, projectiles, vehicles, combat entities.
+    /// Target: 144 Hz (6.9 ms interval).
+    Competitive,
+    /// Standard interactive objects, NPCs, doors, interactables.
+    /// Target: 60 Hz (16.7 ms interval).
+    Interactive,
+    /// Environmental entities: terrain details, particles, ambient objects,
+    /// simulation results, AI world model data.
+    /// Target: 24 Hz (41.7 ms interval).
+    Environmental,
+}
+
+/// Replication priority — also used by `NetworkTickRate::replication_interval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplicationPriority {
+    /// Static / ambient objects (~2 Hz at 60 tick).
+    Low,
+    /// Most game objects (~10 Hz at 60 tick).
+    #[default]
+    Normal,
+    /// Player characters, important objects (~30 Hz at 60 tick).
+    High,
+    /// Always replicate every tick.
+    Critical,
+}
+
+impl ReplicationPriority {
+    /// Fixed interval in ticks at the **default 60 Hz** tick rate.
+    /// For tick-rate-aware intervals, use `NetworkTickRate::replication_interval`.
+    pub fn interval(self) -> u32 {
+        match self {
+            Self::Low      => 30,
+            Self::Normal   => 6,
+            Self::High     => 2,
+            Self::Critical => 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

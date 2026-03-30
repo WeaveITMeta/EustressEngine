@@ -22,9 +22,19 @@ pub enum ClientFrame {
     Unsubscribe { topic: String },
     /// Publish a payload to a topic.
     Publish { topic: String, payload: Vec<u8> },
-    /// Publish N messages in one frame — server returns BatchAck.
-    /// Each entry is `(topic, payload)`. Zero-copy: payloads are Bytes on the heap.
+    /// Publish N messages across (potentially mixed) topics in one frame.
+    /// Server returns `BatchAck { offsets: Vec<u64> }` — one offset per message.
     PublishBatch { messages: Vec<(String, Vec<u8>)> },
+    /// **Zero-copy single-topic batch** — all payloads go to the same topic.
+    ///
+    /// Eliminates per-message topic string allocation and serialization.
+    /// Server returns `BatchAckCompact { first_offset, count }` — just 12 bytes
+    /// regardless of batch size (vs `N × 8` bytes for `BatchAck`).
+    ///
+    /// Prefer this over `PublishBatch` whenever all messages share one topic
+    /// (e.g. `scene_deltas`, `agent_observations`). At batch-256 the ack shrinks
+    /// from **2,048 → 12 bytes** — projected to push TCP throughput past 1M msg/s.
+    PublishBatchTopic { topic: String, payloads: Vec<Vec<u8>> },
     /// List all active topics with stats.
     ListTopics,
     /// Health check — node replies with Pong.
@@ -40,8 +50,14 @@ pub enum ServerFrame {
     TopicList(Vec<TopicStats>),
     /// Acknowledgement after a successful Publish; contains the assigned offset.
     Ack { offset: u64 },
-    /// Acknowledgement for PublishBatch; one offset per message in order.
+    /// Acknowledgement for PublishBatch (mixed-topic); one offset per message.
     BatchAck { offsets: Vec<u64> },
+    /// **Compact acknowledgement for PublishBatchTopic** (single-topic).
+    ///
+    /// Encodes the entire batch ack as `first_offset` + `count`:
+    /// - `offsets[i] = first_offset + i`
+    /// - Wire size: **12 bytes fixed** (vs `count × 8` bytes for `BatchAck`).
+    BatchAckCompact { first_offset: u64, count: u32 },
     /// Error response.
     Error { code: u32, message: String },
     /// Health check reply.

@@ -87,6 +87,20 @@ impl ConnectionHandler {
                 self.send(ServerFrame::BatchAck { offsets }).await?;
             }
 
+            // Zero-copy single-topic batch — ack is just (first_offset, count).
+            ClientFrame::PublishBatchTopic { topic, payloads } => {
+                let count = payloads.len() as u32;
+                let producer = self.stream.producer(&topic);
+                let mut first_offset = 0u64;
+                for (i, payload) in payloads.into_iter().enumerate() {
+                    let offset = producer.send_bytes(Bytes::from(payload));
+                    if i == 0 {
+                        first_offset = offset;
+                    }
+                }
+                self.send(ServerFrame::BatchAckCompact { first_offset, count }).await?;
+            }
+
             ClientFrame::Subscribe { topic, from_offset } => {
                 if self.subscriptions.contains_key(&topic) {
                     // Already subscribed — re-use existing subscription.

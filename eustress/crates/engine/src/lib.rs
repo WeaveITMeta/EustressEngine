@@ -81,6 +81,7 @@ pub mod workshop;
 pub mod manufacturing;
 pub mod class_conversion;
 pub mod txt_to_toml_watcher;
+pub mod stream_node_plugin;
 
 // Re-exports for convenience
 pub use rendering::{PartRenderingPlugin, PartChanged};

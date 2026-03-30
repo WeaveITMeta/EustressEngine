@@ -31,6 +31,8 @@ struct ClientInner {
     ack_queue: Mutex<VecDeque<oneshot::Sender<u64>>>,
     // Pending batch ack waiters — parallel to ack_queue, carries Vec<u64>.
     batch_ack_queue: Mutex<VecDeque<oneshot::Sender<Vec<u64>>>>,
+    // Pending compact batch ack waiters (PublishBatchTopic) — carries (first_offset, count).
+    compact_ack_queue: Mutex<VecDeque<oneshot::Sender<(u64, u32)>>>,
     // Pending ListTopics waiter.
     topic_list_waiter: Mutex<Option<oneshot::Sender<Vec<TopicStats>>>>,
     // Per-topic subscriber channels.
@@ -47,6 +49,7 @@ impl StreamNodeClient {
             writer: Mutex::new(write_half),
             ack_queue: Mutex::new(VecDeque::new()),
             batch_ack_queue: Mutex::new(VecDeque::new()),
+            compact_ack_queue: Mutex::new(VecDeque::new()),
             topic_list_waiter: Mutex::new(None),
             sub_channels: DashMap::new(),
         });
@@ -95,6 +98,35 @@ impl StreamNodeClient {
                 &mut *writer,
                 &ClientFrame::PublishBatch {
                     messages: messages.into_iter().map(|(t, p)| (t, p.to_vec())).collect(),
+                },
+            )
+            .await?;
+        }
+        rx.await.map_err(|_| NodeError::ConnectionClosed)
+    }
+
+    /// **Zero-copy single-topic batch** — all payloads go to the same topic.
+    ///
+    /// Returns `(first_offset, count)`. Individual offsets are `first_offset + i`.
+    /// Use this instead of `publish_batch` when all messages share one topic —
+    /// the ack shrinks from `count × 8` bytes to 12 bytes fixed.
+    pub async fn publish_batch_topic(
+        &self,
+        topic: &str,
+        payloads: Vec<Bytes>,
+    ) -> Result<(u64, u32), NodeError> {
+        let (tx, rx) = oneshot::channel::<(u64, u32)>();
+        {
+            let mut queue = self.inner.compact_ack_queue.lock().await;
+            queue.push_back(tx);
+        }
+        {
+            let mut writer = self.inner.writer.lock().await;
+            write_client_frame(
+                &mut *writer,
+                &ClientFrame::PublishBatchTopic {
+                    topic: topic.to_string(),
+                    payloads: payloads.into_iter().map(|p| p.to_vec()).collect(),
                 },
             )
             .await?;
@@ -180,6 +212,12 @@ async fn reader_task(
                 let mut queue = inner.batch_ack_queue.lock().await;
                 if let Some(tx) = queue.pop_front() {
                     let _ = tx.send(offsets);
+                }
+            }
+            Ok(ServerFrame::BatchAckCompact { first_offset, count }) => {
+                let mut queue = inner.compact_ack_queue.lock().await;
+                if let Some(tx) = queue.pop_front() {
+                    let _ = tx.send((first_offset, count));
                 }
             }
             Ok(ServerFrame::TopicList(list)) => {
