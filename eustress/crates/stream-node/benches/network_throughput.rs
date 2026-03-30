@@ -349,6 +349,63 @@ fn bench_tcp_batch_topic(c: &mut Criterion) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Round 3: Fire-and-forget (no ack)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn bench_tcp_no_ack(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let (node, addr) = rt.block_on(start_node());
+    let client = rt.block_on(connect(addr));
+
+    let payload = Bytes::from(vec![0u8; 100]);
+    let topic = "no_ack_single";
+
+    let mut group = c.benchmark_group("tcp_no_ack");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("publish_100b_no_ack", |b| {
+        b.to_async(&rt).iter(|| async {
+            client.publish_no_ack(topic, payload.clone()).await.unwrap()
+        });
+    });
+    group.finish();
+    node.shutdown();
+}
+
+fn bench_tcp_batch_no_ack(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let (node, addr) = rt.block_on(start_node());
+    let client = rt.block_on(connect(addr));
+
+    let payload_100b = Bytes::from(vec![0u8; 100]);
+    let topic = "no_ack_batch";
+
+    let mut group = c.benchmark_group("tcp_no_ack");
+
+    for batch_size in [1usize, 8, 16, 64, 256, 1024, 4096] {
+        let payloads: Vec<Bytes> = (0..batch_size).map(|_| payload_100b.clone()).collect();
+        let payloads = Arc::new(payloads);
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("batch_100b_no_ack", batch_size),
+            &batch_size,
+            |b, _| {
+                let payloads = Arc::clone(&payloads);
+                b.to_async(&rt).iter(|| async {
+                    client
+                        .publish_batch_no_ack(topic, (*payloads).clone())
+                        .await
+                        .unwrap()
+                });
+            },
+        );
+    }
+
+    group.finish();
+    node.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Round 5: QUIC single publish + batch
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -452,6 +509,8 @@ criterion_group! {
         bench_cluster_publish_1_sub,
         bench_tcp_batch_publish,
         bench_tcp_batch_topic,
+        bench_tcp_no_ack,
+        bench_tcp_batch_no_ack,
         bench_quic_single_publish,
         bench_quic_batch_publish,
 }

@@ -87,6 +87,21 @@ impl ConnectionHandler {
                 self.send(ServerFrame::BatchAck { offsets }).await?;
             }
 
+            // Fire-and-forget — no response sent.
+            ClientFrame::PublishNoAck { topic, payload } => {
+                self.stream.producer(&topic).send_bytes(Bytes::from(payload));
+                // intentionally no send()
+            }
+
+            // Fire-and-forget batch — no response sent.
+            ClientFrame::PublishBatchNoAck { topic, payloads } => {
+                let producer = self.stream.producer(&topic);
+                for payload in payloads {
+                    producer.send_bytes(Bytes::from(payload));
+                }
+                // intentionally no send()
+            }
+
             // Zero-copy single-topic batch — ack is just (first_offset, count).
             ClientFrame::PublishBatchTopic { topic, payloads } => {
                 let count = payloads.len() as u32;

@@ -187,14 +187,18 @@ P_stream(Hz) = floor(StreamNode_throughput / (Hz × msg_per_player))
 
 Benchmarked throughputs (internal, single node):
 
-| Transport                    | Throughput      | P_max @ 60 Hz (3 msg/player/tick) |
-|------------------------------|-----------------|-----------------------------------|
-| In-process                   | ~85 M msg/s     | ∞ (no network)                    |
-| TCP batch-256 (mixed topics) | ~622 K msg/s    | ~3,455 players                    |
-| TCP batch-1024 (same topic)¹ | **~836 K msg/s**| **~4,644 players**                |
-| QUIC batch-256               | ~336 K msg/s    | ~1,866 players                    |
+| Transport                          | Throughput        | P_max @ 60 Hz (3 msg/player/tick) |
+|------------------------------------|-------------------|-----------------------------------|
+| In-process                         | ~85 M msg/s       | ∞ (no network)                    |
+| TCP batch-256 (mixed topics)       | ~622 K msg/s      | ~3,455 players                    |
+| TCP batch-1024 (same topic)¹       | **~836 K msg/s**  | **~4,644 players**                |
+| **TCP no-ack batch-64**²           | **~1,049 K msg/s**| **~5,827 players**                |
+| **TCP no-ack batch-256**²          | **~1,151 K msg/s**| **~6,394 players**                |
+| **TCP no-ack batch-1024**²         | **~1,184 K msg/s**| **~6,578 players**                |
+| QUIC batch-256                     | ~336 K msg/s      | ~1,866 players                    |
 
 ¹ `PublishBatchTopic` with `BatchAckCompact` — use when all messages share one topic (e.g. `scene_deltas`).
+² `PublishBatchNoAck` — fire-and-forget, no ack. Use for best-effort streams (`scene_deltas`, `log/output`, `agent_observations`). Throughput bounded by TCP write bandwidth, not RTT.
 
 ### ForgeCluster horizontal scaling
 

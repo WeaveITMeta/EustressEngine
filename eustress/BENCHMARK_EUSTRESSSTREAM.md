@@ -14,8 +14,11 @@
 | TCP sequential | 1 msg | **103.6 µs** | **9,651 msg/s** | 1× |
 | TCP batch-16 | 16 msgs | **125.8 µs** | **127,150 msg/s** | **13×** |
 | TCP batch-256 | 256 msgs | **411.6 µs** | **622,000 msg/s** | **64×** |
-| **TCP compact batch-256** ¹ | 256 msgs | **429.9 µs** | **596,000 msg/s** | **62×** |
-| **TCP compact batch-1024** ¹ | 1024 msgs | **1,228 µs** | **836,000 msg/s** | **87×** |
+| TCP compact batch-256 ¹ | 256 msgs | **429.9 µs** | **596,000 msg/s** | 62× |
+| TCP compact batch-1024 ¹ | 1024 msgs | **1,228 µs** | **836,000 msg/s** | 87× |
+| **TCP no-ack batch-64** ² | 64 msgs | **61 µs** | **1,049,000 msg/s** | **109×** |
+| **TCP no-ack batch-256** ² | 256 msgs | **223 µs** | **1,151,000 msg/s** | **119×** |
+| **TCP no-ack batch-1024** ² | 1024 msgs | **865 µs** | **1,184,000 msg/s** | **123×** |
 | QUIC sequential | 1 msg | **182.4 µs** | **5,483 msg/s** | 0.6× |
 | QUIC batch-256 | 256 msgs | **761.7 µs** | **336,100 msg/s** | **35×** |
 | **SHM publish** | **1 msg** | **49 ns** | **20,380,000 msg/s** | **2,112×** |
@@ -24,7 +27,8 @@
 | **In-process** | direct | **< 1 µs** | **~85M msg/s** | — |
 | Iggy v0.9 (est.) | sequential | ~62 µs | ~16,000 msg/s | — |
 
-¹ `PublishBatchTopic` + `BatchAckCompact` — single-topic batch with 12-byte ack (vs N×8 bytes for `BatchAck`).
+¹ `PublishBatchTopic` + `BatchAckCompact` — single-topic, 12-byte ack.
+² `PublishBatchNoAck` — no ack. Use for best-effort streams (`scene_deltas`, `log/output`, `agent_observations`).
 
 ---
 
@@ -95,6 +99,30 @@ At batch-256: ack shrinks from **2,048 → 12 bytes** (170×).
 `Vec<Vec<u8>>` vs `Vec<(String, Vec<u8>)>` serialization cost is similar. The real gain
 is at **batch-1024** — previously impossible without an 8 KB ack allocation — which
 reaches **836K msg/s**. Use this when all messages share one topic (e.g. `scene_deltas`).
+
+---
+
+### Round 3: Fire-and-Forget Batch (`PublishBatchNoAck`)
+
+No ack of any kind. The server writes payloads to the ring and returns to the read loop immediately. The client writes the frame and returns — no waiter, no oneshot channel, no queue lock on the response path.
+
+Throughput ceiling is now **TCP write bandwidth** (~127 MB/s on this hardware at 108 B/msg) rather than round-trip latency.
+
+| Batch Size | Median Latency | Throughput      | vs `PublishBatch` same size | vs TCP Sequential |
+|-----------|---------------|-----------------|------------------------------|-------------------|
+| 1         | 105 µs        | 9,500 msg/s     | ≈1× (ack elim. doesn't help single) | 1× |
+| 8         | 108 µs        | 74,000 msg/s    | +10%                         | **7.7×**  |
+| 16        | 111 µs        | 144,000 msg/s   | +13%                         | **14.9×** |
+| 64        | **61 µs**     | **1,049,000 msg/s** | **+213%**               | **109×**  |
+| 256       | **223 µs**    | **1,151,000 msg/s** | **+85%**                | **119×**  |
+| 1024      | **865 µs**    | **1,184,000 msg/s** | **+42%**                | **123×**  |
+| 4096      | 4,073 µs      | 1,006,000 msg/s | −15% (serialization overhead) | 104× |
+
+**Key insights**:
+- **Batch-64 is the sweet spot**: first to break 1M msg/s at only 61 µs latency. Ideal for scene delta streams.
+- **Batch-256/1024 plateau**: throughput saturates at ~1.18M msg/s — the TCP write bandwidth ceiling. Going to batch-4096 regresses because `Vec<Vec<u8>>` bincode serialization overhead dominates.
+- At batch-64+, the per-message cost collapses to **~60 ns serialization + ~0 ns ack wait** ≈ 1 µs total per message.
+- Use `publish_batch_no_ack` for best-effort streams (`scene_deltas`, `log/output`, `agent_observations`) where delivery confirmation is not required.
 
 ---
 

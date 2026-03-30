@@ -319,6 +319,17 @@ async fn dispatch_quic_frame(
             }
             Some(ServerFrame::BatchAckCompact { first_offset, count })
         }
+        ClientFrame::PublishNoAck { topic, payload } => {
+            stream.producer(&topic).send_bytes(Bytes::from(payload));
+            None
+        }
+        ClientFrame::PublishBatchNoAck { topic, payloads } => {
+            let producer = stream.producer(&topic);
+            for payload in payloads {
+                producer.send_bytes(Bytes::from(payload));
+            }
+            None
+        }
         ClientFrame::Ping => Some(ServerFrame::Pong),
         ClientFrame::Unsubscribe { .. } => None,
     }

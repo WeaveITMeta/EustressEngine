@@ -35,6 +35,22 @@ pub enum ClientFrame {
     /// (e.g. `scene_deltas`, `agent_observations`). At batch-256 the ack shrinks
     /// from **2,048 → 12 bytes** — projected to push TCP throughput past 1M msg/s.
     PublishBatchTopic { topic: String, payloads: Vec<Vec<u8>> },
+
+    /// **Fire-and-forget single publish** — server writes to the ring and sends
+    /// **no response**. The client never blocks waiting for an ack.
+    ///
+    /// Throughput is limited only by TCP write bandwidth (~9M msg/s at 100B on
+    /// loopback), not by round-trip latency. Safe for any best-effort stream
+    /// (`scene_deltas`, `log/output`, `agent_observations`).
+    PublishNoAck { topic: String, payload: Vec<u8> },
+
+    /// **Fire-and-forget batch** — same as `PublishNoAck` but sends N messages
+    /// in one frame. No ack of any kind is returned.
+    ///
+    /// This is the fastest TCP publish path. Use for high-frequency ECS delta
+    /// emission where delivery of every individual message is not required.
+    PublishBatchNoAck { topic: String, payloads: Vec<Vec<u8>> },
+
     /// List all active topics with stats.
     ListTopics,
     /// Health check — node replies with Pong.

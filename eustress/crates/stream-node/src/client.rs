@@ -105,6 +105,43 @@ impl StreamNodeClient {
         rx.await.map_err(|_| NodeError::ConnectionClosed)
     }
 
+    /// **Fire-and-forget** — publishes and returns immediately without waiting
+    /// for any ack. Server writes to the ring; no response is sent.
+    ///
+    /// Use for best-effort streams (`scene_deltas`, `log/output`, etc.).
+    pub async fn publish_no_ack(&self, topic: &str, payload: Bytes) -> Result<(), NodeError> {
+        let mut writer = self.inner.writer.lock().await;
+        write_client_frame(
+            &mut *writer,
+            &ClientFrame::PublishNoAck {
+                topic: topic.to_string(),
+                payload: payload.to_vec(),
+            },
+        )
+        .await
+    }
+
+    /// **Fire-and-forget batch** — sends N payloads to one topic and returns
+    /// immediately. No ack of any kind. This is the fastest TCP publish path.
+    ///
+    /// Throughput is bounded only by TCP write bandwidth (~9M msg/s @ 100B on
+    /// loopback) rather than round-trip latency.
+    pub async fn publish_batch_no_ack(
+        &self,
+        topic: &str,
+        payloads: Vec<Bytes>,
+    ) -> Result<(), NodeError> {
+        let mut writer = self.inner.writer.lock().await;
+        write_client_frame(
+            &mut *writer,
+            &ClientFrame::PublishBatchNoAck {
+                topic: topic.to_string(),
+                payloads: payloads.into_iter().map(|p| p.to_vec()).collect(),
+            },
+        )
+        .await
+    }
+
     /// **Zero-copy single-topic batch** — all payloads go to the same topic.
     ///
     /// Returns `(first_offset, count)`. Individual offsets are `first_offset + i`.
