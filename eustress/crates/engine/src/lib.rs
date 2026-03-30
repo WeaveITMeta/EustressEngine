@@ -83,6 +83,23 @@ pub mod class_conversion;
 pub mod txt_to_toml_watcher;
 pub mod stream_node_plugin;
 
+// SimWriterResource must live in the lib so scenarios/plugin.rs and viga/pipeline.rs
+// can reference it via `crate::SimWriterResource` from library code.
+#[cfg(feature = "streaming")]
+pub use sim_writer::SimWriterResource;
+#[cfg(feature = "streaming")]
+pub mod sim_writer {
+    use std::sync::Arc;
+    use bevy::prelude::*;
+    use eustress_common::sim_stream::SimStreamWriter;
+
+    /// Bevy Resource wrapper so `Arc<SimStreamWriter>` can be stored in ECS.
+    /// Inserted by the startup system in `main.rs`; read as
+    /// `Option<Res<SimWriterResource>>` in scenarios and VIGA pipeline.
+    #[derive(Resource)]
+    pub struct SimWriterResource(pub Arc<SimStreamWriter>);
+}
+
 // Re-exports for convenience
 pub use rendering::{PartRenderingPlugin, PartChanged};
 pub use commands::{SelectionManager, TransformManager};

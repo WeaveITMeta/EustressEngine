@@ -16,8 +16,6 @@ use super::image_utils::ImageData;
 #[cfg(feature = "streaming")]
 use eustress_common::sim_record::{CodeDiffRecord, IterationRecord};
 #[cfg(feature = "streaming")]
-use std::sync::Arc;
-#[cfg(feature = "streaming")]
 use eustress_common::sim_stream::{now_ms, publish_iteration_sync, SimStreamWriter};
 #[cfg(feature = "streaming")]
 use eustress_common::change_queue::ChangeQueueConfig;
@@ -580,8 +578,8 @@ impl VigaPipeline {
                 is_best,
                 verifier_feedback: feedback_text,
                 code_diff: CodeDiffRecord {
-                    lines_added: code_diff.added_lines as u32,
-                    lines_removed: code_diff.removed_lines as u32,
+                    lines_added: code_diff.lines_added as u32,
+                    lines_removed: code_diff.lines_removed as u32,
                     summary: code_diff.summary.clone(),
                 },
                 duration_ms,

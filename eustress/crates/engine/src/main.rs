@@ -366,10 +366,9 @@ fn derive_window_title(space_path: &std::path::Path) -> String {
     }
 }
 
-/// Bevy Resource wrapper so `Arc<SimStreamWriter>` can be stored in ECS.
+/// Re-import from lib so this binary can insert the resource.
 #[cfg(feature = "streaming")]
-#[derive(Resource)]
-pub struct SimWriterResource(pub Arc<SimStreamWriter>);
+use eustress_engine::SimWriterResource;
 
 /// Startup system: connect `SimStreamWriter` once and insert as a Bevy Resource.
 ///
