@@ -15,7 +15,7 @@
 //! ```
 //!
 //! ## Feature Gate
-//! Compiled only when `iggy-streaming` feature is enabled.
+//! Compiled only when `streaming` feature is enabled.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,18 +25,18 @@ use tracing::info;
 
 use eustress_stream::{EustressStream, StreamConfig};
 
-use crate::iggy_delta::{
-    IGGY_TOPIC_ARC_EPISODES, IGGY_TOPIC_ITERATION_HISTORY, IGGY_TOPIC_RUNE_SCRIPTS,
-    IGGY_TOPIC_SIM_RESULTS, IGGY_TOPIC_WORKSHOP_ITERATIONS,
+use crate::scene_delta::{
+    TOPIC_ARC_EPISODES, TOPIC_ITERATION_HISTORY, TOPIC_RUNE_SCRIPTS,
+    TOPIC_SIM_RESULTS, TOPIC_WORKSHOP_ITERATIONS,
 };
-use crate::iggy_queue::IggyConfig;
+use crate::change_queue::ChangeQueueConfig;
 use crate::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SimStreamConfig — type alias to IggyConfig
+// SimStreamConfig — type alias to ChangeQueueConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub type SimStreamConfig = IggyConfig;
+pub type SimStreamConfig = ChangeQueueConfig;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SimStreamWriter
@@ -52,7 +52,7 @@ pub struct SimStreamWriter {
 impl SimStreamWriter {
     /// Initialise with a private in-memory EustressStream.
     ///
-    /// Pass `Some(stream)` from `IggyChangeQueue.stream.clone()` if you need
+    /// Pass `Some(stream)` from `ChangeQueue.stream.clone()` if you need
     /// the writer and reader to share topics within the same process.
     pub fn with_stream(stream: EustressStream) -> Self {
         Self { stream }
@@ -71,25 +71,25 @@ impl SimStreamWriter {
 
     pub async fn publish_sim_result(&self, record: &SimRecord) -> Result<(), String> {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv SimRecord: {e}"))?;
-        self.stream.producer(IGGY_TOPIC_SIM_RESULTS).send_bytes(Bytes::from(bytes));
+        self.stream.producer(TOPIC_SIM_RESULTS).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
     pub async fn publish_iteration(&self, record: &IterationRecord) -> Result<(), String> {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv IterationRecord: {e}"))?;
-        self.stream.producer(IGGY_TOPIC_ITERATION_HISTORY).send_bytes(Bytes::from(bytes));
+        self.stream.producer(TOPIC_ITERATION_HISTORY).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
     pub async fn publish_rune_script(&self, record: &RuneScriptRecord) -> Result<(), String> {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv RuneScriptRecord: {e}"))?;
-        self.stream.producer(IGGY_TOPIC_RUNE_SCRIPTS).send_bytes(Bytes::from(bytes));
+        self.stream.producer(TOPIC_RUNE_SCRIPTS).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
     pub async fn publish_arc_episode(&self, record: &ArcEpisodeRecord) -> Result<(), String> {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv ArcEpisodeRecord: {e}"))?;
-        self.stream.producer(IGGY_TOPIC_ARC_EPISODES).send_bytes(Bytes::from(bytes));
+        self.stream.producer(TOPIC_ARC_EPISODES).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
@@ -98,7 +98,7 @@ impl SimStreamWriter {
         record: &WorkshopIterationRecord,
     ) -> Result<(), String> {
         let bytes = record.to_bytes().map_err(|e| format!("rkyv WorkshopIterationRecord: {e}"))?;
-        self.stream.producer(IGGY_TOPIC_WORKSHOP_ITERATIONS).send_bytes(Bytes::from(bytes));
+        self.stream.producer(TOPIC_WORKSHOP_ITERATIONS).send_bytes(Bytes::from(bytes));
         Ok(())
     }
 
@@ -145,7 +145,7 @@ impl SimStreamReader {
 
     pub async fn replay_sim_results(&self, query: &SimQuery) -> Vec<SimRecord> {
         let mut records: Vec<SimRecord> = Vec::new();
-        self.stream.replay_ring(IGGY_TOPIC_SIM_RESULTS, query.from_offset, |view| {
+        self.stream.replay_ring(TOPIC_SIM_RESULTS, query.from_offset, |view| {
             if let Ok(r) = SimRecord::from_bytes(view.data) {
                 if let Some((hi, lo)) = query.scenario_id {
                     let id_hi = (r.scenario_id >> 64) as u64;
@@ -162,7 +162,7 @@ impl SimStreamReader {
 
     pub async fn replay_iterations(&self, query: &SimQuery) -> Vec<IterationRecord> {
         let mut records: Vec<IterationRecord> = Vec::new();
-        self.stream.replay_ring(IGGY_TOPIC_ITERATION_HISTORY, query.from_offset, |view| {
+        self.stream.replay_ring(TOPIC_ITERATION_HISTORY, query.from_offset, |view| {
             if let Ok(r) = IterationRecord::from_bytes(view.data) {
                 if let Some((hi, lo)) = query.session_id {
                     let id_hi = (r.session_id >> 64) as u64;
@@ -186,7 +186,7 @@ impl SimStreamReader {
 
     pub async fn replay_rune_scripts(&self, query: &SimQuery) -> Vec<RuneScriptRecord> {
         let mut records: Vec<RuneScriptRecord> = Vec::new();
-        self.stream.replay_ring(IGGY_TOPIC_RUNE_SCRIPTS, query.from_offset, |view| {
+        self.stream.replay_ring(TOPIC_RUNE_SCRIPTS, query.from_offset, |view| {
             if let Ok(r) = RuneScriptRecord::from_bytes(view.data) {
                 if let Some((hi, lo)) = query.scenario_id {
                     let id_hi = (r.scenario_id >> 64) as u64;
@@ -203,7 +203,7 @@ impl SimStreamReader {
 
     pub async fn workshop_convergence(&self, query: &SimQuery) -> Vec<WorkshopIterationRecord> {
         let mut records: Vec<WorkshopIterationRecord> = Vec::new();
-        self.stream.replay_ring(IGGY_TOPIC_WORKSHOP_ITERATIONS, query.from_offset, |view| {
+        self.stream.replay_ring(TOPIC_WORKSHOP_ITERATIONS, query.from_offset, |view| {
             if let Ok(r) = WorkshopIterationRecord::from_bytes(view.data) {
                 if let Some((hi, lo)) = query.product_id {
                     let id_hi = (r.product_id >> 64) as u64;
@@ -220,7 +220,7 @@ impl SimStreamReader {
 
     pub async fn replay_arc_episodes(&self, query: &SimQuery) -> Vec<ArcEpisodeRecord> {
         let mut records: Vec<ArcEpisodeRecord> = Vec::new();
-        self.stream.replay_ring(IGGY_TOPIC_ARC_EPISODES, query.from_offset, |view| {
+        self.stream.replay_ring(TOPIC_ARC_EPISODES, query.from_offset, |view| {
             if let Ok(r) = ArcEpisodeRecord::from_bytes(view.data) {
                 records.push(r);
             }

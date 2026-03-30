@@ -21,12 +21,12 @@ use uuid::Uuid;
 
 use super::types::{BranchNode, BranchStatus, Evidence, Scenario};
 
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_record::{BranchPosterior, SimRecord};
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_stream::{publish_sim_result_sync, now_ms};
-#[cfg(feature = "iggy-streaming")]
-use eustress_common::iggy_queue::IggyConfig;
+#[cfg(feature = "streaming")]
+use eustress_common::change_queue::ChangeQueueConfig;
 
 // ─────────────────────────────────────────────
 // 1. SimulationConfig
@@ -226,9 +226,9 @@ pub fn run_simulation(scenario: &mut Scenario, config: &SimulationConfig) -> Sim
         completed_at: Utc::now(),
     };
 
-    // Publish to Iggy history — replaces the removed bincode+zstd file cache.
+    // Publish to EustressStream history — replaces the removed bincode+zstd file cache.
     // Fire-and-forget: does not block the simulation thread.
-    #[cfg(feature = "iggy-streaming")]
+    #[cfg(feature = "streaming")]
     {
         use std::time::{SystemTime, UNIX_EPOCH};
         let uuid_to_pair = |id: Uuid| -> (u64, u64) {
@@ -261,7 +261,7 @@ pub fn run_simulation(scenario: &mut Scenario, config: &SimulationConfig) -> Sim
             session_seq: 0, // Caller may set a meaningful seq via wrapping helper
         };
         // None = fallback connect; replace with Some(writer) once Arc<SimStreamWriter> Resource is wired.
-        publish_sim_result_sync(None, IggyConfig::default(), sim_record);
+        publish_sim_result_sync(None, ChangeQueueConfig::default(), sim_record);
     }
 
     result

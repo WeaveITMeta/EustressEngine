@@ -13,14 +13,14 @@ use super::generator::{VigaGenerator, GeneratorConfig};
 use super::verifier::{VigaVerifier, VerifierConfig, VerificationResult};
 use super::image_utils::ImageData;
 
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_record::{CodeDiffRecord, IterationRecord};
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use std::sync::Arc;
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_stream::{now_ms, publish_iteration_sync, SimStreamWriter};
-#[cfg(feature = "iggy-streaming")]
-use eustress_common::iggy_queue::IggyConfig;
+#[cfg(feature = "streaming")]
+use eustress_common::change_queue::ChangeQueueConfig;
 
 /// VIGA request - input for the pipeline
 #[derive(Debug, Clone)]
@@ -569,11 +569,11 @@ impl VigaPipeline {
 
         // Publish to Iggy — replaces in-memory-only VigaContext.history.
         // Fire-and-forget, does not block the Bevy main thread.
-        #[cfg(feature = "iggy-streaming")]
+        #[cfg(feature = "streaming")]
         {
             let record = IterationRecord {
                 run_id: uuid::Uuid::new_v4().as_u128(),
-                session_id: 0, // TODO: wire from IggyChangeQueue.session_id when available
+                session_id: 0, // TODO: wire from ChangeQueue.session_id when available
                 iteration,
                 generated_code: code_now,
                 similarity,
@@ -594,7 +594,7 @@ impl VigaPipeline {
             // is refactored to accept an optional writer parameter. For now None is still used here
             // (fire-and-forget fallback) since process_feedback is a non-system method.
             // The real fix (passing writer into tick()) is deferred to avoid breaking the VigaPipeline API.
-            publish_iteration_sync(None, IggyConfig::default(), record);
+            publish_iteration_sync(None, ChangeQueueConfig::default(), record);
         }
 
         // Clear screenshot for next iteration
@@ -826,7 +826,7 @@ fn process_viga_requests(
 }
 
 /// Task 10: wrapper to extract `Arc<SimStreamWriter>` from the Bevy Resource (if available).
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 type SimWriterRes<'w> = Option<Res<'w, crate::SimWriterResource>>;
 
 /// Tick the VIGA pipeline
@@ -836,11 +836,11 @@ fn tick_viga_pipeline(
     mut complete_events: MessageWriter<VigaCompleteEvent>,
     soul_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
-    #[cfg(feature = "iggy-streaming")]
+    #[cfg(feature = "streaming")]
     sim_writer: SimWriterRes,
 ) {
     // Task 10: resolve persistent writer (Some) or fall back to None (one-shot connect).
-    #[cfg(feature = "iggy-streaming")]
+    #[cfg(feature = "streaming")]
     let _writer: Option<Arc<SimStreamWriter>> = sim_writer.map(|r| r.0.clone());
 
     // Get API key

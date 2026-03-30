@@ -21,12 +21,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_record::RuneScriptRecord;
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use eustress_common::sim_stream::{now_ms, publish_rune_script_sync};
-#[cfg(feature = "iggy-streaming")]
-use eustress_common::iggy_queue::IggyConfig;
+#[cfg(feature = "streaming")]
+use eustress_common::change_queue::ChangeQueueConfig;
 
 #[cfg(feature = "realism-scripting")]
 use rune::{Context, Vm, Source, Sources, Value as RuneValue, Unit, runtime::RuntimeContext};
@@ -274,7 +274,7 @@ impl ScenarioScriptEngine {
     }
 
     /// Execute a script and apply its results to a scenario.
-    /// Publishes a `RuneScriptRecord` to Iggy (fire-and-forget) when `iggy-streaming` is active.
+    /// Publishes a `RuneScriptRecord` to EustressStream (fire-and-forget) when `streaming` is active.
     pub fn execute_and_apply(
         &self,
         source: &str,
@@ -287,7 +287,7 @@ impl ScenarioScriptEngine {
         let execution_us = t_start.elapsed().as_micros() as u64;
 
         // Publish audit record to Iggy before applying (captures pre-apply state).
-        #[cfg(feature = "iggy-streaming")]
+        #[cfg(feature = "streaming")]
         {
             let uuid_to_u128 = |id: Uuid| id.as_u128();
             let (success, error_msg) = match &result {
@@ -333,7 +333,7 @@ impl ScenarioScriptEngine {
                 session_seq: 0,
             };
             // None = fallback connect; replace with Some(writer) once Arc<SimStreamWriter> Resource is wired.
-            publish_rune_script_sync(None, IggyConfig::default(), record);
+            publish_rune_script_sync(None, ChangeQueueConfig::default(), record);
         }
 
         let result = result?;

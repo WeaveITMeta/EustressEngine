@@ -22,7 +22,7 @@ path = "src/bin/generate_benchmark_map.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["physics", "realism", "luau", "streaming", "iggy-streaming"] }
+eustress-common = { path = "../common", features = ["physics", "realism", "luau", "streaming"] }
 eustress-stream-node = { path = "../stream-node" }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
@@ -138,5 +138,5 @@ cef = ["bevy_cef"]
 webview = ["wry"]
 # Rune scripting with VM pooling and ECS bindings
 realism-scripting = []
-# Iggy streaming: simulation results, iteration history, Rune audit trail
-iggy-streaming = ["eustress-common/iggy-streaming"]
+# EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail
+streaming = ["eustress-common/streaming"]

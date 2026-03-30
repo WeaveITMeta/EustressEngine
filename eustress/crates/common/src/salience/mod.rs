@@ -23,7 +23,7 @@
 //!                        delta touches (populated optional fields / max_fields).
 
 use crate::goals::GoalTree;
-use crate::iggy_delta::SceneDelta;
+use crate::scene_delta::SceneDelta;
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,7 +248,7 @@ impl SalienceFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iggy_delta::{SceneDelta, TransformPayload};
+    use crate::scene_delta::{SceneDelta, TransformPayload};
 
     fn transform_delta() -> SceneDelta {
         SceneDelta::transform(

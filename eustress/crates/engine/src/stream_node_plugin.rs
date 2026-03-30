@@ -9,7 +9,7 @@
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │  Bevy ECS                                                   │
-//! │  IggyChangeQueue.stream (in-process EustressStream)         │
+//! │  ChangeQueue.stream (in-process EustressStream)             │
 //! │        │                                                    │
 //! │        │  Arc clone — zero-copy, same ring buffer           │
 //! │        ▼                                                    │
@@ -50,7 +50,7 @@ use bevy::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use eustress_common::iggy_queue::IggyChangeQueue;
+use eustress_common::change_queue::ChangeQueue;
 use eustress_stream_node::{NodeConfig, NodeServer};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,8 +114,8 @@ impl StreamNodeHandle {
 
 /// Bevy plugin that exposes the engine's in-process EustressStream over TCP.
 ///
-/// Requires `IggyPlugin` (or a manually inserted `IggyChangeQueue`) to be
-/// present — the plugin reads `IggyChangeQueue.stream` and bridges it to N
+/// Requires `StreamingPlugin` (or a manually inserted `ChangeQueue`) to be
+/// present — the plugin reads `ChangeQueue.stream` and bridges it to N
 /// TCP nodes.
 pub struct StreamNodePlugin {
     config: StreamNodeConfig,
@@ -147,7 +147,7 @@ impl StreamNodePlugin {
 impl Plugin for StreamNodePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.config.clone())
-           .add_systems(Startup, start_stream_nodes.run_if(resource_exists::<IggyChangeQueue>));
+           .add_systems(Startup, start_stream_nodes.run_if(resource_exists::<ChangeQueue>));
     }
 }
 
@@ -157,7 +157,7 @@ impl Plugin for StreamNodePlugin {
 
 fn start_stream_nodes(
     config: Res<StreamNodeConfig>,
-    queue: Res<IggyChangeQueue>,
+    queue: Res<ChangeQueue>,
     mut commands: Commands,
 ) {
     let stream = queue.stream.clone();

@@ -10,11 +10,11 @@ use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityC
 use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 use std::sync::Arc;
-#[cfg(feature = "iggy-streaming")]
-use eustress_common::iggy_queue::{IggyConfig, IggyPlugin};
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
+use eustress_common::change_queue::{ChangeQueueConfig, StreamingPlugin};
+#[cfg(feature = "streaming")]
 use eustress_common::sim_stream::SimStreamWriter;
 
 mod auth;
@@ -196,7 +196,7 @@ fn main() {
         .add_plugins(NotificationPlugin)
         // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
         .add_plugins(UndoPlugin)
-        // (Iggy streaming registered below — cfg-block required, not inline chain)
+        // (Streaming registered below — cfg-block required, not inline chain)
         // Play mode (must be before SlintUiPlugin which uses PlayModeState)
         .add_plugins(PlayModePlugin)
         // Slint UI (software renderer overlay)
@@ -309,11 +309,11 @@ fn main() {
         app.add_systems(Update, part_selection::part_selection_system);
     }
 
-    // Iggy streaming — must use a separate block because #[cfg] cannot gate
+    // Streaming — must use a separate block because #[cfg] cannot gate
     // individual method calls inside a builder chain.
-    #[cfg(feature = "iggy-streaming")]
+    #[cfg(feature = "streaming")]
     {
-        app.add_plugins(IggyPlugin);
+        app.add_plugins(StreamingPlugin);
         app.add_systems(Startup, setup_sim_stream_writer);
     }
 
@@ -323,7 +323,7 @@ fn main() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Iggy SimStreamWriter — one persistent connection, shared via Arc<Resource>
+// SimStreamWriter — one persistent connection, shared via Arc<Resource>
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,7 +367,7 @@ fn derive_window_title(space_path: &std::path::Path) -> String {
 }
 
 /// Bevy Resource wrapper so `Arc<SimStreamWriter>` can be stored in ECS.
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 #[derive(Resource)]
 pub struct SimWriterResource(pub Arc<SimStreamWriter>);
 
@@ -377,9 +377,9 @@ pub struct SimWriterResource(pub Arc<SimStreamWriter>);
 /// read `Option<Res<SimWriterResource>>` and pass `Some(writer.0.clone())` to the
 /// `publish_*_sync` helpers, replacing the `None` fallback connect.
 ///
-/// Silently skipped if Iggy is unavailable — engine continues without streaming.
-#[cfg(feature = "iggy-streaming")]
-fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<IggyConfig>>) {
+/// Silently skipped if streaming is unavailable — engine continues without streaming.
+#[cfg(feature = "streaming")]
+fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<ChangeQueueConfig>>) {
     let cfg = config.map(|c| c.clone()).unwrap_or_default();
 
     let result = std::thread::spawn(move || {
@@ -396,7 +396,7 @@ fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<IggyConfig
         }
         Err(e) => {
             warn!(
-                "SimStreamWriter: Iggy unavailable ({e}). \
+                "SimStreamWriter: streaming unavailable ({e}). \
                  Simulation records will use fallback one-shot connects."
             );
         }

@@ -141,13 +141,12 @@ realism-wasm = ["realism-scripting", "rune-wasm"]
 realism-gpu = ["realism", "wgpu", "encase"]
 # Enable advanced spatial queries with zero-copy serialization
 realism-spatial = ["realism", "kiddo"]
-# Enable EustressStream for scene delta emission + TOML materializer
-iggy-streaming = ["dep:eustress-stream", "tokio", "bytes"]
+# Enable EustressStream + instance streaming (scene delta emission, TOML materializer,
+# hot-cache, spatial chunking, TOML watcher, dirty-bit write-back)
+streaming = ["dep:eustress-stream", "tokio", "bytes", "notify", "rstar"]
 # Enable quantum effects module (DISABLED — future work)
 # realism-quantum = ["realism-symbolic"]
 # Enable full realism system with all features (excludes quantum)
 realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
 # Enable Luau scripting runtime (Roblox Luau compatibility)
 luau = ["mlua", "ureq"]
-# Enable instance streaming (hot-cache, spatial chunking, TOML watcher, dirty-bit write-back)
-streaming = ["notify", "rstar"]

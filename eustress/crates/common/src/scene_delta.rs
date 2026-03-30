@@ -1,4 +1,4 @@
-//! # Iggy Scene Delta Types
+//! # Scene Delta Types
 //!
 //! ## Table of Contents
 //! - DeltaKind       — enum of every mutation type tracked (Transform, Part, Added, Removed, etc.)
@@ -13,10 +13,10 @@
 //!     → emit_deltas() system
 //!         → SceneDelta { entity, kind, payload }
 //!             → rkyv::to_bytes()        (~100 bytes per delta)
-//!                 → IggyChangeQueue.send_delta()
+//!                 → ChangeQueue.send_delta()
 //!                     → tokio mpsc channel
 //!                         → background producer thread
-//!                             → Iggy "eustress/scene_deltas" topic
+//!                             → EustressStream "eustress/scene_deltas" topic
 //!                                 ↳ Explorer subscriber (real-time tree updates)
 //!                                 ↳ Properties subscriber (real-time panel updates)
 //!                                 ↳ Undo/Redo subscriber (inverse event log)
@@ -27,7 +27,7 @@
 //! SceneDelta with TransformPayload: ~68 bytes.
 //! SceneDelta with PartPayload:      ~96 bytes.
 //! SceneDelta with LifecycleOnly:    ~12 bytes.
-//! At 1M deltas/sec: ~100 MB/s — well within Iggy's >1 GB/s write ceiling.
+//! At 1M deltas/sec: ~100 MB/s — well within EustressStream's >1 GB/s write ceiling.
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -129,12 +129,12 @@ pub struct NamePayload {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SceneDelta — the core message type published to Iggy
+// SceneDelta — the core message type published to EustressStream
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// One mutation event for a single Bevy entity.
 ///
-/// Published to the Iggy stream `eustress/scene_deltas` on every
+/// Published to the EustressStream topic `eustress/scene_deltas` on every
 /// Bevy frame that detects `Changed<T>` components.
 ///
 /// All consumers (Explorer, Properties, Undo/Redo, TOML materializer)
@@ -253,43 +253,37 @@ impl SceneDelta {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Iggy stream / topic constants
+// EustressStream topic constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Default Iggy connection string. Override via CLI `--iggy-url`.
-pub const IGGY_DEFAULT_URL: &str = "iggy://iggy:iggy@127.0.0.1:8090";
-
-/// Iggy stream name. One stream per Eustress installation.
-pub const IGGY_STREAM_NAME: &str = "eustress";
-
 /// Topic for scene mutation deltas.
-pub const IGGY_TOPIC_SCENE_DELTAS: &str = "scene_deltas";
+pub const TOPIC_SCENE_DELTAS: &str = "scene_deltas";
 
 /// Topic for agent command/response loop (CLI ↔ running session).
-pub const IGGY_TOPIC_AGENT_COMMANDS: &str = "agent_commands";
+pub const TOPIC_AGENT_COMMANDS: &str = "agent_commands";
 
 /// Topic for agent observations emitted by the session for the CLI agent.
-pub const IGGY_TOPIC_AGENT_OBSERVATIONS: &str = "agent_observations";
+pub const TOPIC_AGENT_OBSERVATIONS: &str = "agent_observations";
 
 /// Topic for Monte Carlo simulation results (SimRecord). One message per run_simulation() call.
 /// Replaces the removed file-cache system. Enables replay + cross-run comparison.
-pub const IGGY_TOPIC_SIM_RESULTS: &str = "sim_results";
+pub const TOPIC_SIM_RESULTS: &str = "sim_results";
 
 /// Topic for VIGA / workshop iteration history (IterationRecord). One message per
 /// feedback cycle — carries generated code, similarity score, and verifier feedback.
-pub const IGGY_TOPIC_ITERATION_HISTORY: &str = "iteration_history";
+pub const TOPIC_ITERATION_HISTORY: &str = "iteration_history";
 
 /// Topic for Rune script execution records (RuneScriptRecord). One message per
 /// execute_and_apply() call — carries source, directives, log messages, success flag.
-pub const IGGY_TOPIC_RUNE_SCRIPTS: &str = "rune_scripts";
+pub const TOPIC_RUNE_SCRIPTS: &str = "rune_scripts";
 
 /// Topic for workshop product-iteration records (WorkshopIterationRecord). Aggregates
 /// one full optimize→simulate→Rune→result cycle for workshop convergence analysis.
-pub const IGGY_TOPIC_WORKSHOP_ITERATIONS: &str = "workshop_iterations";
+pub const TOPIC_WORKSHOP_ITERATIONS: &str = "workshop_iterations";
 
 /// Topic for ARC-AGI-3 (and gym-style) episode records (ArcEpisodeRecord).
 /// One message per completed episode — carries step history, final score, and efficiency ratio.
-pub const IGGY_TOPIC_ARC_EPISODES: &str = "arc_episodes";
+pub const TOPIC_ARC_EPISODES: &str = "arc_episodes";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent command / observation types (for CLI agent-in-the-loop)

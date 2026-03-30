@@ -34,7 +34,7 @@
 //!
 //! ## Feature Gate
 //! Always compiled — rkyv is a non-optional workspace dependency.
-//! Iggy publishing is done via `sim_stream.rs` (feature-gated by `iggy-streaming`).
+//! Iggy publishing is done via `sim_stream.rs` (feature-gated by `streaming`).
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};

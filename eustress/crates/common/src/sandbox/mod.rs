@@ -59,7 +59,7 @@
 //! }
 //! ```
 
-use crate::iggy_delta::SceneDelta;
+use crate::scene_delta::SceneDelta;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;

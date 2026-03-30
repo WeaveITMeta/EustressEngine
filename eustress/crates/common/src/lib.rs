@@ -29,19 +29,19 @@ pub mod adornments;
 pub mod assets;
 pub mod attributes;
 // Scene delta types (always available — rkyv is non-optional)
-pub mod iggy_delta;
+pub mod scene_delta;
 // EustressStream change queue: Bevy Resource + producer/consumer (feature-gated)
-#[cfg(feature = "iggy-streaming")]
-pub mod iggy_queue;
+#[cfg(feature = "streaming")]
+pub mod change_queue;
 // EustressStream TOML materializer: delta subscriber + debounced file write (feature-gated)
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 pub mod toml_materializer;
 // Simulation record types — rkyv payload structs for all simulation data
 // (always available — rkyv is non-optional)
 pub mod sim_record;
 // Simulation stream — EustressStream read/write for SimRecord, IterationRecord, etc.
 // (feature-gated: requires eustress-stream + tokio + bytes)
-#[cfg(feature = "iggy-streaming")]
+#[cfg(feature = "streaming")]
 pub mod sim_stream;
 pub mod classes;
 pub mod default_scene;

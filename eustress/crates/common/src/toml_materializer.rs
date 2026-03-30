@@ -17,7 +17,7 @@
 //! ```
 //!
 //! ## Feature Gate
-//! Compiled only when the `iggy-streaming` feature is enabled.
+//! Compiled only when the `streaming` feature is enabled.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,9 +30,9 @@ use tracing::{error, info, warn};
 
 use eustress_stream::{EustressStream, OwnedMessage};
 
-use crate::iggy_delta::{
+use crate::scene_delta::{
     DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload,
-    IGGY_DEFAULT_URL, IGGY_TOPIC_SCENE_DELTAS,
+    TOPIC_SCENE_DELTAS,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ pub struct MaterializerConfig {
 impl Default for MaterializerConfig {
     fn default() -> Self {
         Self {
-            iggy_url: IGGY_DEFAULT_URL.to_string(),
+            iggy_url: String::new(),
             consumer_group: "toml-materializer".to_string(),
             debounce: Duration::from_millis(200),
             hot_output_path: PathBuf::from(".eustress/current.toml"),
@@ -190,7 +190,7 @@ impl SceneMirror {
 /// Spawn the background TOML materializer. Returns immediately.
 ///
 /// The `stream` parameter must be the same `EustressStream` that the engine
-/// uses for scene deltas (clone from `IggyChangeQueue.stream`).
+/// uses for scene deltas (clone from `ChangeQueue.stream`).
 pub async fn spawn_toml_materializer(
     config: MaterializerConfig,
     session_id: String,
@@ -198,7 +198,7 @@ pub async fn spawn_toml_materializer(
 ) {
     let (tx, rx) = eustress_stream::flume::unbounded::<OwnedMessage>();
 
-    if let Err(e) = stream.subscribe_channel(IGGY_TOPIC_SCENE_DELTAS, tx) {
+    if let Err(e) = stream.subscribe_channel(TOPIC_SCENE_DELTAS, tx) {
         warn!("TomlMaterializer: failed to subscribe to scene_deltas: {e}");
         return;
     }
@@ -302,16 +302,16 @@ async fn write_mirror(
 
 /// Bevy Startup system: spawns the TOML materializer on a background thread.
 ///
-/// Requires `IggyChangeQueue` to be present (added by `IggyPlugin`).
+/// Requires `ChangeQueue` to be present (added by `StreamingPlugin`).
 pub fn start_toml_materializer_system(
     config: Option<bevy::prelude::Res<MaterializerConfig>>,
-    queue: Option<bevy::prelude::Res<crate::iggy_queue::IggyChangeQueue>>,
+    queue: Option<bevy::prelude::Res<crate::change_queue::ChangeQueue>>,
 ) {
     let cfg = config.map(|c| c.clone()).unwrap_or_default();
     let session_id = format!("session-{}", uuid::Uuid::new_v4());
 
     let Some(queue) = queue else {
-        warn!("TomlMaterializer: IggyChangeQueue not available — skipping materializer.");
+        warn!("TomlMaterializer: ChangeQueue not available — skipping materializer.");
         return;
     };
 
@@ -332,7 +332,7 @@ pub fn start_toml_materializer_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iggy_delta::{DeltaKind, TransformPayload};
+    use crate::scene_delta::{DeltaKind, TransformPayload};
 
     fn make_transform(entity: u64, seq: u64, x: f32) -> SceneDelta {
         SceneDelta::transform(

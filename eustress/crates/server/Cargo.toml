@@ -20,8 +20,8 @@ bevy = { workspace = true, default-features = false, features = [
     "multi_threaded",
 ] }
 
-# Shared types (with Iggy streaming + async-assets for tokio)
-eustress-common = { path = "../common", features = ["iggy-streaming", "async-assets"] }
+# Shared types (with EustressStream + async-assets for tokio)
+eustress-common = { path = "../common", features = ["streaming", "async-assets"] }
 
 # Runtime (character, physics, ownership)
 eustress-runtime = { path = "../runtime", default-features = false, features = ["networking"] }

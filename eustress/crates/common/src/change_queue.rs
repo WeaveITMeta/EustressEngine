@@ -15,7 +15,7 @@
 //!      address space as the Bevy app.
 //!
 //! ## Feature Gate
-//! Compiled only when the `iggy-streaming` feature is enabled.
+//! Compiled only when the `streaming` feature is enabled.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,15 +28,14 @@ use tracing::{info, warn};
 
 use eustress_stream::{EustressStream, OwnedMessage, Producer, StreamConfig};
 
-use crate::iggy_delta::{
+use crate::scene_delta::{
     AgentCommand, AgentObservation, DeltaKind, PartPayload, SceneDelta, TransformPayload,
-    IGGY_DEFAULT_URL, IGGY_STREAM_NAME,
-    IGGY_TOPIC_AGENT_COMMANDS, IGGY_TOPIC_AGENT_OBSERVATIONS, IGGY_TOPIC_SCENE_DELTAS,
+    TOPIC_AGENT_COMMANDS, TOPIC_AGENT_OBSERVATIONS, TOPIC_SCENE_DELTAS,
 };
 use crate::classes::BasePart;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// IggyConfig  (kept for API compatibility — url/stream_name fields are ignored)
+// ChangeQueueConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Connection and streaming configuration.
@@ -44,8 +43,8 @@ use crate::classes::BasePart;
 /// `url` and `stream_name` are retained for backward compatibility but are
 /// ignored by EustressStream (no external server is required).
 #[derive(Debug, Clone, Resource)]
-pub struct IggyConfig {
-    /// Legacy Iggy URL — retained for API compatibility, not used.
+pub struct ChangeQueueConfig {
+    /// Legacy URL — retained for API compatibility, not used.
     pub url: String,
     /// Legacy stream name — retained for API compatibility, not used.
     pub stream_name: String,
@@ -64,14 +63,14 @@ pub struct IggyConfig {
     pub sim_result_partitions: u32,
 }
 
-impl Default for IggyConfig {
+impl Default for ChangeQueueConfig {
     fn default() -> Self {
         Self {
-            url: IGGY_DEFAULT_URL.to_string(),
-            stream_name: IGGY_STREAM_NAME.to_string(),
-            topic_scene_deltas: IGGY_TOPIC_SCENE_DELTAS.to_string(),
-            topic_agent_commands: IGGY_TOPIC_AGENT_COMMANDS.to_string(),
-            topic_agent_observations: IGGY_TOPIC_AGENT_OBSERVATIONS.to_string(),
+            url: String::new(),
+            stream_name: "eustress".to_string(),
+            topic_scene_deltas: TOPIC_SCENE_DELTAS.to_string(),
+            topic_agent_commands: TOPIC_AGENT_COMMANDS.to_string(),
+            topic_agent_observations: TOPIC_AGENT_OBSERVATIONS.to_string(),
             batch_size: 512,
             delta_linger_ms: 1,
             sim_linger_ms: 0,
@@ -84,7 +83,7 @@ impl Default for IggyConfig {
     }
 }
 
-impl IggyConfig {
+impl ChangeQueueConfig {
     pub fn scene_partitions(&self) -> u64 {
         self.scene_delta_partitions.max(1) as u64
     }
@@ -94,7 +93,7 @@ impl IggyConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// IggyChangeQueue
+// ChangeQueue
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bevy Resource — fire-and-forget sink for ECS mutation deltas.
@@ -102,7 +101,7 @@ impl IggyConfig {
 /// ECS systems call `queue.send_delta(delta)` with <1 µs cost.
 /// Dispatch is **synchronous and in-process** — no background thread, no TCP.
 #[derive(Resource)]
-pub struct IggyChangeQueue {
+pub struct ChangeQueue {
     /// Shared EustressStream — clone it to subscribe to any topic.
     pub stream: EustressStream,
     delta_producer: Producer,
@@ -114,7 +113,7 @@ pub struct IggyChangeQueue {
     drop_on_full: bool,
 }
 
-impl IggyChangeQueue {
+impl ChangeQueue {
     /// Send a scene delta. Non-blocking (<1 µs).
     pub fn send_delta(&self, delta: SceneDelta) {
         match delta.to_bytes() {
@@ -123,7 +122,7 @@ impl IggyChangeQueue {
             }
             Err(e) => {
                 if !self.drop_on_full {
-                    warn!("IggyChangeQueue: delta serialize failed: {e}");
+                    warn!("ChangeQueue: delta serialize failed: {e}");
                 }
             }
         }
@@ -135,7 +134,7 @@ impl IggyChangeQueue {
             Ok(b) => {
                 self.observation_producer.send_bytes(Bytes::from(b.to_vec()));
             }
-            Err(e) => warn!("IggyChangeQueue: observation serialize failed: {e}"),
+            Err(e) => warn!("ChangeQueue: observation serialize failed: {e}"),
         }
     }
 
@@ -159,14 +158,14 @@ impl IggyChangeQueue {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// init_iggy — bootstrap (no external server required)
+// init_change_queue — bootstrap (no external server required)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Initialise the EustressStream and return a ready `IggyChangeQueue`.
+/// Initialise the EustressStream and return a ready `ChangeQueue`.
 ///
 /// This is now infallible in practice (no network call), but returns `Result`
 /// for API compatibility with existing call sites.
-pub async fn init_iggy(config: &IggyConfig) -> Result<IggyChangeQueue, String> {
+pub async fn init_change_queue(config: &ChangeQueueConfig) -> Result<ChangeQueue, String> {
     let ring_cap = config.channel_capacity.next_power_of_two();
     let stream = EustressStream::new(
         StreamConfig::default()
@@ -174,14 +173,14 @@ pub async fn init_iggy(config: &IggyConfig) -> Result<IggyChangeQueue, String> {
             .in_memory(),
     );
 
-    let delta_producer       = stream.producer(IGGY_TOPIC_SCENE_DELTAS);
-    let observation_producer = stream.producer(IGGY_TOPIC_AGENT_OBSERVATIONS);
+    let delta_producer       = stream.producer(TOPIC_SCENE_DELTAS);
+    let observation_producer = stream.producer(TOPIC_AGENT_OBSERVATIONS);
 
     // Subscribe to incoming agent commands and forward to a tokio mpsc channel
     // so the existing `poll_agent_commands` Bevy system works unchanged.
     let (cmd_tx, cmd_rx) = unbounded_channel::<AgentCommand>();
     stream
-        .subscribe_owned(IGGY_TOPIC_AGENT_COMMANDS, move |msg: OwnedMessage| {
+        .subscribe_owned(TOPIC_AGENT_COMMANDS, move |msg: OwnedMessage| {
             match rkyv::from_bytes::<AgentCommand, rkyv::rancor::Error>(msg.data.as_ref()) {
                 Ok(cmd) => {
                     let _ = cmd_tx.send(cmd);
@@ -193,7 +192,7 @@ pub async fn init_iggy(config: &IggyConfig) -> Result<IggyChangeQueue, String> {
 
     info!("EustressStream: streaming ready (in-process, no external server).");
 
-    Ok(IggyChangeQueue {
+    Ok(ChangeQueue {
         stream,
         delta_producer,
         observation_producer,
@@ -205,16 +204,16 @@ pub async fn init_iggy(config: &IggyConfig) -> Result<IggyChangeQueue, String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// IggyPlugin
+// StreamingPlugin
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Bevy plugin: initialises EustressStream and registers ECS systems.
-pub struct IggyPlugin;
+pub struct StreamingPlugin;
 
-impl Plugin for IggyPlugin {
+impl Plugin for StreamingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PanelDirtyFlags>()
-           .add_systems(Startup, setup_iggy_queue)
+           .add_systems(Startup, setup_change_queue)
            .add_systems(Update, (
                poll_agent_commands,
                emit_lifecycle_deltas,
@@ -226,31 +225,31 @@ impl Plugin for IggyPlugin {
     }
 }
 
-fn setup_iggy_queue(mut commands: Commands, config: Option<Res<IggyConfig>>) {
+fn setup_change_queue(mut commands: Commands, config: Option<Res<ChangeQueueConfig>>) {
     let config = config.map(|c| c.clone()).unwrap_or_default();
 
-    // Run init_iggy on a background thread so we don't need an existing tokio
+    // Run init_change_queue on a background thread so we don't need an existing tokio
     // runtime on the main thread during Bevy startup.
     let result = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio rt");
-        rt.block_on(init_iggy(&config))
+        rt.block_on(init_change_queue(&config))
     })
     .join()
     .unwrap_or_else(|_| Err("EustressStream init thread panicked".to_string()));
 
     match result {
         Ok(queue) => {
-            info!("IggyPlugin: IggyChangeQueue ready.");
+            info!("StreamingPlugin: ChangeQueue ready.");
             commands.insert_resource(queue);
         }
         Err(e) => {
-            warn!("IggyPlugin: stream init failed ({e}).");
+            warn!("StreamingPlugin: stream init failed ({e}).");
         }
     }
 }
 
 fn poll_agent_commands(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     mut commands: Commands,
 ) {
     let Some(queue) = queue else { return };
@@ -269,7 +268,7 @@ pub struct IncomingAgentCommand(pub AgentCommand);
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn emit_lifecycle_deltas(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     added: Query<Entity, Added<bevy::prelude::Name>>,
     mut removed: RemovedComponents<bevy::prelude::Name>,
     mut dirty: ResMut<PanelDirtyFlags>,
@@ -287,12 +286,12 @@ fn emit_lifecycle_deltas(
 
     for entity in added_list {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartAdded, seq, ts));
     }
     for entity in removed_list {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta::lifecycle(entity.to_bits(), DeltaKind::PartRemoved, seq, ts));
     }
 }
@@ -319,7 +318,7 @@ pub struct PanelDirtyFlags {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn emit_transform_deltas(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     changed: Query<(Entity, &bevy::prelude::Transform), (
         bevy::prelude::Changed<bevy::prelude::Transform>,
         bevy::prelude::With<BasePart>,
@@ -331,7 +330,7 @@ fn emit_transform_deltas(
     let Some(queue) = queue else { return };
     for (entity, t) in changed.iter() {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta::transform(
             entity.to_bits(), seq, ts,
             TransformPayload {
@@ -344,7 +343,7 @@ fn emit_transform_deltas(
 }
 
 fn emit_part_property_deltas(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     changed: Query<(Entity, &BasePart), bevy::prelude::Changed<BasePart>>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
@@ -353,7 +352,7 @@ fn emit_part_property_deltas(
     let Some(queue) = queue else { return };
     for (entity, bp) in changed.iter() {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta::part_props(
             entity.to_bits(), seq, ts,
             PartPayload {
@@ -371,7 +370,7 @@ fn emit_part_property_deltas(
 }
 
 fn emit_name_deltas(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     changed: Query<(Entity, &bevy::prelude::Name), bevy::prelude::Changed<bevy::prelude::Name>>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
@@ -380,13 +379,13 @@ fn emit_name_deltas(
     let Some(queue) = queue else { return };
     for (entity, name) in changed.iter() {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta::rename(entity.to_bits(), seq, ts, name.to_string()));
     }
 }
 
 fn emit_parent_deltas(
-    queue: Option<Res<IggyChangeQueue>>,
+    queue: Option<Res<ChangeQueue>>,
     changed: Query<(Entity, &bevy::prelude::ChildOf), bevy::prelude::Changed<bevy::prelude::ChildOf>>,
     mut dirty: ResMut<PanelDirtyFlags>,
 ) {
@@ -395,7 +394,7 @@ fn emit_parent_deltas(
     let Some(queue) = queue else { return };
     for (entity, child_of) in changed.iter() {
         let seq = queue.next_seq();
-        let ts  = IggyChangeQueue::unix_ms();
+        let ts  = ChangeQueue::unix_ms();
         queue.send_delta(SceneDelta {
             entity:       entity.to_bits(),
             kind:         DeltaKind::Reparented,

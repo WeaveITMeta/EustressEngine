@@ -2075,9 +2075,9 @@ struct DrainResources<'w> {
     brush_state: Option<ResMut<'w, BrushState>>,
     /// Standard materials for spawning instances
     materials: ResMut<'w, Assets<StandardMaterial>>,
-    /// Task 12: Iggy change queue — emit SceneDeltas on property write-back (iggy-streaming feature only).
-    #[cfg(feature = "iggy-streaming")]
-    iggy_queue: Option<Res<'w, eustress_common::iggy_queue::IggyChangeQueue>>,
+    /// Task 12: change queue — emit SceneDeltas on property write-back (streaming feature only).
+    #[cfg(feature = "streaming")]
+    change_queue: Option<Res<'w, eustress_common::change_queue::ChangeQueue>>,
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
@@ -3179,7 +3179,7 @@ fn drain_slint_actions(
 
                     // ══════════════════════════════════════════════════════════
                     // Task 12: Iggy delta emission — stream property change to
-                    // IggyChangeQueue so TOML materializers and remote agents
+                    // ChangeQueue so TOML materializers and remote agents
                     // observe every write-back in real time.
                     //
                     // DeltaKind selection:
@@ -3187,15 +3187,15 @@ fn drain_slint_actions(
                     //   Name → Renamed
                     //   everything else → PartPropertiesChanged
                     // ══════════════════════════════════════════════════════════
-                    #[cfg(feature = "iggy-streaming")]
-                    if let Some(ref iggy) = res.iggy_queue {
-                        use eustress_common::iggy_delta::{
+                    #[cfg(feature = "streaming")]
+                    if let Some(ref cq) = res.change_queue {
+                        use eustress_common::scene_delta::{
                             DeltaKind, NamePayload, PartPayload, SceneDelta, TransformPayload,
                         };
 
                         let entity_id = entity.to_bits();
-                        let seq = iggy.next_seq();
-                        let ts  = iggy.now_ms();
+                        let seq = cq.next_seq();
+                        let ts  = cq.now_ms();
 
                         let delta = match key.as_str() {
                             "Position.X" | "Position.Y" | "Position.Z"
@@ -3289,7 +3289,7 @@ fn drain_slint_actions(
                         };
 
                         if let Some(d) = delta {
-                            iggy.send_delta(d);
+                            cq.send_delta(d);
                         }
                     }
                 }
@@ -4443,7 +4443,7 @@ fn sync_bevy_to_slint(
 /// to receive live engine log output without polling. Runs only when the console changes.
 fn publish_output_logs(
     console: Option<Res<OutputConsole>>,
-    queue: Option<Res<eustress_common::iggy_queue::IggyChangeQueue>>,
+    queue: Option<Res<eustress_common::change_queue::ChangeQueue>>,
 ) {
     let (Some(console), Some(queue)) = (console, queue) else { return };
     if !console.is_changed() { return; }
@@ -4763,7 +4763,7 @@ fn sync_unified_explorer_to_slint(
     terrain_roots: Query<(Entity, &eustress_common::terrain::TerrainConfig), With<eustress_common::terrain::TerrainRoot>>,
     terrain_chunks: Query<(Entity, &eustress_common::terrain::Chunk)>,
     // EustressStream change-detection dirty flag
-    mut panel_dirty: Option<ResMut<eustress_common::iggy_queue::PanelDirtyFlags>>,
+    mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
 ) {
     // EustressStream change-detection: if any entity was added/removed/renamed/reparented,
     // bypass throttling and rebuild the tree immediately.
@@ -5715,7 +5715,7 @@ fn sync_properties_to_slint(
         Query<&eustress_common::classes::ScrollingFrame>,
     )>,
     // EustressStream change-detection dirty flag
-    mut panel_dirty: Option<ResMut<eustress_common::iggy_queue::PanelDirtyFlags>>,
+    mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;

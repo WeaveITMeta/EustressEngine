@@ -249,7 +249,7 @@ impl MemoryTierController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iggy_delta::{SceneDelta, TransformPayload};
+    use crate::scene_delta::{SceneDelta, TransformPayload};
     use crate::salience::SalienceScore;
 
     fn make_scored(composite: f32) -> ScoredEvent {

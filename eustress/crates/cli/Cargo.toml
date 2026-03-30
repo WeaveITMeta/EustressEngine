@@ -11,8 +11,8 @@ name = "eustress"
 path = "src/main.rs"
 
 [dependencies]
-# Shared types + Iggy streaming + TOML materializer
-eustress-common = { path = "../common", features = ["iggy-streaming", "async-assets"] }
+# Shared types + EustressStream + TOML materializer
+eustress-common = { path = "../common", features = ["streaming", "async-assets"] }
 
 # CLI argument parsing
 clap = { version = "4.4", features = ["derive", "env"] }

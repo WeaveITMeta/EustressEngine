@@ -26,7 +26,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 use eustress_common::sim_record::{ArcEpisodeRecord, IterationRecord, RuneScriptRecord, SimRecord, WorkshopIterationRecord};
 use eustress_common::sim_stream::{SimQuery, SimStreamConfig, SimStreamReader};
 
-use eustress_common::iggy_delta::IGGY_DEFAULT_URL;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI definition
@@ -39,8 +38,8 @@ use eustress_common::iggy_delta::IGGY_DEFAULT_URL;
 #[command(version)]
 #[command(propagate_version = true)]
 struct Cli {
-    /// Legacy Iggy URL flag — retained for script compatibility, not used.
-    #[arg(long, global = true, env = "IGGY_URL", default_value = IGGY_DEFAULT_URL, hide = true)]
+    /// Legacy URL flag — retained for script compatibility, not used.
+    #[arg(long, global = true, env = "IGGY_URL", default_value = "", hide = true)]
     iggy_url: String,
 
     #[arg(long, short, global = true)]
