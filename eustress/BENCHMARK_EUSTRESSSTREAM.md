@@ -14,6 +14,8 @@
 | TCP sequential | 1 msg | **103.6 µs** | **9,651 msg/s** | 1× |
 | TCP batch-16 | 16 msgs | **125.8 µs** | **127,150 msg/s** | **13×** |
 | TCP batch-256 | 256 msgs | **411.6 µs** | **622,000 msg/s** | **64×** |
+| **TCP compact batch-256** ¹ | 256 msgs | **429.9 µs** | **596,000 msg/s** | **62×** |
+| **TCP compact batch-1024** ¹ | 1024 msgs | **1,228 µs** | **836,000 msg/s** | **87×** |
 | QUIC sequential | 1 msg | **182.4 µs** | **5,483 msg/s** | 0.6× |
 | QUIC batch-256 | 256 msgs | **761.7 µs** | **336,100 msg/s** | **35×** |
 | **SHM publish** | **1 msg** | **49 ns** | **20,380,000 msg/s** | **2,112×** |
@@ -21,6 +23,8 @@
 | **SHM batch-1024** | **1024 msgs** | **36 µs** | **27,974,000 msg/s** | **2,900×** |
 | **In-process** | direct | **< 1 µs** | **~85M msg/s** | — |
 | Iggy v0.9 (est.) | sequential | ~62 µs | ~16,000 msg/s | — |
+
+¹ `PublishBatchTopic` + `BatchAckCompact` — single-topic batch with 12-byte ack (vs N×8 bytes for `BatchAck`).
 
 ---
 
@@ -67,6 +71,30 @@ One round trip sends N messages; server returns `BatchAck { offsets: Vec<u64> }`
 | 256 | 411.6 µs | 622,000 msg/s | **64.5×** |
 
 **Key insight**: latency increases only ~4× going from batch-1 to batch-256, but throughput increases 64×. The marginal cost per message collapses to ~1.6 µs at batch-256.
+
+---
+
+### Round 2: Zero-Copy Single-Topic Batch (`PublishBatchTopic` + `BatchAckCompact`)
+
+`PublishBatchTopic` sends all payloads to one topic in a single frame.
+The server returns `BatchAckCompact { first_offset, count }` — **12 bytes fixed**
+regardless of batch size (vs `N × 8` bytes for `BatchAck`).
+
+At batch-256: ack shrinks from **2,048 → 12 bytes** (170×).
+
+| Batch Size | Median Latency | Throughput    | vs `PublishBatch` same size  |
+|-----------|---------------|---------------|------------------------------|
+| 1         | 141.1 µs      | 7,088 msg/s   | −27% (overhead at batch-1)   |
+| 8         | 151.6 µs      | 52,782 msg/s  | −22%                         |
+| 16        | 168.5 µs      | 94,962 msg/s  | −25%                         |
+| 64        | 217.0 µs      | 294,890 msg/s | −12%                         |
+| 256       | 429.9 µs      | 595,560 msg/s | −4%  (ack 170× smaller)      |
+| **1024**  | **1,228 µs**  | **835,870 msg/s** | **first batch size to clear 800K** |
+
+**Key insight**: `PublishBatchTopic` is marginal at batch-256 vs `PublishBatch` because
+`Vec<Vec<u8>>` vs `Vec<(String, Vec<u8>)>` serialization cost is similar. The real gain
+is at **batch-1024** — previously impossible without an 8 KB ack allocation — which
+reaches **836K msg/s**. Use this when all messages share one topic (e.g. `scene_deltas`).
 
 ---
 

@@ -308,6 +308,47 @@ fn bench_tcp_batch_publish(c: &mut Criterion) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Round 2: Zero-copy single-topic batch (PublishBatchTopic + BatchAckCompact)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Benchmarks `publish_batch_topic` — single-topic variant that returns a
+/// `BatchAckCompact { first_offset, count }` (12 bytes) instead of
+/// `BatchAck { offsets: Vec<u64> }` (N × 8 bytes).
+fn bench_tcp_batch_topic(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let (node, addr) = rt.block_on(start_node());
+    let client = rt.block_on(connect(addr));
+
+    let payload_100b = Bytes::from(vec![0u8; 100]);
+    let topic = "batch_topic_compact";
+
+    let mut group = c.benchmark_group("tcp_batch_topic");
+
+    for batch_size in [1usize, 8, 16, 64, 256, 1024] {
+        let payloads: Vec<Bytes> = (0..batch_size).map(|_| payload_100b.clone()).collect();
+        let payloads = Arc::new(payloads);
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("compact_100b_no_sub", batch_size),
+            &batch_size,
+            |b, _| {
+                let payloads = Arc::clone(&payloads);
+                b.to_async(&rt).iter(|| async {
+                    client
+                        .publish_batch_topic(topic, (*payloads).clone())
+                        .await
+                        .unwrap()
+                });
+            },
+        );
+    }
+
+    group.finish();
+    node.shutdown();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Round 5: QUIC single publish + batch
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -410,6 +451,7 @@ criterion_group! {
         bench_cluster_publish_no_sub,
         bench_cluster_publish_1_sub,
         bench_tcp_batch_publish,
+        bench_tcp_batch_topic,
         bench_quic_single_publish,
         bench_quic_batch_publish,
 }

@@ -187,11 +187,14 @@ P_stream(Hz) = floor(StreamNode_throughput / (Hz × msg_per_player))
 
 Benchmarked throughputs (internal, single node):
 
-| Transport          | Throughput    | P_max @ 60 Hz (3 msg/player/tick) |
-|--------------------|---------------|-----------------------------------|
-| In-process         | ~85 M msg/s   | ∞ (no network)                    |
-| TCP batch-256      | ~622 K msg/s  | ~3,455 players                    |
-| QUIC batch-256     | ~336 K msg/s  | ~1,866 players                    |
+| Transport                    | Throughput      | P_max @ 60 Hz (3 msg/player/tick) |
+|------------------------------|-----------------|-----------------------------------|
+| In-process                   | ~85 M msg/s     | ∞ (no network)                    |
+| TCP batch-256 (mixed topics) | ~622 K msg/s    | ~3,455 players                    |
+| TCP batch-1024 (same topic)¹ | **~836 K msg/s**| **~4,644 players**                |
+| QUIC batch-256               | ~336 K msg/s    | ~1,866 players                    |
+
+¹ `PublishBatchTopic` with `BatchAckCompact` — use when all messages share one topic (e.g. `scene_deltas`).
 
 ### ForgeCluster horizontal scaling
 

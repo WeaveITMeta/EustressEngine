@@ -309,6 +309,16 @@ async fn dispatch_quic_frame(
             }).collect();
             Some(ServerFrame::TopicList(stats))
         }
+        ClientFrame::PublishBatchTopic { topic, payloads } => {
+            let count = payloads.len() as u32;
+            let producer = stream.producer(&topic);
+            let mut first_offset = 0u64;
+            for (i, payload) in payloads.into_iter().enumerate() {
+                let offset = producer.send_bytes(Bytes::from(payload));
+                if i == 0 { first_offset = offset; }
+            }
+            Some(ServerFrame::BatchAckCompact { first_offset, count })
+        }
         ClientFrame::Ping => Some(ServerFrame::Pong),
         ClientFrame::Unsubscribe { .. } => None,
     }
@@ -417,6 +427,10 @@ async fn quic_client_reader(mut recv: RecvStream, inner: Arc<QuicClientInner>) {
                 if let Some(ch) = inner.sub_channels.get(&topic) {
                     let _ = ch.try_send((offset, timestamp, payload));
                 }
+            }
+            Ok(ServerFrame::BatchAckCompact { .. }) => {
+                // QUIC QuicNodeClient doesn't yet expose publish_batch_topic —
+                // ignore compact acks until the QUIC client is extended.
             }
             Ok(ServerFrame::Pong) => {}
             Ok(ServerFrame::Error { code, message }) => {
