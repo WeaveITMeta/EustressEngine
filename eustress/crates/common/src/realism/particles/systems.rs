@@ -10,12 +10,14 @@
 //! 4. **Force Application** - Apply accumulated forces
 
 use bevy::prelude::*;
+use bevy::diagnostic::FrameCount;
 use rayon::prelude::*;
 
 use super::components::*;
 use super::spatial::SpatialHash;
 use crate::realism::constants;
 use crate::realism::laws::{thermodynamics, mechanics};
+use crate::realism::lod::SimLodTier;
 use crate::realism::RealismConfig;
 
 // ============================================================================
@@ -46,31 +48,36 @@ pub fn update_spatial_hash(
 
 /// Update thermodynamic properties of particles
 pub fn update_thermodynamics(
-    mut query: Query<(&Particle, &mut ThermodynamicState, &Transform)>,
+    mut query: Query<(&Particle, &mut ThermodynamicState, &Transform, Option<&SimLodTier>)>,
     spatial_hash: Res<SpatialHash>,
     config: Res<RealismConfig>,
     time: Res<Time>,
+    frame: Res<FrameCount>,
 ) {
     if !config.thermodynamics_enabled {
         return;
     }
-    
+
     let dt = time.delta_secs() * config.time_scale;
     if dt <= 0.0 {
         return;
     }
-    
+
     // Collect positions and temperatures for heat transfer calculations
     let particle_data: Vec<(Entity, Vec3, f32)> = query
         .iter()
-        .map(|(_, thermo, transform)| {
+        .map(|(_, thermo, transform, _)| {
             (Entity::PLACEHOLDER, transform.translation, thermo.temperature)
         })
         .collect();
-    
+
     // Update each particle's thermodynamic state
-    for (particle, mut thermo, transform) in query.iter_mut() {
+    for (particle, mut thermo, transform, lod) in query.iter_mut() {
         if !particle.active {
+            continue;
+        }
+        let tier = lod.copied().unwrap_or_default();
+        if !tier.should_update(frame.0) {
             continue;
         }
         
@@ -113,19 +120,24 @@ pub fn update_thermodynamics(
 
 /// Update kinematic state (velocity, position) from forces
 pub fn update_kinematics(
-    mut query: Query<(&Particle, &mut KineticState, &mut Transform)>,
+    mut query: Query<(&Particle, &mut KineticState, &mut Transform, Option<&SimLodTier>)>,
     config: Res<RealismConfig>,
     time: Res<Time>,
+    frame: Res<FrameCount>,
 ) {
     let dt = time.delta_secs() * config.time_scale;
     if dt <= 0.0 {
         return;
     }
-    
+
     // Parallel iteration for performance
     if config.parallel_enabled {
-        query.par_iter_mut().for_each(|(particle, mut kinetic, mut transform)| {
+        query.par_iter_mut().for_each(|(particle, mut kinetic, mut transform, lod)| {
             if !particle.active {
+                return;
+            }
+            let tier = lod.copied().unwrap_or_default();
+            if !tier.should_update(frame.0) {
                 return;
             }
             
@@ -159,17 +171,21 @@ pub fn update_kinematics(
             kinetic.clear_forces();
         });
     } else {
-        for (particle, mut kinetic, mut transform) in query.iter_mut() {
+        for (particle, mut kinetic, mut transform, lod) in query.iter_mut() {
             if !particle.active {
                 continue;
             }
-            
+            let tier = lod.copied().unwrap_or_default();
+            if !tier.should_update(frame.0) {
+                continue;
+            }
+
             let acceleration = if particle.mass > 0.0 {
                 kinetic.accumulated_force / particle.mass
             } else {
                 Vec3::ZERO
             };
-            
+
             kinetic.velocity += acceleration * dt;
             transform.translation += kinetic.velocity * dt;
             kinetic.update_momentum(particle.mass);

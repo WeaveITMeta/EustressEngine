@@ -25,12 +25,15 @@ pub mod prelude {
 use bevy::prelude::*;
 use tracing::info;
 
+use crate::realism::lod::{SimLodPlugin, SimLodTier};
+
 /// Particle physics plugin
 pub struct ParticlePlugin;
 
 impl Plugin for ParticlePlugin {
     fn build(&self, app: &mut App) {
         app
+            .add_plugins(SimLodPlugin)
             .init_resource::<spatial::SpatialHash>()
             .init_resource::<spawner::ParticleSpawnerConfig>()
             .register_type::<components::Particle>()
@@ -38,13 +41,14 @@ impl Plugin for ParticlePlugin {
             .register_type::<components::KineticState>()
             .register_type::<components::ParticleType>()
             .register_type::<components::ElectrochemicalState>()
+            .register_type::<SimLodTier>()
             .add_systems(Update, (
                 systems::update_spatial_hash,
                 systems::update_thermodynamics,
                 systems::update_kinematics,
                 systems::apply_particle_forces,
             ).chain());
-        
+
         info!("ParticlePlugin initialized");
     }
 }
