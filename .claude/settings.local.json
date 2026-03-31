@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(python -c \"import sys,json; m=json.load\\(sys.stdin\\); pkg=[p for p in m[''''packages''''] if p[''''name'''']==''''iggy''''][0]; print\\(list\\(pkg[''''features''''].keys\\(\\)\\)[:30]\\)\")",
+      "Bash(cargo search:*)",
+      "Bash(cargo test:*)",
+      "Bash(grep -rn \"kernel_law\\\\|KernelLaw\\\\|symbolica\" e:/Workspace/EustressEngine/eustress/crates/ --include=*.rs)",
+      "Bash(xargs grep:*)",
+      "Bash(wc -l /e/Workspace/EustressEngine/eustress/crates/common/src/scripting/*.rs)",
+      "Bash(git push:*)",
+      "Bash(grep -B2 \"could not find \\\\`serializers\\\\`\\\\|E0107\\\\|E0282\")",
+      "Bash(find /e/Workspace/EustressEngine/eustress/crates -type f -name *kernel* -o -name *law*)",
+      "Bash(grep -r \"LOD\\\\|proximity\\\\|distance.*update\\\\|spatial\" /e/Workspace/EustressEngine/eustress/crates/common/src/realism/ --include=*.rs)",
+      "Bash(grep -r \"BasePart\\\\|update.*property\\\\|apply.*property\" /e/Workspace/EustressEngine/eustress/crates/common/src/realism/ --include=*.rs)",
+      "Bash(grep -r \"FixedUpdate\\\\|fixed.*update\\\\|delta_secs\\\\|frame.*rate\" /e/Workspace/EustressEngine/eustress/crates/common/src/ --include=*.rs)",
+      "Bash(grep -r \"kernel\\\\|law\\\\|physics.*update\" /e/Workspace/EustressEngine/eustress/crates/workshop/src/ --include=*.rs)"
+    ],
+    "dangerouslySkipPermissions": true
+  }
+}

@@ -57,12 +57,21 @@ pub mod embedvec_target;
 #[cfg(feature = "embedvec")]
 pub use embedvec_target::{
     EmbedvecExportTarget, EmbedvecExportTargetBuilder, OntologyAwareExportTarget, TrainingRecord,
+    register_embedvec_subscriber, register_ontology_subscriber,
 };
 
 pub use config::McpConfig;
 pub use error::McpError;
 pub use protocol::*;
-pub use server::McpServer;
+pub use server::{McpServer, McpServerBuilder, McpState, topics};
+pub use router::{
+    McpRouter,
+    WebhookExportTarget, ConsoleExportTarget, FileExportTarget,
+    register_webhook_subscriber, register_console_subscriber, register_file_subscriber,
+};
+
+// Re-export EustressStream for callers that need to share a stream instance.
+pub use eustress_stream::EustressStream;
 
 // ============================================================================
 // Prelude
@@ -77,6 +86,7 @@ pub mod prelude {
         QueryEntitiesRequest, EntityResponse, SpaceInfo,
         McpCapability, McpProtocolVersion,
     };
-    pub use super::server::McpServer;
+    pub use super::server::{McpServer, McpServerBuilder, topics};
     pub use super::types::{EntityData, TransformData, PropertyMap};
+    pub use eustress_stream::EustressStream;
 }

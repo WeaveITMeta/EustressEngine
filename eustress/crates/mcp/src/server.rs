@@ -1,51 +1,107 @@
 //! MCP Server - Main server implementation.
+//!
+//! ## Architecture (EustressStream-backed)
+//!
+//! ```text
+//! HTTP handler (create_entity)
+//!     → stream.producer("mcp.entity.create").send(&entity)
+//!         ↳ McpRouter subscriber    → AI consent check → export record → "mcp.exports"
+//!         ↳ ChangeQueue subscriber  → spawn entity in Bevy ECS
+//!         ↳ Properties panel        → refresh UI
+//!         ↳ Any future subscriber   → zero-copy access, <1 µs
+//! ```
+//!
+//! All inter-component communication uses named EustressStream topics instead of
+//! point-to-point `tokio::sync::mpsc` channels. This gives fan-out (N subscribers),
+//! replay (ring buffer), persistence (optional segments), and multi-transport
+//! (in-process / SHM / TCP / QUIC) for free.
 
 use axum::{
     routing::{get, post},
     Router,
 };
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+
+use eustress_stream::{EustressStream, StreamConfig};
 
 use crate::{
     config::McpConfig,
     error::{McpError, McpResult},
-    handlers::{self, EntityOperation},
+    handlers,
     router::McpRouter,
 };
 
-/// MCP Server state shared across handlers
+// ─────────────────────────────────────────────────────────────────────────────
+// Well-known MCP topic names
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Well-known EustressStream topic names for MCP operations.
+/// Subscribe to these on any `EustressStream` clone to observe MCP activity.
+pub mod topics {
+    /// Entity creation operations (payload: JSON-serialized `EntityData`).
+    pub const ENTITY_CREATE: &str = "mcp.entity.create";
+    /// Entity update operations (payload: JSON-serialized `UpdateEntityRequest`).
+    pub const ENTITY_UPDATE: &str = "mcp.entity.update";
+    /// Entity deletion operations (payload: JSON-serialized `DeleteEntityRequest`).
+    pub const ENTITY_DELETE: &str = "mcp.entity.delete";
+    /// EEP export records produced by the router (payload: JSON-serialized `EepExportRecord`).
+    pub const EXPORTS: &str = "mcp.exports";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// McpState — shared across Axum handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// MCP Server state shared across handlers.
+///
+/// Handlers publish to EustressStream topics. Any number of subscribers
+/// (McpRouter, ChangeQueue, UI panels, export targets) can observe operations.
 pub struct McpState {
     /// Configuration
     pub config: McpConfig,
-    /// Channel for sending entity operations to router
-    pub entity_tx: mpsc::Sender<EntityOperation>,
+    /// Shared EustressStream — handlers publish operations here.
+    /// Clone this to subscribe from any context.
+    pub stream: EustressStream,
 }
 
-/// MCP Server
+// ─────────────────────────────────────────────────────────────────────────────
+// McpServer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// MCP Server — Axum HTTP server backed by EustressStream.
 pub struct McpServer {
     config: McpConfig,
     state: Arc<McpState>,
-    router_rx: mpsc::Receiver<EntityOperation>,
 }
 
 impl McpServer {
-    /// Create a new MCP server
+    /// Create a new MCP server with its own private EustressStream.
+    ///
+    /// Use [`McpServer::with_stream`] to share a stream with other subsystems
+    /// (e.g. the engine's `ChangeQueue`).
     pub fn new(config: McpConfig) -> Self {
-        let (tx, rx) = mpsc::channel(1000);
+        let stream = EustressStream::new(StreamConfig::default().in_memory());
+        Self::with_stream(config, stream)
+    }
 
+    /// Create a new MCP server that publishes to an existing EustressStream.
+    ///
+    /// Pass `change_queue.stream.clone()` here to unify MCP operations with
+    /// the engine's scene delta pipeline.
+    pub fn with_stream(config: McpConfig, stream: EustressStream) -> Self {
         let state = Arc::new(McpState {
             config: config.clone(),
-            entity_tx: tx,
+            stream,
         });
 
-        Self {
-            config,
-            state,
-            router_rx: rx,
-        }
+        Self { config, state }
+    }
+
+    /// Access the underlying EustressStream (e.g. to register export targets).
+    pub fn stream(&self) -> &EustressStream {
+        &self.state.stream
     }
 
     /// Build the Axum router
@@ -76,19 +132,21 @@ impl McpServer {
             .with_state(self.state.clone())
     }
 
-    /// Run the MCP server
+    /// Run the MCP server.
+    ///
+    /// Registers the `McpRouter` as a stream subscriber, then starts the
+    /// Axum HTTP listener. The router processes operations via zero-copy
+    /// callbacks — no background task polling a channel.
     pub async fn run(self) -> McpResult<()> {
         let addr = self.config.address();
         tracing::info!("Starting MCP server on {}", addr);
 
-        // Build the HTTP router before moving fields out of self
+        // Build the HTTP router before moving fields
         let app = self.build_router();
 
-        // Start the entity router in a background task
-        let router = McpRouter::new(self.router_rx);
-        tokio::spawn(async move {
-            router.run().await;
-        });
+        // Register the McpRouter as a stream subscriber (handles AI consent + export)
+        McpRouter::register(&self.state.stream);
+
         let listener = tokio::net::TcpListener::bind(&addr).await
             .map_err(|e| McpError::Internal(format!("Failed to bind: {}", e)))?;
 
@@ -102,10 +160,18 @@ impl McpServer {
     }
 }
 
-/// Builder for MCP server with export targets
+// ─────────────────────────────────────────────────────────────────────────────
+// McpServerBuilder
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builder for MCP server with export targets.
+///
+/// Export targets register as independent EustressStream subscribers on the
+/// `"mcp.exports"` topic. Each target receives records in parallel — a slow
+/// webhook does not block the console logger or file writer.
 pub struct McpServerBuilder {
     config: McpConfig,
-    export_targets: Vec<Arc<dyn crate::router::ExportTarget>>,
+    stream: Option<EustressStream>,
 }
 
 impl McpServerBuilder {
@@ -113,43 +179,59 @@ impl McpServerBuilder {
     pub fn new(config: McpConfig) -> Self {
         Self {
             config,
-            export_targets: Vec::new(),
+            stream: None,
         }
     }
 
-    /// Add an export target
-    pub fn with_target(mut self, target: Arc<dyn crate::router::ExportTarget>) -> Self {
-        self.export_targets.push(target);
+    /// Share an existing EustressStream (e.g. from ChangeQueue).
+    pub fn with_stream(mut self, stream: EustressStream) -> Self {
+        self.stream = Some(stream);
         self
     }
 
-    /// Add a webhook export target
+    /// Register a webhook export target that subscribes to `"mcp.exports"`.
     pub fn with_webhook(self, name: &str, endpoint: &str, api_key: Option<&str>) -> Self {
-        let target = Arc::new(crate::router::WebhookExportTarget::new(
+        let target = crate::router::WebhookExportTarget::new(
             name.to_string(),
             endpoint.to_string(),
             api_key.map(String::from),
-        ));
-        self.with_target(target)
+        );
+        // Target will be registered as a stream subscriber in build()
+        let stream = self.effective_stream();
+        crate::router::register_webhook_subscriber(&stream, target);
+        self
     }
 
-    /// Add a console export target (for debugging)
+    /// Register a console export target (for debugging) that subscribes to `"mcp.exports"`.
     pub fn with_console(self, name: &str) -> Self {
-        let target = Arc::new(crate::router::ConsoleExportTarget::new(name.to_string()));
-        self.with_target(target)
+        let stream = self.effective_stream();
+        crate::router::register_console_subscriber(&stream, name.to_string());
+        self
     }
 
-    /// Add a file export target
+    /// Register a file export target that subscribes to `"mcp.exports"`.
     pub fn with_file(self, name: &str, output_dir: &std::path::Path) -> Self {
-        let target = Arc::new(crate::router::FileExportTarget::new(
+        let target = crate::router::FileExportTarget::new(
             name.to_string(),
             output_dir.to_path_buf(),
-        ));
-        self.with_target(target)
+        );
+        let stream = self.effective_stream();
+        crate::router::register_file_subscriber(&stream, target);
+        self
     }
 
     /// Build the server
     pub fn build(self) -> McpServer {
-        McpServer::new(self.config)
+        let stream = self.stream.unwrap_or_else(||
+            EustressStream::new(StreamConfig::default().in_memory())
+        );
+        McpServer::with_stream(self.config, stream)
+    }
+
+    /// Get or create the stream for registering subscribers during build.
+    fn effective_stream(&self) -> EustressStream {
+        self.stream.clone().unwrap_or_else(||
+            EustressStream::new(StreamConfig::default().in_memory())
+        )
     }
 }

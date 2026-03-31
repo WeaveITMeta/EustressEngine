@@ -1,17 +1,22 @@
 //! EmbedvecExportTarget - Routes MCP entity data to the vector store
 //!
 //! ## Table of Contents
-//! 1. EmbedvecExportTarget - ExportTarget implementation for embedvec
-//! 2. OntologyAwareExportTarget - Exports with ontology-aware indexing
+//! 1. EmbedvecExportTarget - EustressStream subscriber for embedvec training data
+//! 2. OntologyAwareExportTarget - Subscriber with ontology-aware indexing
 //! 3. TrainingRecord - Training data format for spatial LLM
+//!
+//! Both targets register as independent subscribers on `"mcp.exports"`.
+//! Async work (ontology index writes, flush) is spawned via `tokio::spawn`
+//! from the synchronous stream callback.
 
 use crate::error::McpResult;
 use crate::protocol::EepExportRecord;
-use crate::router::ExportTarget;
+use crate::server::topics;
 use eustress_embedvec::{
     EmbeddingMetadata, OntologyIndex, OntologyTree, PropertyEmbedder, SimpleHashEmbedder,
     SpatialContextEmbedder, SpatialFeatures,
 };
+use eustress_stream::EustressStream;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,6 +79,11 @@ pub struct TrainingRecord {
 }
 
 impl EmbedvecExportTarget {
+    /// Target name for logging and identification
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Create a new embedvec export target
     pub fn new(name: impl Into<String>, dimension: usize) -> Self {
         Self {
@@ -341,6 +351,11 @@ pub struct OntologyAwareExportTarget {
 }
 
 impl OntologyAwareExportTarget {
+    /// Target name for logging and identification
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Create a new ontology-aware export target
     pub fn new(name: impl Into<String>, dimension: usize) -> Self {
         Self {
@@ -474,16 +489,12 @@ impl OntologyAwareExportTarget {
     }
 }
 
-#[async_trait::async_trait]
-impl ExportTarget for OntologyAwareExportTarget {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    async fn export(&self, record: &EepExportRecord) -> McpResult<()> {
+impl OntologyAwareExportTarget {
+    /// Process an EEP export record (called from stream subscriber callback).
+    fn process_record(&self, record: &EepExportRecord) {
         // Only process records with AI consent
         if !record.consent.ai_training {
-            return Ok(());
+            return;
         }
 
         // Generate embedding
@@ -494,7 +505,7 @@ impl ExportTarget for OntologyAwareExportTarget {
                     entity_id = %record.entity.id,
                     "Failed to generate embedding"
                 );
-                return Ok(());
+                return;
             }
         };
 
@@ -532,62 +543,69 @@ impl ExportTarget for OntologyAwareExportTarget {
         let instance_id = uuid::Uuid::parse_str(&record.entity.id)
             .unwrap_or_else(|_| uuid::Uuid::new_v4());
 
-        // Insert into ontology index
-        // Note: We use a placeholder Entity here since we don't have the actual Bevy Entity
-        // In a real integration, this would come from the ECS
+        // Insert into ontology index — spawn async since we need .write().await
+        let index = Arc::clone(&self.index);
+        let exported_count = Arc::clone(&self.exported_count);
+        let entity_id = record.entity.id.clone();
+        let ontology_path_clone = ontology_path.clone();
+        let fallback_embedding = self.generate_embedding(record).unwrap_or_default();
+        let fallback_meta = EmbeddingMetadata::with_name(&record.entity.id);
         let placeholder_entity = bevy::prelude::Entity::from_bits(instance_id.as_u128() as u64);
 
-        let mut index = self.index.write().await;
-        if let Err(e) = index.insert(
-            &ontology_path,
-            placeholder_entity,
-            instance_id,
-            embedding,
-            metadata,
-        ) {
-            tracing::warn!(
-                entity_id = %record.entity.id,
-                ontology_path = %ontology_path,
-                error = %e,
-                "Failed to insert into ontology index, using fallback path"
-            );
-            // Try with a fallback path
-            let _ = index.insert(
-                "Entity/Spatial/Prop",
+        tokio::spawn(async move {
+            let mut idx = index.write().await;
+            if let Err(e) = idx.insert(
+                &ontology_path_clone,
                 placeholder_entity,
                 instance_id,
-                self.generate_embedding(record).unwrap_or_default(),
-                EmbeddingMetadata::with_name(&record.entity.id),
+                embedding,
+                metadata,
+            ) {
+                tracing::warn!(
+                    entity_id = %entity_id,
+                    ontology_path = %ontology_path_clone,
+                    error = %e,
+                    "Failed to insert into ontology index, using fallback path"
+                );
+                let _ = idx.insert(
+                    "Entity/Spatial/Prop",
+                    placeholder_entity,
+                    instance_id,
+                    fallback_embedding,
+                    fallback_meta,
+                );
+            }
+
+            *exported_count.write().await += 1;
+
+            tracing::debug!(
+                entity_id = %entity_id,
+                ontology_path = %ontology_path_clone,
+                "Exported entity to ontology index"
             );
-        }
-
-        // Update stats
-        *self.exported_count.write().await += 1;
-
-        tracing::debug!(
-            entity_id = %record.entity.id,
-            ontology_path = %ontology_path,
-            "Exported entity to ontology index"
-        );
-
-        Ok(())
-    }
-
-    async fn health_check(&self) -> bool {
-        true
+        });
     }
 }
 
-#[async_trait::async_trait]
-impl ExportTarget for EmbedvecExportTarget {
-    fn name(&self) -> &str {
-        &self.name
-    }
+/// Register an `OntologyAwareExportTarget` as a subscriber on `"mcp.exports"`.
+pub fn register_ontology_subscriber(stream: &EustressStream, target: OntologyAwareExportTarget) {
+    let target = Arc::new(target);
+    let _ = stream.subscribe_owned(topics::EXPORTS, move |msg| {
+        let Ok(record) = serde_json::from_slice::<EepExportRecord>(&msg.data) else {
+            tracing::warn!("OntologyAwareExportTarget: failed to deserialize EepExportRecord");
+            return;
+        };
+        target.process_record(&record);
+    });
+    tracing::info!("OntologyAwareExportTarget registered on mcp.exports");
+}
 
-    async fn export(&self, record: &EepExportRecord) -> McpResult<()> {
+impl EmbedvecExportTarget {
+    /// Process an EEP export record (called from stream subscriber callback).
+    fn process_record(&self, record: &EepExportRecord) {
         // Only process records with AI consent
         if !record.consent.ai_training {
-            return Ok(());
+            return;
         }
 
         // Generate embedding
@@ -605,22 +623,72 @@ impl ExportTarget for EmbedvecExportTarget {
             "Collected training record with embedding"
         );
 
-        // Add to pending records
-        let mut records = self.training_records.write().await;
-        records.push(training_record);
+        // Add to pending records — spawn async since we need .write().await
+        let records = Arc::clone(&self.training_records);
+        let auto_flush = self.auto_flush;
+        let flush_threshold = self.flush_threshold;
+        let output_dir = self.output_dir.clone();
 
-        // Auto-flush if threshold reached
-        if self.auto_flush && records.len() >= self.flush_threshold {
-            drop(records); // Release lock before flush
-            self.flush().await?;
-        }
+        tokio::spawn(async move {
+            let mut recs = records.write().await;
+            recs.push(training_record);
 
-        Ok(())
+            // Auto-flush if threshold reached
+            if auto_flush && recs.len() >= flush_threshold {
+                if let Some(dir) = &output_dir {
+                    let count = recs.len();
+                    if let Err(e) = flush_records_to_disk(&mut recs, dir).await {
+                        tracing::error!("Auto-flush failed: {e}");
+                    } else {
+                        tracing::info!(count, "Auto-flushed training records");
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Register an `EmbedvecExportTarget` as a subscriber on `"mcp.exports"`.
+pub fn register_embedvec_subscriber(stream: &EustressStream, target: EmbedvecExportTarget) {
+    let target = Arc::new(target);
+    let _ = stream.subscribe_owned(topics::EXPORTS, move |msg| {
+        let Ok(record) = serde_json::from_slice::<EepExportRecord>(&msg.data) else {
+            tracing::warn!("EmbedvecExportTarget: failed to deserialize EepExportRecord");
+            return;
+        };
+        target.process_record(&record);
+    });
+    tracing::info!("EmbedvecExportTarget registered on mcp.exports");
+}
+
+/// Helper: flush training records to JSONL file on disk.
+async fn flush_records_to_disk(
+    records: &mut Vec<TrainingRecord>,
+    dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if records.is_empty() {
+        return Ok(());
     }
 
-    async fn health_check(&self) -> bool {
-        true
+    tokio::fs::create_dir_all(dir).await?;
+
+    let filename = format!(
+        "training_data_{}.jsonl",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S")
+    );
+    let path = dir.join(filename);
+
+    let mut content = String::new();
+    for record in records.iter() {
+        let json = serde_json::to_string(record)?;
+        content.push_str(&json);
+        content.push('\n');
     }
+
+    tokio::fs::write(&path, content).await?;
+    tracing::info!(path = %path.display(), count = records.len(), "Flushed training records to disk");
+    records.clear();
+    Ok(())
 }
 
 /// Builder for EmbedvecExportTarget

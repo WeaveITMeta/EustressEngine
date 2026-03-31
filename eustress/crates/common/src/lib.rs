@@ -88,10 +88,14 @@ pub use parameters::{
     InstanceParameters, ParameterValue, ParameterValueType,
     // MCP Server Configuration
     McpServerConfig, McpCapabilities, ExportTargetConfig, ExportTargetType, AuthConfig,
-    // Parameter Router
+    // Parameter Router (now EustressStream-backed)
     ParameterRouter, RouterStats, ExportRecord, ExportTransform, CreatorInfo, CreatorType,
-    // Events
+    // Events (Bevy Messages)
     ParameterChangedEvent, ExportRequestEvent,
+    // Serializable event types for stream bridging
+    ParameterChangedSerialized, ExportRequestSerialized,
+    // Well-known stream topic names
+    parameter_topics,
 };
 
 // Re-export default scene functions

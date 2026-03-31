@@ -51,6 +51,15 @@ impl Plugin for ParametersPlugin {
             .init_resource::<ParameterRouter>()
             .add_message::<ParameterChangedEvent>()
             .add_message::<ExportRequestEvent>();
+
+        // When streaming is enabled, bridge Bevy parameter events to
+        // EustressStream topics so the MCP server, export targets, and
+        // external processes can observe parameter changes.
+        #[cfg(feature = "streaming")]
+        {
+            app.add_observer(bridge_parameter_changed_to_stream)
+               .add_observer(bridge_export_requests_to_stream);
+        }
     }
 }
 
@@ -293,16 +302,89 @@ impl Default for ParameterValue {
 }
 
 // ============================================================================
-// Parameter Router (Change Detection & Export)
+// Parameter Router (Change Detection & Export via EustressStream)
 // ============================================================================
 
-/// Routes parameter changes to appropriate export targets
-#[derive(Resource, Default, Clone, Debug)]
+/// Well-known EustressStream topic names for parameter events.
+///
+/// Subscribe to these on any `EustressStream` clone to observe parameter
+/// changes and export requests. Payloads are JSON-serialized.
+pub mod parameter_topics {
+    /// Parameter change notifications (payload: JSON `ExportRecord`).
+    /// Published by `ParameterRouter::publish_export()`.
+    pub const PARAMETER_EXPORTS: &str = "parameter.exports";
+    /// Parameter changed events (payload: JSON `ParameterChangedSerialized`).
+    /// Published by the `bridge_parameter_events` system.
+    pub const PARAMETER_CHANGED: &str = "parameter.changed";
+    /// Export request events (payload: JSON `ExportRequestSerialized`).
+    /// Published by the `bridge_export_requests` system.
+    pub const EXPORT_REQUESTS: &str = "parameter.export_requests";
+}
+
+/// Routes parameter changes to the `"parameter.exports"` EustressStream topic.
+///
+/// Instead of buffering into a `Vec`, this publishes each export record
+/// directly to the stream. Any number of subscribers (MCP router, file
+/// exporters, training pipelines) can observe records with <1 µs latency.
+///
+/// When `streaming` feature is disabled, falls back to a `Vec` buffer.
+#[derive(Resource, Clone, Debug)]
 pub struct ParameterRouter {
-    /// Pending exports (batched for efficiency)
-    pub pending_exports: Vec<ExportRecord>,
     /// Export statistics
     pub stats: RouterStats,
+    /// Fallback buffer for non-streaming builds
+    pub pending_exports: Vec<ExportRecord>,
+}
+
+impl Default for ParameterRouter {
+    fn default() -> Self {
+        Self {
+            stats: RouterStats::default(),
+            pending_exports: Vec::new(),
+        }
+    }
+}
+
+impl ParameterRouter {
+    /// Publish an export record.
+    ///
+    /// With the `streaming` feature: publishes to the `"parameter.exports"`
+    /// topic on the provided `EustressStream`. Without streaming: appends to
+    /// the internal `pending_exports` vec for manual draining.
+    #[cfg(feature = "streaming")]
+    pub fn publish_export(
+        &mut self,
+        record: &ExportRecord,
+        stream: &eustress_stream::EustressStream,
+    ) {
+        match serde_json::to_vec(record) {
+            Ok(json_bytes) => {
+                stream.producer(parameter_topics::PARAMETER_EXPORTS)
+                    .send_bytes(bytes::Bytes::from(json_bytes));
+                self.stats.total_exports += 1;
+                self.stats.successful_exports += 1;
+                self.stats.last_export_time = Some(std::time::Instant::now());
+            }
+            Err(e) => {
+                tracing::error!("ParameterRouter: failed to serialize ExportRecord: {e}");
+                self.stats.total_exports += 1;
+                self.stats.failed_exports += 1;
+            }
+        }
+    }
+
+    /// Fallback: buffer an export record when streaming is unavailable.
+    pub fn buffer_export(&mut self, record: ExportRecord) {
+        self.pending_exports.push(record);
+        self.stats.total_exports += 1;
+        self.stats.successful_exports += 1;
+        self.stats.last_export_time = Some(std::time::Instant::now());
+    }
+
+    /// Drain all buffered exports (for non-streaming builds or manual flush).
+    pub fn drain_pending(&mut self) -> Vec<ExportRecord> {
+        std::mem::take(&mut self.pending_exports)
+    }
 }
 
 /// Statistics for the parameter router
@@ -398,6 +480,74 @@ pub struct ExportRequestEvent {
     pub entity: bevy::prelude::Entity,
     pub domain: String,
     pub target_ids: Vec<String>,
+}
+
+// ============================================================================
+// Stream Bridge — Bevy Messages → EustressStream topics
+// ============================================================================
+
+/// Serializable form of `ParameterChangedEvent` for stream publishing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParameterChangedSerialized {
+    pub entity_bits: u64,
+    pub domain: String,
+    pub key: String,
+    pub old_value: Option<ParameterValue>,
+    pub new_value: ParameterValue,
+}
+
+/// Serializable form of `ExportRequestEvent` for stream publishing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportRequestSerialized {
+    pub entity_bits: u64,
+    pub domain: String,
+    pub target_ids: Vec<String>,
+}
+
+/// Bevy system: bridges `ParameterChangedEvent` messages to the
+/// `"parameter.changed"` EustressStream topic.
+///
+/// Only compiled when the `streaming` feature is enabled.
+#[cfg(feature = "streaming")]
+pub fn bridge_parameter_changed_to_stream(
+    trigger: Trigger<ParameterChangedEvent>,
+    queue: Option<Res<crate::change_queue::ChangeQueue>>,
+) {
+    let Some(queue) = queue else { return; };
+    let event = trigger.event();
+    let serialized = ParameterChangedSerialized {
+        entity_bits: event.entity.to_bits(),
+        domain: event.domain.clone(),
+        key: event.key.clone(),
+        old_value: event.old_value.clone(),
+        new_value: event.new_value.clone(),
+    };
+    if let Ok(json_bytes) = serde_json::to_vec(&serialized) {
+        queue.stream.producer(parameter_topics::PARAMETER_CHANGED)
+            .send_bytes(bytes::Bytes::from(json_bytes));
+    }
+}
+
+/// Bevy system: bridges `ExportRequestEvent` messages to the
+/// `"parameter.export_requests"` EustressStream topic.
+///
+/// Only compiled when the `streaming` feature is enabled.
+#[cfg(feature = "streaming")]
+pub fn bridge_export_requests_to_stream(
+    trigger: Trigger<ExportRequestEvent>,
+    queue: Option<Res<crate::change_queue::ChangeQueue>>,
+) {
+    let Some(queue) = queue else { return; };
+    let event = trigger.event();
+    let serialized = ExportRequestSerialized {
+        entity_bits: event.entity.to_bits(),
+        domain: event.domain.clone(),
+        target_ids: event.target_ids.clone(),
+    };
+    if let Ok(json_bytes) = serde_json::to_vec(&serialized) {
+        queue.stream.producer(parameter_topics::EXPORT_REQUESTS)
+            .send_bytes(bytes::Bytes::from(json_bytes));
+    }
 }
 
 // ============================================================================

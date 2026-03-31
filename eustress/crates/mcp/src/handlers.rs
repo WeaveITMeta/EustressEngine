@@ -1,7 +1,11 @@
 //! HTTP handlers for MCP endpoints.
+//!
+//! Handlers publish entity operations to EustressStream topics for fan-out
+//! dispatch. Any number of subscribers (McpRouter, ChangeQueue, UI panels,
+//! export targets) can observe operations with <1 µs latency.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -11,7 +15,7 @@ use std::sync::Arc;
 use crate::{
     error::McpError,
     protocol::*,
-    server::McpState,
+    server::{McpState, topics},
     types::*,
 };
 
@@ -55,8 +59,10 @@ pub async fn create_entity(
         parameters: request.parameters,
     };
 
-    // Queue for processing
-    let _ = state.entity_tx.send(EntityOperation::Create(entity.clone())).await;
+    // Publish to EustressStream — all subscribers notified synchronously (<1 µs)
+    state.stream.producer(topics::ENTITY_CREATE)
+        .send(&entity)
+        .map_err(|e| McpError::Internal(format!("Stream publish failed: {e}")))?;
 
     Ok(Json(EntityResponse {
         success: true,
@@ -85,13 +91,15 @@ pub async fn update_entity(
         return Err(McpError::InvalidRequest("space_id and entity_id are required".into()));
     }
 
-    // Queue update operation
-    let _ = state.entity_tx.send(EntityOperation::Update(request.clone())).await;
+    // Publish to EustressStream — all subscribers notified synchronously
+    state.stream.producer(topics::ENTITY_UPDATE)
+        .send(&request)
+        .map_err(|e| McpError::Internal(format!("Stream publish failed: {e}")))?;
 
-    // Return success (actual update happens asynchronously)
+    // Return success (actual update happens via stream subscribers)
     Ok(Json(EntityResponse {
         success: true,
-        entity: None, // Would be populated after actual update
+        entity: None,
         error: None,
     }))
 }
@@ -117,12 +125,14 @@ pub async fn delete_entity(
         return Err(McpError::InvalidRequest("space_id and entity_id are required".into()));
     }
 
-    // Queue delete operation
-    let _ = state.entity_tx.send(EntityOperation::Delete(request.clone())).await;
+    // Publish to EustressStream — all subscribers notified synchronously
+    state.stream.producer(topics::ENTITY_DELETE)
+        .send(&request)
+        .map_err(|e| McpError::Internal(format!("Stream publish failed: {e}")))?;
 
     Ok(Json(DeleteResponse {
         success: true,
-        deleted_count: 1, // Would be actual count after processing
+        deleted_count: 1,
         error: None,
     }))
 }
@@ -131,7 +141,7 @@ pub async fn delete_entity(
 // Query Entities
 // ============================================================================
 
-/// GET /mcp/query - Query entities
+/// POST /mcp/query - Query entities
 pub async fn query_entities(
     State(_state): State<Arc<McpState>>,
     Json(request): Json<QueryEntitiesRequest>,
@@ -207,10 +217,11 @@ pub async fn batch_create(
     let mut results = Vec::new();
     let mut succeeded = 0;
     let mut failed = 0;
+    let producer = state.stream.producer(topics::ENTITY_CREATE);
 
     for (index, create_req) in request.entities.into_iter().enumerate() {
         let entity_id = uuid::Uuid::new_v4().to_string();
-        
+
         let entity = EntityData {
             id: entity_id.clone(),
             name: create_req.name.unwrap_or_else(|| create_req.class.clone()),
@@ -230,15 +241,26 @@ pub async fn batch_create(
             parameters: create_req.parameters,
         };
 
-        let _ = state.entity_tx.send(EntityOperation::Create(entity)).await;
-        
-        results.push(OperationResult {
-            index,
-            success: true,
-            entity_id: Some(entity_id),
-            error: None,
-        });
-        succeeded += 1;
+        match producer.send(&entity) {
+            Ok(_) => {
+                results.push(OperationResult {
+                    index,
+                    success: true,
+                    entity_id: Some(entity_id),
+                    error: None,
+                });
+                succeeded += 1;
+            }
+            Err(e) => {
+                results.push(OperationResult {
+                    index,
+                    success: false,
+                    entity_id: Some(entity_id),
+                    error: Some(format!("Stream publish failed: {e}")),
+                });
+                failed += 1;
+            }
+        }
     }
 
     Ok(Json(BatchResponse {
@@ -263,6 +285,8 @@ pub async fn batch_delete(
 
     let mut results = Vec::new();
     let mut succeeded = 0;
+    let mut failed = 0;
+    let producer = state.stream.producer(topics::ENTITY_DELETE);
 
     for (index, entity_id) in request.entity_ids.into_iter().enumerate() {
         let delete_req = DeleteEntityRequest {
@@ -271,22 +295,33 @@ pub async fn batch_delete(
             recursive: request.recursive,
         };
 
-        let _ = state.entity_tx.send(EntityOperation::Delete(delete_req)).await;
-        
-        results.push(OperationResult {
-            index,
-            success: true,
-            entity_id: Some(entity_id),
-            error: None,
-        });
-        succeeded += 1;
+        match producer.send(&delete_req) {
+            Ok(_) => {
+                results.push(OperationResult {
+                    index,
+                    success: true,
+                    entity_id: Some(entity_id),
+                    error: None,
+                });
+                succeeded += 1;
+            }
+            Err(e) => {
+                results.push(OperationResult {
+                    index,
+                    success: false,
+                    entity_id: Some(entity_id),
+                    error: Some(format!("Stream publish failed: {e}")),
+                });
+                failed += 1;
+            }
+        }
     }
 
     Ok(Json(BatchResponse {
-        success: true,
+        success: failed == 0,
         total: results.len(),
         succeeded,
-        failed: 0,
+        failed,
         results,
     }))
 }
@@ -296,11 +331,19 @@ pub async fn batch_delete(
 // ============================================================================
 
 /// GET /mcp/health - Health check
-pub async fn health_check() -> impl IntoResponse {
+pub async fn health_check(
+    State(state): State<Arc<McpState>>,
+) -> impl IntoResponse {
+    // Include stream stats in health response
+    let topic_count = state.stream.topics().len();
     (StatusCode::OK, Json(serde_json::json!({
         "status": "healthy",
         "protocol_version": "eep_v1",
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "stream": {
+            "topics": topic_count,
+            "transport": "in_process"
+        }
     })))
 }
 
@@ -319,21 +362,10 @@ pub async fn get_capabilities() -> impl IntoResponse {
             { "name": "rune_execution", "supported": false },
             { "name": "realtime_streaming", "supported": true },
             { "name": "batch_export", "supported": true },
-            { "name": "query", "supported": true }
+            { "name": "query", "supported": true },
+            { "name": "eustress_stream", "supported": true }
         ]
     }))
-}
-
-// ============================================================================
-// Entity Operations (Internal)
-// ============================================================================
-
-/// Entity operation for async processing
-#[derive(Debug, Clone)]
-pub enum EntityOperation {
-    Create(EntityData),
-    Update(UpdateEntityRequest),
-    Delete(DeleteEntityRequest),
 }
 
 // ============================================================================

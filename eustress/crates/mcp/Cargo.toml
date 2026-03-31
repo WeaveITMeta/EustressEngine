@@ -12,6 +12,10 @@ readme = "README.md"
 eustress-common = { path = "../common" }
 eustress-forge = { path = "../forge" }
 eustress-embedvec = { path = "../embedvec", optional = true }
+# EustressStream — embedded in-process pub/sub for fan-out dispatch
+eustress-stream = { path = "../stream" }
+# bytes — payload buffer type used by streaming code
+bytes = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -56,8 +60,8 @@ async-channel = "2.0"
 # WebSocket
 tokio-tungstenite = "0.26"
 
-# Async trait
-async-trait = "0.1"
+# async-trait removed — export targets are now synchronous stream subscribers
+# (async work like HTTP POST is spawned internally via tokio::spawn)
 
 [features]
 default = []

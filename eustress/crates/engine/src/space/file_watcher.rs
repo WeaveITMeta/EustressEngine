@@ -271,26 +271,24 @@ fn handle_file_modified(
     soul_scripts: &mut Query<&mut crate::soul::SoulScriptData>,
 ) {
     match event.file_type {
-        FileType::Soul => {
-            // Hot-reload Soul script
+        FileType::Soul | FileType::Rune => {
+            // Hot-reload Soul/Rune script source
             if let Some(entity) = registry.get_entity(&event.path) {
                 if let Ok(mut script_data) = soul_scripts.get_mut(entity) {
-                    // Reload markdown source
                     match std::fs::read_to_string(&event.path) {
                         Ok(new_source) => {
                             script_data.source = new_source;
                             script_data.dirty = true;
                             script_data.build_status = crate::soul::SoulBuildStatus::Stale;
-                            
-                            info!("🔄 Hot-reloaded Soul script: {:?}", event.path);
-                            
-                            // Trigger rebuild
+
+                            info!("🔄 Hot-reloaded script: {:?}", event.path);
+
                             commands.trigger(crate::soul::TriggerBuildEvent {
                                 entity,
                             });
                         }
                         Err(e) => {
-                            error!("Failed to reload Soul script {:?}: {}", event.path, e);
+                            error!("Failed to reload script {:?}: {}", event.path, e);
                         }
                     }
                 }
@@ -441,14 +439,14 @@ fn handle_file_created(
             );
         }
         
-        FileType::Soul => {
+        FileType::Soul | FileType::Rune => {
             match std::fs::read_to_string(&event.path) {
-                Ok(markdown_source) => {
+                Ok(source) => {
                     let name = event.path.file_stem()
                         .and_then(|n| n.to_str())
                         .unwrap_or("Unknown")
                         .to_string();
-                    
+
                     let entity = commands.spawn((
                         eustress_common::classes::Instance {
                             name: name.clone(),
@@ -458,7 +456,7 @@ fn handle_file_created(
                             ai: false,
                         },
                         crate::soul::SoulScriptData {
-                            source: markdown_source,
+                            source,
                             dirty: false,
                             ast: None,
                             generated_code: None,
@@ -473,7 +471,13 @@ fn handle_file_created(
                         },
                         Name::new(name.clone()),
                     )).id();
-                    
+
+                    // Parent to service entity so the Explorer primary path finds it
+                    let service_toml = space_root.join(&event.service).join("_service.toml");
+                    if let Some(service_entity) = registry.get_entity(&service_toml) {
+                        commands.entity(entity).insert(ChildOf(service_entity));
+                    }
+
                     registry.register(
                         event.path.clone(),
                         entity,
@@ -487,13 +491,16 @@ fn handle_file_created(
                             children: Vec::new(),
                         },
                     );
+                    info!("➕ Loaded new {} script: {:?}",
+                        if event.file_type == FileType::Rune { "Rune" } else { "Soul" },
+                        event.path);
                 }
                 Err(e) => {
-                    error!("Failed to read new Soul script {:?}: {}", event.path, e);
+                    error!("Failed to read new script {:?}: {}", event.path, e);
                 }
             }
         }
-        
+
         FileType::Toml => {
             // Load .part.toml, .model.toml, .instance.toml files
             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {

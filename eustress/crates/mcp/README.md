@@ -8,23 +8,29 @@ The Eustress MCP Server turns EustressEngine into a **fully scriptable, AI-contr
 
 Combined with the `AI = true` property opt-in, this creates the **ultimate consented, real-time training loop**.
 
-## Architecture
+## Architecture (EustressStream-backed)
 
 ```
 AI Model (Claude, GPT, Grok, etc.)
         ↓ (MCP calls over HTTP/WebSocket)
 Eustress MCP Server (hosted on Eustress Forge)
+        ↓ stream.producer("mcp.entity.create").send(&entity)
+EustressStream topic fan-out (<1 µs, zero-copy)
+        ↓                   ↓                    ↓
+McpRouter subscriber   ChangeQueue subscriber  Properties panel
+(AI consent check)     (spawn in Bevy ECS)     (refresh UI)
         ↓
-Rune API → Native Rust Engine (Bevy ECS)
-        ↓
-Create/Update/Delete Entities in Live Spaces
-        ↓
-Entities with AI = true → Automatically routed
-        ↓
-Parameter Router → External Export (via EEP)
+"mcp.exports" topic
+        ↓                   ↓                    ↓
+Webhook subscriber     Console subscriber      File subscriber
+(async HTTP POST)      (tracing::info)         (async file write)
         ↓
 Back to AI Training Pipeline
 ```
+
+All inter-component communication uses named **EustressStream topics** instead of
+point-to-point channels. This gives fan-out (N subscribers), replay (ring buffer),
+persistence (optional segments), and multi-transport (in-process / SHM / TCP / QUIC).
 
 ## Quick Start
 
@@ -51,9 +57,11 @@ async fn main() -> Result<(), McpError> {
 
 ### With Export Targets
 
+Export targets register as independent EustressStream subscribers on `"mcp.exports"`.
+Each target is fully isolated — a slow webhook never blocks the console logger.
+
 ```rust
 use eustress_mcp::prelude::*;
-use eustress_mcp::server::McpServerBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), McpError> {
@@ -68,6 +76,18 @@ async fn main() -> Result<(), McpError> {
     server.run().await?;
     Ok(())
 }
+```
+
+### Sharing a Stream with the Engine
+
+Pass the engine's `ChangeQueue` stream to unify MCP with the ECS:
+
+```rust
+use eustress_mcp::prelude::*;
+
+// In your Bevy startup system:
+let change_queue: &ChangeQueue = /* from Bevy resource */;
+let server = McpServer::with_stream(config, change_queue.stream.clone());
 ```
 
 ## API Endpoints
@@ -219,20 +239,38 @@ This ensures **consented, high-quality training data** from real 3D creations.
 
 ## Export Targets
 
-Built-in export targets:
+Built-in export targets (each registers as an independent EustressStream subscriber):
 
-- **Webhook**: Send EEP records to HTTP endpoints
-- **Console**: Log records for debugging
-- **File**: Write JSON files to disk
+- **Webhook**: Async HTTP POST (spawns tokio task, never blocks dispatch)
+- **Console**: Synchronous `tracing::info` (instant, zero overhead)
+- **File**: Async JSON file write (spawns tokio task)
+- **Embedvec**: Vector embedding + ontology indexing (optional `embedvec` feature)
 
-Custom targets can implement the `ExportTarget` trait:
+### Well-Known Stream Topics
+
+| Topic | Payload | Publisher |
+|-------|---------|-----------|
+| `mcp.entity.create` | JSON `EntityData` | HTTP handler |
+| `mcp.entity.update` | JSON `UpdateEntityRequest` | HTTP handler |
+| `mcp.entity.delete` | JSON `DeleteEntityRequest` | HTTP handler |
+| `mcp.exports` | JSON `EepExportRecord` | McpRouter (AI consent gated) |
+| `parameter.exports` | JSON `ExportRecord` | ParameterRouter |
+| `parameter.changed` | JSON `ParameterChangedSerialized` | Bridge observer |
+
+### Custom Export Targets
+
+Register a closure as a stream subscriber on `"mcp.exports"`:
 
 ```rust
-#[async_trait]
-pub trait ExportTarget: Send + Sync {
-    fn name(&self) -> &str;
-    async fn export(&self, record: &EepExportRecord) -> McpResult<()>;
-}
+use eustress_mcp::prelude::*;
+
+let stream: EustressStream = server.stream().clone();
+stream.subscribe_owned("mcp.exports", move |msg| {
+    let record: EepExportRecord = serde_json::from_slice(&msg.data).unwrap();
+    // Your custom logic here — synchronous callback, <1 µs dispatch
+    // For async work, spawn a tokio task:
+    tokio::spawn(async move { /* ... */ });
+});
 ```
 
 ## Protocol Version
