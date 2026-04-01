@@ -22,6 +22,8 @@ members = [
     "crates/cli",
     "crates/stream",
     "crates/stream-node",
+    "crates/functions",
+    "crates/identity",
     "benches/instance-capacity"
 ]
 

@@ -1,0 +1,69 @@
+[package]
+name = "eustress-functions"
+version = "0.1.0"
+edition = "2021"
+description = "Eustress Functions — 12-stage spatial intelligence DSL for Rune scripts"
+
+[dependencies]
+# Core engine types (ECS, Transform, Entity, etc.)
+bevy = { workspace = true, features = ["serialize"] }
+
+# Rune scripting runtime (0.14 — matches engine and common crates)
+rune = { version = "0.14", optional = true }
+
+# Shared types: ScriptContext, PropertyUpdate, PropertyValue, EntityData, ScriptEntity
+# Optional — only needed for stages that interact with the realism/scripting subsystem
+eustress-common = { path = "../common", optional = true }
+
+# Vector database: OntologyIndex, SpatialContextEmbedder, EmbedvecResource, SearchResult
+eustress-embedvec = { path = "../embedvec", optional = true }
+
+# Zero-copy streaming: EustressStream, OwnedMessage, Producer
+eustress-stream = { path = "../stream", optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+# Logging
+tracing = "0.1"
+
+[features]
+default = ["genesis", "rune-dsl"]
+
+# Rune scripting integration (module registration, #[rune::function] macros)
+rune-dsl = ["rune"]
+
+# ── Stage feature flags ──────────────────────────────────────────────────────
+# Phase 1: Foundation
+genesis = []
+concurrence = []
+
+# Phase 2: Perception
+proximity = ["dep:eustress-embedvec"]
+ontology = ["dep:eustress-embedvec"]
+knowledge = ["ontology", "proximity"]
+
+# Phase 3: Pipeline
+measurement = []
+refinement = []
+language = ["dep:eustress-embedvec"]
+
+# Phase 4: Temporal + Spatial
+temporal = ["dep:eustress-stream"]
+spatial = ["knowledge", "temporal"]
+
+# Phase 5: Intelligence
+statistical = []
+planning = ["spatial", "statistical"]
+meta = ["dep:eustress-stream"]
+
+# All stages enabled
+full = [
+    "genesis", "concurrence",
+    "proximity", "ontology", "knowledge",
+    "measurement", "refinement", "language",
+    "temporal", "spatial",
+    "statistical", "planning", "meta",
+]
