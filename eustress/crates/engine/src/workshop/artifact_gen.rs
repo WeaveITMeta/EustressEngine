@@ -851,7 +851,7 @@ fn resolve_universe_assets_dir(space_root: &std::path::Path, safe_product_name: 
         space_root.to_path_buf()
     };
 
-    universe_root.join("assets").join("meshes").join(safe_product_name)
+    universe_root.join(".eustress").join("assets").join("meshes").join(safe_product_name)
 }
 
 /// Sanitize a product name for use as a directory name

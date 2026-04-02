@@ -373,6 +373,11 @@ pub enum SlintAction {
     // Auth
     Login,
     Logout,
+
+    // Bliss node
+    BlissSetLight,
+    BlissSetFull,
+    BlissToggleEnabled,
     
     // Scripts
     BuildScript(i32),
@@ -1030,6 +1035,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<UIPerformance>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
+            .init_resource::<crate::auth::BlissNodeState>()
             .init_resource::<crate::soul::SoulServiceSettings>()
             .init_resource::<crate::commands::CommandHistory>()
             // Events
@@ -1085,6 +1091,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<SlintUIFocus>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
+            .init_resource::<crate::auth::BlissNodeState>()
             .init_resource::<crate::soul::SoulServiceSettings>()
             .init_resource::<crate::commands::CommandHistory>()
             .init_resource::<SlintCursorState>()
@@ -1418,7 +1425,15 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_login(move || q.push(SlintAction::Login));
     let q = queue.clone();
     ui.on_logout(move || q.push(SlintAction::Logout));
-    
+
+    // Bliss node mode
+    let q = queue.clone();
+    ui.on_bliss_set_light(move || q.push(SlintAction::BlissSetLight));
+    let q = queue.clone();
+    ui.on_bliss_set_full(move || q.push(SlintAction::BlissSetFull));
+    let q = queue.clone();
+    ui.on_bliss_toggle_enabled(move || q.push(SlintAction::BlissToggleEnabled));
+
     // Scripts
     let q = queue.clone();
     ui.on_build_script(move |id| q.push(SlintAction::BuildScript(id)));
@@ -2058,6 +2073,7 @@ struct DrainResources<'w> {
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
+    bliss_state: Option<ResMut<'w, crate::auth::BlissNodeState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
@@ -2425,7 +2441,34 @@ fn drain_slint_actions(
                     }
                 }
             }
-            
+
+            // Bliss node mode
+            SlintAction::BlissSetLight => {
+                if let Some(ref mut bliss) = res.bliss_state {
+                    bliss.set_light();
+                    if let Some(ref mut out) = res.output {
+                        out.info("Bliss node mode: Light (1.0x bonus)".to_string());
+                    }
+                }
+            }
+            SlintAction::BlissSetFull => {
+                if let Some(ref mut bliss) = res.bliss_state {
+                    bliss.set_full();
+                    if let Some(ref mut out) = res.output {
+                        out.info("Bliss node mode: Full (+10% bonus, ~2GB RAM)".to_string());
+                    }
+                }
+            }
+            SlintAction::BlissToggleEnabled => {
+                if let Some(ref mut bliss) = res.bliss_state {
+                    bliss.enabled = !bliss.enabled;
+                    let status = if bliss.enabled { "enabled" } else { "disabled" };
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Bliss integration {}", status));
+                    }
+                }
+            }
+
             // Scripts
             SlintAction::BuildScript(id) => {
                 if let Some(ref mut out) = res.output {
@@ -4180,6 +4223,7 @@ fn sync_bevy_to_slint(
     output: Option<Res<OutputConsole>>,
     editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
     auth_state: Option<Res<crate::auth::AuthState>>,
+    bliss_state: Option<Res<crate::auth::BlissNodeState>>,
     mut viewport_bounds: Option<ResMut<super::ViewportBounds>>,
     snapshot: Option<Res<UIWorldSnapshot>>,
     // Direct entity count query as fallback when snapshot is empty
@@ -4400,6 +4444,21 @@ fn sync_bevy_to_slint(
         ui.set_account_name(account_name.into());
         ui.set_account_status(account_status.into());
         ui.set_sync_status(sync_status.into());
+    }
+
+    // Bliss node state sync
+    if let Some(ref bliss) = bliss_state {
+        let current_mode: String = ui.get_bliss_node_mode().into();
+        if current_mode != bliss.mode {
+            ui.set_bliss_node_mode(bliss.mode.clone().into());
+            ui.set_bliss_bonus(bliss.bonus.clone().into());
+            ui.set_bliss_enabled(bliss.enabled);
+        }
+        let current_balance: String = ui.get_bliss_balance().into();
+        if current_balance != bliss.balance {
+            ui.set_bliss_balance(bliss.balance.clone().into());
+            ui.set_bliss_pending(bliss.pending.clone().into());
+        }
     }
     
     // Sync entity count - only when changed
@@ -7180,8 +7239,8 @@ fn sync_asset_manager_to_slint(
 
     // ── Universe Assets section ─────────────────────────────────────────
     if let Some(ref uni_root) = universe_root {
-        let parts_dir = uni_root.join("assets").join("parts");
-        let meshes_dir = uni_root.join("assets").join("meshes");
+        let parts_dir = uni_root.join(".eustress").join("assets").join("parts");
+        let meshes_dir = uni_root.join(".eustress").join("assets").join("meshes");
 
         let parts_files = scan_asset_dir(&parts_dir, &parts_dir);
         let mesh_files = scan_asset_dir(&meshes_dir, &meshes_dir);

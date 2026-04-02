@@ -43,6 +43,27 @@ pub struct RefreshResponse {
     pub token: String,
 }
 
+/// Challenge request for Eustress Identity login.
+#[derive(Debug, Serialize)]
+pub struct ChallengeRequest {
+    pub public_key: String,
+}
+
+/// Challenge response from server (nonce to sign).
+#[derive(Debug, Deserialize)]
+pub struct ChallengeResponse {
+    pub challenge: String,
+    pub expires_at: String,
+}
+
+/// Verify signed challenge for Eustress Identity login.
+#[derive(Debug, Serialize)]
+pub struct VerifyChallengeRequest {
+    pub public_key: String,
+    pub challenge: String,
+    pub signature: String,
+}
+
 // -----------------------------------------------------------------------------
 // 2. Auth API Functions
 // -----------------------------------------------------------------------------
@@ -96,6 +117,66 @@ pub async fn refresh_token(client: &ApiClient) -> Result<RefreshResponse, ApiErr
 /// Logout (client-side only, clears token).
 pub fn logout() {
     let _ = gloo_storage::LocalStorage::delete("auth_token");
+}
+
+/// Request a challenge nonce for Eustress Identity login.
+pub async fn request_challenge(
+    client: &ApiClient,
+    public_key: &str,
+) -> Result<ChallengeResponse, ApiError> {
+    let request = ChallengeRequest {
+        public_key: public_key.to_string(),
+    };
+    client.post("/api/auth/challenge", &request).await
+}
+
+/// Verify a signed challenge to complete Eustress Identity login.
+pub async fn verify_challenge(
+    client: &ApiClient,
+    public_key: &str,
+    challenge: &str,
+    signature: &str,
+) -> Result<AuthResponse, ApiError> {
+    let request = VerifyChallengeRequest {
+        public_key: public_key.to_string(),
+        challenge: challenge.to_string(),
+        signature: signature.to_string(),
+    };
+
+    let response: AuthResponse = client.post("/api/auth/verify-challenge", &request).await?;
+    let _ = gloo_storage::LocalStorage::set("auth_token", &response.token);
+    Ok(response)
+}
+
+/// Register a new Eustress Identity with the node.
+#[derive(Debug, Serialize)]
+pub struct IdentityRegisterRequest {
+    pub username: String,
+    pub public_key: String,
+    pub birthday: Option<String>,
+    pub id_type: Option<String>,
+    pub id_hash: Option<String>,
+}
+
+pub async fn register_identity(
+    client: &ApiClient,
+    username: &str,
+    public_key: &str,
+    birthday: Option<&str>,
+    id_type: Option<&str>,
+    id_hash: Option<&str>,
+) -> Result<AuthResponse, ApiError> {
+    let request = IdentityRegisterRequest {
+        username: username.to_string(),
+        public_key: public_key.to_string(),
+        birthday: birthday.map(|s| s.to_string()),
+        id_type: id_type.map(|s| s.to_string()),
+        id_hash: id_hash.map(|s| s.to_string()),
+    };
+
+    let response: AuthResponse = client.post("/api/auth/register", &request).await?;
+    let _ = gloo_storage::LocalStorage::set("auth_token", &response.token);
+    Ok(response)
 }
 
 /// Add email and password to existing account.

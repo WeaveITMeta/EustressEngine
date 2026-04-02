@@ -1,0 +1,31 @@
+# =============================================================================
+# Eustress Witness Worker — Rust/WASM Cloudflare Worker
+# =============================================================================
+# Co-signing API for local-first earning. Holds server Ed25519 key, co-signs
+# contribution hashes submitted by local EustressEngine instances.
+#
+# Build: cd infrastructure/cloudflare/witness && npx wrangler deploy
+# =============================================================================
+
+[package]
+name = "eustress-witness-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Cloudflare Worker for Eustress witness co-signing (Rust/WASM)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+worker = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["wasmbind"] }
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

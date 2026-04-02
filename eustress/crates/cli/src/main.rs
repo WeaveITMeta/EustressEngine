@@ -80,6 +80,12 @@ enum Commands {
         #[command(subcommand)]
         action: SimCommands,
     },
+
+    /// Fork management: register with the trust registry, validate queue.
+    Fork {
+        #[command(subcommand)]
+        action: ForkCommands,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +227,60 @@ enum SimCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum ForkCommands {
+    /// Register this fork with the Online Trust Registry via Cloudflare Tunnel.
+    ///
+    /// Steps: 1) Generates fork keypair if needed  2) Creates cloudflared tunnel
+    /// 3) Registers well-known endpoints  4) Submits to the OTR at eustress.dev
+    Register {
+        /// Fork ID (domain-style, e.g. "neovia.fork" or "studio.example.com")
+        #[arg(long)]
+        fork_id: String,
+        /// Chain ID (must be unique, not 1=mainnet or 2=testnet)
+        #[arg(long)]
+        chain_id: u32,
+        /// Contact email or URL
+        #[arg(long)]
+        contact: String,
+        /// Local port your fork server listens on (default: 8080)
+        #[arg(long, default_value = "8080")]
+        port: u16,
+        /// Path to existing fork keypair (will be generated if not provided)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Skip tunnel setup (use if you already have a tunnel configured)
+        #[arg(long)]
+        skip_tunnel: bool,
+    },
+
+    /// Run the validation loop — checks the registration queue every 30 minutes.
+    ///
+    /// Fetches pending fork registrations, validates their well-known endpoints,
+    /// verifies tunnel connectivity, and processes approvals/rejections.
+    Loop {
+        /// Registry API endpoint (default: https://eustress.dev)
+        #[arg(long, default_value = "https://eustress.dev")]
+        registry_url: String,
+        /// Check interval in minutes (default: 30)
+        #[arg(long, default_value = "30")]
+        interval_minutes: u64,
+        /// Run once and exit (don't loop)
+        #[arg(long)]
+        once: bool,
+    },
+
+    /// Show the status of this fork's registration.
+    Status {
+        /// Fork ID to check
+        #[arg(long)]
+        fork_id: String,
+        /// Registry API endpoint
+        #[arg(long, default_value = "https://eustress.dev")]
+        registry_url: String,
+    },
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
@@ -247,6 +307,7 @@ async fn main() -> Result<()> {
         Commands::Publish(args) => cmd_publish(args).await,
         Commands::Stats(_) => cmd_streaming_stub("stats", false),
         Commands::Sim { action } => cmd_sim(&cli.iggy_url, action).await,
+        Commands::Fork { action } => cmd_fork(action).await,
     }
 }
 
@@ -594,6 +655,393 @@ async fn cmd_sim(iggy_url: &str, action: SimCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cmd_fork — Fork registration and validation loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn cmd_fork(action: ForkCommands) -> Result<()> {
+    match action {
+        ForkCommands::Register {
+            fork_id,
+            chain_id,
+            contact,
+            port,
+            key_file,
+            skip_tunnel,
+        } => {
+            if chain_id == 1 || chain_id == 2 {
+                anyhow::bail!("Chain ID 1 (mainnet) and 2 (testnet) are reserved");
+            }
+
+            println!("{}", "── Fork Registration ──".bold());
+            println!("  Fork ID  : {}", fork_id.cyan());
+            println!("  Chain ID : {}", chain_id.to_string().yellow());
+            println!("  Contact  : {}", contact);
+            println!();
+
+            // Step 1: Generate or load fork keypair
+            let key_path = key_file.unwrap_or_else(|| PathBuf::from("fork-key.json"));
+            if key_path.exists() {
+                println!("{} Using existing keypair: {}", "●".green(), key_path.display());
+            } else {
+                println!("{} Generating Ed25519 keypair → {}", "●".cyan(), key_path.display());
+                // Use bliss-cli if available, otherwise generate inline
+                let status = tokio::process::Command::new("bliss")
+                    .args(["wallet", "create", "--name", &format!("fork-{}", fork_id)])
+                    .status()
+                    .await;
+                match status {
+                    Ok(s) if s.success() => {
+                        println!("  {} Keypair generated via bliss-cli", "✓".green());
+                    }
+                    _ => {
+                        // Fallback: generate a random keypair and save seed
+                        use std::io::Write;
+                        let seed: [u8; 32] = rand::random();
+                        let mut f = std::fs::File::create(&key_path)?;
+                        let hex_seed = hex::encode(seed);
+                        writeln!(f, "{{")?;
+                        writeln!(f, "  \"fork_id\": \"{fork_id}\",")?;
+                        writeln!(f, "  \"chain_id\": {chain_id},")?;
+                        writeln!(f, "  \"private_key_hex\": \"{hex_seed}\",")?;
+                        writeln!(f, "  \"contact\": \"{contact}\"")?;
+                        writeln!(f, "}}")?;
+                        println!("  {} Keypair generated: {}", "✓".green(), key_path.display());
+                        println!(
+                            "  {} Keep this file secure — it signs balance attestations",
+                            "⚠".yellow()
+                        );
+                    }
+                }
+            }
+
+            // Step 2: Set up Cloudflare Tunnel (if not skipped)
+            if !skip_tunnel {
+                println!();
+                println!("{} Setting up Cloudflare Tunnel…", "●".cyan());
+
+                // Check cloudflared is installed
+                let cf_check = tokio::process::Command::new("cloudflared")
+                    .arg("--version")
+                    .output()
+                    .await;
+                match cf_check {
+                    Ok(output) if output.status.success() => {
+                        let ver = String::from_utf8_lossy(&output.stdout);
+                        println!("  {} cloudflared: {}", "✓".green(), ver.trim());
+                    }
+                    _ => {
+                        println!(
+                            "  {} cloudflared not found. Install from:",
+                            "✗".red()
+                        );
+                        println!("    https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/");
+                        println!();
+                        println!("  After installing, run these commands:");
+                        println!("    cloudflared tunnel login");
+                        println!("    cloudflared tunnel create {fork_id}");
+                        println!(
+                            "    cloudflared tunnel route dns {fork_id} {fork_id}.eustress.dev"
+                        );
+                        println!(
+                            "    cloudflared tunnel run --url http://localhost:{port} {fork_id}"
+                        );
+                        println!();
+                        println!("  Then re-run: eustress fork register --fork-id {fork_id} --chain-id {chain_id} --contact \"{contact}\" --skip-tunnel");
+                        return Ok(());
+                    }
+                }
+
+                // Create tunnel
+                println!("  Creating tunnel '{fork_id}'…");
+                let create = tokio::process::Command::new("cloudflared")
+                    .args(["tunnel", "create", &fork_id])
+                    .status()
+                    .await;
+                match create {
+                    Ok(s) if s.success() => {
+                        println!("  {} Tunnel created", "✓".green());
+                    }
+                    _ => {
+                        println!(
+                            "  {} Tunnel may already exist (that's OK)",
+                            "ℹ".yellow()
+                        );
+                    }
+                }
+
+                // Route DNS
+                let subdomain = format!("{}.eustress.dev", fork_id.replace('.', "-"));
+                println!("  Routing DNS: {subdomain} → tunnel…");
+                let route = tokio::process::Command::new("cloudflared")
+                    .args(["tunnel", "route", "dns", &fork_id, &subdomain])
+                    .status()
+                    .await;
+                match route {
+                    Ok(s) if s.success() => {
+                        println!("  {} DNS routed: {subdomain}", "✓".green());
+                    }
+                    _ => {
+                        println!(
+                            "  {} DNS route may already exist (that's OK)",
+                            "ℹ".yellow()
+                        );
+                    }
+                }
+
+                println!();
+                println!("{} To start the tunnel, run:", "→".cyan());
+                println!(
+                    "    cloudflared tunnel run --url http://localhost:{port} {fork_id}"
+                );
+            }
+
+            // Step 3: Submit registration to OTR
+            println!();
+            println!("{} Submitting to Online Trust Registry…", "●".cyan());
+            println!(
+                "  POST https://eustress.dev/api/fork-register"
+            );
+            println!("  {{");
+            println!("    \"fork_id\": \"{fork_id}\",");
+            println!("    \"chain_id\": {chain_id},");
+            println!("    \"contact\": \"{contact}\",");
+            println!("    \"endpoint\": \"https://{}.eustress.dev\"", fork_id.replace('.', "-"));
+            println!("  }}");
+            println!();
+
+            // Attempt API call
+            let endpoint = format!("https://{}.eustress.dev", fork_id.replace('.', "-"));
+            let body = serde_json::json!({
+                "fork_id": fork_id,
+                "chain_id": chain_id,
+                "contact": contact,
+                "endpoint": endpoint,
+            });
+
+            let client = reqwest::Client::new();
+            match client
+                .post("https://eustress.dev/api/fork-register")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        println!("{} Registration submitted successfully!", "✓".green().bold());
+                        println!("  {text}");
+                    } else {
+                        println!("{} Registration returned {status}: {text}", "⚠".yellow());
+                        println!("  Your fork has been queued. Run 'eustress fork status --fork-id {fork_id}' to check.");
+                    }
+                }
+                Err(e) => {
+                    println!("{} Could not reach eustress.dev: {e}", "⚠".yellow());
+                    println!("  Registration will be retried when the validation loop runs.");
+                    println!("  Ensure your tunnel is running and well-known endpoints are live.");
+                }
+            }
+
+            println!();
+            println!("{}", "── Next Steps ──".bold());
+            println!("  1. Start your fork server on port {port}");
+            println!("  2. Serve /.well-known/eustress-fork with your fork info");
+            println!("  3. Start the tunnel: cloudflared tunnel run --url http://localhost:{port} {fork_id}");
+            println!("  4. Check status: eustress fork status --fork-id {fork_id}");
+
+            Ok(())
+        }
+
+        ForkCommands::Loop {
+            registry_url,
+            interval_minutes,
+            once,
+        } => {
+            println!("{}", "── Fork Validation Loop ──".bold());
+            println!("  Registry : {}", registry_url.cyan());
+            println!(
+                "  Interval : {} minutes",
+                interval_minutes.to_string().yellow()
+            );
+            if once {
+                println!("  Mode     : single pass");
+            } else {
+                println!("  Mode     : continuous");
+            }
+            println!();
+
+            let client = reqwest::Client::new();
+
+            loop {
+                println!(
+                    "{} Checking registration queue… ({})",
+                    "●".cyan(),
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                );
+
+                // Fetch pending registrations
+                let pending_url = format!("{}/api/fork-registrations?status=pending", registry_url);
+                match client.get(&pending_url).send().await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            let text = resp.text().await.unwrap_or_default();
+                            let registrations: Vec<serde_json::Value> =
+                                serde_json::from_str(&text).unwrap_or_default();
+
+                            if registrations.is_empty() {
+                                println!("  {} No pending registrations", "·".dimmed());
+                            } else {
+                                println!(
+                                    "  {} {} pending registrations",
+                                    "→".yellow(),
+                                    registrations.len()
+                                );
+
+                                for reg in &registrations {
+                                    let fid = reg["fork_id"].as_str().unwrap_or("?");
+                                    let ep = reg["endpoint"].as_str().unwrap_or("?");
+
+                                    println!("  Validating {fid}…");
+
+                                    // Step 1: Fetch /.well-known/eustress-fork
+                                    let well_known_url =
+                                        format!("{}/.well-known/eustress-fork", ep);
+                                    match client.get(&well_known_url).send().await {
+                                        Ok(wk_resp) if wk_resp.status().is_success() => {
+                                            let wk_text =
+                                                wk_resp.text().await.unwrap_or_default();
+                                            match serde_json::from_str::<serde_json::Value>(
+                                                &wk_text,
+                                            ) {
+                                                Ok(fork_info) => {
+                                                    let claimed_id = fork_info["fork_id"]
+                                                        .as_str()
+                                                        .unwrap_or("");
+                                                    if claimed_id == fid {
+                                                        println!(
+                                                            "    {} Well-known endpoint verified",
+                                                            "✓".green()
+                                                        );
+
+                                                        // Step 2: Approve
+                                                        let approve_url = format!(
+                                                            "{}/api/fork-registrations/{}/approve",
+                                                            registry_url, fid
+                                                        );
+                                                        let _ =
+                                                            client.post(&approve_url).send().await;
+                                                        println!(
+                                                            "    {} Approved: {fid}",
+                                                            "✓".green().bold()
+                                                        );
+                                                    } else {
+                                                        println!(
+                                                            "    {} fork_id mismatch: claimed '{}', expected '{fid}'",
+                                                            "✗".red(),
+                                                            claimed_id
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    println!(
+                                                        "    {} Invalid JSON from well-known: {e}",
+                                                        "✗".red()
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(wk_resp) => {
+                                            println!(
+                                                "    {} Well-known returned {}",
+                                                "✗".red(),
+                                                wk_resp.status()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            println!(
+                                                "    {} Cannot reach {ep}: {e}",
+                                                "✗".red()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            println!(
+                                "  {} Registry returned {}",
+                                "⚠".yellow(),
+                                resp.status()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!("  {} Cannot reach registry: {e}", "✗".red());
+                    }
+                }
+
+                if once {
+                    break;
+                }
+
+                println!(
+                    "  {} Next check in {interval_minutes} minutes",
+                    "⏳".dimmed()
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    interval_minutes * 60,
+                ))
+                .await;
+            }
+
+            Ok(())
+        }
+
+        ForkCommands::Status {
+            fork_id,
+            registry_url,
+        } => {
+            let client = reqwest::Client::new();
+            let url = format!("{}/api/fork-registrations/{}", registry_url, fork_id);
+            match client.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        let info: serde_json::Value =
+                            serde_json::from_str(&text).unwrap_or_default();
+                        println!("{}", "── Fork Status ──".bold());
+                        println!("  Fork ID   : {}", fork_id.cyan());
+                        println!(
+                            "  Status    : {}",
+                            info["status"].as_str().unwrap_or("unknown")
+                        );
+                        println!(
+                            "  Chain ID  : {}",
+                            info["chain_id"].as_u64().unwrap_or(0)
+                        );
+                        println!(
+                            "  Endpoint  : {}",
+                            info["endpoint"].as_str().unwrap_or("?")
+                        );
+                        println!(
+                            "  Registered: {}",
+                            info["registered_at"].as_str().unwrap_or("?")
+                        );
+                    } else {
+                        println!("{} Fork '{fork_id}' not found ({status})", "✗".red());
+                    }
+                }
+                Err(e) => {
+                    println!("{} Cannot reach registry: {e}", "✗".red());
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

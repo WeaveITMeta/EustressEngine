@@ -275,9 +275,9 @@ pub fn copy_engine_default_parts(target_parts_dir: &Path) {
 /// Called at Space load time to handle existing Universes that predate this feature.
 pub fn ensure_universe_default_parts(space_root: &Path) {
     if let Some(universe_root) = crate::space::universe_root_for_path(space_root) {
-        let parts_dir = universe_root.join("assets").join("parts");
+        let parts_dir = universe_root.join(".eustress").join("assets").join("parts");
         let _ = std::fs::create_dir_all(&parts_dir);
-        let _ = std::fs::create_dir_all(universe_root.join("assets").join("meshes"));
+        let _ = std::fs::create_dir_all(universe_root.join(".eustress").join("assets").join("meshes"));
         copy_engine_default_parts(&parts_dir);
     }
 }
@@ -625,9 +625,9 @@ pub fn new_universe(world: &mut World) {
     match std::fs::create_dir(&requested_universe_root) {
         Ok(()) => {
             // Create Universe-level asset directories and copy engine default parts
-            let _ = std::fs::create_dir_all(requested_universe_root.join("assets").join("parts"));
-            let _ = std::fs::create_dir_all(requested_universe_root.join("assets").join("meshes"));
-            copy_engine_default_parts(&requested_universe_root.join("assets").join("parts"));
+            let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("assets").join("parts"));
+            let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("assets").join("meshes"));
+            copy_engine_default_parts(&requested_universe_root.join(".eustress").join("assets").join("parts"));
 
             if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
                 notifs.success(format!("Universe created: {}", universe_name));

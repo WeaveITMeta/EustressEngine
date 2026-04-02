@@ -1,83 +1,47 @@
-//! # Bliss Cryptocurrency
+//! # Eustress Bliss Integration
 //!
-//! Bliss (BLS) - Proof-of-Contribution cryptocurrency for the Eustress ecosystem.
-//! Earn through contributions to the platform or purchase on exchanges.
+//! Connects EustressEngine to the Bliss (BLS) proof-of-contribution network.
+//! Every engine instance runs a **Light Node** by default. Users can opt in
+//! to a **Full Node** for +10% BLS bonus and block production.
 //!
-//! ## Features
+//! ## What launches with the engine
 //!
-//! - **Contribution Tracking**: Automatically track user contributions
-//! - **Proof-of-Contribution**: Cryptographic proof of meaningful contributions
-//! - **Token Distribution**: Fair distribution based on contribution weight
-//! - **Exchange Integration**: Trade on decentralized exchanges
-//! - **Wallet Management**: Built-in wallet for BLS tokens
-//!
-//! ## Contribution Types
-//!
-//! | Type | Weight | Description |
-//! |------|--------|-------------|
-//! | Building | 2.5x | Create 3D models, places, and assets |
-//! | Scripting | 3.0x | Write Soul scripts and game logic |
-//! | Design | 2.0x | UI/UX design, texturing, visual work |
-//! | Collaboration | 2.0x | Team work, communication, helping others |
-//! | Teaching | 2.2x | Tutorials, mentoring, documentation |
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! use eustress_bliss::prelude::*;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), BlissError> {
-//!     let bliss = Bliss::new(BlissConfig::from_env()?).await?;
-//!     
-//!     // Create a wallet
-//!     let wallet = bliss.create_wallet().await?;
-//!     println!("Wallet address: {}", wallet.address());
-//!     
-//!     // Record a contribution
-//!     let contribution = bliss.record_contribution(Contribution {
-//!         user_id: "user123".into(),
-//!         contribution_type: ContributionType::Building,
-//!         weight: 2.5,
-//!         description: "Created medieval castle model".into(),
-//!         evidence: vec!["asset_id_123".into()],
-//!     }).await?;
-//!     
-//!     // Check balance
-//!     let balance = bliss.get_balance(wallet.address()).await?;
-//!     println!("BLS Balance: {}", balance);
-//!     
-//!     Ok(())
-//! }
+//! ```text
+//! EustressEngine
+//!   └── eustress-bliss (this crate)
+//!         ├── node     — Light/Full mode, contribution tracking
+//!         ├── api      — Axum HTTP server (auth, cosign, health)
+//!         ├── store    — SQLite identity database (embedded)
+//!         ├── cosign   — Witness co-signing client
+//!         └── bliss-*  — Official crates from crates.io
 //! ```
+//!
+//! One engine launched = one working auth server. No external DB needed.
 
-pub mod blockchain;
-pub mod contribution;
-pub mod crypto;
+pub mod api;
+pub mod cosign;
 pub mod error;
-pub mod wallet;
+pub mod node;
 
-#[cfg(feature = "database")]
-pub mod database;
+// Re-export official Bliss crates for engine-wide access
+pub use bliss_core as core;
+pub use bliss_crypto as crypto;
+pub use bliss_embedded as embedded;
+pub use bliss_events as events;
+pub use bliss_wallet as wallet;
 
-#[cfg(feature = "mock")]
-pub mod mock;
-
-pub use blockchain::{Blockchain, BlockchainConfig};
-pub use contribution::{Contribution, ContributionTracker, ContributionType};
-pub use crypto::{BlissCrypto, Signature};
+pub use api::start_server;
+pub use cosign::CosignClient;
 pub use error::BlissError;
-pub use wallet::{Wallet, WalletManager};
+pub use node::{BlissNode, NodeConfig, NodeMode};
 
-// ============================================================================
-// Prelude
-// ============================================================================
-
-/// Convenient re-exports for common Bliss types.
+/// Prelude for convenient imports.
 pub mod prelude {
-    pub use super::blockchain::{Blockchain, BlockchainConfig, Transaction};
-    pub use super::contribution::{Contribution, ContributionTracker, ContributionType, ContributionWeight};
-    pub use super::crypto::{BlissCrypto, Signature, PublicKey, PrivateKey};
+    pub use super::api::start_server;
+    pub use super::cosign::CosignClient;
     pub use super::error::BlissError;
-    pub use super::wallet::{Wallet, WalletManager, WalletAddress};
+    pub use super::node::{BlissNode, NodeConfig, NodeMode};
+
+    pub use bliss_core::amount::Amount;
+    pub use bliss_crypto::{KeyPair, PrivateKey, PublicKey, Signature};
 }

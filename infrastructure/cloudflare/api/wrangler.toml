@@ -1,0 +1,31 @@
+name = "eustress-api"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+
+# Route: api.eustress.dev/*
+# Set this up in Cloudflare Dashboard after first deploy:
+#   Workers Routes → Add Route → api.eustress.dev/* → eustress-api
+
+# KV namespaces
+[[kv_namespaces]]
+binding = "USERS"
+id = "58a7c318344d41fa8cfce36bc18ae763"
+
+[[kv_namespaces]]
+binding = "CHALLENGES"
+id = "be98270d8e594722bed1508f11176fab"
+
+[[kv_namespaces]]
+binding = "KYC_STATUS"
+id = "2a5efced14784736a8a1cc5368e72395"
+
+# R2 bucket for KYC documents (global, jurisdiction prefix in object key)
+[[r2_buckets]]
+binding = "KYC_BUCKET"
+bucket_name = "eustress-kyc-documents"
+
+# Secrets (set via: wrangler secret put JWT_SECRET)
+# JWT_SECRET — persistent JWT signing key
+
+[vars]
+FORK_ID = "eustress.dev"

@@ -1,0 +1,18 @@
+name = "eustress-kyc"
+main = "worker.js"
+compatibility_date = "2026-04-01"
+
+# R2 bucket for identity documents
+[[r2_buckets]]
+binding = "KYC_BUCKET"
+bucket_name = "eustress-kyc-documents"
+
+# KV namespace for verification status
+[[kv_namespaces]]
+binding = "KYC_STATUS"
+id = ""  # Fill after: wrangler kv:namespace create KYC_STATUS
+
+[rules]
+  [[rules.include]]
+  type = "Data"
+  globs = ["**/*.json"]

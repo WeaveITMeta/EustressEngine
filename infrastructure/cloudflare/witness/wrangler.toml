@@ -1,0 +1,61 @@
+# =============================================================================
+# Eustress Witness Worker — Co-signing API for Local-First Earning
+# =============================================================================
+# Deploy: cd infrastructure/cloudflare/witness && wrangler deploy
+# Secrets: wrangler secret put SIGNING_KEY
+#          wrangler secret put SERVER_PUBLIC_KEY
+# =============================================================================
+
+name = "eustress-witness"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-01-01"
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+# Custom domain
+routes = [{ pattern = "witness.eustress.dev/*", zone_name = "eustress.dev" }]
+
+# KV namespace for user registry
+# Create: wrangler kv namespace create USERS
+[[kv_namespaces]]
+binding = "USERS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# KV namespace for rate limiting counters
+# Create: wrangler kv namespace create RATE_LIMITS
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+FORK_ID = "eustress.dev"
+CHAIN_ID = "1"
+RATE_LIMIT_PER_HOUR = "120"
+IDENTITY_SCHEMA_VERSION = "1.0"
+BLISS_VERSION = "0.1.0"
+
+# Secrets (set via wrangler secret put):
+#   SIGNING_KEY        — Ed25519 private key (base64), signs co-signatures
+#   SERVER_PUBLIC_KEY  — Ed25519 public key (base64), published for verification
+
+# Development overrides
+[env.dev]
+name = "eustress-witness-dev"
+routes = [{ pattern = "witness-dev.eustress.dev/*", zone_name = "eustress.dev" }]
+
+[[env.dev.kv_namespaces]]
+binding = "USERS"
+id = "REPLACE_WITH_DEV_KV_NAMESPACE_ID"
+
+[[env.dev.kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "REPLACE_WITH_DEV_KV_NAMESPACE_ID"
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+FORK_ID = "eustress.dev"
+CHAIN_ID = "2"
+RATE_LIMIT_PER_HOUR = "600"

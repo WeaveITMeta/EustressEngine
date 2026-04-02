@@ -57,36 +57,51 @@ impl AuthState {
 // 3. App State
 // -----------------------------------------------------------------------------
 
+/// Jurisdiction detection state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JurisdictionState {
+    /// Still detecting (loading)
+    Detecting,
+    /// Supported jurisdiction — country code + name
+    Supported { iso2: String, name: String },
+    /// Unsupported jurisdiction — country code
+    Unsupported { iso2: String },
+}
+
+impl Default for JurisdictionState {
+    fn default() -> Self {
+        Self::Detecting
+    }
+}
+
 /// Global application state provided via Leptos context.
 #[derive(Clone)]
 pub struct AppState {
     /// Current authentication state.
     pub auth: RwSignal<AuthState>,
-    
+
     /// API base URL.
     pub api_url: String,
-    
+
     /// Whether the app is in dark mode.
     pub dark_mode: RwSignal<bool>,
-    
+
     /// Global loading state.
     pub loading: RwSignal<bool>,
-    
+
     /// Global error message.
     pub error: RwSignal<Option<String>>,
+
+    /// Detected jurisdiction from Cloudflare trace.
+    pub jurisdiction: RwSignal<JurisdictionState>,
 }
 
 impl AppState {
     /// Create a new app state instance.
     pub fn new() -> Self {
-        // Determine API URL based on ENVIRONMENT variable
-        let environment = option_env!("ENVIRONMENT").unwrap_or("production");
-        let api_url = if environment == "development" {
-            "http://localhost:7000".to_string()
-        } else {
-            // Production or staging use the production API
-            "https://api.eustress.dev".to_string()
-        };
+        // Auth always goes to Cloudflare Worker — it's the registration authority.
+        // The local Bliss node (localhost:7777) only handles co-signing.
+        let api_url = "https://api.eustress.dev".to_string();
         
         // Check localStorage for saved preferences
         let dark_mode: bool = gloo_storage::LocalStorage::get("dark_mode")
@@ -98,6 +113,7 @@ impl AppState {
             dark_mode: RwSignal::new(dark_mode),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            jurisdiction: RwSignal::new(JurisdictionState::Detecting),
         }
     }
     

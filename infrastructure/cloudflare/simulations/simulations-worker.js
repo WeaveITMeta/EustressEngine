@@ -1,9 +1,9 @@
 // =============================================================================
-// Eustress Experiences Worker - Publishing & Asset Delivery
+// Eustress Simulations Worker - Publishing & Asset Delivery
 // =============================================================================
 // Deploy: wrangler deploy
 // Bindings required:
-//   - EXPERIENCES: R2 bucket (eustress-experiences)
+//   - SIMULATIONS: R2 bucket (eustress-simulations)
 //   - JWT_SECRET: Secret for token validation
 // =============================================================================
 
@@ -46,7 +46,7 @@ async function generatePresignedUrl(bucket, key, expiresIn = 3600) {
   // For now, we'll return the key and let the worker handle the upload
   return {
     key,
-    uploadUrl: `/api/experience/upload/${encodeURIComponent(key)}`,
+    uploadUrl: `/api/simulation/upload/${encodeURIComponent(key)}`,
     expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
   };
 }
@@ -66,28 +66,28 @@ export default {
     // Public Routes (no auth required)
     // =========================================================================
 
-    // GET /api/experience/:id - Get experience manifest
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)$/) && request.method === 'GET') {
-      const experienceId = path.split('/')[3];
-      return await getExperience(env, experienceId);
+    // GET /api/simulation/:id - Get simulation manifest
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)$/) && request.method === 'GET') {
+      const simulationId = path.split('/')[3];
+      return await getSimulation(env, simulationId);
     }
 
-    // GET /api/experience/:id/download - Download experience package
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)\/download$/) && request.method === 'GET') {
-      const experienceId = path.split('/')[3];
-      return await downloadExperience(env, experienceId);
+    // GET /api/simulation/:id/download - Download simulation package
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)\/download$/) && request.method === 'GET') {
+      const simulationId = path.split('/')[3];
+      return await downloadSimulation(env, simulationId);
     }
 
-    // GET /api/experience/:id/thumbnail - Get thumbnail
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)\/thumbnail$/) && request.method === 'GET') {
-      const experienceId = path.split('/')[3];
-      return await getThumbnail(env, experienceId);
+    // GET /api/simulation/:id/thumbnail - Get thumbnail
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)\/thumbnail$/) && request.method === 'GET') {
+      const simulationId = path.split('/')[3];
+      return await getThumbnail(env, simulationId);
     }
 
-    // GET /api/experience/:id/versions - List versions
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)\/versions$/) && request.method === 'GET') {
-      const experienceId = path.split('/')[3];
-      return await listVersions(env, experienceId);
+    // GET /api/simulation/:id/versions - List versions
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)\/versions$/) && request.method === 'GET') {
+      const simulationId = path.split('/')[3];
+      return await listVersions(env, simulationId);
     }
 
     // =========================================================================
@@ -99,7 +99,7 @@ export default {
     const token = authHeader?.replace('Bearer ', '');
     const user = await validateJWT(token, env.JWT_SECRET);
 
-    if (!user && path.startsWith('/api/experience/') && 
+    if (!user && path.startsWith('/api/simulation/') && 
         (request.method === 'POST' || request.method === 'PUT' || request.method === 'DELETE')) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
@@ -107,33 +107,33 @@ export default {
       });
     }
 
-    // POST /api/experience/publish - Initiate new experience publish
-    if (path === '/api/experience/publish' && request.method === 'POST') {
+    // POST /api/simulation/publish - Initiate new simulation publish
+    if (path === '/api/simulation/publish' && request.method === 'POST') {
       return await initiatePublish(env, request, user);
     }
 
-    // PUT /api/experience/:id - Update existing experience
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)$/) && request.method === 'PUT') {
-      const experienceId = path.split('/')[3];
-      return await updateExperience(env, request, user, experienceId);
+    // PUT /api/simulation/:id - Update existing simulation
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)$/) && request.method === 'PUT') {
+      const simulationId = path.split('/')[3];
+      return await updateSimulation(env, request, user, simulationId);
     }
 
-    // POST /api/experience/upload/:key - Direct upload to R2 (with presigned validation)
-    if (path.startsWith('/api/experience/upload/') && request.method === 'POST') {
-      const key = decodeURIComponent(path.replace('/api/experience/upload/', ''));
+    // POST /api/simulation/upload/:key - Direct upload to R2 (with presigned validation)
+    if (path.startsWith('/api/simulation/upload/') && request.method === 'POST') {
+      const key = decodeURIComponent(path.replace('/api/simulation/upload/', ''));
       return await handleUpload(env, request, user, key);
     }
 
-    // POST /api/experience/:id/commit - Finalize publish after uploads complete
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)\/commit$/) && request.method === 'POST') {
-      const experienceId = path.split('/')[3];
-      return await commitPublish(env, request, user, experienceId);
+    // POST /api/simulation/:id/commit - Finalize publish after uploads complete
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)\/commit$/) && request.method === 'POST') {
+      const simulationId = path.split('/')[3];
+      return await commitPublish(env, request, user, simulationId);
     }
 
-    // DELETE /api/experience/:id - Delete experience
-    if (path.match(/^\/api\/experience\/([a-f0-9-]+)$/) && request.method === 'DELETE') {
-      const experienceId = path.split('/')[3];
-      return await deleteExperience(env, request, user, experienceId);
+    // DELETE /api/simulation/:id - Delete simulation
+    if (path.match(/^\/api\/simulation\/([a-f0-9-]+)$/) && request.method === 'DELETE') {
+      const simulationId = path.split('/')[3];
+      return await deleteSimulation(env, request, user, simulationId);
     }
 
     // 404 for unknown routes
@@ -148,12 +148,12 @@ export default {
 // Route Handlers
 // =============================================================================
 
-// Get experience manifest
-async function getExperience(env, experienceId) {
+// Get simulation manifest
+async function getSimulation(env, simulationId) {
   try {
-    const manifest = await env.EXPERIENCES.get(`${experienceId}/manifest.json`);
+    const manifest = await env.SIMULATIONS.get(`${simulationId}/manifest.json`);
     if (!manifest) {
-      return new Response(JSON.stringify({ error: 'Experience not found' }), {
+      return new Response(JSON.stringify({ error: 'Simulation not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
@@ -163,17 +163,17 @@ async function getExperience(env, experienceId) {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
   } catch (e) {
-    return new Response(JSON.stringify({ error: 'Failed to fetch experience' }), {
+    return new Response(JSON.stringify({ error: 'Failed to fetch simulation' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
   }
 }
 
-// Download experience scene package
-async function downloadExperience(env, experienceId) {
+// Download simulation scene package
+async function downloadSimulation(env, simulationId) {
   try {
-    const scene = await env.EXPERIENCES.get(`${experienceId}/scene.eustress`);
+    const scene = await env.SIMULATIONS.get(`${simulationId}/scene.eustress`);
     if (!scene) {
       return new Response(JSON.stringify({ error: 'Scene not found' }), {
         status: 404,
@@ -197,10 +197,10 @@ async function downloadExperience(env, experienceId) {
   }
 }
 
-// Get experience thumbnail
-async function getThumbnail(env, experienceId) {
+// Get simulation thumbnail
+async function getThumbnail(env, simulationId) {
   try {
-    const thumbnail = await env.EXPERIENCES.get(`${experienceId}/thumbnail.webp`);
+    const thumbnail = await env.SIMULATIONS.get(`${simulationId}/thumbnail.webp`);
     if (!thumbnail) {
       // Return default thumbnail
       return new Response(null, { status: 404, headers: corsHeaders });
@@ -218,17 +218,17 @@ async function getThumbnail(env, experienceId) {
   }
 }
 
-// List experience versions
-async function listVersions(env, experienceId) {
+// List simulation versions
+async function listVersions(env, simulationId) {
   try {
-    const list = await env.EXPERIENCES.list({ prefix: `${experienceId}/versions/` });
+    const list = await env.SIMULATIONS.list({ prefix: `${simulationId}/versions/` });
     const versions = [];
 
     for (const object of list.objects) {
       // Extract version number from path like "uuid/versions/v1/manifest.json"
       const match = object.key.match(/versions\/v(\d+)\/manifest\.json$/);
       if (match) {
-        const versionManifest = await env.EXPERIENCES.get(object.key);
+        const versionManifest = await env.SIMULATIONS.get(object.key);
         if (versionManifest) {
           const data = await versionManifest.json();
           versions.push({
@@ -253,26 +253,26 @@ async function listVersions(env, experienceId) {
   }
 }
 
-// Initiate new experience publish - returns presigned URLs
+// Initiate new simulation publish - returns presigned URLs
 async function initiatePublish(env, request, user) {
   try {
     const body = await request.json();
     const { name, description, genre, max_players, is_public, allow_copying } = body;
 
     if (!name || name.trim().length === 0) {
-      return new Response(JSON.stringify({ error: 'Experience name is required' }), {
+      return new Response(JSON.stringify({ error: 'Simulation name is required' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
     }
 
-    // Generate new experience ID
-    const experienceId = crypto.randomUUID();
+    // Generate new simulation ID
+    const simulationId = crypto.randomUUID();
     const version = 1;
 
     // Create manifest
     const manifest = {
-      id: experienceId,
+      id: simulationId,
       name: name.trim(),
       description: description || '',
       genre: genre || 'all_genres',
@@ -289,20 +289,20 @@ async function initiatePublish(env, request, user) {
 
     // Generate upload URLs for assets
     const uploadUrls = {
-      scene: await generatePresignedUrl(env.EXPERIENCES, `${experienceId}/scene.eustress`),
-      thumbnail: await generatePresignedUrl(env.EXPERIENCES, `${experienceId}/thumbnail.webp`),
-      // Assets will be uploaded to experienceId/assets/...
+      scene: await generatePresignedUrl(env.SIMULATIONS, `${simulationId}/scene.eustress`),
+      thumbnail: await generatePresignedUrl(env.SIMULATIONS, `${simulationId}/thumbnail.webp`),
+      // Assets will be uploaded to simulationId/assets/...
     };
 
     // Store pending manifest (will be finalized on commit)
-    await env.EXPERIENCES.put(
-      `${experienceId}/pending-manifest.json`,
+    await env.SIMULATIONS.put(
+      `${simulationId}/pending-manifest.json`,
       JSON.stringify(manifest),
       { customMetadata: { status: 'pending', user_id: user.user_id } }
     );
 
     return new Response(JSON.stringify({
-      experience_id: experienceId,
+      simulation_id: simulationId,
       version,
       upload_urls: uploadUrls,
       manifest,
@@ -319,13 +319,13 @@ async function initiatePublish(env, request, user) {
   }
 }
 
-// Update existing experience
-async function updateExperience(env, request, user, experienceId) {
+// Update existing simulation
+async function updateSimulation(env, request, user, simulationId) {
   try {
     // Check ownership
-    const existingManifest = await env.EXPERIENCES.get(`${experienceId}/manifest.json`);
+    const existingManifest = await env.SIMULATIONS.get(`${simulationId}/manifest.json`);
     if (!existingManifest) {
-      return new Response(JSON.stringify({ error: 'Experience not found' }), {
+      return new Response(JSON.stringify({ error: 'Simulation not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
@@ -333,7 +333,7 @@ async function updateExperience(env, request, user, experienceId) {
 
     const existing = await existingManifest.json();
     if (existing.author_id !== user.user_id) {
-      return new Response(JSON.stringify({ error: 'Not authorized to update this experience' }), {
+      return new Response(JSON.stringify({ error: 'Not authorized to update this simulation' }), {
         status: 403,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
@@ -358,19 +358,19 @@ async function updateExperience(env, request, user, experienceId) {
 
     // Generate upload URLs
     const uploadUrls = {
-      scene: await generatePresignedUrl(env.EXPERIENCES, `${experienceId}/scene.eustress`),
-      thumbnail: await generatePresignedUrl(env.EXPERIENCES, `${experienceId}/thumbnail.webp`),
+      scene: await generatePresignedUrl(env.SIMULATIONS, `${simulationId}/scene.eustress`),
+      thumbnail: await generatePresignedUrl(env.SIMULATIONS, `${simulationId}/thumbnail.webp`),
     };
 
     // Store pending manifest
-    await env.EXPERIENCES.put(
-      `${experienceId}/pending-manifest.json`,
+    await env.SIMULATIONS.put(
+      `${simulationId}/pending-manifest.json`,
       JSON.stringify(manifest),
       { customMetadata: { status: 'pending', user_id: user.user_id, previous_version: existing.version.toString() } }
     );
 
     return new Response(JSON.stringify({
-      experience_id: experienceId,
+      simulation_id: simulationId,
       version: newVersion,
       upload_urls: uploadUrls,
       manifest,
@@ -379,7 +379,7 @@ async function updateExperience(env, request, user, experienceId) {
     });
   } catch (e) {
     console.error('Update error:', e);
-    return new Response(JSON.stringify({ error: 'Failed to update experience' }), {
+    return new Response(JSON.stringify({ error: 'Failed to update simulation' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
@@ -389,12 +389,12 @@ async function updateExperience(env, request, user, experienceId) {
 // Handle direct upload to R2
 async function handleUpload(env, request, user, key) {
   try {
-    // Validate key belongs to user's experience
-    const experienceId = key.split('/')[0];
-    const pendingManifest = await env.EXPERIENCES.head(`${experienceId}/pending-manifest.json`);
+    // Validate key belongs to user's simulation
+    const simulationId = key.split('/')[0];
+    const pendingManifest = await env.SIMULATIONS.head(`${simulationId}/pending-manifest.json`);
     
     if (!pendingManifest || pendingManifest.customMetadata?.user_id !== user.user_id) {
-      return new Response(JSON.stringify({ error: 'Not authorized to upload to this experience' }), {
+      return new Response(JSON.stringify({ error: 'Not authorized to upload to this simulation' }), {
         status: 403,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
@@ -404,7 +404,7 @@ async function handleUpload(env, request, user, key) {
     const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
 
     // Upload to R2
-    await env.EXPERIENCES.put(key, request.body, {
+    await env.SIMULATIONS.put(key, request.body, {
       httpMetadata: { contentType },
     });
 
@@ -421,10 +421,10 @@ async function handleUpload(env, request, user, key) {
 }
 
 // Commit publish - finalize after all uploads complete
-async function commitPublish(env, request, user, experienceId) {
+async function commitPublish(env, request, user, simulationId) {
   try {
     // Get pending manifest
-    const pendingObj = await env.EXPERIENCES.get(`${experienceId}/pending-manifest.json`);
+    const pendingObj = await env.SIMULATIONS.get(`${simulationId}/pending-manifest.json`);
     if (!pendingObj) {
       return new Response(JSON.stringify({ error: 'No pending publish found' }), {
         status: 404,
@@ -432,7 +432,7 @@ async function commitPublish(env, request, user, experienceId) {
       });
     }
 
-    const pendingMeta = await env.EXPERIENCES.head(`${experienceId}/pending-manifest.json`);
+    const pendingMeta = await env.SIMULATIONS.head(`${simulationId}/pending-manifest.json`);
     if (pendingMeta.customMetadata?.user_id !== user.user_id) {
       return new Response(JSON.stringify({ error: 'Not authorized' }), {
         status: 403,
@@ -443,7 +443,7 @@ async function commitPublish(env, request, user, experienceId) {
     const manifest = await pendingObj.json();
 
     // Verify scene was uploaded
-    const sceneExists = await env.EXPERIENCES.head(`${experienceId}/scene.eustress`);
+    const sceneExists = await env.SIMULATIONS.head(`${simulationId}/scene.eustress`);
     if (!sceneExists) {
       return new Response(JSON.stringify({ error: 'Scene file not uploaded' }), {
         status: 400,
@@ -454,37 +454,37 @@ async function commitPublish(env, request, user, experienceId) {
     // Archive previous version if exists
     const previousVersion = pendingMeta.customMetadata?.previous_version;
     if (previousVersion) {
-      const prevManifest = await env.EXPERIENCES.get(`${experienceId}/manifest.json`);
-      const prevScene = await env.EXPERIENCES.get(`${experienceId}/scene.eustress`);
+      const prevManifest = await env.SIMULATIONS.get(`${simulationId}/manifest.json`);
+      const prevScene = await env.SIMULATIONS.get(`${simulationId}/scene.eustress`);
       
       if (prevManifest) {
-        await env.EXPERIENCES.put(
-          `${experienceId}/versions/v${previousVersion}/manifest.json`,
+        await env.SIMULATIONS.put(
+          `${simulationId}/versions/v${previousVersion}/manifest.json`,
           prevManifest.body
         );
       }
       if (prevScene) {
-        await env.EXPERIENCES.put(
-          `${experienceId}/versions/v${previousVersion}/scene.eustress`,
+        await env.SIMULATIONS.put(
+          `${simulationId}/versions/v${previousVersion}/scene.eustress`,
           prevScene.body
         );
       }
     }
 
     // Finalize manifest
-    await env.EXPERIENCES.put(`${experienceId}/manifest.json`, JSON.stringify(manifest));
+    await env.SIMULATIONS.put(`${simulationId}/manifest.json`, JSON.stringify(manifest));
 
     // Clean up pending
-    await env.EXPERIENCES.delete(`${experienceId}/pending-manifest.json`);
+    await env.SIMULATIONS.delete(`${simulationId}/pending-manifest.json`);
 
     // TODO: Notify backend to update PostgreSQL and trigger notifications
-    // await notifyBackend(env, experienceId, manifest);
+    // await notifyBackend(env, simulationId, manifest);
 
     return new Response(JSON.stringify({
       success: true,
-      experience_id: experienceId,
+      simulation_id: simulationId,
       version: manifest.version,
-      url: `https://experiences.eustress.dev/api/experience/${experienceId}`,
+      url: `https://simulations.eustress.dev/api/simulation/${simulationId}`,
     }), {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });
@@ -497,13 +497,13 @@ async function commitPublish(env, request, user, experienceId) {
   }
 }
 
-// Delete experience
-async function deleteExperience(env, request, user, experienceId) {
+// Delete simulation
+async function deleteSimulation(env, request, user, simulationId) {
   try {
     // Check ownership
-    const manifest = await env.EXPERIENCES.get(`${experienceId}/manifest.json`);
+    const manifest = await env.SIMULATIONS.get(`${simulationId}/manifest.json`);
     if (!manifest) {
-      return new Response(JSON.stringify({ error: 'Experience not found' }), {
+      return new Response(JSON.stringify({ error: 'Simulation not found' }), {
         status: 404,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
@@ -511,16 +511,16 @@ async function deleteExperience(env, request, user, experienceId) {
 
     const data = await manifest.json();
     if (data.author_id !== user.user_id) {
-      return new Response(JSON.stringify({ error: 'Not authorized to delete this experience' }), {
+      return new Response(JSON.stringify({ error: 'Not authorized to delete this simulation' }), {
         status: 403,
         headers: { 'Content-Type': 'application/json', ...corsHeaders },
       });
     }
 
-    // List and delete all objects for this experience
-    const list = await env.EXPERIENCES.list({ prefix: `${experienceId}/` });
+    // List and delete all objects for this simulation
+    const list = await env.SIMULATIONS.list({ prefix: `${simulationId}/` });
     for (const object of list.objects) {
-      await env.EXPERIENCES.delete(object.key);
+      await env.SIMULATIONS.delete(object.key);
     }
 
     return new Response(JSON.stringify({ success: true }), {
@@ -528,7 +528,7 @@ async function deleteExperience(env, request, user, experienceId) {
     });
   } catch (e) {
     console.error('Delete error:', e);
-    return new Response(JSON.stringify({ error: 'Failed to delete experience' }), {
+    return new Response(JSON.stringify({ error: 'Failed to delete simulation' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
     });

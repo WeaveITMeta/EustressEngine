@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Head -->
+  <ellipse cx="32" cy="30" rx="14" ry="16" fill="currentColor" opacity="0.15"/>
+  <ellipse cx="32" cy="30" rx="14" ry="16"/>
+  <!-- Left floppy ear -->
+  <path d="M18 24 C14 18, 8 20, 10 30 C12 38, 16 36, 18 32" fill="currentColor" opacity="0.2"/>
+  <path d="M18 24 C14 18, 8 20, 10 30 C12 38, 16 36, 18 32"/>
+  <!-- Right floppy ear -->
+  <path d="M46 24 C50 18, 56 20, 54 30 C52 38, 48 36, 46 32" fill="currentColor" opacity="0.2"/>
+  <path d="M46 24 C50 18, 56 20, 54 30 C52 38, 48 36, 46 32"/>
+  <!-- Eyes -->
+  <circle cx="26" cy="27" r="2.5" fill="currentColor"/>
+  <circle cx="38" cy="27" r="2.5" fill="currentColor"/>
+  <!-- Eye shine -->
+  <circle cx="27" cy="26" r="0.8" fill="white"/>
+  <circle cx="39" cy="26" r="0.8" fill="white"/>
+  <!-- Nose -->
+  <ellipse cx="32" cy="34" rx="3.5" ry="2.5" fill="currentColor"/>
+  <!-- Mouth -->
+  <path d="M32 36.5 C32 36.5, 28 40, 26 38"/>
+  <path d="M32 36.5 C32 36.5, 36 40, 38 38"/>
+  <!-- Tongue -->
+  <path d="M30 38 C30 42, 34 42, 34 38" fill="currentColor" opacity="0.3"/>
+  <!-- Snout highlight -->
+  <ellipse cx="32" cy="33" rx="6" ry="4" fill="none" opacity="0.5"/>
+  <!-- Body hint -->
+  <path d="M22 46 C22 42, 26 40, 32 40 C38 40, 42 42, 42 46" fill="currentColor" opacity="0.1"/>
+  <path d="M22 46 C22 42, 26 40, 32 40 C38 40, 42 42, 42 46"/>
+  <!-- Collar -->
+  <path d="M24 41 C28 43, 36 43, 40 41" stroke-width="2.5" opacity="0.6"/>
+  <!-- Tag -->
+  <circle cx="32" cy="44" r="2" fill="currentColor" opacity="0.4"/>
+</svg>

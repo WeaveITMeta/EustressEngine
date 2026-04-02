@@ -293,6 +293,16 @@ export component Ribbon inherits Rectangle {
     in property <string> account-name: "Guest";
     in property <string> account-status: "Logged out";
     in property <string> sync-status: "Local-first";
+
+    // Bliss node state
+    in property <string> bliss-balance: "0.00000000";
+    in property <string> bliss-pending: "+0.00000000";
+    in property <string> bliss-node-mode: "Light";  // "Light" or "Full"
+    in property <string> bliss-bonus: "1.0x";
+    in property <bool> bliss-enabled: true;
+    callback on-bliss-set-light();
+    callback on-bliss-set-full();
+    callback on-bliss-toggle-enabled();
     
     // File callbacks
     callback on-new-universe();
@@ -1029,6 +1039,236 @@ export component Ribbon inherits Rectangle {
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+                }
+
+                // 8px gap before Bliss badge
+                Rectangle { width: 8px; }
+
+                // Bliss node badge + dropdown
+                Rectangle {
+                    width: 150px;
+                    height: 20px;
+                    background: root.bliss-enabled ? #2a2a3a : Theme.background-secondary;
+                    border-radius: 4px;
+
+                    bliss-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { bliss-popup.show(); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "Bliss";
+                            color: root.bliss-enabled ? #ffffff : Theme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.bliss-balance;
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
+                    bliss-popup := PopupWindow {
+                        x: -80px;
+                        y: parent.height + 2px;
+                        width: 260px;
+
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000080;
+                            width: 260px;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 6px;
+
+                                // Header
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "Bliss";
+                                        color: #ffffff;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.bliss-balance;
+                                        color: Theme.text-primary;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: " BLS";
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Pending
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Pending";
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.bliss-pending;
+                                        color: #81c784;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                DropdownSeparator {}
+
+                                // Node mode header
+                                DropdownHeader { label: "NODE MODE"; }
+
+                                // Light node option
+                                Rectangle {
+                                    height: 40px;
+                                    background: root.bliss-node-mode == "Light" ? #3a3a4a : (light-touch.has-hover ? Theme.button-hover : transparent);
+                                    border-radius: 4px;
+                                    border-width: root.bliss-node-mode == "Light" ? 1px : 0px;
+                                    border-color: #ffffff40;
+
+                                    light-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.on-bliss-set-light(); }
+                                    }
+
+                                    VerticalLayout {
+                                        padding: 4px;
+                                        padding-left: 8px;
+                                        spacing: 2px;
+
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "Light Node";
+                                                color: Theme.text-primary;
+                                                font-size: 11px;
+                                                font-weight: 500;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "DEFAULT";
+                                                color: #ffffff;
+                                                font-size: 8px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Text {
+                                                text: "1.0x";
+                                                color: Theme.text-secondary;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        Text {
+                                            text: "~200MB RAM — earn by creating, zero setup";
+                                            color: Theme.text-secondary;
+                                            font-size: 9px;
+                                        }
+                                    }
+                                }
+
+                                // Full node option
+                                Rectangle {
+                                    height: 40px;
+                                    background: root.bliss-node-mode == "Full" ? #1a3a1a : (full-touch.has-hover ? Theme.button-hover : transparent);
+                                    border-radius: 4px;
+                                    border-width: root.bliss-node-mode == "Full" ? 1px : 0px;
+                                    border-color: #81c78440;
+
+                                    full-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.on-bliss-set-full(); }
+                                    }
+
+                                    VerticalLayout {
+                                        padding: 4px;
+                                        padding-left: 8px;
+                                        spacing: 2px;
+
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            Text {
+                                                text: "Full Node";
+                                                color: Theme.text-primary;
+                                                font-size: 11px;
+                                                font-weight: 500;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: "+10% BLS";
+                                                color: #81c784;
+                                                font-size: 8px;
+                                                font-weight: 700;
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Text {
+                                                text: "1.1x";
+                                                color: #81c784;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        Text {
+                                            text: "~2GB RAM — blockchain storage, block production";
+                                            color: Theme.text-secondary;
+                                            font-size: 9px;
+                                        }
+                                    }
+                                }
+
+                                DropdownSeparator {}
+
+                                // Bonus info
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Bonus multiplier";
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.bliss-bonus;
+                                        color: root.bliss-node-mode == "Full" ? #81c784 : Theme.text-primary;
+                                        font-size: 10px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

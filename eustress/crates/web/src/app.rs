@@ -13,6 +13,8 @@ use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 use web_sys::window;
 
+use crate::state::JurisdictionState;
+
 use crate::pages::{
     about::AboutPage,
     acts::ActsPage,
@@ -20,6 +22,7 @@ use crate::pages::{
     home::HomePage,
     login::LoginPage,
     bliss::BlissPage,
+    bliss_leaderboard::BlissLeaderboardPage,
     careers::CareersPage,
     community::CommunityPage,
     contact::ContactPage,
@@ -49,6 +52,7 @@ use crate::pages::{
     profile::ProfilePage,
     settings::SettingsPage,
     terms::TermsPage,
+    trust_registry::TrustRegistryPage,
 };
 use crate::state::AppState;
 
@@ -102,10 +106,49 @@ pub fn App() -> impl IntoView {
     // Restore session from localStorage on startup
     app_state.restore_session();
     
+    // Detect jurisdiction from Cloudflare trace
+    let jurisdiction_signal = app_state.jurisdiction;
+    spawn_local(async move {
+        match detect_jurisdiction().await {
+            Some((iso2, supported)) => {
+                if supported {
+                    jurisdiction_signal.set(JurisdictionState::Supported {
+                        iso2: iso2.clone(),
+                        name: jurisdiction_name(&iso2),
+                    });
+                } else {
+                    jurisdiction_signal.set(JurisdictionState::Unsupported { iso2 });
+                }
+            }
+            None => {
+                // Can't detect (localhost, no CF) — allow through
+                jurisdiction_signal.set(JurisdictionState::Supported {
+                    iso2: "XX".to_string(),
+                    name: "Local Development".to_string(),
+                });
+            }
+        }
+    });
+
     provide_context(app_state);
-    
+
     view! {
-        <Router>
+        {move || {
+            match jurisdiction_signal.get() {
+                JurisdictionState::Detecting => {
+                    view! {
+                        <div class="jurisdiction-loading">
+                            <div class="loading-spinner"></div>
+                            <p>"Verifying jurisdiction..."</p>
+                        </div>
+                    }.into_any()
+                }
+                JurisdictionState::Unsupported { iso2 } => {
+                    view! { <JurisdictionBlockedPage iso2=iso2 /> }.into_any()
+                }
+                JurisdictionState::Supported { .. } => {
+                    view! {
+                        <Router>
             <Routes fallback=|| "Not found.">
                 // Public routes
                 <Route path=path!("/") view=HomePage />
@@ -126,6 +169,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/docs/realism") view=DocsRealismPage />
                 <Route path=path!("/docs/philosophy") view=DocsPhilosophyPage />
                 <Route path=path!("/bliss") view=BlissPage />
+                <Route path=path!("/bliss-leaderboard") view=BlissLeaderboardPage />
                 <Route path=path!("/download") view=DownloadPage />
                 <Route path=path!("/downloads/player") view=DownloadPlayerPage />
                 <Route path=path!("/about") view=AboutPage />
@@ -142,7 +186,8 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/cookies") view=CookiesPage />
                 <Route path=path!("/dmca") view=DmcaPage />
                 <Route path=path!("/acts") view=ActsPage />
-                
+                <Route path=path!("/trust-registry") view=TrustRegistryPage />
+
                 // Protected routes
                 <Route path=path!("/dashboard") view=DashboardPage />
                 <Route path=path!("/projects") view=ProjectsPage />
@@ -150,6 +195,104 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/settings") view=SettingsPage />
                 <Route path=path!("/friends") view=FriendsPage />
             </Routes>
-        </Router>
+                        </Router>
+                    }.into_any()
+                }
+            }
+        }}
+    }
+}
+
+// ── Jurisdiction Detection ──────────────────────────────────────────────────
+
+/// Supported KYC jurisdictions (IRS QI approved).
+const SUPPORTED_JURISDICTIONS: &[&str] = &[
+    "AD","AE","AG","AR","AU","AW","BE","BH","BM","BN","BQ","BR","BS",
+    "CA","CH","CK","CN","CO","CY","CZ","DE","DK","EE","ES","FI","FR",
+    "GB","GG","GI","GR","HK","HR","HU","IE","IM","IN","IS","IT","JE",
+    "JP","KR","KY","KZ","LC","LI","LT","LU","LV","MC","MT","MU","MX",
+    "NL","NO","NZ","PA","PL","PT","RO","RU","SA","SC","SE","SG","SI",
+    "SK","SM","TC","TW","US","VC","VG","ZA",
+];
+
+/// Detect jurisdiction from Cloudflare cdn-cgi/trace.
+/// Returns (iso2, is_supported) or None if detection fails.
+async fn detect_jurisdiction() -> Option<(String, bool)> {
+    // On localhost, skip detection
+    if let Some(win) = window() {
+        let hostname = win.location().hostname().unwrap_or_default();
+        if hostname == "localhost" || hostname == "127.0.0.1" {
+            return None; // Allow through in dev
+        }
+    }
+
+    let resp = gloo_net::http::Request::get("https://1.1.1.1/cdn-cgi/trace")
+        .send()
+        .await
+        .ok()?;
+    let text = resp.text().await.ok()?;
+
+    for line in text.lines() {
+        if let Some(loc) = line.strip_prefix("loc=") {
+            let iso2 = loc.trim().to_uppercase();
+            let supported = SUPPORTED_JURISDICTIONS.contains(&iso2.as_str());
+            return Some((iso2, supported));
+        }
+    }
+
+    None
+}
+
+/// Get a human-readable name for common jurisdictions.
+fn jurisdiction_name(iso2: &str) -> String {
+    match iso2 {
+        "US" => "United States", "CA" => "Canada", "GB" => "United Kingdom",
+        "AU" => "Australia", "NZ" => "New Zealand", "DE" => "Germany",
+        "FR" => "France", "JP" => "Japan", "KR" => "Korea", "IN" => "India",
+        "SG" => "Singapore", "HK" => "Hong Kong", "CH" => "Switzerland",
+        "NL" => "Netherlands", "SE" => "Sweden", "NO" => "Norway",
+        "FI" => "Finland", "DK" => "Denmark", "IE" => "Ireland",
+        "IT" => "Italy", "ES" => "Spain", "PT" => "Portugal",
+        "BE" => "Belgium", "BR" => "Brazil", "MX" => "Mexico",
+        "CN" => "China", "TW" => "Taiwan", "SA" => "Saudi Arabia",
+        "AE" => "UAE", "XX" => "Local Development",
+        other => return other.to_string(),
+    }.to_string()
+}
+
+// ── Blocked Page ────────────────────────────────────────────────────────────
+
+/// Shown when the user is in an unsupported KYC jurisdiction.
+#[component]
+fn JurisdictionBlockedPage(iso2: String) -> impl IntoView {
+    view! {
+        <div class="jurisdiction-blocked">
+            <div class="blocked-card">
+                <img src="/assets/logo.svg" alt="Eustress Engine" class="blocked-logo" />
+                <h1>"Jurisdiction Not Supported"</h1>
+                <p class="blocked-message">
+                    "Your country ("<strong>{iso2.clone()}</strong>") does not currently have "
+                    "Know Your Customer (KYC) legislation approved by the IRS Qualified Intermediary program."
+                </p>
+                <p class="blocked-detail">
+                    "Eustress requires KYC compliance for identity verification and Bliss (BLS) participation. "
+                    "We can only operate in jurisdictions with IRS QI-approved KYC frameworks."
+                </p>
+                <div class="blocked-action">
+                    <p>"Inform your country's financial leadership to apply for KYC approval:"</p>
+                    <a
+                        href="https://www.irs.gov/businesses/forms-and-instructions-required-to-apply-for-kyc-approval"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="btn btn-primary"
+                    >
+                        "IRS KYC Approval Application"
+                    </a>
+                </div>
+                <p class="blocked-footer">
+                    "Once your jurisdiction is approved, Eustress will automatically detect it and grant access."
+                </p>
+            </div>
+        </div>
     }
 }

@@ -180,6 +180,16 @@ export component StudioWindow inherits Window {
     in-out property <string> account-name: "Guest";
     in-out property <string> account-status: "Logged out";
     in-out property <string> sync-status: "Local-first";
+
+    // Bliss node state
+    in-out property <string> bliss-balance: "0.00000000";
+    in-out property <string> bliss-pending: "+0.00000000";
+    in-out property <string> bliss-node-mode: "Light";
+    in-out property <string> bliss-bonus: "1.0x";
+    in-out property <bool> bliss-enabled: true;
+    callback bliss-set-light();
+    callback bliss-set-full();
+    callback bliss-toggle-enabled();
     
     // Service selection (for service properties)
     in-out property <string> selected-service: ""; // "workspace", "lighting", "players", etc.
@@ -528,6 +538,16 @@ export component StudioWindow inherits Window {
             account-name: root.account-name;
             account-status: root.account-status;
             sync-status: root.sync-status;
+
+            // Bliss
+            bliss-balance: root.bliss-balance;
+            bliss-pending: root.bliss-pending;
+            bliss-node-mode: root.bliss-node-mode;
+            bliss-bonus: root.bliss-bonus;
+            bliss-enabled: root.bliss-enabled;
+            on-bliss-set-light => { root.bliss-set-light(); }
+            on-bliss-set-full => { root.bliss-set-full(); }
+            on-bliss-toggle-enabled => { root.bliss-toggle-enabled(); }
             
             // File
             on-new-universe => { root.new-universe(); }

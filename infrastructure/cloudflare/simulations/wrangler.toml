@@ -1,0 +1,32 @@
+# =============================================================================
+# Eustress Simulations Worker Configuration
+# =============================================================================
+# Deploy: cd infrastructure/cloudflare/simulations && wrangler deploy
+# =============================================================================
+
+name = "eustress-simulations"
+main = "simulations-worker.js"
+compatibility_date = "2026-04-01"
+
+# Custom domain
+routes = [{ pattern = "simulations.eustress.dev/*", zone_name = "eustress.dev" }]
+
+# R2 bucket binding for simulations
+[[r2_buckets]]
+binding = "SIMULATIONS"
+bucket_name = "eustress-simulations"
+
+[vars]
+ENVIRONMENT = "production"
+BACKEND_API_URL = "https://api.eustress.dev"
+
+# Secrets (set via wrangler secret put)
+# JWT_SECRET - For validating auth tokens
+
+[env.dev]
+name = "eustress-simulations-dev"
+routes = [{ pattern = "simulations-dev.eustress.dev/*", zone_name = "eustress.dev" }]
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+BACKEND_API_URL = "http://localhost:7777"

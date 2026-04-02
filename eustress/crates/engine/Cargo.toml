@@ -23,6 +23,7 @@ path = "src/bin/generate_benchmark_map.rs"
 [dependencies]
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism", "luau"] }
+eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node" }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }

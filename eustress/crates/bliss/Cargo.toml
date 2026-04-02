@@ -2,11 +2,21 @@
 name = "eustress-bliss"
 version = "0.1.0"
 edition = "2021"
-description = "Bliss (BLS) - Proof-of-Contribution cryptocurrency for the Eustress ecosystem"
+description = "Bliss (BLS) integration for EustressEngine — Light/Full node, contribution tracking, co-signing"
 authors = ["EustressEngine Contributors"]
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# Official Bliss crates from crates.io
+bliss-core = "0.1.1"
+bliss-crypto = "0.1.1"
+bliss-embedded = "0.1"
+bliss-events = "0.1"
+bliss-wallet = "0.1"
+
+# Bliss SDK — QUIC transport for node communication
+bliss-sdk = { version = "0.1", optional = true }
+
 # Core async runtime
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -17,7 +27,6 @@ serde_json = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
-anyhow = "1.0"
 
 # Logging
 tracing = "0.1"
@@ -28,31 +37,23 @@ uuid = { workspace = true }
 # Time
 chrono = { workspace = true }
 
-# Cryptography
-sha2 = "0.10"
-blake3 = "1.5"
-ed25519-dalek = { version = "2.0", features = ["rand_core"] }
-rand = "0.8"
-
-# Blockchain
-ethers = { version = "2.0", optional = true }
-web3 = { version = "0.19", optional = true }
-
-# HTTP client
+# HTTP client for witness co-signing
 reqwest = { version = "0.12", features = ["json"] }
 
+# Node API server (co-signing + identity verification)
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Crypto utilities
+rand = "0.8"
+hex = "0.4"
+
 # Configuration
-config = "0.14"
 toml = "0.8"
 
-# Database for contribution tracking
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"], optional = true }
-
 [features]
-default = ["ethereum"]
-# Ethereum integration
-ethereum = ["ethers", "web3"]
-# Database support for contribution tracking
-database = ["sqlx"]
-# Mock blockchain for testing
-mock = []
+default = ["light-node"]
+# Light node — runs by default in every EustressEngine instance.
+light-node = []
+# Full node — opt-in, +10% BLS bonus, block production, ~2GB RAM.
+full-node = ["bliss-sdk"]

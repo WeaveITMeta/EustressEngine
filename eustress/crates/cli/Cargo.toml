@@ -48,5 +48,15 @@ humantime = "2.1"
 anyhow = "1.0"
 thiserror = "2.0"
 
+# HTTP client for fork registration / validation loop
+reqwest = { version = "0.12", features = ["json"] }
+
+# Cryptographic random for keypair generation
+rand = "0.8"
+hex = "0.4"
+
+# Date/time for validation loop timestamps
+chrono = "0.4"
+
 [features]
 default = []

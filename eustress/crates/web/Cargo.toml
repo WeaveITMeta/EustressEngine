@@ -37,6 +37,8 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlElement",
     "HtmlCanvasElement",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
     "WebGl2RenderingContext",
     "Storage",
     "Location",
@@ -46,6 +48,13 @@ web-sys = { version = "0.3", features = [
     "Notification",
     "NotificationOptions",
     "NotificationPermission",
+    "File",
+    "FileList",
+    "FileReader",
+    "Blob",
+    "Url",
+    "HtmlAnchorElement",
+    "FormData",
 ] }
 
 # HTTP Client (WASM-compatible)
@@ -65,9 +74,9 @@ log = "0.4"
 console_log = "1"
 console_error_panic_hook = "0.1"
 
-# Bliss Wallet (crypto currency) - WASM-compatible only
-bliss-core = { path = "E:/OpenSource/Crypto/Bliss/crates/bliss-core" }
-bliss-crypto = { path = "E:/OpenSource/Crypto/Bliss/crates/bliss-crypto" }
+# Bliss (crypto currency) — published crates from crates.io
+bliss-core = "0.1.1"
+bliss-crypto = "0.1.1"
 hex = "0.4"
 getrandom = { version = "0.2", features = ["js"] }
 

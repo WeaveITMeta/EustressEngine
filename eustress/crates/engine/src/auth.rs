@@ -51,6 +51,46 @@ impl Default for AuthState {
     }
 }
 
+/// Bliss node state — tracks node mode and balance for the engine UI.
+/// Light node runs by default. Full node is opt-in (+10% BLS bonus).
+#[derive(Resource, Clone, Debug)]
+pub struct BlissNodeState {
+    /// "Light" or "Full"
+    pub mode: String,
+    /// Current BLS balance (display string)
+    pub balance: String,
+    /// Pending BLS (display string, e.g. "+8.50")
+    pub pending: String,
+    /// Bonus multiplier display (e.g. "1.0x" or "1.1x")
+    pub bonus: String,
+    /// Whether Bliss integration is enabled
+    pub enabled: bool,
+}
+
+impl Default for BlissNodeState {
+    fn default() -> Self {
+        Self {
+            mode: "Light".to_string(),
+            balance: "0.00000000".to_string(),
+            pending: "+0.00000000".to_string(),
+            bonus: "1.0x".to_string(),
+            enabled: true,
+        }
+    }
+}
+
+impl BlissNodeState {
+    pub fn set_light(&mut self) {
+        self.mode = "Light".to_string();
+        self.bonus = "1.0x".to_string();
+    }
+
+    pub fn set_full(&mut self) {
+        self.mode = "Full".to_string();
+        self.bonus = "1.1x".to_string();
+    }
+}
+
 /// Login form state
 #[derive(Default, Clone)]
 pub struct LoginForm {
@@ -573,12 +613,84 @@ pub fn show_login_dialog_stub(_auth_state: &mut AuthState) {
     // This function is kept for API compatibility
 }
 
-/// Plugin for the auth system
+/// Bliss node handle — holds the running API server task.
+#[derive(Resource)]
+pub struct BlissNodeHandle {
+    pub port: u16,
+    pub running: bool,
+}
+
+impl Default for BlissNodeHandle {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            running: false,
+        }
+    }
+}
+
+/// Plugin for the auth system + Bliss node.
 pub struct StudioAuthPlugin;
 
 impl Plugin for StudioAuthPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AuthState>()
+            .init_resource::<BlissNodeState>()
+            .init_resource::<BlissNodeHandle>()
+            .add_systems(Startup, start_bliss_node)
             .add_systems(Update, auth_poll_system);
     }
+}
+
+/// Start the Bliss node API server on engine startup.
+fn start_bliss_node(mut handle: ResMut<BlissNodeHandle>, bliss_state: Res<BlissNodeState>) {
+    if !bliss_state.enabled {
+        info!("Bliss node disabled — skipping startup");
+        return;
+    }
+
+    let mode_str = bliss_state.mode.clone();
+    let mode = if mode_str == "Full" {
+        eustress_bliss::NodeMode::Full
+    } else {
+        eustress_bliss::NodeMode::Light
+    };
+
+    let port = 7777u16;
+
+    println!("🟣 Starting Bliss {} on port {}...", mode, port);
+    println!("🟣 Registration: https://api.eustress.dev (Cloudflare)");
+    println!("🟣 This node: co-signing + identity verification");
+
+    // Spawn the async node startup on a background thread
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime for Bliss node");
+
+        rt.block_on(async {
+            let mut node = eustress_bliss::BlissNode::new(eustress_bliss::NodeConfig {
+                mode,
+                api_port: port,
+                ..eustress_bliss::NodeConfig::default()
+            });
+
+            match node.start().await {
+                Ok(p) => {
+                    println!("🟣 Bliss node API running on http://127.0.0.1:{}", p);
+                    // Keep the runtime alive so the server keeps running
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("🔴 Failed to start Bliss node: {}", e);
+                }
+            }
+        });
+    });
+
+    handle.port = port;
+    handle.running = true;
 }

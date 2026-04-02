@@ -5,6 +5,7 @@
 // =============================================================================
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use crate::api::{ApiClient};
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
@@ -339,7 +340,7 @@ pub fn ProjectsPage() -> impl IntoView {
             </section>
             
             // API Keys Section (for signed-in users)
-            <Show when=move || app_state.is_authenticated.get()>
+            <Show when=move || app_state.auth.get().is_authenticated()>
                 <ApiKeysSection />
             </Show>
             
@@ -595,8 +596,9 @@ fn ApiKeysSection() -> impl IntoView {
     });
     
     // Create new key handler
+    let api_url_stored = StoredValue::new(app_state.api_url.clone());
     let create_key = move |_| {
-        let api_url = app_state.api_url.clone();
+        let api_url = api_url_stored.get_value();
         let name = new_key_name.get();
         let key_type = new_key_type.get();
         
@@ -607,7 +609,7 @@ fn ApiKeysSection() -> impl IntoView {
                 "key_type": key_type
             });
             
-            match client.post::<CreateKeyResponse>("/api/keys", &body).await {
+            match client.post::<CreateKeyResponse, _>("/api/keys", &body).await {
                 Ok(response) => {
                     newly_created_key.set(Some(response.key.clone()));
                     // Refresh keys list
@@ -622,20 +624,20 @@ fn ApiKeysSection() -> impl IntoView {
         });
     };
     
-    // Copy key to clipboard
+    // Copy key to clipboard via navigator.clipboard JS API
     let copy_to_clipboard = move |key: String, key_id: String| {
-        if let Some(window) = web_sys::window() {
-            if let Some(navigator) = window.navigator().clipboard() {
-                let _ = navigator.write_text(&key);
-                copied_key_id.set(Some(key_id));
-                // Reset after 2 seconds
-                let copied_signal = copied_key_id;
-                wasm_bindgen_futures::spawn_local(async move {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    copied_signal.set(None);
-                });
-            }
-        }
+        let js_code = format!(
+            "navigator.clipboard.writeText('{}')",
+            key.replace('\'', "\\'")
+        );
+        let _ = js_sys::eval(&js_code);
+
+        copied_key_id.set(Some(key_id));
+        let copied_signal = copied_key_id;
+        wasm_bindgen_futures::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(2000).await;
+            copied_signal.set(None);
+        });
     };
     
     view! {

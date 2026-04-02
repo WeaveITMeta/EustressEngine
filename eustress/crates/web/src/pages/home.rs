@@ -276,11 +276,11 @@ pub fn HomePage() -> impl IntoView {
                                 <td class="unreal"><span class="check">"✓"</span>" AAA"</td>
                             </tr>
                             <tr>
-                                <td class="feature-name">"Script Editor"</td>
-                                <td class="eustress"><span class="warn">"~"</span>" Soul + Rune"</td>
-                                <td class="roblox"><span class="check">"✓"</span>" Full IDE"</td>
-                                <td class="unity"><span class="check">"✓"</span>" Full IDE"</td>
-                                <td class="unreal"><span class="check">"✓"</span>" Full IDE"</td>
+                                <td class="feature-name">"Scripting"</td>
+                                <td class="eustress"><span class="check">"✓"</span>" Soul + Rune + Luau"</td>
+                                <td class="roblox"><span class="check">"✓"</span>" Luau"</td>
+                                <td class="unity"><span class="check">"✓"</span>" C#"</td>
+                                <td class="unreal"><span class="check">"✓"</span>" Blueprint + C++"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"XR / VR"</td>

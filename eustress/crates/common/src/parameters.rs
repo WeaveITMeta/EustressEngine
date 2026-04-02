@@ -465,7 +465,7 @@ pub enum CreatorType {
 // ============================================================================
 
 /// Event fired when a parameter changes
-#[derive(Message, Clone, Debug)]
+#[derive(Event, Message, Clone, Debug)]
 pub struct ParameterChangedEvent {
     pub entity: bevy::prelude::Entity,
     pub domain: String,
@@ -475,7 +475,7 @@ pub struct ParameterChangedEvent {
 }
 
 /// Event requesting an export
-#[derive(Message, Clone, Debug)]
+#[derive(Event, Message, Clone, Debug)]
 pub struct ExportRequestEvent {
     pub entity: bevy::prelude::Entity,
     pub domain: String,
@@ -510,7 +510,7 @@ pub struct ExportRequestSerialized {
 /// Only compiled when the `streaming` feature is enabled.
 #[cfg(feature = "streaming")]
 pub fn bridge_parameter_changed_to_stream(
-    trigger: Trigger<ParameterChangedEvent>,
+    trigger: On<ParameterChangedEvent>,
     queue: Option<Res<crate::change_queue::ChangeQueue>>,
 ) {
     let Some(queue) = queue else { return; };
@@ -534,7 +534,7 @@ pub fn bridge_parameter_changed_to_stream(
 /// Only compiled when the `streaming` feature is enabled.
 #[cfg(feature = "streaming")]
 pub fn bridge_export_requests_to_stream(
-    trigger: Trigger<ExportRequestEvent>,
+    trigger: On<ExportRequestEvent>,
     queue: Option<Res<crate::change_queue::ChangeQueue>>,
 ) {
     let Some(queue) = queue else { return; };
