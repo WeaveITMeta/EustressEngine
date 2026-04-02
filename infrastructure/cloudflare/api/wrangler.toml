@@ -27,6 +27,14 @@ id = "0e94f37a45eb49fea4defc9ba38dc46b"
 binding = "INVENTORY"
 id = "4ba9409d9b4d4175a6dcecabd697ac99"
 
+[[kv_namespaces]]
+binding = "SCREENING"
+id = "3fc01ee7305c4c4ca5be6b14b74d6d53"
+
+[[kv_namespaces]]
+binding = "AUDIT_LOG"
+id = "276638d8157344589cd2a82d4f1865bb"
+
 # R2 bucket for KYC documents (global, jurisdiction prefix in object key)
 [[r2_buckets]]
 binding = "KYC_BUCKET"

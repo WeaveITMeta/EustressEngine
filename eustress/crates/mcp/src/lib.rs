@@ -46,6 +46,7 @@
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod moderation;
 pub mod protocol;
 pub mod router;
 pub mod server;

@@ -53,8 +53,32 @@ pub fn LoginPage() -> impl IntoView {
     ]);
     let jurisdiction_name = RwSignal::new("Detecting...".to_string());
 
-    // Detect jurisdiction on load
+    // Detect jurisdiction on load — try Cloudflare trace, fallback to API
     spawn_local(async move {
+        // Try the API endpoint first (works everywhere, has cf-ipcountry)
+        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/kyc/jurisdiction").send().await {
+            if resp.ok() {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    if let Some(iso2) = data.get("iso2").and_then(|v| v.as_str()) {
+                        detected_country.set(iso2.to_string());
+                        if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
+                            jurisdiction_name.set(name.to_string());
+                        } else {
+                            jurisdiction_name.set(iso2.to_string());
+                        }
+                        if let Some(ids_arr) = data.get("accepted_ids").and_then(|v| v.as_array()) {
+                            let ids: Vec<String> = ids_arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                            if !ids.is_empty() {
+                                accepted_ids.set(ids);
+                            }
+                        }
+                        return; // Got jurisdiction from API
+                    }
+                }
+            }
+        }
+
+        // Fallback: try cdn-cgi/trace (only works when served from Cloudflare)
         if let Ok(resp) = gloo_net::http::Request::get("/cdn-cgi/trace").send().await {
             if let Ok(text) = resp.text().await {
                 for line in text.lines() {
@@ -601,25 +625,16 @@ pub fn LoginPage() -> impl IntoView {
 
                                                 match generate_identity_toml(&uname, &bday, &idt, &idn) {
                                                     Ok((toml_content, pub_key, priv_key)) => {
-                                                        // Download the TOML file
-                                                        download_file("identity.toml", &toml_content);
-
                                                         let pub_key_clone = pub_key.clone();
                                                         let uname_clone = uname.clone();
                                                         let bday_clone = bday.clone();
                                                         let idt_clone = idt.clone();
                                                         let id_hash = sha256_hex(&format!("{}:{}:{}", idt, idn, bday));
 
-                                                        // Set local state
-                                                        identity_public_key.set(pub_key);
-                                                        identity_private_key.set(priv_key);
-                                                        identity_username.set(uname_clone.clone());
-                                                        identity_file_loaded.set(true);
-
-                                                        // Register with the node API
+                                                        // Register first — only download TOML on success
                                                         loading.set(true);
                                                         error.set(None);
-                                                        identity_status.set("Registering with node...".to_string());
+                                                        identity_status.set("Registering...".to_string());
 
                                                         let api_url = api_url_stored.get_value();
                                                         let app_state_c = app_state_stored.get_value();
@@ -637,16 +652,23 @@ pub fn LoginPage() -> impl IntoView {
                                                                 Some(&sess),
                                                             ).await {
                                                                 Ok(response) => {
+                                                                    // Registration succeeded — download both files
+                                                                    download_file("identity.toml", &toml_content);
+                                                                    download_file("README - Eustress Identity.txt", &identity_readme(&uname_clone));
+
+                                                                    identity_public_key.set(pub_key);
+                                                                    identity_private_key.set(priv_key);
+                                                                    identity_username.set(uname_clone.clone());
+                                                                    identity_file_loaded.set(true);
+
                                                                     loading.set(false);
-                                                                    identity_status.set("Registered and signed in!".to_string());
+                                                                    identity_status.set("Registered — save your identity.toml!".to_string());
                                                                     app_state_c.login_with_token(response.token, response.user);
                                                                     nav("/dashboard", Default::default());
                                                                 }
                                                                 Err(e) => {
                                                                     loading.set(false);
-                                                                    identity_status.set("Identity created — save your file to cloud or desktop.".to_string());
-                                                                    error.set(Some(format!("Registration: {} — you can still sign in with your downloaded identity.toml", e)));
-                                                                    is_register.set(false);
+                                                                    error.set(Some(format!("Registration failed: {}", e)));
                                                                 }
                                                             }
                                                         });
@@ -742,6 +764,87 @@ async fn upload_id_document(
     }
 }
 
+/// Generate the README file that accompanies identity.toml downloads.
+fn identity_readme(username: &str) -> String {
+    format!(r#"========================================================
+  EUSTRESS IDENTITY — {username}
+========================================================
+
+WHAT IS THIS FILE?
+
+  The "identity.toml" file in this folder IS your Eustress
+  account. It contains your Ed25519 keypair — your private
+  key is your password, your public key is your username's
+  cryptographic proof. There is no email, no password, no
+  "forgot password" button. This file is everything.
+
+HOW TO KEEP IT SAFE
+
+  1. RECOMMENDED: Save this folder to a cloud drive
+     (OneDrive, iCloud Drive, Google Drive, Dropbox).
+     This way your identity syncs across all your
+     computers automatically.
+
+     Suggested locations:
+       Windows:  OneDrive/Documents/Eustress/
+       macOS:    iCloud Drive/Eustress/
+       Linux:    Google Drive/Eustress/
+
+  2. Make a backup on a USB drive or external storage.
+     If you lose this file and have no backup, your
+     account is gone forever. No one can recover it.
+
+  3. NEVER share identity.toml with anyone. Anyone who
+     has this file can sign in as you.
+
+SIGN IN ON ANOTHER COMPUTER
+
+  You can sign in on as many computers as you want,
+  at the same time. Just copy identity.toml to each
+  machine (or use cloud sync). Go to eustress.dev/login,
+  click "Sign In", and load your identity.toml file.
+
+  Each session gets its own token. There is no limit
+  on simultaneous sessions.
+
+HOW IT WORKS
+
+  When you sign in, the server sends a random challenge.
+  Your browser signs it with your private key (which
+  never leaves your device). The server verifies the
+  signature matches your public key on file. Done.
+
+  No passwords are transmitted. No credentials are
+  stored on any server. Your private key never touches
+  the network.
+
+BENEFICIARIES
+
+  You can add beneficiaries to your identity.toml to
+  designate who receives your BLS balance and assets
+  if your account becomes inactive. Add this section
+  to the bottom of your identity.toml:
+
+  [beneficiaries]
+  primary = "their_public_key_hex"
+  secondary = "backup_public_key_hex"
+  inactive_days = 365
+
+  After 365 days of inactivity, your assets transfer
+  to your primary beneficiary automatically.
+
+SUPPORT
+
+  Website:  https://eustress.dev
+  Login:    https://eustress.dev/login
+  Help:     support@eustress.dev
+
+========================================================
+  Keep this file safe. It is your account.
+========================================================
+"#)
+}
+
 fn extract_toml_value(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.splitn(2, '=').collect();
     if parts.len() == 2 {
@@ -763,7 +866,7 @@ fn generate_identity_toml(
 
     let keypair = KeyPair::generate();
     let pub_hex = keypair.public_key().to_hex();
-    let priv_b64 = base64_encode(&keypair.private_key().to_bytes());
+    let priv_hex = keypair.private_key().to_hex();
 
     let now = chrono::Utc::now().to_rfc3339();
     let user_id = uuid::Uuid::new_v4().to_string();
@@ -779,7 +882,7 @@ version = "1.0"
 user_id = "{user_id}"
 username = "{username}"
 public_key = "{pub_hex}"
-private_key = "{priv_b64}"
+private_key = "{priv_hex}"
 issued_at = "{now}"
 
 [profile]
@@ -791,7 +894,7 @@ id_hash = "{id_hash}"
 verified = false
 "#);
 
-    Ok((toml_content, pub_hex, priv_b64))
+    Ok((toml_content, pub_hex, priv_hex))
 }
 
 fn sha256_hex(input: &str) -> String {
@@ -799,19 +902,31 @@ fn sha256_hex(input: &str) -> String {
     hash.to_hex()
 }
 
-fn sign_challenge_ed25519(private_key_b64: &str, challenge: &str) -> Result<String, String> {
+fn sign_challenge_ed25519(private_key_hex: &str, challenge: &str) -> Result<String, String> {
     use bliss_crypto::{PrivateKey, Signature};
 
-    let seed_bytes = base64_decode(private_key_b64)
-        .map_err(|e| format!("Invalid private key encoding: {}", e))?;
-
-    let private_key = PrivateKey::from_bytes(&seed_bytes)
-        .map_err(|e| format!("Invalid private key: {}", e))?;
+    // Support both hex and base64 encoded keys for backwards compatibility
+    let private_key = if private_key_hex.len() == 64 && private_key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Hex-encoded (new format)
+        PrivateKey::from_hex(private_key_hex)
+            .map_err(|e| format!("Invalid private key: {}", e))?
+    } else {
+        // Base64-encoded (old format)
+        let seed_bytes = base64_decode(private_key_hex)
+            .map_err(|e| format!("Invalid private key encoding: {}", e))?;
+        PrivateKey::from_bytes(&seed_bytes)
+            .map_err(|e| format!("Invalid private key: {}", e))?
+    };
 
     let signature = Signature::sign(challenge.as_bytes(), &private_key)
         .map_err(|e| format!("Signing failed: {}", e))?;
 
-    Ok(base64_encode(&signature.to_bytes()))
+    // Return signature as hex (matches what the Worker expects)
+    Ok(private_key_to_hex_sig(&signature.to_bytes()))
+}
+
+fn private_key_to_hex_sig(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn download_file(filename: &str, content: &str) {
