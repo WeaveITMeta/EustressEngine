@@ -4205,9 +4205,38 @@ fn drain_slint_actions(
                 let space_path = std::path::PathBuf::from(&path);
                 if crate::space::looks_like_space_root(&space_path) {
                     info!("UniverseBrowser: switching to space {:?}", space_path);
+
+                    // Despawn all entities loaded from files (full data model clear)
+                    let loaded_entities: Vec<Entity> = queries.loaded_from_file
+                        .iter()
+                        .map(|(e, _)| e)
+                        .collect();
+                    let count = loaded_entities.len();
+                    for entity in loaded_entities {
+                        commands.entity(entity).despawn();
+                    }
+                    info!("Despawned {} file-loaded entities", count);
+
+                    // Clear file registry
+                    if let Some(ref mut registry) = res.file_registry {
+                        registry.clear();
+                    }
+
+                    // Set new space root and trigger rescan
                     commands.insert_resource(crate::space::SpaceRoot(space_path));
+                    commands.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
+
+                    // Reset file watcher for new space
+                    // (will be re-created on next file watcher tick)
+
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Switched to space (cleared {} entities)", count));
+                    }
                 } else {
                     warn!("UniverseBrowser: {:?} is not a valid Space root", space_path);
+                    if let Some(ref mut out) = res.output {
+                        out.warn(format!("Not a valid Space: {}", path));
+                    }
                 }
             }
         }

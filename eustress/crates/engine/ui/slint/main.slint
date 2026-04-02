@@ -651,67 +651,71 @@ export component StudioWindow inherits Window {
                             padding-right: 2px;
                             padding-top: 2px;
                             spacing: 1px;
-                            
+
+                            // Tab 0: Universes (always visible, first)
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.left-tab-index == 0 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.left-tab-index = 0; }
                                 }
-                                
+
                                 Text {
-                                    text: "Explorer";
+                                    text: "Universes";
                                     color: root.left-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                            
+
+                            // Tab 1: Assets
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.left-tab-index == 1 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.left-tab-index = 1; }
                                 }
-                                
+
                                 Text {
-                                    text: "Toolbox";
+                                    text: "Assets";
                                     color: root.left-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                            
+
+                            // Tab 2: Explorer
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.left-tab-index == 2 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.left-tab-index = 2; }
                                 }
-                                
+
                                 Text {
-                                    text: "Assets";
+                                    text: "Explorer";
                                     color: root.left-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
-                            
+
+                            // Tab 3: Toolbox
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.left-tab-index == 3 ? Theme.panel-background : Theme.tab-inactive;
@@ -724,7 +728,7 @@ export component StudioWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: "Terrain";
+                                    text: "Toolbox";
                                     color: root.left-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
@@ -732,23 +736,69 @@ export component StudioWindow inherits Window {
                                 }
                             }
 
-                            if root.show-universe-browser: Rectangle {
-                                horizontal-stretch: 1;
-                                background: root.left-tab-index == 4 ? Theme.panel-background : Theme.tab-inactive;
+                            // Overflow: chevron dropdown for additional panels (Terrain, etc.)
+                            Rectangle {
+                                width: 24px;
+                                background: more-panels-touch.has-hover ? Theme.button-hover : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
 
-                                TouchArea {
+                                more-panels-touch := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.left-tab-index = 4; }
+                                    clicked => { more-panels-popup.show(); }
                                 }
 
                                 Text {
-                                    text: "Universes";
-                                    color: root.left-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
+                                    text: "▾";
+                                    color: Theme.text-secondary;
+                                    font-size: 14px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
+                                }
+
+                                more-panels-popup := PopupWindow {
+                                    x: -60px;
+                                    y: parent.height;
+                                    width: 140px;
+
+                                    Rectangle {
+                                        background: #1e1e1e;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: #3a3a3a;
+                                        drop-shadow-blur: 8px;
+                                        drop-shadow-color: #00000080;
+                                        width: 140px;
+
+                                        VerticalLayout {
+                                            padding-top: 4px;
+                                            padding-bottom: 4px;
+
+                                            // Terrain toggle
+                                            Rectangle {
+                                                height: 24px;
+                                                background: terrain-item-touch.has-hover ? Theme.button-hover : transparent;
+
+                                                terrain-item-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.left-tab-index = 4; }
+                                                }
+
+                                                HorizontalLayout {
+                                                    padding-left: 10px;
+                                                    spacing: 6px;
+
+                                                    Text {
+                                                        text: "Terrain";
+                                                        color: root.left-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -759,7 +809,7 @@ export component StudioWindow inherits Window {
                         vertical-stretch: 1;
                         background: Theme.panel-background;
                         
-                        if root.left-tab-index == 0: ExplorerPanel {
+                        if root.left-tab-index == 2: ExplorerPanel {
                             tree-nodes: root.tree-nodes;
                             on-select-node(id, node-type) => { root.select-node(id, node-type); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
@@ -798,13 +848,13 @@ export component StudioWindow inherits Window {
                             }
                         }
                         
-                        if root.left-tab-index == 1: Toolbox {
+                        if root.left-tab-index == 3: Toolbox {
                             current-tool: root.current-tool;
                             on-select-tool(tool) => { root.select-tool(tool); }
                             on-insert-part(part-type) => { root.insert-part(part-type); }
                         }
                         
-                        if root.left-tab-index == 2: AssetManager {
+                        if root.left-tab-index == 1: AssetManager {
                             asset-nodes: root.asset-nodes;
                             current-category: root.asset-category;
                             universe-asset-count: root.universe-asset-count;
@@ -816,13 +866,13 @@ export component StudioWindow inherits Window {
                             on-category-changed(cat) => { root.asset-category-changed(cat); }
                         }
                         
-                        if root.left-tab-index == 4 && root.show-universe-browser: UniverseBrowser {
+                        if root.left-tab-index == 0: UniverseBrowser {
                             universe-items: root.universe-items;
                             active-space-path: root.active-space-path;
                             space-selected(path) => { root.space-selected(path); }
                         }
 
-                        if root.left-tab-index == 3: TerrainEditor {
+                        if root.left-tab-index == 4: TerrainEditor {
                             has-terrain: root.has-terrain;
                             edit-mode: root.terrain-edit-mode;
                             current-brush: root.terrain-brush;

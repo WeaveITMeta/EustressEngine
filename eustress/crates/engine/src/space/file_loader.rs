@@ -217,6 +217,14 @@ impl SpaceFileRegistry {
         self.file_metadata.insert(path, metadata);
     }
     
+    /// Clear all registry entries (used when switching spaces).
+    pub fn clear(&mut self) {
+        self.file_to_entity.clear();
+        self.entity_to_file.clear();
+        self.file_metadata.clear();
+        self.failed_files.clear();
+    }
+
     /// Unregister a file (when deleted or entity despawned)
     pub fn unregister_file(&mut self, path: &Path) {
         if let Some(entity) = self.file_to_entity.remove(path) {
