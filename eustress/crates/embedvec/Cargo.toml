@@ -9,8 +9,8 @@ license = "MIT"
 # Core Bevy
 bevy = { workspace = true, features = ["serialize"] }
 
-# Vector database with HNSW indexing
-embedvec = { version = "0.5.1", default-features = false, features = ["async"] }
+# Vector database with HNSW indexing, H4/E8 lattice quantization
+embedvec = { version = "0.7.0", default-features = false }
 
 # Serialization
 serde = { workspace = true }
@@ -22,22 +22,27 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 
-# Async runtime (optional, for persistence)
+# Async runtime (optional, for async flush in persistence)
 tokio = { workspace = true, optional = true }
 
-# RocksDB embedded database (optional, for cold-tier persistence)
+# Sled embedded database (optional, pure-Rust, for KnowledgeStore + PersistentIndex)
+sled = { version = "0.34", optional = true }
+
+# RocksDB embedded database (optional, cold-tier column-family layout).
+# Requires libclang/LLVM on the build host. Set LIBCLANG_PATH if not in PATH.
 rocksdb = { version = "0.22", optional = true }
 
 [features]
 default = []
-# Enable RocksDB-based persistence (cold-tier, column-family layout).
-# Requires libclang on the build host (LLVM). Set LIBCLANG_PATH if not in PATH.
+# Enable Sled-based persistence (pure Rust, no libclang needed)
+persistence = ["sled", "tokio"]
+# Enable Sled persistence alias (same as persistence)
+persistence-sled = ["persistence"]
+# Enable RocksDB-based persistence (requires LLVM/libclang)
 persistence-rocksdb = ["rocksdb", "tokio"]
-# Legacy alias — kept for any downstream crates that declare `persistence`
-persistence = ["persistence-rocksdb"]
 # Enable SIMD acceleration
 simd = ["embedvec/simd"]
-# Full feature set
+# Full feature set (Sled persistence — use persistence-rocksdb separately if needed)
 full = ["persistence", "simd"]
 
 [dev-dependencies]

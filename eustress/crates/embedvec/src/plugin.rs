@@ -14,6 +14,17 @@ use crate::systems::{
 };
 use bevy::prelude::*;
 
+#[cfg(feature = "persistence")]
+use crate::knowledge::KnowledgeGraph;
+#[cfg(feature = "persistence")]
+use crate::memory::MemoryStore;
+#[cfg(feature = "persistence")]
+use crate::persistence::{KnowledgeStore, PersistenceConfig};
+#[cfg(feature = "persistence")]
+use parking_lot::RwLock;
+#[cfg(feature = "persistence")]
+use std::sync::Arc;
+
 /// Core embedvec plugin that sets up the resource and basic systems
 pub struct EmbedvecPlugin {
     /// Index configuration
@@ -201,5 +212,145 @@ impl EmbedvecAppExt for App {
 
     fn add_embedvec_auto_index(&mut self) -> &mut Self {
         self.add_plugins(AutoIndexPlugin)
+    }
+}
+
+// ============================================================================
+// KnowledgeStoreResource + KnowledgeStorePlugin
+// ============================================================================
+
+/// Bevy Resource holding the per-space KnowledgeStore.
+///
+/// Loaded from `<universe>/knowledge/<space_name>/knowledge.db` when a Space
+/// opens. Provides mutable access to `KnowledgeGraph`, `MemoryStore`, and
+/// `TraitLedger` instances keyed by name.
+#[cfg(feature = "persistence")]
+#[derive(Resource)]
+pub struct KnowledgeStoreResource {
+    /// The active Sled-backed store
+    pub store: Arc<RwLock<KnowledgeStore>>,
+    /// The in-memory KnowledgeGraph (loaded from / flushed to store)
+    pub graph: Arc<RwLock<KnowledgeGraph>>,
+    /// The in-memory MemoryStore (loaded from / flushed to store)
+    pub memories: Arc<RwLock<MemoryStore>>,
+    /// Absolute path of the open knowledge.db (for display/logging)
+    pub db_path: std::path::PathBuf,
+}
+
+#[cfg(feature = "persistence")]
+impl KnowledgeStoreResource {
+    /// Open (or create) a knowledge store for the given space root.
+    pub fn open_for_space(space_root: &std::path::Path) -> Result<Self, crate::error::EmbedvecError> {
+        let config = crate::persistence::PersistenceConfig::for_space(space_root);
+        let db_path = std::path::PathBuf::from(&config.path);
+        let store = KnowledgeStore::open(&config)?;
+
+        // Load persisted data (or start fresh if first open)
+        let graph = store.load_knowledge_graph()?.unwrap_or_default();
+        let memories = store.load_memory_store()?;
+
+        tracing::info!(
+            path = %db_path.display(),
+            memories = memories.len(),
+            concepts = graph.node_count(),
+            "KnowledgeStore opened"
+        );
+
+        Ok(Self {
+            store: Arc::new(RwLock::new(store)),
+            graph: Arc::new(RwLock::new(graph)),
+            memories: Arc::new(RwLock::new(memories)),
+            db_path,
+        })
+    }
+
+    /// Flush in-memory graph and memories back to Sled.
+    pub fn flush(&self) -> Result<(), crate::error::EmbedvecError> {
+        let store = self.store.read();
+        store.save_knowledge_graph(&*self.graph.read())?;
+        store.save_memory_store(&*self.memories.read())?;
+        store.flush()?;
+        tracing::debug!(path = %self.db_path.display(), "KnowledgeStore flushed");
+        Ok(())
+    }
+}
+
+/// Bevy Resource tracking which `SpaceRoot` path the knowledge store was loaded for.
+/// Used to detect space switches and reload the store.
+#[cfg(feature = "persistence")]
+#[derive(Resource, Default)]
+struct LoadedKnowledgeSpacePath(Option<std::path::PathBuf>);
+
+/// Plugin that loads and saves `KnowledgeStoreResource` per space.
+///
+/// ## Lifecycle
+/// - **Space open** (`SpaceRoot` changed): closes old store, opens `knowledge.db`
+///   from `<universe>/knowledge/<space_name>/knowledge.db`, inserts
+///   `KnowledgeStoreResource` into the world.
+/// - **App exit**: flushes to disk.
+///
+/// Add to the engine app alongside `EmbedvecPlugin`:
+/// ```rust,ignore
+/// app.add_plugins(KnowledgeStorePlugin);
+/// ```
+#[cfg(feature = "persistence")]
+pub struct KnowledgeStorePlugin;
+
+#[cfg(feature = "persistence")]
+impl Plugin for KnowledgeStorePlugin {
+    fn build(&self, app: &mut App) {
+        // Sled flushes automatically via flush_every_ms and on Drop.
+        // reload_knowledge_store_on_space_change handles per-space load.
+        app.init_resource::<LoadedKnowledgeSpacePath>()
+            .add_systems(PostUpdate, reload_knowledge_store_on_space_change);
+    }
+}
+
+/// System: detect `SpaceRootRef` change and (re)load the knowledge store.
+#[cfg(feature = "persistence")]
+fn reload_knowledge_store_on_space_change(
+    space_root: Option<Res<SpaceRootRef>>,
+    mut loaded_path: ResMut<LoadedKnowledgeSpacePath>,
+    mut commands: Commands,
+) {
+    let Some(space_root) = space_root else { return };
+    if !space_root.is_changed() {
+        return;
+    }
+
+    let path = space_root.0.clone();
+    if loaded_path.0.as_deref() == Some(path.as_path()) {
+        return;
+    }
+
+    match KnowledgeStoreResource::open_for_space(&path) {
+        Ok(resource) => {
+            loaded_path.0 = Some(path.clone());
+            commands.insert_resource(resource);
+            tracing::info!(space = %path.display(), "KnowledgeStore reloaded for space");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to open KnowledgeStore for space");
+        }
+    }
+}
+
+/// Thin newtype so `eustress-embedvec` can accept the engine's `SpaceRoot`
+/// without directly depending on `eustress-engine`.
+///
+/// The engine registers this by inserting:
+/// ```rust,ignore
+/// app.insert_resource(SpaceRootRef(space_root.0.clone()));
+/// ```
+/// whenever `SpaceRoot` changes (via an observer or system in the engine).
+#[cfg(feature = "persistence")]
+#[derive(Resource, Clone)]
+pub struct SpaceRootRef(pub std::path::PathBuf);
+
+#[cfg(feature = "persistence")]
+impl SpaceRootRef {
+    /// Construct from any path
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self(path.into())
     }
 }

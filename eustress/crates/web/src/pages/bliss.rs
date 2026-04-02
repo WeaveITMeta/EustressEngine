@@ -9,7 +9,6 @@
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
-use crate::wallet::{use_wallet, WalletStatus};
 
 // -----------------------------------------------------------------------------
 // Data Types
@@ -23,11 +22,10 @@ pub struct BlissKpi {
     pub treasury_balance: String,
     pub active_nodes: u64,
     pub total_contributors: u64,
-    pub avg_contribution_score: f64,
+    pub avg_bliss_earned: String,
     pub network_hashrate: String,
     pub blocks_mined: u64,
-    pub monthly_distribution: String,
-    pub forks_registered: u64,
+    pub daily_distribution: String,
 }
 
 impl Default for BlissKpi {
@@ -38,11 +36,10 @@ impl Default for BlissKpi {
             treasury_balance: "Loading...".to_string(),
             active_nodes: 0,
             total_contributors: 0,
-            avg_contribution_score: 0.0,
+            avg_bliss_earned: "Loading...".to_string(),
             network_hashrate: "Loading...".to_string(),
             blocks_mined: 0,
-            monthly_distribution: "Loading...".to_string(),
-            forks_registered: 0,
+            daily_distribution: "Loading...".to_string(),
         }
     }
 }
@@ -65,14 +62,6 @@ pub struct InvestmentTier {
 #[component]
 pub fn BlissPage() -> impl IntoView {
     let _app_state = expect_context::<AppState>();
-    let wallet = use_wallet();
-
-    // Wallet modal state
-    let show_wallet_modal = RwSignal::new(false);
-    let wallet_name = RwSignal::new(String::new());
-    let private_key_input = RwSignal::new(String::new());
-    let import_mode = RwSignal::new(false);
-    let wallet_error = RwSignal::new(Option::<String>::None);
 
     // Investment state
     let selected_tier = RwSignal::new(Option::<usize>::None);
@@ -85,90 +74,46 @@ pub fn BlissPage() -> impl IntoView {
         treasury_balance: "$47,832 USD".to_string(),
         active_nodes: 342,
         total_contributors: 1_847,
-        avg_contribution_score: 23.7,
+        avg_bliss_earned: "7.41 BLS".to_string(),
         network_hashrate: "1.2 TH/s".to_string(),
         blocks_mined: 48_291,
-        monthly_distribution: "12,500 BLS".to_string(),
-        forks_registered: 8,
+        daily_distribution: "13,699 BLS".to_string(),
     });
 
-    // Investment tiers
+    // Payment mode: one-time or recurring (monthly)
+    let is_recurring = RwSignal::new(false);
+
+    // Investment tiers — flat rate: 10 BLS per $1
     let tiers = vec![
         InvestmentTier {
             name: "Seed",
             amount_usd: "$25",
-            bls_estimate: "~250 BLS",
+            bls_estimate: "250 BLS",
             description: "Support the ecosystem at ground level",
-            perks: vec!["Treasury contribution receipt", "Supporter badge on profile"],
+            perks: vec![],
         },
         InvestmentTier {
             name: "Growth",
             amount_usd: "$100",
-            bls_estimate: "~1,050 BLS",
-            description: "Meaningful treasury investment with bonus allocation",
-            perks: vec!["5% bonus BLS allocation", "Supporter badge", "Early feature access"],
+            bls_estimate: "1,000 BLS",
+            description: "Meaningful treasury investment",
+            perks: vec![],
         },
         InvestmentTier {
             name: "Sustainer",
             amount_usd: "$500",
-            bls_estimate: "~5,500 BLS",
+            bls_estimate: "5,000 BLS",
             description: "Significant contribution to network sustainability",
-            perks: vec!["10% bonus BLS allocation", "Gold badge", "Governance vote weight", "Priority fork registration"],
+            perks: vec![],
         },
         InvestmentTier {
             name: "Patron",
             amount_usd: "$1,000+",
-            bls_estimate: "~11,500+ BLS",
+            bls_estimate: "10,000+ BLS",
             description: "Major backer powering the Bliss economy",
-            perks: vec!["15% bonus BLS allocation", "Platinum badge", "Governance vote weight", "Direct line to core team", "Name in credits"],
+            perks: vec![],
         },
     ];
-
-    // Wallet actions
-    let create_wallet = Callback::new({
-        let wallet = wallet.clone();
-        move |_: ()| {
-            let name = wallet_name.get();
-            if name.is_empty() {
-                wallet_error.set(Some("Please enter a wallet name".to_string()));
-                return;
-            }
-            match wallet.create_wallet(&name) {
-                Ok(_) => {
-                    show_wallet_modal.set(false);
-                    wallet_error.set(None);
-                }
-                Err(e) => wallet_error.set(Some(e)),
-            }
-        }
-    });
-
-    let import_wallet = Callback::new({
-        let wallet = wallet.clone();
-        move |_: ()| {
-            let name = wallet_name.get();
-            let key = private_key_input.get();
-            if name.is_empty() || key.is_empty() {
-                wallet_error.set(Some("Please enter wallet name and private key".to_string()));
-                return;
-            }
-            match wallet.import_wallet(&name, &key) {
-                Ok(_) => {
-                    show_wallet_modal.set(false);
-                    wallet_error.set(None);
-                    private_key_input.set(String::new());
-                }
-                Err(e) => wallet_error.set(Some(e)),
-            }
-        }
-    });
-
-    let disconnect_wallet = Callback::new({
-        let wallet = wallet.clone();
-        move |_: ()| {
-            wallet.disconnect();
-        }
-    });
 
     view! {
         <div class="page page-bliss-industrial">
@@ -197,137 +142,21 @@ pub fn BlissPage() -> impl IntoView {
                     "strengthen the network, or simply build and earn."
                 </p>
 
-                // Wallet Connection (compact)
-                {move || {
-                    match wallet.status.get() {
-                        WalletStatus::Connected(info) => {
-                            view! {
-                                <div class="wallet-connected">
-                                    <div class="wallet-info">
-                                        <span class="wallet-label">"Connected"</span>
-                                        <span class="wallet-address">{shorten_address(&info.address)}</span>
-                                    </div>
-                                    <div class="wallet-balance">
-                                        <img src="/assets/icons/bliss.svg" alt="BLS" />
-                                        <span class="balance-value">{wallet.formatted_balance()}</span>
-                                    </div>
-                                    <button class="disconnect-btn" on:click=move |_| disconnect_wallet.run(())>
-                                        "Disconnect"
-                                    </button>
-                                </div>
-                            }.into_any()
-                        }
-                        WalletStatus::Connecting => {
-                            view! {
-                                <div class="wallet-connecting">
-                                    <span>"Connecting wallet..."</span>
-                                </div>
-                            }.into_any()
-                        }
-                        WalletStatus::Error(err) => {
-                            view! {
-                                <div class="wallet-error">
-                                    <span class="error-text">{err}</span>
-                                    <button class="connect-btn" on:click=move |_| show_wallet_modal.set(true)>
-                                        "Try Again"
-                                    </button>
-                                </div>
-                            }.into_any()
-                        }
-                        WalletStatus::Disconnected => {
-                            view! {
-                                <div class="wallet-disconnected">
-                                    <button class="connect-btn" on:click=move |_| show_wallet_modal.set(true)>
-                                        <img src="/assets/icons/wallet.svg" alt="Wallet" />
-                                        "Connect Wallet"
-                                    </button>
-                                </div>
-                            }.into_any()
-                        }
-                    }
-                }}
-            </section>
-
-            // Wallet Modal
-            {move || {
-                if show_wallet_modal.get() {
-                    view! {
-                        <div class="modal-overlay" on:click=move |_| show_wallet_modal.set(false)>
-                            <div class="modal wallet-modal" on:click=|e| e.stop_propagation()>
-                                <h2>"Connect Wallet"</h2>
-                                <div class="modal-tabs">
-                                    <button
-                                        class="tab-btn"
-                                        class:active=move || !import_mode.get()
-                                        on:click=move |_| import_mode.set(false)
-                                    >"Create New"</button>
-                                    <button
-                                        class="tab-btn"
-                                        class:active=move || import_mode.get()
-                                        on:click=move |_| import_mode.set(true)
-                                    >"Import Existing"</button>
-                                </div>
-                                <div class="modal-form">
-                                    <label>"Wallet Name"</label>
-                                    <input
-                                        type="text"
-                                        placeholder="My Bliss Wallet"
-                                        prop:value=move || wallet_name.get()
-                                        on:input=move |e| wallet_name.set(event_target_value(&e))
-                                    />
-                                    {move || {
-                                        if import_mode.get() {
-                                            view! {
-                                                <div class="import-fields">
-                                                    <label>"Private Key (hex)"</label>
-                                                    <input
-                                                        type="password"
-                                                        placeholder="Enter your private key..."
-                                                        prop:value=move || private_key_input.get()
-                                                        on:input=move |e| private_key_input.set(event_target_value(&e))
-                                                    />
-                                                    <p class="warning">"Never share your private key with anyone!"</p>
-                                                </div>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <p class="info">"A new wallet will be created with a secure keypair."</p>
-                                            }.into_any()
-                                        }
-                                    }}
-                                    {move || {
-                                        wallet_error.get().map(|err| view! {
-                                            <p class="error">{err}</p>
-                                        })
-                                    }}
-                                    <div class="modal-actions">
-                                        <button class="cancel-btn" on:click=move |_| show_wallet_modal.set(false)>
-                                            "Cancel"
-                                        </button>
-                                        {move || {
-                                            if import_mode.get() {
-                                                view! {
-                                                    <button class="submit-btn" on:click=move |_| import_wallet.run(())>
-                                                        "Import Wallet"
-                                                    </button>
-                                                }.into_any()
-                                            } else {
-                                                view! {
-                                                    <button class="submit-btn" on:click=move |_| create_wallet.run(())>
-                                                        "Create Wallet"
-                                                    </button>
-                                                }.into_any()
-                                            }
-                                        }}
-                                    </div>
-                                </div>
-                            </div>
+                // Identity wallet — your identity.toml IS your wallet
+                <div class="identity-wallet-section">
+                    <div class="identity-wallet-info">
+                        <img src="/assets/icons/wallet.svg" alt="Wallet" class="identity-wallet-icon" />
+                        <div>
+                            <p class="identity-wallet-title">"Your identity.toml is your wallet"</p>
+                            <p class="identity-wallet-desc">
+                                "No separate wallet needed. Your Ed25519 keypair holds your BLS. "
+                                "Add beneficiaries to your identity.toml to designate asset transfers."
+                            </p>
                         </div>
-                    }.into_any()
-                } else {
-                    view! { <div></div> }.into_any()
-                }
-            }}
+                    </div>
+                    <a href="/login" class="btn btn-primary identity-wallet-btn">"Sign In to View Balance"</a>
+                </div>
+            </section>
 
             // =========================================================
             // Live KPIs Dashboard
@@ -364,20 +193,16 @@ pub fn BlissPage() -> impl IntoView {
                                 <span class="kpi-value">{format!("{}", k.total_contributors)}</span>
                             </div>
                             <div class="kpi-card">
-                                <span class="kpi-label">"Avg Score"</span>
-                                <span class="kpi-value">{format!("{:.1}", k.avg_contribution_score)}</span>
+                                <span class="kpi-label">"Avg Bliss/Day"</span>
+                                <span class="kpi-value">{k.avg_bliss_earned.clone()}</span>
                             </div>
                             <div class="kpi-card">
                                 <span class="kpi-label">"Blocks Mined"</span>
                                 <span class="kpi-value">{format!("{}", k.blocks_mined)}</span>
                             </div>
                             <div class="kpi-card">
-                                <span class="kpi-label">"Monthly Distribution"</span>
-                                <span class="kpi-value">{k.monthly_distribution.clone()}</span>
-                            </div>
-                            <div class="kpi-card">
-                                <span class="kpi-label">"Registered Forks"</span>
-                                <span class="kpi-value">{k.forks_registered.to_string()}</span>
+                                <span class="kpi-label">"Daily Distribution"</span>
+                                <span class="kpi-value">{k.daily_distribution.clone()}</span>
                             </div>
                         }
                     }}
@@ -393,9 +218,23 @@ pub fn BlissPage() -> impl IntoView {
                     <h2>"Fund the Treasury"</h2>
                 </div>
                 <p class="section-subtitle">
-                    "Invest in the Bliss ecosystem. 100% of funds go to the treasury — "
-                    "no middlemen, no VC extraction. Your investment directly powers the network."
+                    "100% goes to the treasury. No middlemen, no VC extraction. "
+                    "Flat rate: 10 BLS per $1."
                 </p>
+
+                // One-time / Recurring toggle
+                <div class="payment-mode-tabs">
+                    <button
+                        class="payment-mode-tab"
+                        class:active=move || !is_recurring.get()
+                        on:click=move |_| is_recurring.set(false)
+                    >"One-time"</button>
+                    <button
+                        class="payment-mode-tab"
+                        class:active=move || is_recurring.get()
+                        on:click=move |_| is_recurring.set(true)
+                    >"Monthly"</button>
+                </div>
 
                 <div class="tier-grid">
                     {tiers.into_iter().enumerate().map(|(i, tier)| {
@@ -407,45 +246,67 @@ pub fn BlissPage() -> impl IntoView {
                                 on:click=move |_| selected_tier.set(Some(i))
                             >
                                 <h3 class="tier-name">{tier.name}</h3>
-                                <div class="tier-amount">{tier.amount_usd}</div>
-                                <div class="tier-bls">{tier.bls_estimate}</div>
+                                <div class="tier-price">{tier.amount_usd}
+                                    <span class="tier-frequency">
+                                        {move || if is_recurring.get() { "/mo" } else { "" }}
+                                    </span>
+                                </div>
+                                <div class="tier-bls">{tier.bls_estimate}
+                                    <span class="tier-frequency">
+                                        {move || if is_recurring.get() { "/mo" } else { "" }}
+                                    </span>
+                                </div>
                                 <p class="tier-desc">{tier.description}</p>
-                                <ul class="tier-perks">
-                                    {tier.perks.into_iter().map(|perk| {
-                                        view! { <li>{perk}</li> }
-                                    }).collect::<Vec<_>>()}
-                                </ul>
                             </div>
                         }
                     }).collect::<Vec<_>>()}
                 </div>
 
-                <div class="custom-invest">
-                    <label>"Custom Amount (USD)"</label>
-                    <div class="custom-input-row">
-                        <span class="currency-prefix">"$"</span>
+                <div class="custom-invest-card">
+                    <div class="custom-invest-header">
+                        <span class="custom-invest-label">"Or enter a custom amount"</span>
+                    </div>
+                    <div class="custom-invest-input">
+                        <span class="currency-symbol">"$"</span>
                         <input
                             type="number"
                             min="5"
-                            placeholder="Enter amount..."
+                            step="1"
+                            class="custom-amount-input"
+                            placeholder="0"
                             prop:value=move || custom_amount.get()
                             on:input=move |e| {
                                 custom_amount.set(event_target_value(&e));
                                 selected_tier.set(None);
                             }
                         />
+                        <span class="currency-code">"USD"</span>
                     </div>
+                    {move || {
+                        let amt = custom_amount.get().parse::<f64>().unwrap_or(0.0);
+                        if amt >= 5.0 {
+                            let bls = amt * 10.0; // flat rate: 10 BLS per $1
+                            Some(view! {
+                                <p class="custom-estimate">{format!("~{:.0} BLS", bls)}</p>
+                            })
+                        } else {
+                            None
+                        }
+                    }}
                 </div>
 
                 <button class="invest-btn" disabled=move || {
                     selected_tier.get().is_none() && custom_amount.get().is_empty()
                 }>
-                    "Invest via Stripe"
+                    {move || if is_recurring.get() { "Subscribe Monthly" } else { "Fund Treasury" }}
                 </button>
-                <p class="invest-note">
-                    "Powered by Stripe. Secure payment processing. "
-                    "BLS tokens are allocated to your connected wallet after payment confirmation."
-                </p>
+                <div class="invest-footer">
+                    <img src="/assets/icons/shield.svg" alt="Secure" class="invest-footer-icon" />
+                    <p class="invest-note">
+                        "Secure payment via Stripe. 100% goes to the treasury. "
+                        "BLS allocated to your wallet after confirmation."
+                    </p>
+                </div>
             </section>
 
             // =========================================================
@@ -528,6 +389,30 @@ pub fn BlissPage() -> impl IntoView {
                             "The Online Trust Registry lets the community flag forks that "
                             "deviate from fair rates. No central authority decides who earns "
                             "what — the network self-regulates."
+                        </p>
+                    </div>
+
+                    <div class="why-card">
+                        <div class="why-icon">
+                            <img src="/assets/icons/clock.svg" alt="Daily" />
+                        </div>
+                        <h3>"Daily Payouts"</h3>
+                        <p>
+                            "Get paid every day at UTC midnight — not monthly, not quarterly. "
+                            "Yesterday's contributions become today's earnings. "
+                            "The fastest feedback loop in crypto."
+                        </p>
+                    </div>
+
+                    <div class="why-card">
+                        <div class="why-icon">
+                            <img src="/assets/icons/network.svg" alt="KYC" />
+                        </div>
+                        <h3>"KYC Compliant"</h3>
+                        <p>
+                            "72 IRS QI-approved jurisdictions. Identity verified once, "
+                            "recognized everywhere. Sybil-proof by design — one person, "
+                            "one account, real contributions only."
                         </p>
                     </div>
                 </div>
@@ -657,6 +542,18 @@ pub fn BlissPage() -> impl IntoView {
                             </p>
                         </div>
                     </div>
+
+                    <div class="innovation-item">
+                        <span class="innovation-num">"06"</span>
+                        <div class="innovation-content">
+                            <h3>"Surgical Fork Revocation"</h3>
+                            <p>
+                                "If a fork is caught gaming the system, only the BLS it issued gets revoked. "
+                                "Your direct contributions and earnings from other forks are never touched. "
+                                "Per-fork ledger tracking makes revocation precise, not punitive."
+                            </p>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -675,16 +572,16 @@ pub fn BlissPage() -> impl IntoView {
                         <p>
                             "Use Eustress Engine. Your building, scripting, design, and collaboration "
                             "activities are automatically tracked. The Cloudflare witness co-signs your "
-                            "contributions and BLS is distributed monthly based on your score."
+                            "contributions and BLS is distributed daily at UTC midnight based on your score."
                         </p>
                     </div>
 
                     <div class="faq-item">
-                        <h3>"Is investing in the treasury like buying tokens?"</h3>
+                        <h3>"Where does treasury funding go?"</h3>
                         <p>
-                            "Not exactly. When you fund the treasury, you receive BLS at the current "
-                            "rate plus a tier bonus. The funds go directly to network operations, "
-                            "development, and infrastructure — not to founders or VCs."
+                            "100% goes to contributors. When you fund the treasury, you receive BLS "
+                            "at the flat rate (10 BLS per $1). The treasury drips daily to active "
+                            "contributors — your investment directly rewards the people building on Eustress."
                         </p>
                     </div>
 
@@ -700,9 +597,9 @@ pub fn BlissPage() -> impl IntoView {
                     <div class="faq-item">
                         <h3>"Do I need to run a Full Node?"</h3>
                         <p>
-                            "No. Light Node is the default and requires no setup. Full Node is for "
-                            "users who want to contribute infrastructure and earn a +10% bonus. "
-                            "Both are valid participation levels."
+                            "No. Light Node is the default and runs automatically when you use the engine. "
+                            "Full Node is opt-in for users who want to store blockchain data and produce "
+                            "blocks, earning a +10% BLS bonus."
                         </p>
                     </div>
 

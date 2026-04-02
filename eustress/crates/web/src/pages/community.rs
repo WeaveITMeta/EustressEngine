@@ -6,37 +6,105 @@
 // =============================================================================
 
 use leptos::prelude::*;
-use crate::api::{self, ApiClient, PublicUser, LeaderboardEntry as ApiLeaderboardEntry, CommunityStats};
+use leptos::task::spawn_local;
+use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
 
-// Helper function to trigger search (avoids closure move issues)
+const API_URL: &str = "https://api.eustress.dev";
+
+// API response types
+#[derive(Debug, Clone, Deserialize, Default)]
+struct StatsResponse {
+    total_users: u64,
+    total_simulations: u64,
+    total_plays: u64,
+    online_now: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SearchUser {
+    username: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    bliss_balance: u64,
+    is_verified: bool,
+    follower_count: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SearchResponse {
+    users: Vec<SearchUser>,
+    query: String,
+    ai_suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LeaderboardUser {
+    username: String,
+    avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LeaderboardApiEntry {
+    rank: u32,
+    user: LeaderboardUser,
+    score: u64,
+    score_label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LeaderboardResponse {
+    entries: Vec<LeaderboardApiEntry>,
+    total: u64,
+}
+
+/// Fetch stats from Cloudflare Worker
+async fn fetch_stats() -> StatsResponse {
+    match gloo_net::http::Request::get(&format!("{}/api/community/stats", API_URL))
+        .send().await
+    {
+        Ok(resp) if resp.ok() => {
+            resp.json::<StatsResponse>().await.unwrap_or_default()
+        }
+        _ => StatsResponse::default(),
+    }
+}
+
+/// Search users via Cloudflare Worker (with Grok AI fallback)
 fn trigger_search(
     search_query: RwSignal<String>,
-    search_results: RwSignal<Vec<UserResult>>,
+    search_results: RwSignal<Vec<SearchUser>>,
+    ai_suggestion: RwSignal<Option<String>>,
     is_searching: RwSignal<bool>,
-    api_url: String,
 ) {
     let query = search_query.get();
-    if query.is_empty() {
+    if query.len() < 2 {
         is_searching.set(false);
         search_results.set(vec![]);
+        ai_suggestion.set(None);
         return;
     }
-    
+
     is_searching.set(true);
-    
-    wasm_bindgen_futures::spawn_local(async move {
-        let client = ApiClient::new(&api_url);
-        
-        match api::community::search_users(&client, &query, None, Some(10)).await {
-            Ok(response) => {
-                search_results.set(response.users);
+    let encoded = urlencoding::encode(&query).to_string();
+
+    spawn_local(async move {
+        match gloo_net::http::Request::get(
+            &format!("{}/api/community/search?q={}&limit=10", API_URL, encoded)
+        ).send().await {
+            Ok(resp) if resp.ok() => {
+                if let Ok(data) = resp.json::<SearchResponse>().await {
+                    search_results.set(data.users);
+                    ai_suggestion.set(data.ai_suggestion);
+                }
             }
-            Err(e) => {
-                log::warn!("Search failed: {:?}", e);
+            _ => {
+                search_results.set(vec![]);
+                ai_suggestion.set(None);
             }
         }
+        is_searching.set(false);
     });
 }
 
@@ -55,8 +123,8 @@ pub struct LeaderboardEntry {
     pub badge: Option<String>,
 }
 
-impl From<ApiLeaderboardEntry> for LeaderboardEntry {
-    fn from(entry: ApiLeaderboardEntry) -> Self {
+impl From<LeaderboardApiEntry> for LeaderboardEntry {
+    fn from(entry: LeaderboardApiEntry) -> Self {
         let badge = match entry.rank {
             1 => Some("🏆".to_string()),
             2 => Some("🥈".to_string()),
@@ -74,9 +142,6 @@ impl From<ApiLeaderboardEntry> for LeaderboardEntry {
     }
 }
 
-/// User search result.
-pub type UserResult = PublicUser;
-
 // -----------------------------------------------------------------------------
 // Main Component
 // -----------------------------------------------------------------------------
@@ -84,58 +149,52 @@ pub type UserResult = PublicUser;
 /// Community page - leaderboards, user search, and social hub.
 #[component]
 pub fn CommunityPage() -> impl IntoView {
-    let app_state = expect_context::<AppState>();
-    
+    let _app_state = expect_context::<AppState>();
+
     // State
     let search_query = RwSignal::new(String::new());
     let is_searching = RwSignal::new(false);
-    
+    let ai_suggestion = RwSignal::new(Option::<String>::None);
+
     // API data state
     let leaderboard = RwSignal::new(Vec::<LeaderboardEntry>::new());
-    let search_results = RwSignal::new(Vec::<UserResult>::new());
-    let stats = RwSignal::new(Option::<CommunityStats>::None);
+    let search_results = RwSignal::new(Vec::<SearchUser>::new());
+    let total_users = RwSignal::new(0u64);
+    let total_simulations = RwSignal::new(0u64);
+    let total_plays = RwSignal::new(0u64);
     let is_loading = RwSignal::new(true);
-    
-    // Fetch community data on mount
-    let api_url = app_state.api_url.clone();
-    Effect::new(move |_| {
-        let api_url = api_url.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let client = ApiClient::new(&api_url);
-            
-            // Fetch leaderboard
-            match api::community::get_leaderboard(&client, "creators", None, None, Some(10)).await {
-                Ok(response) => {
-                    let entries: Vec<LeaderboardEntry> = response.entries.into_iter().map(Into::into).collect();
-                    leaderboard.set(entries);
-                }
-                Err(e) => {
-                    log::warn!("Failed to fetch leaderboard: {:?}", e);
-                }
+
+    // Fetch stats + leaderboard on mount
+    spawn_local(async move {
+        // Initial stats fetch
+        let stats = fetch_stats().await;
+        total_users.set(stats.total_users);
+        total_simulations.set(stats.total_simulations);
+        total_plays.set(stats.total_plays);
+
+        // Fetch leaderboard
+        if let Ok(resp) = gloo_net::http::Request::get(
+            &format!("{}/api/community/leaderboard", API_URL)
+        ).send().await {
+            if let Ok(data) = resp.json::<LeaderboardResponse>().await {
+                let entries: Vec<LeaderboardEntry> = data.entries.into_iter().map(Into::into).collect();
+                leaderboard.set(entries);
             }
-            
-            // Fetch community stats
-            match api::community::get_community_stats(&client).await {
-                Ok(response) => {
-                    stats.set(Some(response));
-                }
-                Err(e) => {
-                    log::warn!("Failed to fetch stats: {:?}", e);
-                }
-            }
-            
-            is_loading.set(false);
-        });
+        }
+
+        is_loading.set(false);
     });
-    
-    // Handle search - clone for each closure
-    let api_url_search1 = app_state.api_url.clone();
-    let api_url_search2 = app_state.api_url.clone();
-    
-    // Get stats for display
-    let total_users = move || stats.get().map(|s| s.total_users).unwrap_or(0);
-    let total_experiences = move || stats.get().map(|s| s.total_experiences).unwrap_or(0);
-    let total_plays = move || stats.get().map(|s| s.total_plays).unwrap_or(0);
+
+    // Poll stats every 5 seconds
+    spawn_local(async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(5000).await;
+            let stats = fetch_stats().await;
+            total_users.set(stats.total_users);
+            total_simulations.set(stats.total_simulations);
+            total_plays.set(stats.total_plays);
+        }
+    });
     
     view! {
         <div class="page page-community-industrial">
@@ -162,18 +221,18 @@ pub fn CommunityPage() -> impl IntoView {
                 // Stats Banner
                 <div class="community-stats">
                     <div class="stat-item">
-                        <span class="stat-number">{move || format_number(total_users())}</span>
-                        <span class="stat-label">"Users"</span>
+                        <span class="stat-number stat-animate">{move || format_number(total_users.get())}</span>
+                        <span class="stat-label">"USERS"</span>
                     </div>
                     <div class="stat-divider"></div>
                     <div class="stat-item">
-                        <span class="stat-number">{move || format_number(total_experiences())}</span>
-                        <span class="stat-label">"Experiences"</span>
+                        <span class="stat-number stat-animate">{move || format_number(total_simulations.get())}</span>
+                        <span class="stat-label">"SIMULATIONS"</span>
                     </div>
                     <div class="stat-divider"></div>
                     <div class="stat-item">
-                        <span class="stat-number">{move || format_number(total_plays())}</span>
-                        <span class="stat-label">"Total Plays"</span>
+                        <span class="stat-number stat-animate">{move || format_number(total_plays.get())}</span>
+                        <span class="stat-label">"TOTAL PLAYS"</span>
                     </div>
                 </div>
             </section>
@@ -186,58 +245,72 @@ pub fn CommunityPage() -> impl IntoView {
                             <circle cx="11" cy="11" r="8"></circle>
                             <path d="m21 21-4.3-4.3"></path>
                         </svg>
-                        <input 
+                        <input
                             type="text"
                             class="search-input-industrial"
-                            placeholder="Search by username, email, or Discord..."
+                            placeholder="Search by username..."
                             prop:value=move || search_query.get()
                             on:input=move |e| {
                                 search_query.set(event_target_value(&e));
                             }
                             on:keydown=move |e: web_sys::KeyboardEvent| {
                                 if e.key() == "Enter" {
-                                    trigger_search(search_query, search_results, is_searching, api_url_search1.clone());
+                                    trigger_search(search_query, search_results, ai_suggestion, is_searching);
                                 }
                             }
                         />
-                        <button class="search-btn" on:click=move |_| trigger_search(search_query, search_results, is_searching, api_url_search2.clone())>
+                        <button class="search-btn" on:click=move |_| trigger_search(search_query, search_results, ai_suggestion, is_searching)>
                             "Search"
                         </button>
                     </div>
-                    <p class="search-hint">"Supports Eustress usernames, email addresses, and Discord usernames"</p>
                 </div>
                 
                 // Search Results
-                <Show when=move || is_searching.get() && !search_query.get().is_empty()>
+                <Show when=move || !search_query.get().is_empty()>
                     <div class="search-results">
+                        // AI Suggestion
+                        {move || ai_suggestion.get().map(|s| view! {
+                            <div class="ai-suggestion">
+                                <span class="ai-label">"AI"</span>
+                                <p>{s}</p>
+                            </div>
+                        })}
+
                         <h3 class="results-title">"Search Results"</h3>
-                        <div class="results-grid">
-                            <For
-                                each=move || search_results.get()
-                                key=|user| user.username.clone()
-                                children=move |user| {
-                                    let profile_url = format!("/profile/{}", user.username);
-                                    view! {
-                                        <a href=profile_url class="user-card">
-                                            <div class="user-avatar">
-                                                <img src="/assets/icons/user.svg" alt="Avatar" />
-                                            </div>
-                                            <div class="user-info">
-                                                <div class="user-name-row">
-                                                    <span class="user-display-name">{user.display_name}</span>
-                                                    {user.is_verified.then(|| view! {
-                                                        <img src="/assets/icons/check.svg" alt="Verified" class="verified-icon" />
-                                                    })}
-                                                </div>
-                                                <span class="user-username">"@"{user.username}</span>
-                                                <span class="user-followers">{format_number(user.follower_count)}" followers"</span>
-                                            </div>
-                                            <img src="/assets/icons/arrow-right.svg" alt="View" class="user-arrow" />
-                                        </a>
-                                    }
-                                }
-                            />
-                        </div>
+                        {move || {
+                            let results = search_results.get();
+                            if results.is_empty() && !is_searching.get() {
+                                view! {
+                                    <p class="no-results">"No users found matching your search."</p>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <div class="results-grid">
+                                        {results.into_iter().map(|user| {
+                                            let profile_url = format!("/profile/{}", user.username);
+                                            view! {
+                                                <a href=profile_url class="user-card">
+                                                    <div class="user-avatar">
+                                                        <img src="/assets/icons/user.svg" alt="Avatar" />
+                                                    </div>
+                                                    <div class="user-info">
+                                                        <div class="user-name-row">
+                                                            <span class="user-display-name">{user.display_name.clone()}</span>
+                                                            {user.is_verified.then(|| view! {
+                                                                <img src="/assets/icons/check.svg" alt="Verified" class="verified-icon" />
+                                                            })}
+                                                        </div>
+                                                        <span class="user-username">"@"{user.username.clone()}</span>
+                                                        <span class="user-joined">"Member"</span>
+                                                    </div>
+                                                    <img src="/assets/icons/arrow-right.svg" alt="View" class="user-arrow" />
+                                                </a>
+                                            }
+                                        }).collect::<Vec<_>>()}
+                                    </div>
+                                }.into_any()
+                            }
+                        }}
                     </div>
                 </Show>
             </section>

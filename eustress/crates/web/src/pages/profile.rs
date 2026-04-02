@@ -5,9 +5,13 @@
 // =============================================================================
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
+use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
+
+const API_URL: &str = "https://api.eustress.dev";
 
 /// User profile data.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,12 +33,34 @@ pub struct UserProfile {
 }
 
 /// User badge/achievement.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Badge {
     pub id: String,
     pub name: String,
     pub icon: String,
     pub description: String,
+}
+
+/// API response for user profile.
+#[derive(Clone, Debug, Deserialize)]
+struct ProfileApiResponse {
+    username: String,
+    display_name: String,
+    bio: String,
+    avatar_url: Option<String>,
+    banner_url: Option<String>,
+    join_date: String,
+    follower_count: u64,
+    following_count: u64,
+    friend_count: Option<u64>,
+    simulation_count: u32,
+    total_plays: u64,
+    favorite_count: Option<u64>,
+    inventory_count: Option<u64>,
+    badges: Vec<Badge>,
+    is_verified: bool,
+    is_following: Option<bool>,
+    discord_linked: bool,
 }
 
 /// User's published experience.
@@ -52,8 +78,8 @@ pub fn ProfilePage() -> impl IntoView {
     let params = use_params_map();
     let app_state = expect_context::<AppState>();
     
-    // Get username from URL or use current user
-    let _username = move || {
+    // Get username from URL or current user
+    let username = move || {
         params.get().get("username").unwrap_or_else(|| {
             match app_state.auth.get() {
                 AuthState::Authenticated(user) => user.username,
@@ -61,82 +87,79 @@ pub fn ProfilePage() -> impl IntoView {
             }
         })
     };
-    // TODO: Use _username to fetch profile from API
-    
-    // Sample profile data (would come from API)
+
     let profile = RwSignal::new(UserProfile {
-        username: "PlayerOne".to_string(),
-        display_name: "Player One".to_string(),
-        bio: "Game developer and explorer. Creating awesome experiences since 2023. 🎮✨".to_string(),
+        username: String::new(),
+        display_name: String::new(),
+        bio: String::new(),
         avatar_url: None,
         banner_url: None,
-        join_date: "January 2023".to_string(),
-        follower_count: 12500,
-        following_count: 342,
-        experience_count: 8,
-        total_plays: 450000,
-        badges: vec![
-            Badge {
-                id: "creator".to_string(),
-                name: "Creator".to_string(),
-                icon: "🎨".to_string(),
-                description: "Published 5+ experiences".to_string(),
-            },
-            Badge {
-                id: "popular".to_string(),
-                name: "Popular".to_string(),
-                icon: "⭐".to_string(),
-                description: "100K+ total plays".to_string(),
-            },
-            Badge {
-                id: "veteran".to_string(),
-                name: "Veteran".to_string(),
-                icon: "🏆".to_string(),
-                description: "Member for 1+ year".to_string(),
-            },
-            Badge {
-                id: "social".to_string(),
-                name: "Social Butterfly".to_string(),
-                icon: "🦋".to_string(),
-                description: "1K+ followers".to_string(),
-            },
-        ],
-        is_verified: true,
+        join_date: String::new(),
+        follower_count: 0,
+        following_count: 0,
+        experience_count: 0,
+        total_plays: 0,
+        badges: vec![],
+        is_verified: false,
         is_following: false,
-        discord_linked: true,
+        discord_linked: false,
+    });
+
+    let experiences = RwSignal::new(Vec::<UserExperience>::new());
+    let profile_loading = RwSignal::new(true);
+    let profile_error = RwSignal::new(Option::<String>::None);
+
+    // Fetch profile from Cloudflare Worker
+    let uname = username();
+    spawn_local(async move {
+        let url = format!("{}/api/community/users/{}", API_URL, urlencoding::encode(&uname));
+        match gloo_net::http::Request::get(&url).send().await {
+            Ok(resp) if resp.ok() => {
+                if let Ok(data) = resp.json::<ProfileApiResponse>().await {
+                    profile.set(UserProfile {
+                        username: data.username.clone(),
+                        display_name: data.display_name,
+                        bio: data.bio,
+                        avatar_url: data.avatar_url,
+                        banner_url: data.banner_url,
+                        join_date: data.join_date,
+                        follower_count: data.follower_count,
+                        following_count: data.following_count,
+                        experience_count: data.simulation_count,
+                        total_plays: data.total_plays,
+                        badges: data.badges,
+                        is_verified: data.is_verified,
+                        is_following: data.is_following.unwrap_or(false),
+                        discord_linked: data.discord_linked,
+                    });
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                profile_error.set(Some(format!("User not found ({})", status)));
+            }
+            Err(e) => {
+                profile_error.set(Some(format!("Failed to load profile: {}", e)));
+            }
+        }
+        profile_loading.set(false);
     });
     
-    // User's experiences
-    let experiences = RwSignal::new(vec![
-        UserExperience {
-            id: "1".to_string(),
-            name: "Adventure World".to_string(),
-            thumbnail_url: None,
-            play_count: 125000,
-        },
-        UserExperience {
-            id: "2".to_string(),
-            name: "Puzzle Paradise".to_string(),
-            thumbnail_url: None,
-            play_count: 89000,
-        },
-        UserExperience {
-            id: "3".to_string(),
-            name: "Racing Rivals".to_string(),
-            thumbnail_url: None,
-            play_count: 156000,
-        },
-        UserExperience {
-            id: "4".to_string(),
-            name: "Space Station".to_string(),
-            thumbnail_url: None,
-            play_count: 80000,
-        },
-    ]);
-    
-    // Tab state
-    let active_tab = RwSignal::new("experiences".to_string());
-    
+    // Determine if this is the owner viewing their own profile
+    let is_own_profile = move || {
+        let auth = app_state.auth.get();
+        match auth {
+            AuthState::Authenticated(user) => {
+                let p = profile.get();
+                !p.username.is_empty() && user.username == p.username
+            }
+            _ => false,
+        }
+    };
+
+    // Default tab: Simulations for public view, Avatar for own profile
+    let active_tab = RwSignal::new("simulations".to_string());
+
     // Follow state
     let is_following = RwSignal::new(false);
     
@@ -176,12 +199,10 @@ pub fn ProfilePage() -> impl IntoView {
                         <div class="profile-name-row">
                             <div class="name-with-links">
                                 <h1 class="display-name">
-                                    {move || profile.get().display_name}
-                                    {move || profile.get().is_verified.then(|| view! {
-                                        <span class="verified-badge" title="Verified Creator">
-                                            <img src="/assets/icons/check.svg" alt="Verified" />
-                                        </span>
-                                    })}
+                                    {move || {
+                                        let p = profile.get();
+                                        if p.display_name.is_empty() { p.username.clone() } else { p.display_name.clone() }
+                                    }}
                                 </h1>
                                 // Linked account icons
                                 <div class="linked-accounts-icons">
@@ -221,7 +242,7 @@ pub fn ProfilePage() -> impl IntoView {
                         </div>
                         <div class="stat-card">
                             <span class="stat-value">{move || profile.get().experience_count.to_string()}</span>
-                            <span class="stat-label">"Experiences"</span>
+                            <span class="stat-label">"Simulations"</span>
                         </div>
                         <div class="stat-card">
                             <span class="stat-value">{move || format_number(profile.get().total_plays)}</span>
@@ -230,14 +251,29 @@ pub fn ProfilePage() -> impl IntoView {
                     </div>
                     
                     <div class="profile-actions">
-                        <button 
-                            class="btn-follow"
-                            class:following=move || is_following.get()
-                            on:click=move |_| is_following.update(|f| *f = !*f)
-                        >
-                            <img src="/assets/icons/user.svg" alt="Follow" />
-                            {move || if is_following.get() { "Following" } else { "Follow" }}
-                        </button>
+                        {move || {
+                            let auth = app_state.auth.get();
+                            let viewing_self = match &auth {
+                                AuthState::Authenticated(user) => user.username == profile.get().username,
+                                _ => false,
+                            };
+                            let is_authed = auth.is_authenticated();
+
+                            if is_authed && !viewing_self && !profile.get().username.is_empty() {
+                                Some(view! {
+                                    <button
+                                        class="btn-follow"
+                                        class:following=move || is_following.get()
+                                        on:click=move |_| is_following.update(|f| *f = !*f)
+                                    >
+                                        <img src="/assets/icons/user.svg" alt="Follow" />
+                                        {move || if is_following.get() { "Following" } else { "Follow" }}
+                                    </button>
+                                })
+                            } else {
+                                None
+                            }
+                        }}
                         <button class="btn-icon" title="Share">
                             <img src="/assets/icons/upload.svg" alt="Share" />
                         </button>
@@ -266,45 +302,222 @@ pub fn ProfilePage() -> impl IntoView {
                     </div>
                 </section>
                 
-                // Content tabs
+                // Content tabs — public shows Simulations only, owner sees all
                 <div class="profile-tabs">
-                    <button 
+                    // Simulations — always visible (public)
+                    <button
                         class="profile-tab"
-                        class:active=move || active_tab.get() == "experiences"
-                        on:click=move |_| active_tab.set("experiences".to_string())
+                        class:active=move || active_tab.get() == "simulations"
+                        on:click=move |_| active_tab.set("simulations".to_string())
                     >
-                        <img src="/assets/icons/gamepad.svg" alt="Experiences" />
-                        "Experiences"
+                        <img src="/assets/icons/gamepad.svg" alt="Simulations" />
+                        "Simulations"
                     </button>
-                    <button 
-                        class="profile-tab"
-                        class:active=move || active_tab.get() == "favorites"
-                        on:click=move |_| active_tab.set("favorites".to_string())
-                    >
-                        <img src="/assets/icons/heart.svg" alt="Favorites" />
-                        "Favorites"
-                    </button>
-                    <button 
-                        class="profile-tab"
-                        class:active=move || active_tab.get() == "friends"
-                        on:click=move |_| active_tab.set("friends".to_string())
-                    >
-                        <img src="/assets/icons/users.svg" alt="Friends" />
-                        "Friends"
-                    </button>
-                    <button 
-                        class="profile-tab"
-                        class:active=move || active_tab.get() == "inventory"
-                        on:click=move |_| active_tab.set("inventory".to_string())
-                    >
-                        <img src="/assets/icons/archive.svg" alt="Inventory" />
-                        "Inventory"
-                    </button>
+
+                    // Private tabs — only visible to profile owner
+                    {move || is_own_profile().then(|| view! {
+                        <button
+                            class="profile-tab"
+                            class:active=move || active_tab.get() == "avatar"
+                            on:click=move |_| active_tab.set("avatar".to_string())
+                        >
+                            <img src="/assets/icons/user.svg" alt="Avatar" />
+                            "Avatar"
+                        </button>
+                        <button
+                            class="profile-tab"
+                            class:active=move || active_tab.get() == "favorites"
+                            on:click=move |_| active_tab.set("favorites".to_string())
+                        >
+                            <img src="/assets/icons/heart.svg" alt="Favorites" />
+                            "Favorites"
+                        </button>
+                        <button
+                            class="profile-tab"
+                            class:active=move || active_tab.get() == "friends"
+                            on:click=move |_| active_tab.set("friends".to_string())
+                        >
+                            <img src="/assets/icons/users.svg" alt="Friends" />
+                            "Friends"
+                        </button>
+                        <button
+                            class="profile-tab"
+                            class:active=move || active_tab.get() == "inventory"
+                            on:click=move |_| active_tab.set("inventory".to_string())
+                        >
+                            <img src="/assets/icons/archive.svg" alt="Inventory" />
+                            "Inventory"
+                        </button>
+                    })}
                 </div>
-                
+
                 // Tab content
                 <div class="profile-tab-content">
-                    <Show when=move || active_tab.get() == "experiences">
+                    // Avatar — private only
+                    <Show when=move || active_tab.get() == "avatar" && is_own_profile()>
+                        <div class="avatar-customizer">
+                            <div class="avatar-preview-section">
+                                // 3D character preview (placeholder — connects to engine's character system)
+                                <div class="avatar-viewport">
+                                    <div class="avatar-3d-placeholder">
+                                        <img src="/assets/icons/user.svg" alt="Avatar" class="avatar-placeholder-icon" />
+                                        <p class="avatar-placeholder-text">"3D Preview"</p>
+                                    </div>
+                                    <div class="avatar-rotate-hint">"Drag to rotate"</div>
+                                </div>
+                            </div>
+
+                            <div class="avatar-controls-section">
+                                <h3 class="avatar-section-title">"Customize Character"</h3>
+
+                                // Body
+                                <div class="avatar-category">
+                                    <h4 class="avatar-category-title">"Body"</h4>
+                                    <div class="avatar-options">
+                                        <div class="avatar-option">
+                                            <label>"Height"</label>
+                                            <input type="range" min="0" max="100" value="50" class="avatar-slider" />
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Build"</label>
+                                            <input type="range" min="0" max="100" value="50" class="avatar-slider" />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                // Head
+                                <div class="avatar-category">
+                                    <h4 class="avatar-category-title">"Head"</h4>
+                                    <div class="avatar-options">
+                                        <div class="avatar-option">
+                                            <label>"Face Shape"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"Round"</option>
+                                                <option>"Square"</option>
+                                                <option>"Oval"</option>
+                                                <option>"Diamond"</option>
+                                            </select>
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Skin Tone"</label>
+                                            <div class="color-swatches">
+                                                <button class="swatch" style="background: #f5d0a9"></button>
+                                                <button class="swatch" style="background: #d4a574"></button>
+                                                <button class="swatch" style="background: #a0754a"></button>
+                                                <button class="swatch" style="background: #6b4226"></button>
+                                                <button class="swatch" style="background: #3d2314"></button>
+                                                <button class="swatch" style="background: #f0c8c8"></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                // Hair
+                                <div class="avatar-category">
+                                    <h4 class="avatar-category-title">"Hair"</h4>
+                                    <div class="avatar-options">
+                                        <div class="avatar-option">
+                                            <label>"Style"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"Short"</option>
+                                                <option>"Medium"</option>
+                                                <option>"Long"</option>
+                                                <option>"Buzz"</option>
+                                                <option>"Mohawk"</option>
+                                                <option>"Ponytail"</option>
+                                                <option>"Bald"</option>
+                                            </select>
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Color"</label>
+                                            <div class="color-swatches">
+                                                <button class="swatch" style="background: #1a1a1a"></button>
+                                                <button class="swatch" style="background: #3b2a1a"></button>
+                                                <button class="swatch" style="background: #5a3825"></button>
+                                                <button class="swatch" style="background: #8b6914"></button>
+                                                <button class="swatch" style="background: #c4892a"></button>
+                                                <button class="swatch" style="background: #d4a04a"></button>
+                                                <button class="swatch" style="background: #c4500f"></button>
+                                                <button class="swatch" style="background: #a0a0a0"></button>
+                                                <button class="swatch" style="background: #e0e0e0"></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                // Clothing
+                                <div class="avatar-category">
+                                    <h4 class="avatar-category-title">"Clothing"</h4>
+                                    <div class="avatar-options">
+                                        <div class="avatar-option">
+                                            <label>"Top"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"T-Shirt"</option>
+                                                <option>"Hoodie"</option>
+                                                <option>"Jacket"</option>
+                                                <option>"Tank Top"</option>
+                                                <option>"Suit"</option>
+                                            </select>
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Bottom"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"Jeans"</option>
+                                                <option>"Shorts"</option>
+                                                <option>"Pants"</option>
+                                                <option>"Skirt"</option>
+                                                <option>"Suit Pants"</option>
+                                            </select>
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Shirt Color"</label>
+                                            <div class="color-swatches">
+                                                <button class="swatch" style="background: #ffffff"></button>
+                                                <button class="swatch" style="background: #1a1a1a"></button>
+                                                <button class="swatch" style="background: #3366ff"></button>
+                                                <button class="swatch" style="background: #ff3333"></button>
+                                                <button class="swatch" style="background: #33cc33"></button>
+                                                <button class="swatch" style="background: #ffcc00"></button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                // Accessories
+                                <div class="avatar-category">
+                                    <h4 class="avatar-category-title">"Accessories"</h4>
+                                    <div class="avatar-options">
+                                        <div class="avatar-option">
+                                            <label>"Hat"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"None"</option>
+                                                <option>"Cap"</option>
+                                                <option>"Beanie"</option>
+                                                <option>"Top Hat"</option>
+                                                <option>"Headband"</option>
+                                            </select>
+                                        </div>
+                                        <div class="avatar-option">
+                                            <label>"Glasses"</label>
+                                            <select class="form-input avatar-select">
+                                                <option>"None"</option>
+                                                <option>"Round"</option>
+                                                <option>"Square"</option>
+                                                <option>"Aviator"</option>
+                                                <option>"Sunglasses"</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <button class="btn btn-primary avatar-save-btn">
+                                    "Save Avatar"
+                                </button>
+                            </div>
+                        </div>
+                    </Show>
+
+                    <Show when=move || active_tab.get() == "simulations">
                         <div class="experiences-grid">
                             <For
                                 each=move || experiences.get()
@@ -316,7 +529,7 @@ pub fn ProfilePage() -> impl IntoView {
                         </div>
                     </Show>
                     
-                    <Show when=move || active_tab.get() == "favorites">
+                    <Show when=move || active_tab.get() == "favorites" && is_own_profile()>
                         <div class="empty-state">
                             <img src="/assets/icons/heart.svg" alt="No favorites" class="empty-icon" />
                             <h3>"No favorites yet"</h3>
@@ -324,7 +537,7 @@ pub fn ProfilePage() -> impl IntoView {
                         </div>
                     </Show>
                     
-                    <Show when=move || active_tab.get() == "friends">
+                    <Show when=move || active_tab.get() == "friends" && is_own_profile()>
                         <div class="friends-grid">
                             <FriendCard name="GamerPro" status="online" />
                             <FriendCard name="PixelArtist" status="in-game" />
@@ -333,7 +546,7 @@ pub fn ProfilePage() -> impl IntoView {
                         </div>
                     </Show>
                     
-                    <Show when=move || active_tab.get() == "inventory">
+                    <Show when=move || active_tab.get() == "inventory" && is_own_profile()>
                         <div class="inventory-grid">
                             <InventoryItem name="Golden Sword" rarity="legendary" />
                             <InventoryItem name="Space Helmet" rarity="rare" />

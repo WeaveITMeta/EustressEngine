@@ -14,8 +14,16 @@
       "Bash(grep -r \"LOD\\\\|proximity\\\\|distance.*update\\\\|spatial\" /e/Workspace/EustressEngine/eustress/crates/common/src/realism/ --include=*.rs)",
       "Bash(grep -r \"BasePart\\\\|update.*property\\\\|apply.*property\" /e/Workspace/EustressEngine/eustress/crates/common/src/realism/ --include=*.rs)",
       "Bash(grep -r \"FixedUpdate\\\\|fixed.*update\\\\|delta_secs\\\\|frame.*rate\" /e/Workspace/EustressEngine/eustress/crates/common/src/ --include=*.rs)",
-      "Bash(grep -r \"kernel\\\\|law\\\\|physics.*update\" /e/Workspace/EustressEngine/eustress/crates/workshop/src/ --include=*.rs)"
-    ],
-    "dangerouslySkipPermissions": true
+      "Bash(grep -r \"kernel\\\\|law\\\\|physics.*update\" /e/Workspace/EustressEngine/eustress/crates/workshop/src/ --include=*.rs)",
+      "Bash(grep -E \"^[^/]*Cargo.toml$|workspace\")",
+      "Bash(find E:WorkspaceEustressEngine -name *.md -type f -exec grep -l \"eustress.*stress\\\\|good stress\" {})",
+      "Bash(2)",
+      "Bash(xargs wc:*)",
+      "Bash(find E:WorkspaceEustressEngine -type f -name *.rs -path */witness/*)",
+      "Bash(grep -E \"\\\\.\\(md|rs\\)$\")",
+      "Bash(wrangler deploy:*)",
+      "Bash(wrangler kv:namespace create SOCIAL)",
+      "Bash(wrangler kv:*)"
+    ]
   }
 }

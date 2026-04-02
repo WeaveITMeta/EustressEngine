@@ -21,6 +21,9 @@
 mod components;
 mod embedder;
 mod error;
+mod knowledge;
+mod ledger;
+mod memory;
 mod ontology;
 #[cfg(feature = "persistence")]
 mod persistence;
@@ -34,12 +37,22 @@ mod systems;
 pub use components::*;
 pub use embedder::*;
 pub use error::*;
+pub use knowledge::{ConceptNode, KnowledgeGraph, RelationEdge, RelationType};
+pub use ledger::{
+    DiffResult, ProvenanceRecord, ProvenanceSource, RollbackPolicy, TraitDelta, TraitLedger,
+    TraitRevision, TraitValue,
+};
+pub use memory::{Memory, MemoryQuery, MemoryStore, MemoryType};
 pub use ontology::*;
 #[cfg(feature = "persistence")]
-pub use persistence::*;
+pub use persistence::{
+    IndexStats, KnowledgeStore, PersistenceConfig, PersistentIndex, PersistentOntologyIndex,
+};
 #[cfg(feature = "persistence-rocksdb")]
 pub use rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
-pub use plugin::*;
+pub use plugin::{AutoIndexPlugin, EmbedvecAppExt, EmbedvecBuilder, EmbedvecPlugin};
+#[cfg(feature = "persistence")]
+pub use plugin::{KnowledgeStorePlugin, KnowledgeStoreResource, SpaceRootRef};
 pub use resource::*;
 pub use spatial::*;
 pub use systems::*;
@@ -49,12 +62,22 @@ pub mod prelude {
     pub use crate::components::{EmbeddedComponent, EmbeddingMetadata};
     pub use crate::embedder::{PropertyEmbedder, ReflectPropertyEmbedder, SimpleHashEmbedder};
     pub use crate::error::{EmbedvecError, Result};
-    pub use crate::ontology::{OntologyTree, OntologyNode, OntologyIndex, PropertySchema, PropertyType, InstancePath};
+    pub use crate::knowledge::{ConceptNode, KnowledgeGraph, RelationEdge, RelationType};
+    pub use crate::ledger::{
+        ProvenanceRecord, ProvenanceSource, TraitDelta, TraitLedger, TraitValue,
+    };
+    pub use crate::memory::{Memory, MemoryQuery, MemoryStore, MemoryType};
+    pub use crate::ontology::{
+        InstancePath, OntologyIndex, OntologyNode, OntologyTree, PropertySchema, PropertyType,
+    };
     #[cfg(feature = "persistence")]
-    pub use crate::persistence::{PersistentIndex, PersistentOntologyIndex, PersistenceConfig, IndexStats};
+    pub use crate::persistence::{
+        IndexStats, KnowledgeStore, PersistenceConfig, PersistentIndex, PersistentOntologyIndex,
+    };
     #[cfg(feature = "persistence-rocksdb")]
     pub use crate::rocksdb_store::{RocksConfig, RocksIndex, RocksOntologyIndex};
     pub use crate::plugin::{AutoIndexPlugin, EmbedvecPlugin};
-    pub use crate::resource::{EmbedvecIndex, EmbedvecResource, SearchResult};
+    pub use crate::resource::{EmbedvecIndex, EmbedvecResource, IndexConfig, SearchResult};
     pub use crate::spatial::{SpatialContextEmbedder, SpatialFeatures, SpatialTrainingRecord};
+    pub use embedvec::quantization::Quantization;
 }

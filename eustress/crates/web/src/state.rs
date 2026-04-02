@@ -22,10 +22,10 @@ use uuid::Uuid;
 pub struct User {
     pub id: Uuid,
     pub username: String,
-    pub email: String,
+    pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub discord_id: Option<String>,
-    pub bliss_balance: u64,  // Bliss currency balance
+    pub bliss_balance: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

@@ -19,13 +19,22 @@ id = "be98270d8e594722bed1508f11176fab"
 binding = "KYC_STATUS"
 id = "2a5efced14784736a8a1cc5368e72395"
 
+[[kv_namespaces]]
+binding = "SOCIAL"
+id = "0e94f37a45eb49fea4defc9ba38dc46b"
+
+[[kv_namespaces]]
+binding = "INVENTORY"
+id = "4ba9409d9b4d4175a6dcecabd697ac99"
+
 # R2 bucket for KYC documents (global, jurisdiction prefix in object key)
 [[r2_buckets]]
 binding = "KYC_BUCKET"
 bucket_name = "eustress-kyc-documents"
 
-# Secrets (set via: wrangler secret put JWT_SECRET)
-# JWT_SECRET — persistent JWT signing key
+# Secrets (set via wrangler secret put):
+# JWT_SECRET   — persistent JWT signing key
+# GROK_API_KEY — xAI Grok API key for AI-enhanced search
 
 [vars]
 FORK_ID = "eustress.dev"

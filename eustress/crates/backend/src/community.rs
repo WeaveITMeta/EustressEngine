@@ -14,8 +14,17 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::db::UserResponse;
 use crate::error::ApiError;
+
+/// User response for community endpoints.
+/// Users live on Cloudflare KV — this is a lightweight representation.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserResponse {
+    pub id: String,
+    pub username: String,
+    pub avatar_url: Option<String>,
+    pub bliss_balance: i64,
+}
 use crate::AppState;
 
 // =============================================================================

@@ -382,7 +382,7 @@ WebTransport protocol (QUIC-based) for bidirectional streaming:
 - [ ] Email automation (CRON reminders, reply parsing)
 
 ### Q4 2026
-- [ ] CLI tool for AI agents (`eustress-mfg`)
+- [ ] CLI tool for AI agents (`eustress-cli`)
 - [ ] Slint UI dashboard in Eustress Studio
 - [ ] Quality SLA enforcement (auto-suspend, auto-reallocate)
 - [ ] Multi-product portfolio management

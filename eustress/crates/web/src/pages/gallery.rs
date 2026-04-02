@@ -145,8 +145,8 @@ pub fn GalleryPage() -> impl IntoView {
                     <span class="header-tag">"GALLERY"</span>
                     <div class="header-line"></div>
                 </div>
-                <h1 class="gallery-title">"Experience Gallery"</h1>
-                <p class="gallery-subtitle">"Explore experiences created by our community"</p>
+                <h1 class="gallery-title">"Simulation Gallery"</h1>
+                <p class="gallery-subtitle">"Explore creations from our community"</p>
                 
                 <div class="search-box">
                     <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

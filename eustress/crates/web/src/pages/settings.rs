@@ -39,7 +39,7 @@ pub fn SettingsPage() -> impl IntoView {
     // Get current user info
     let user_email = move || {
         match auth.get() {
-            AuthState::Authenticated(user) => user.email.clone(),
+            AuthState::Authenticated(user) => user.email.clone().unwrap_or_default(),
             _ => String::new(),
         }
     };

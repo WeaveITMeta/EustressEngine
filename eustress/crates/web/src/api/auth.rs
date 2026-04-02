@@ -156,6 +156,7 @@ pub struct IdentityRegisterRequest {
     pub birthday: Option<String>,
     pub id_type: Option<String>,
     pub id_hash: Option<String>,
+    pub kyc_session_id: Option<String>,
 }
 
 pub async fn register_identity(
@@ -165,6 +166,7 @@ pub async fn register_identity(
     birthday: Option<&str>,
     id_type: Option<&str>,
     id_hash: Option<&str>,
+    kyc_session_id: Option<&str>,
 ) -> Result<AuthResponse, ApiError> {
     let request = IdentityRegisterRequest {
         username: username.to_string(),
@@ -172,6 +174,7 @@ pub async fn register_identity(
         birthday: birthday.map(|s| s.to_string()),
         id_type: id_type.map(|s| s.to_string()),
         id_hash: id_hash.map(|s| s.to_string()),
+        kyc_session_id: kyc_session_id.map(|s| s.to_string()),
     };
 
     let response: AuthResponse = client.post("/api/auth/register", &request).await?;

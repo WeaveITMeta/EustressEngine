@@ -144,7 +144,13 @@ pub fn CentralNav(
                         }
                         _ => {
                             view! {
-                                <a href="/login" class="central-nav-link nav-cta">"Sign In"</a>
+                                <div class="nav-user-section">
+                                    <a href="/bliss" class="nav-bliss">
+                                        <img src="/assets/icons/bliss.svg" alt="Bliss" class="bliss-icon" />
+                                        <span class="bliss-label">"Bliss"</span>
+                                    </a>
+                                    <a href="/login" class="central-nav-link nav-cta">"Sign In"</a>
+                                </div>
                             }.into_any()
                         }
                     }

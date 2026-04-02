@@ -97,3 +97,4 @@ incremental/
 **/deps/*.d
 **/deps/*.rlib
 **/deps/*.rmeta
+infrastructure/cloudflare/api/.wrangler/

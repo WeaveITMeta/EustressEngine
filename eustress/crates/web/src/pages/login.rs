@@ -42,6 +42,7 @@ pub fn LoginPage() -> impl IntoView {
     let reg_id_back_uploaded = RwSignal::new(false);
     let reg_id_needs_back = RwSignal::new(false); // passport = no back needed
     let reg_step = RwSignal::new(1_u32); // 1=form, 2=verify, 3=done
+    let kyc_session_id = RwSignal::new(uuid::Uuid::new_v4().to_string()); // links uploads to registration
 
     // Jurisdiction detection (from Cloudflare cdn-cgi/trace)
     let detected_country = RwSignal::new("US".to_string());
@@ -461,9 +462,9 @@ pub fn LoginPage() -> impl IntoView {
                                                             let name = file.name();
                                                             reg_id_front_name.set(name.clone());
                                                             let id_type = reg_id_type.get();
-                                                            // Upload to R2 via Cloudflare Worker
+                                                            let sess = kyc_session_id.get();
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "front", &id_type).await {
+                                                                match upload_id_document(&file, "front", &id_type, &sess).await {
                                                                     Ok(_) => reg_id_front_uploaded.set(true),
                                                                     Err(e) => {
                                                                         error.set(Some(format!("Front upload failed: {}", e)));
@@ -509,8 +510,9 @@ pub fn LoginPage() -> impl IntoView {
                                                             let name = file.name();
                                                             reg_id_back_name.set(name.clone());
                                                             let id_type = reg_id_type.get();
+                                                            let sess = kyc_session_id.get();
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "back", &id_type).await {
+                                                                match upload_id_document(&file, "back", &id_type, &sess).await {
                                                                     Ok(_) => reg_id_back_uploaded.set(true),
                                                                     Err(e) => {
                                                                         error.set(Some(format!("Back upload failed: {}", e)));
@@ -624,6 +626,7 @@ pub fn LoginPage() -> impl IntoView {
                                                         let nav = nav_fn.get_value();
                                                         spawn_local(async move {
                                                             let client = ApiClient::new(&api_url);
+                                                            let sess = kyc_session_id.get();
                                                             match api::register_identity(
                                                                 &client,
                                                                 &uname_clone,
@@ -631,6 +634,7 @@ pub fn LoginPage() -> impl IntoView {
                                                                 Some(&bday_clone),
                                                                 Some(&idt_clone),
                                                                 Some(&id_hash),
+                                                                Some(&sess),
                                                             ).await {
                                                                 Ok(response) => {
                                                                     loading.set(false);
@@ -691,6 +695,7 @@ async fn upload_id_document(
     file: &web_sys::File,
     side: &str,
     id_type: &str,
+    session_id: &str,
 ) -> Result<String, String> {
     let form_data = web_sys::FormData::new()
         .map_err(|_| "Failed to create FormData".to_string())?;
@@ -703,12 +708,18 @@ async fn upload_id_document(
     form_data
         .append_with_str("id_type", id_type)
         .map_err(|_| "Failed to append id_type".to_string())?;
+    form_data
+        .append_with_str("session_id", session_id)
+        .map_err(|_| "Failed to append session_id".to_string())?;
 
     // KYC uploads always go to Cloudflare Worker (R2 is only there)
     let api_url = "https://api.eustress.dev".to_string();
 
     // Get auth token if available
-    let token: Option<String> = gloo_storage::LocalStorage::get("auth_token").ok();
+    let token: Option<String> = {
+        use gloo_storage::Storage;
+        gloo_storage::LocalStorage::get("auth_token").ok()
+    };
 
     let mut request = gloo_net::http::Request::post(&format!("{}/api/kyc/upload", api_url));
     if let Some(ref t) = token {

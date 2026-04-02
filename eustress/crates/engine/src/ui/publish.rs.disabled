@@ -9,7 +9,7 @@ use bevy_egui::egui;
 use std::sync::{Arc, Mutex};
 
 /// API base URL for experiences service
-const EXPERIENCES_API_URL: &str = "https://experiences.eustress.dev";
+const EXPERIENCES_API_URL: &str = "https://simulations.eustress.dev";
 
 /// State for the publish dialog
 #[derive(Resource)]

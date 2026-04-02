@@ -1,9 +1,23 @@
-//! Persistence - Sled-based storage for embedvec indices
+//! Persistence - Sled-based storage for embedvec indices and knowledge stores
 //!
 //! ## Table of Contents
-//! 1. PersistentIndex - Sled-backed vector index
-//! 2. PersistenceConfig - Configuration for storage
-//! 3. Serialization helpers
+//! 1. PersistenceConfig  — path, cache size, flush interval
+//! 2. PersistentIndex    — Sled-backed vector index (embeddings + entity mappings)
+//! 3. PersistentOntologyIndex — ontology-aware persistent index
+//! 4. KnowledgeStore     — Sled-backed persistence for KnowledgeGraph, MemoryStore, TraitLedger
+//!
+//! ## Persistence Scope
+//! All four stores share a single Sled database opened at `PersistenceConfig::path`.
+//! Each store uses a dedicated named tree to avoid key collisions:
+//!
+//! | Store          | Sled Tree         | Key format                   |
+//! |----------------|-------------------|------------------------------|
+//! | Embeddings     | `embeddings`      | UUID bytes                   |
+//! | Entity index   | `entity_index`    | u64 be-bytes                 |
+//! | Class index    | `class_index`     | "class_path:UUID"            |
+//! | KnowledgeGraph | `knowledge_graph` | `"kg"` (single JSON blob)    |
+//! | MemoryStore    | `memory_store`    | UUID bytes per Memory entry  |
+//! | TraitLedger    | `trait_ledger`    | `"ledger:{name}"` per ledger |
 
 use crate::components::EmbeddingMetadata;
 use crate::error::{EmbedvecError, Result};
@@ -32,7 +46,9 @@ impl Default for PersistenceConfig {
             path: "./embedvec_db".to_string(),
             cache_size: 1024 * 1024 * 1024, // 1GB
             flush_interval_ms: 500,
-            compression: true,
+            // Sled compression requires the 'compression' cargo feature on the sled crate.
+            // Disabled by default to avoid "Unsupported: compression feature must be enabled".
+            compression: false,
         }
     }
 }
@@ -54,6 +70,88 @@ impl PersistenceConfig {
     pub fn with_flush_interval(mut self, ms: u64) -> Self {
         self.flush_interval_ms = ms;
         self
+    }
+
+    /// Derive persistence config from an EEP Space root.
+    ///
+    /// ## Path resolution
+    /// Preferred: `<universe_root>/knowledge/<space_name>/knowledge.db`
+    /// - The `knowledge/` directory lives at the Universe level and is already
+    ///   present in ARC-AGI-3 / similar universes.
+    /// - Each space gets its own subdirectory, so knowledge is separated per space
+    ///   but co-located under the universe for easy cross-space introspection.
+    ///
+    /// Fallback (if universe root cannot be resolved):
+    /// `<space_root>/.eustress/local/knowledge.db`
+    /// - `.eustress/local/` is scaffolded and gitignored by every EEP space.
+    ///
+    /// ## Universe root resolution
+    /// Follows the same logic as `universe_root_for_path()` in `space/mod.rs`:
+    /// walks up from `space_root` to find the universe directory (the directory
+    /// two levels up from the workspace root that contains `spaces/`).
+    pub fn for_space(space_root: &std::path::Path) -> Self {
+        let db_path = Self::resolve_db_path(space_root);
+        // Ensure the parent directory exists (creates knowledge/<space_name>/ if needed)
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Self {
+            path: db_path.to_string_lossy().into_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// Compute the canonical knowledge.db path for a space.
+    /// Exported so the plugin can display/log the resolved path.
+    pub fn resolve_db_path(space_root: &std::path::Path) -> std::path::PathBuf {
+        // Try to find the universe root by walking up:
+        // workspace/    ← Documents/Eustress/
+        //   <universe>/ ← ARC-AGI-3/ or Universe1/
+        //     spaces/
+        //       <space>/ ← space_root
+        let universe_root = Self::find_universe_root(space_root);
+
+        let space_name = space_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        match universe_root {
+            Some(universe) => universe
+                .join("knowledge")
+                .join(&space_name)
+                .join("knowledge.db"),
+            None => space_root
+                .join(".eustress")
+                .join("local")
+                .join("knowledge.db"),
+        }
+    }
+
+    /// Walk up from space_root to find the containing universe directory.
+    /// Expected layout: `<workspace>/<universe>/spaces/<space_name>/`
+    fn find_universe_root(space_root: &std::path::Path) -> Option<std::path::PathBuf> {
+        // spaces/<space_name>  →  parent = spaces/  →  parent = <universe>/
+        let spaces_dir = space_root.parent()?;
+        let universe_candidate = spaces_dir.parent()?;
+
+        // Validate: universe must contain a "spaces" subdirectory
+        if spaces_dir.file_name().map(|n| n == "spaces").unwrap_or(false)
+            && universe_candidate.is_dir()
+        {
+            return Some(universe_candidate.to_path_buf());
+        }
+
+        // Fallback: space is directly inside universe (no spaces/ subdir)
+        // <workspace>/<universe>/<space_name>/
+        let direct_parent = space_root.parent()?;
+        let grandparent = direct_parent.parent()?;
+        // Grandparent should be the workspace root (Documents/Eustress)
+        if grandparent.is_dir() {
+            return Some(direct_parent.to_path_buf());
+        }
+
+        None
     }
 }
 
@@ -656,6 +754,414 @@ mod tests {
 
             assert_eq!(index.len(), 1);
             assert!(index.contains(entity));
+        }
+    }
+}
+
+// ============================================================================
+// 4. KnowledgeStore — Sled-backed persistence for knowledge structures
+// ============================================================================
+
+use crate::knowledge::KnowledgeGraph;
+use crate::memory::{Memory, MemoryStore};
+use crate::ledger::TraitLedger;
+
+/// Sled tree name constants for knowledge persistence
+mod tree_names {
+    pub const KNOWLEDGE_GRAPH: &str = "knowledge_graph";
+    pub const MEMORY_STORE:    &str = "memory_store";
+    pub const TRAIT_LEDGER:    &str = "trait_ledger";
+}
+
+/// Persistent store for KnowledgeGraph, MemoryStore, and TraitLedger.
+///
+/// Opens (or reuses) the same Sled database as `PersistentIndex` — callers
+/// that want both vector search and knowledge persistence should open a single
+/// `PersistenceConfig` path and pass the resulting `sled::Db` to both.
+///
+/// ## Key Scheme
+/// - `KnowledgeGraph` — stored as one JSON blob under key `b"kg"`
+/// - `Memory`         — stored per-entry under UUID bytes as key
+/// - `TraitLedger`    — stored per-ledger under `b"ledger:{name}"` as key
+pub struct KnowledgeStore {
+    /// Sled tree: KnowledgeGraph (single blob, key = b"kg")
+    kg_tree: sled::Tree,
+    /// Sled tree: Memory entries (key = UUID bytes)
+    mem_tree: sled::Tree,
+    /// Sled tree: TraitLedger entries (key = b"ledger:{name}")
+    ledger_tree: sled::Tree,
+}
+
+impl KnowledgeStore {
+    /// Open a KnowledgeStore sharing a Sled database at the given path.
+    pub fn open(persistence_config: &PersistenceConfig) -> Result<Self> {
+        let db = sled::Config::new()
+            .path(&persistence_config.path)
+            .cache_capacity(persistence_config.cache_size)
+            .flush_every_ms(if persistence_config.flush_interval_ms > 0 {
+                Some(persistence_config.flush_interval_ms)
+            } else {
+                None
+            })
+            .use_compression(persistence_config.compression)
+            .open()
+            .map_err(|e| EmbedvecError::Persistence(format!("KnowledgeStore: open failed: {}", e)))?;
+
+        Self::from_db(db)
+    }
+
+    /// Open a KnowledgeStore from an existing `sled::Db` (share with PersistentIndex).
+    pub fn from_db(db: sled::Db) -> Result<Self> {
+        let kg_tree = db
+            .open_tree(tree_names::KNOWLEDGE_GRAPH)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        let mem_tree = db
+            .open_tree(tree_names::MEMORY_STORE)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        let ledger_tree = db
+            .open_tree(tree_names::TRAIT_LEDGER)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+
+        Ok(Self { kg_tree, mem_tree, ledger_tree })
+    }
+
+    // -------------------------------------------------------------------------
+    // KnowledgeGraph
+    // -------------------------------------------------------------------------
+
+    /// Persist the entire KnowledgeGraph as a single JSON blob.
+    pub fn save_knowledge_graph(&self, kg: &KnowledgeGraph) -> Result<()> {
+        let bytes = serde_json::to_vec(kg)
+            .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+        self.kg_tree
+            .insert(b"kg", bytes)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load the KnowledgeGraph from Sled. Returns `None` if not yet persisted.
+    pub fn load_knowledge_graph(&self) -> Result<Option<KnowledgeGraph>> {
+        let bytes = self.kg_tree
+            .get(b"kg")
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        match bytes {
+            None => Ok(None),
+            Some(b) => {
+                let kg: KnowledgeGraph = serde_json::from_slice(&b)
+                    .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+                Ok(Some(kg))
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // MemoryStore
+    // -------------------------------------------------------------------------
+
+    /// Persist a single Memory entry (upsert by UUID key).
+    pub fn save_memory(&self, memory: &Memory) -> Result<()> {
+        let bytes = serde_json::to_vec(memory)
+            .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+        self.mem_tree
+            .insert(memory.id.as_bytes(), bytes)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Persist all memories in a MemoryStore (saves each entry individually).
+    pub fn save_memory_store(&self, store: &MemoryStore) -> Result<()> {
+        // Access memories via the query API — use a broad query with high limit
+        let all = store.query(&crate::memory::MemoryQuery::new().with_limit(usize::MAX));
+        for memory in all {
+            self.save_memory(memory)?;
+        }
+        Ok(())
+    }
+
+    /// Load all persisted memories and return a rebuilt MemoryStore.
+    pub fn load_memory_store(&self) -> Result<MemoryStore> {
+        let mut store = MemoryStore::new();
+        for result in self.mem_tree.iter() {
+            let (_, value) = result
+                .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+            let memory: Memory = serde_json::from_slice(&value)
+                .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+            store.store(memory);
+        }
+        tracing::info!(count = store.len(), "Loaded MemoryStore from Sled");
+        Ok(store)
+    }
+
+    /// Delete a single memory by UUID.
+    pub fn delete_memory(&self, id: uuid::Uuid) -> Result<()> {
+        self.mem_tree
+            .remove(id.as_bytes())
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // TraitLedger
+    // -------------------------------------------------------------------------
+
+    /// Persist a TraitLedger under key `ledger:{name}`.
+    pub fn save_ledger(&self, ledger: &TraitLedger) -> Result<()> {
+        let key = format!("ledger:{}", ledger.name);
+        // Serialize the full revision history as JSON
+        let revisions: Vec<&crate::ledger::TraitRevision> = (0..=ledger.version())
+            .filter_map(|v| ledger.get_revision(v))
+            .collect();
+        let bytes = serde_json::to_vec(&revisions)
+            .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+        self.ledger_tree
+            .insert(key.as_bytes(), bytes)
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load a TraitLedger by name. Returns `None` if not found.
+    pub fn load_ledger(&self, name: &str) -> Result<Option<TraitLedger>> {
+        let key = format!("ledger:{}", name);
+        let bytes = self.ledger_tree
+            .get(key.as_bytes())
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+
+        match bytes {
+            None => Ok(None),
+            Some(b) => {
+                let revisions: Vec<crate::ledger::TraitRevision> = serde_json::from_slice(&b)
+                    .map_err(|e| EmbedvecError::Serialization(e.to_string()))?;
+
+                if revisions.is_empty() {
+                    return Ok(None);
+                }
+
+                // Reconstruct ledger from serialized revisions
+                let initial = revisions[0].value.clone();
+                let mut ledger = TraitLedger::new(name, initial);
+
+                for revision in revisions.into_iter().skip(1) {
+                    ledger
+                        .commit(revision.value, revision.provenance)
+                        .map_err(|e| EmbedvecError::Persistence(e))?;
+                }
+
+                Ok(Some(ledger))
+            }
+        }
+    }
+
+    /// List all persisted ledger names.
+    pub fn ledger_names(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for result in self.ledger_tree.iter() {
+            let (key, _) = result
+                .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if let Some(name) = key_str.strip_prefix("ledger:") {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    /// Delete a ledger by name.
+    pub fn delete_ledger(&self, name: &str) -> Result<()> {
+        let key = format!("ledger:{}", name);
+        self.ledger_tree
+            .remove(key.as_bytes())
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // General
+    // -------------------------------------------------------------------------
+
+    /// Flush all three trees to disk.
+    pub fn flush(&self) -> Result<()> {
+        self.kg_tree
+            .flush()
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        self.mem_tree
+            .flush()
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        self.ledger_tree
+            .flush()
+            .map_err(|e| EmbedvecError::Persistence(e.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod knowledge_store_tests {
+    use super::*;
+    use crate::knowledge::{KnowledgeGraph, RelationType};
+    use crate::ledger::{ProvenanceRecord, ProvenanceSource, TraitLedger, TraitValue};
+    use crate::memory::{Memory, MemoryQuery, MemoryStore, MemoryType};
+    use tempfile::tempdir;
+
+    fn open_store(path: &str) -> KnowledgeStore {
+        let config = PersistenceConfig::default().with_path(path);
+        KnowledgeStore::open(&config).unwrap()
+    }
+
+    #[test]
+    fn test_knowledge_graph_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut kg = KnowledgeGraph::new();
+        kg.add_relations("fire", &["heat", "light"]);
+        kg.add_relation("fire", "water", RelationType::Opposes);
+
+        let store = open_store(path);
+        store.save_knowledge_graph(&kg).unwrap();
+        store.flush().unwrap();
+
+        let loaded = store.load_knowledge_graph().unwrap().unwrap();
+        assert!(loaded.are_related("fire", "heat"));
+        assert!(loaded.are_related("fire", "water"));
+        assert_eq!(loaded.node_count(), kg.node_count());
+    }
+
+    #[test]
+    fn test_knowledge_graph_not_found() {
+        let dir = tempdir().unwrap();
+        let store = open_store(dir.path().to_str().unwrap());
+        assert!(store.load_knowledge_graph().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_memory_store_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut mem_store = MemoryStore::new();
+        mem_store.store(
+            Memory::new("The sky is blue", MemoryType::Semantic)
+                .with_confidence(0.9)
+                .with_importance(0.8),
+        );
+        mem_store.store(
+            Memory::new("It rained yesterday", MemoryType::Episodic)
+                .with_confidence(0.7),
+        );
+
+        let store = open_store(path);
+        store.save_memory_store(&mem_store).unwrap();
+        store.flush().unwrap();
+
+        // Reload into a fresh MemoryStore
+        let loaded = store.load_memory_store().unwrap();
+        assert_eq!(loaded.len(), 2);
+
+        let semantic = loaded.query(
+            &MemoryQuery::new().with_type(MemoryType::Semantic),
+        );
+        assert_eq!(semantic.len(), 1);
+        assert_eq!(semantic[0].content, "The sky is blue");
+    }
+
+    #[test]
+    fn test_memory_delete() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut mem_store = MemoryStore::new();
+        let id = mem_store.store(Memory::new("ephemeral", MemoryType::Working));
+
+        let store = open_store(path);
+        store.save_memory_store(&mem_store).unwrap();
+        store.delete_memory(id).unwrap();
+        store.flush().unwrap();
+
+        let loaded = store.load_memory_store().unwrap();
+        assert_eq!(loaded.len(), 0);
+    }
+
+    #[test]
+    fn test_trait_ledger_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut ledger = TraitLedger::new("confidence", TraitValue::Scalar(0.5));
+        ledger
+            .commit(
+                TraitValue::Scalar(0.8),
+                ProvenanceRecord::new("system", "calibration", ProvenanceSource::SystemInit, 0),
+            )
+            .unwrap();
+        ledger
+            .commit(
+                TraitValue::Scalar(0.95),
+                ProvenanceRecord::new("agent", "refinement", ProvenanceSource::ReinforcementLearning, 0),
+            )
+            .unwrap();
+
+        let store = open_store(path);
+        store.save_ledger(&ledger).unwrap();
+        store.flush().unwrap();
+
+        let loaded = store.load_ledger("confidence").unwrap().unwrap();
+        assert_eq!(loaded.version(), 2);
+        assert!((loaded.current().as_scalar() - 0.95).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ledger_not_found() {
+        let dir = tempdir().unwrap();
+        let store = open_store(dir.path().to_str().unwrap());
+        assert!(store.load_ledger("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_ledger_names() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let store = open_store(path);
+
+        store.save_ledger(&TraitLedger::new("alpha", TraitValue::Flag(true))).unwrap();
+        store.save_ledger(&TraitLedger::new("beta", TraitValue::Scalar(1.0))).unwrap();
+
+        let names = store.ledger_names().unwrap();
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn test_persistence_reload_all() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+
+        // Write all three stores
+        {
+            let store = open_store(&path);
+            let mut kg = KnowledgeGraph::new();
+            kg.add_relations("concept_a", &["concept_b"]);
+            store.save_knowledge_graph(&kg).unwrap();
+
+            let mut mem = MemoryStore::new();
+            mem.store(Memory::new("persistent memory", MemoryType::Semantic));
+            store.save_memory_store(&mem).unwrap();
+
+            store.save_ledger(&TraitLedger::new("test_trait", TraitValue::Label("initial".into()))).unwrap();
+            store.flush().unwrap();
+        }
+
+        // Reopen and verify everything survived
+        {
+            let store = open_store(&path);
+
+            let kg = store.load_knowledge_graph().unwrap().unwrap();
+            assert!(kg.are_related("concept_a", "concept_b"));
+
+            let mem = store.load_memory_store().unwrap();
+            assert_eq!(mem.len(), 1);
+
+            let ledger = store.load_ledger("test_trait").unwrap().unwrap();
+            assert_eq!(ledger.current().as_label(), "initial");
         }
     }
 }
