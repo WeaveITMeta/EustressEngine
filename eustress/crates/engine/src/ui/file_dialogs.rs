@@ -162,6 +162,20 @@ pub fn pick_publish_file() -> Option<PathBuf> {
         .save_file()
 }
 
+/// Show file picker for importing assets (3D models, textures, audio, etc.)
+/// Returns multiple selected files.
+pub fn pick_asset_files() -> Vec<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("3D Models", &["glb", "gltf", "obj", "fbx", "stl"])
+        .add_filter("Textures", &["png", "jpg", "jpeg", "webp", "bmp", "tga", "hdr", "exr"])
+        .add_filter("Audio", &["wav", "ogg", "mp3", "flac"])
+        .add_filter("Materials", &["mat.toml"])
+        .add_filter("All Assets", &["glb", "gltf", "obj", "fbx", "stl", "png", "jpg", "jpeg", "webp", "wav", "ogg", "mp3", "flac"])
+        .set_title("Import Assets")
+        .pick_files()
+        .unwrap_or_default()
+}
+
 /// Get the default scenes directory
 pub fn default_scenes_dir() -> PathBuf {
     // Try to use Documents/Eustress/Scenes

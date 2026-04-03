@@ -4170,7 +4170,54 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::AssetImport(_kind) => {
-                info!("Asset import not yet implemented");
+                // Open file picker and import selected assets
+                let files = super::file_dialogs::pick_asset_files();
+                if files.is_empty() {
+                    return;
+                }
+
+                // Determine destination: Universe .eustress/assets/meshes/ for 3D,
+                // or Space directory for other types
+                let dest_dir = if let Some(space_root) = res.space_root.as_ref() {
+                    let universe_root = crate::space::universe_root_for_path(&space_root.0);
+                    if let Some(uni) = universe_root {
+                        uni.join(".eustress").join("assets").join("meshes")
+                    } else {
+                        space_root.0.clone()
+                    }
+                } else {
+                    info!("No space loaded — cannot import assets");
+                    return;
+                };
+
+                let _ = std::fs::create_dir_all(&dest_dir);
+
+                let mut imported = 0;
+                for file_path in &files {
+                    if let Some(file_name) = file_path.file_name() {
+                        let dest = dest_dir.join(file_name);
+                        match std::fs::copy(file_path, &dest) {
+                            Ok(bytes) => {
+                                info!("Imported asset: {} ({} bytes) → {:?}",
+                                    file_name.to_string_lossy(), bytes, dest);
+                                imported += 1;
+                            }
+                            Err(e) => {
+                                error!("Failed to import {:?}: {}", file_name, e);
+                            }
+                        }
+                    }
+                }
+
+                if imported > 0 {
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Imported {} asset(s)", imported));
+                    }
+                    // Refresh the asset tree
+                    if let Some(mut am) = res.asset_manager_state.as_mut() {
+                        am.dirty = true;
+                    }
+                }
             }
             SlintAction::AssetSearch(text) => {
                 if let Some(mut am) = res.asset_manager_state.as_mut() {
