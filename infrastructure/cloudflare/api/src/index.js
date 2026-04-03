@@ -22,6 +22,11 @@
 import JURISDICTIONS from '../../kyc/jurisdictions.json';
 
 export default {
+  // Daily payout cron — runs at UTC midnight
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runDailyPayout(env));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const cors = corsHeaders(request);
@@ -100,6 +105,24 @@ export default {
         return handleAdminRescreen(request, env, cors);
       if (url.pathname === '/api/admin/screening-report' && request.method === 'GET')
         return handleAdminScreeningReport(request, env, cors);
+
+      // Stripe
+      if (url.pathname === '/api/stripe/checkout' && request.method === 'POST')
+        return handleStripeCheckout(request, env, cors);
+      if (url.pathname === '/api/stripe/webhook' && request.method === 'POST')
+        return handleStripeWebhook(request, env);
+      if (url.pathname === '/api/stripe/connect/onboard' && request.method === 'POST')
+        return handleStripeConnectOnboard(request, env, cors);
+      if (url.pathname === '/api/stripe/connect/status' && request.method === 'GET')
+        return handleStripeConnectStatus(request, env, cors);
+
+      // Payouts
+      if (url.pathname === '/api/payouts/daily' && request.method === 'POST')
+        return handleDailyPayout(request, env, cors);
+      if (url.pathname === '/api/payouts/history' && request.method === 'GET')
+        return handlePayoutHistory(request, env, cors);
+      if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
+        return handlePayoutRate(env, cors);
 
       // Health
       if (url.pathname === '/health')
@@ -1183,6 +1206,495 @@ async function handleAdminScreeningReport(request, env, cors) {
   report.users.sort((a, b) => b.risk_score - a.risk_score);
 
   return json(report, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRIPE — Treasury funding + Connect payouts
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function stripeRequest(method, endpoint, body, env) {
+  const resp = await fetch(`https://api.stripe.com/v1${endpoint}`, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body ? new URLSearchParams(body).toString() : undefined,
+  });
+  return resp.json();
+}
+
+// Stripe price IDs
+const STRIPE_PRICES = {
+  seed_one_time: 'price_1THvJ6PiMzxNRJisA6uZ0055',
+  growth_one_time: 'price_1THvJ6PiMzxNRJisO3dHFqe0',
+  sustainer_one_time: 'price_1THvJ7PiMzxNRJisYP6tZzcO',
+  patron_one_time: 'price_1THvJ8PiMzxNRJisfsOnku2k',
+  seed_recurring: 'price_1THvJ8PiMzxNRJisJnZXhxRg',
+  growth_recurring: 'price_1THvJ9PiMzxNRJis2cAeFt5D',
+  sustainer_recurring: 'price_1THvJ9PiMzxNRJisu2gKnxIN',
+  patron_recurring: 'price_1THvJAPiMzxNRJis4loBIX84',
+};
+
+// Platform fee: 2.5%
+const PLATFORM_FEE_PERCENT = 2.5;
+
+// Create Stripe Checkout session for treasury funding
+async function handleStripeCheckout(request, env, cors) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+
+  const userId = await verifyAuth(request, env);
+  const { tier, mode, custom_amount } = await request.json();
+  // tier: 'seed'|'growth'|'sustainer'|'patron' or null for custom
+  // mode: 'one_time' or 'recurring'
+
+  const isRecurring = mode === 'recurring';
+  let priceId;
+  let amountCents;
+
+  if (tier && STRIPE_PRICES[`${tier}_${isRecurring ? 'recurring' : 'one_time'}`]) {
+    priceId = STRIPE_PRICES[`${tier}_${isRecurring ? 'recurring' : 'one_time'}`];
+  } else if (custom_amount && custom_amount >= 5) {
+    amountCents = Math.round(custom_amount * 100);
+  } else {
+    return json({ error: 'Select a tier or enter a custom amount ($5 minimum)' }, 400, cors);
+  }
+
+  const params = {
+    'mode': isRecurring ? 'subscription' : 'payment',
+    'success_url': 'https://eustress.dev/bliss?funded=true',
+    'cancel_url': 'https://eustress.dev/bliss?funded=false',
+  };
+
+  if (priceId) {
+    params['line_items[0][price]'] = priceId;
+    params['line_items[0][quantity]'] = '1';
+  } else {
+    // Custom amount — create price inline
+    params['line_items[0][price_data][currency]'] = 'usd';
+    params['line_items[0][price_data][product]'] = 'prod_UGSDsAdsbUdE5l';
+    params['line_items[0][price_data][unit_amount]'] = amountCents.toString();
+    params['line_items[0][quantity]'] = '1';
+    if (isRecurring) {
+      params['line_items[0][price_data][recurring][interval]'] = 'month';
+    }
+  }
+
+  // 2.5% platform fee (Stripe collects this for us via Connect)
+  if (amountCents) {
+    const feeCents = Math.round(amountCents * PLATFORM_FEE_PERCENT / 100);
+    params['payment_intent_data[application_fee_amount]'] = feeCents.toString();
+  }
+
+  if (userId) {
+    params['metadata[user_id]'] = userId;
+    params['client_reference_id'] = userId;
+  }
+
+  const session = await stripeRequest('POST', '/checkout/sessions', params, env);
+
+  if (session.error) {
+    return json({ error: session.error.message, type: session.error.type }, 400, cors);
+  }
+
+  return json({ url: session.url, session_id: session.id }, 200, cors);
+}
+
+// Stripe webhook — handle successful payments
+async function handleStripeWebhook(request, env) {
+  // In production, verify webhook signature with STRIPE_WEBHOOK_SECRET
+  const body = await request.text();
+  let event;
+
+  try {
+    event = JSON.parse(body);
+  } catch {
+    return new Response('Invalid JSON', { status: 400 });
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const amount = (session.amount_total || 0) / 100; // dollars
+    const userId = session.metadata?.user_id || session.client_reference_id;
+
+    // Record treasury deposit
+    const deposit = {
+      id: session.id,
+      amount_usd: amount,
+      user_id: userId || 'anonymous',
+      timestamp: new Date().toISOString(),
+      mode: session.mode,
+      stripe_payment_intent: session.payment_intent,
+    };
+
+    await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify(deposit));
+
+    // Update treasury total
+    const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+    await env.PAYOUTS.put('treasury:total_usd', (currentTotal + amount).toString());
+
+    // Increment deposit count
+    const count = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
+    await env.PAYOUTS.put('treasury:deposit_count', (count + 1).toString());
+  }
+
+  return new Response('OK', { status: 200 });
+}
+
+// Stripe Connect — onboard a contributor to receive payouts
+async function handleStripeConnectOnboard(request, env, cors) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const userData = await env.USERS.get(`user:${userId}`);
+  if (!userData) return json({ error: 'User not found' }, 404, cors);
+  const user = JSON.parse(userData);
+
+  // Check if user already has a Connect account
+  let connectId = user.stripe_connect_id;
+
+  if (!connectId) {
+    // Detect country from KYC data
+    const kycFront = await env.KYC_STATUS.get(`kyc-${userId}-front`);
+    const kycCountry = kycFront ? JSON.parse(kycFront).iso2 || 'US' : 'US';
+
+    // Create Connect Custom account with pre-filled identity info
+    const clientIp = request.headers.get('cf-connecting-ip') || '0.0.0.0';
+    const accountParams = {
+      'type': 'custom',
+      'country': kycCountry,
+      'business_type': 'individual',
+      'metadata[user_id]': userId,
+      'metadata[username]': user.username,
+      'capabilities[transfers][requested]': 'true',
+      // ToS acceptance (required for custom accounts)
+      'tos_acceptance[date]': Math.floor(Date.now() / 1000).toString(),
+      'tos_acceptance[ip]': clientIp,
+    };
+
+    if (user.email) accountParams['email'] = user.email;
+    if (user.username) accountParams['individual[first_name]'] = user.username;
+    if (user.birthday) {
+      const [y, m, d] = user.birthday.split('-');
+      accountParams['individual[dob][year]'] = y;
+      accountParams['individual[dob][month]'] = parseInt(m).toString();
+      accountParams['individual[dob][day]'] = parseInt(d).toString();
+    }
+
+    const account = await stripeRequest('POST', '/accounts', accountParams, env);
+    if (account.error) return json({ error: account.error.message, type: account.error.type, code: account.error.code, param: account.error.param }, 400, cors);
+
+    connectId = account.id;
+    user.stripe_connect_id = connectId;
+    await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+
+    // Upload KYC docs from R2 to Stripe for identity verification
+    await syncKycDocsToStripe(userId, connectId, env);
+  }
+
+  // Create onboarding link — collects remaining info (bank details, SSN for 1099)
+  const link = await stripeRequest('POST', '/account_links', {
+    'account': connectId,
+    'refresh_url': 'https://eustress.dev/bliss?connect=refresh',
+    'return_url': 'https://eustress.dev/bliss?connect=complete',
+    'type': 'account_onboarding',
+    'collect': 'eventually_due',
+  }, env);
+
+  if (link.error) return json({ error: link.error.message, type: link.error.type, code: link.error.code }, 400, cors);
+
+  return json({ url: link.url, connect_id: connectId }, 200, cors);
+}
+
+// Check Stripe Connect status for a user
+async function handleStripeConnectStatus(request, env, cors) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const userData = await env.USERS.get(`user:${userId}`);
+  if (!userData) return json({ error: 'User not found' }, 404, cors);
+  const user = JSON.parse(userData);
+
+  if (!user.stripe_connect_id) {
+    return json({ connected: false, message: 'No payout account linked' }, 200, cors);
+  }
+
+  const account = await stripeRequest('GET', `/accounts/${user.stripe_connect_id}`, null, env);
+
+  return json({
+    connected: true,
+    connect_id: user.stripe_connect_id,
+    payouts_enabled: account.payouts_enabled || false,
+    details_submitted: account.details_submitted || false,
+  }, 200, cors);
+}
+
+// Sync KYC documents from R2 to Stripe Connect for identity verification
+async function syncKycDocsToStripe(userId, connectId, env) {
+  try {
+    for (const side of ['front', 'back']) {
+      // Get the KYC record to find the R2 key
+      const kycData = await env.KYC_STATUS.get(`kyc-${userId}-${side}`);
+      if (!kycData) continue;
+
+      const kyc = JSON.parse(kycData);
+      if (!kyc.r2_key) continue;
+
+      // Fetch document from R2
+      const r2Object = await env.KYC_BUCKET.get(kyc.r2_key);
+      if (!r2Object) continue;
+
+      const fileBytes = await r2Object.arrayBuffer();
+      const contentType = r2Object.httpMetadata?.contentType || 'image/jpeg';
+
+      // Upload to Stripe Files API (multipart form)
+      const formData = new FormData();
+      const ext = contentType.includes('pdf') ? 'pdf' : contentType.includes('png') ? 'png' : 'jpg';
+      formData.append('file', new Blob([fileBytes], { type: contentType }), `id_${side}.${ext}`);
+      formData.append('purpose', 'identity_document');
+
+      const fileResp = await fetch('https://files.stripe.com/v1/files', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+        body: formData,
+      });
+
+      const fileResult = await fileResp.json();
+      if (fileResult.error || !fileResult.id) continue;
+
+      // Attach to the Connect account's identity verification
+      const docSide = side === 'front' ? 'front' : 'back';
+      await stripeRequest('POST', `/accounts/${connectId}`, {
+        [`individual[verification][document][${docSide}]`]: fileResult.id,
+      }, env);
+    }
+  } catch (e) {
+    // Non-fatal — Stripe onboarding will still work, user just re-uploads manually
+    console.error('KYC sync to Stripe failed:', e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DAILY PAYOUTS — BLS → USD conversion + Stripe Connect transfers
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Trigger daily payout calculation (called by cron or admin)
+async function handleDailyPayout(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+
+  // Get treasury balance
+  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+  if (treasuryUsd <= 0) return json({ error: 'Treasury is empty', treasury_usd: 0 }, 200, cors);
+
+  // Daily drip rate: 0.276% of remaining balance (from economics.rs)
+  const dripRate = 0.00276;
+  const dailyDripUsd = treasuryUsd * dripRate;
+
+  if (dailyDripUsd < 0.50) {
+    return json({ message: 'Daily drip too small for payout', drip_usd: dailyDripUsd }, 200, cors);
+  }
+
+  // Get all users with contribution scores
+  const userList = await env.USERS.list({ prefix: 'user:', limit: 1000 });
+  const contributors = [];
+  let totalScore = 0;
+
+  for (const key of userList.keys) {
+    const data = await env.USERS.get(key.name);
+    if (!data) continue;
+    const user = JSON.parse(data);
+    const score = user.contribution_score || 0;
+    if (score > 0 && user.stripe_connect_id && !user.banned) {
+      contributors.push({ user_id: user.id, username: user.username, score, connect_id: user.stripe_connect_id });
+      totalScore += score;
+    }
+  }
+
+  if (totalScore <= 0 || contributors.length === 0) {
+    return json({
+      message: 'No eligible contributors with Connect accounts',
+      drip_usd: dailyDripUsd,
+      contributors: 0,
+    }, 200, cors);
+  }
+
+  // Calculate per-contributor payout
+  const payouts = [];
+  let totalPaid = 0;
+
+  for (const c of contributors) {
+    const share = c.score / totalScore;
+    const amountUsd = dailyDripUsd * share;
+    const amountCents = Math.floor(amountUsd * 100);
+
+    if (amountCents < 50) continue; // Stripe minimum: $0.50
+
+    // Create Stripe transfer to connected account
+    try {
+      const transfer = await stripeRequest('POST', '/transfers', {
+        'amount': amountCents.toString(),
+        'currency': 'usd',
+        'destination': c.connect_id,
+        'description': `Bliss daily payout - ${c.username}`,
+        'metadata[user_id]': c.user_id,
+        'metadata[date]': new Date().toISOString().split('T')[0],
+      }, env);
+
+      if (!transfer.error) {
+        payouts.push({
+          user_id: c.user_id,
+          username: c.username,
+          amount_usd: amountCents / 100,
+          transfer_id: transfer.id,
+        });
+        totalPaid += amountCents / 100;
+      }
+    } catch (e) {
+      // Skip failed transfers, continue with others
+    }
+  }
+
+  // Debit treasury
+  const newTreasury = treasuryUsd - totalPaid;
+  await env.PAYOUTS.put('treasury:total_usd', newTreasury.toString());
+
+  // Record payout
+  const payoutRecord = {
+    date: new Date().toISOString(),
+    drip_usd: dailyDripUsd,
+    total_paid_usd: totalPaid,
+    contributors_paid: payouts.length,
+    treasury_before: treasuryUsd,
+    treasury_after: newTreasury,
+    payouts,
+  };
+
+  const payoutKey = `payout:${new Date().toISOString().split('T')[0]}`;
+  await env.PAYOUTS.put(payoutKey, JSON.stringify(payoutRecord), { expirationTtl: 86400 * 365 * 5 });
+
+  await auditLog(env, 'DAILY_PAYOUT', adminId, 'treasury', payoutRecord);
+
+  return json(payoutRecord, 200, cors);
+}
+
+// Get payout history
+async function handlePayoutHistory(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  // Get recent payouts for this user
+  const history = [];
+  const list = await env.PAYOUTS.list({ prefix: 'payout:', limit: 30 });
+
+  for (const key of list.keys) {
+    const data = await env.PAYOUTS.get(key.name);
+    if (!data) continue;
+    const record = JSON.parse(data);
+    const userPayout = record.payouts?.find(p => p.user_id === userId);
+    if (userPayout) {
+      history.push({
+        date: record.date,
+        amount_usd: userPayout.amount_usd,
+        transfer_id: userPayout.transfer_id,
+      });
+    }
+  }
+
+  return json({ history, total_received: history.reduce((sum, p) => sum + p.amount_usd, 0) }, 200, cors);
+}
+
+// Get current BLS → USD exchange rate
+async function handlePayoutRate(env, cors) {
+  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+  const dripRate = 0.00276; // daily drip rate
+  const dailyDripUsd = treasuryUsd * dripRate;
+
+  // Daily BLS emission: 13,699 BLS (year 1)
+  const dailyBls = 13699;
+  const blsToUsd = dailyBls > 0 ? dailyDripUsd / dailyBls : 0;
+
+  return json({
+    treasury_usd: treasuryUsd,
+    daily_drip_usd: dailyDripUsd,
+    daily_bls_emission: dailyBls,
+    bls_to_usd_rate: blsToUsd,
+    rate_display: blsToUsd > 0 ? `$${blsToUsd.toFixed(6)}/BLS` : 'No treasury funds',
+    deposit_count: parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0'),
+  }, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CRON — Daily payout (called by scheduled trigger at UTC midnight)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function runDailyPayout(env) {
+  if (!env.STRIPE_SECRET_KEY) return;
+
+  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+  if (treasuryUsd <= 0) return;
+
+  const dripRate = 0.00276;
+  const dailyDripUsd = treasuryUsd * dripRate;
+  if (dailyDripUsd < 0.50) return;
+
+  const userList = await env.USERS.list({ prefix: 'user:', limit: 1000 });
+  const contributors = [];
+  let totalScore = 0;
+
+  for (const key of userList.keys) {
+    const data = await env.USERS.get(key.name);
+    if (!data) continue;
+    const user = JSON.parse(data);
+    const score = user.contribution_score || 0;
+    if (score > 0 && user.stripe_connect_id && !user.banned) {
+      contributors.push({ user_id: user.id, username: user.username, score, connect_id: user.stripe_connect_id });
+      totalScore += score;
+    }
+  }
+
+  if (totalScore <= 0 || contributors.length === 0) return;
+
+  let totalPaid = 0;
+  const payouts = [];
+
+  for (const c of contributors) {
+    const share = c.score / totalScore;
+    const amountCents = Math.floor(dailyDripUsd * share * 100);
+    if (amountCents < 50) continue;
+
+    try {
+      const transfer = await stripeRequest('POST', '/transfers', {
+        'amount': amountCents.toString(),
+        'currency': 'usd',
+        'destination': c.connect_id,
+        'description': `Bliss daily payout - ${c.username}`,
+        'metadata[user_id]': c.user_id,
+        'metadata[date]': new Date().toISOString().split('T')[0],
+      }, env);
+
+      if (!transfer.error) {
+        payouts.push({ user_id: c.user_id, username: c.username, amount_usd: amountCents / 100, transfer_id: transfer.id });
+        totalPaid += amountCents / 100;
+      }
+    } catch (e) { /* skip */ }
+  }
+
+  // Debit treasury
+  await env.PAYOUTS.put('treasury:total_usd', (treasuryUsd - totalPaid).toString());
+
+  // Record
+  const payoutKey = `payout:${new Date().toISOString().split('T')[0]}`;
+  await env.PAYOUTS.put(payoutKey, JSON.stringify({
+    date: new Date().toISOString(), drip_usd: dailyDripUsd, total_paid_usd: totalPaid,
+    contributors_paid: payouts.length, treasury_before: treasuryUsd, treasury_after: treasuryUsd - totalPaid, payouts,
+  }), { expirationTtl: 86400 * 365 * 5 });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

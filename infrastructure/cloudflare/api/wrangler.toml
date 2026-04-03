@@ -35,14 +35,24 @@ id = "3fc01ee7305c4c4ca5be6b14b74d6d53"
 binding = "AUDIT_LOG"
 id = "276638d8157344589cd2a82d4f1865bb"
 
+[[kv_namespaces]]
+binding = "PAYOUTS"
+id = "c1d7016c782641aeba8662e2fa08b28b"
+
 # R2 bucket for KYC documents (global, jurisdiction prefix in object key)
 [[r2_buckets]]
 binding = "KYC_BUCKET"
 bucket_name = "eustress-kyc-documents"
 
 # Secrets (set via wrangler secret put):
-# JWT_SECRET   — persistent JWT signing key
-# GROK_API_KEY — xAI Grok API key for AI-enhanced search
+# JWT_SECRET            — persistent JWT signing key
+# GROK_API_KEY          — xAI Grok API key for AI-enhanced search
+# STRIPE_SECRET_KEY     — Stripe secret key for payments + Connect
+# STRIPE_WEBHOOK_SECRET — Stripe webhook signing secret
+
+# Daily payout cron — runs at UTC midnight
+[triggers]
+crons = ["0 0 * * *"]
 
 [vars]
 FORK_ID = "eustress.dev"

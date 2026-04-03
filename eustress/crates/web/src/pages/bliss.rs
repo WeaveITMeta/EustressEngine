@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
-use crate::state::AppState;
+use crate::state::{AppState, AuthState};
 
 // -----------------------------------------------------------------------------
 // Data Types
@@ -49,7 +49,7 @@ impl Default for BlissKpi {
 pub struct InvestmentTier {
     pub name: &'static str,
     pub amount_usd: &'static str,
-    pub bls_estimate: &'static str,
+    pub impact: &'static str,
     pub description: &'static str,
     pub perks: Vec<&'static str>,
 }
@@ -83,33 +83,33 @@ pub fn BlissPage() -> impl IntoView {
     // Payment mode: one-time or recurring (monthly)
     let is_recurring = RwSignal::new(false);
 
-    // Investment tiers — flat rate: 10 BLS per $1
+    // Investment tiers — treasury funding, not token purchase
     let tiers = vec![
         InvestmentTier {
             name: "Seed",
             amount_usd: "$25",
-            bls_estimate: "250 BLS",
+            impact: "",
             description: "Support the ecosystem at ground level",
             perks: vec![],
         },
         InvestmentTier {
             name: "Growth",
             amount_usd: "$100",
-            bls_estimate: "1,000 BLS",
+            impact: "",
             description: "Meaningful treasury investment",
             perks: vec![],
         },
         InvestmentTier {
             name: "Sustainer",
             amount_usd: "$500",
-            bls_estimate: "5,000 BLS",
+            impact: "",
             description: "Significant contribution to network sustainability",
             perks: vec![],
         },
         InvestmentTier {
             name: "Patron",
             amount_usd: "$1,000+",
-            bls_estimate: "10,000+ BLS",
+            impact: "",
             description: "Major backer powering the Bliss economy",
             perks: vec![],
         },
@@ -142,20 +142,92 @@ pub fn BlissPage() -> impl IntoView {
                     "strengthen the network, or simply build and earn."
                 </p>
 
-                // Identity wallet — your identity.toml IS your wallet
-                <div class="identity-wallet-section">
-                    <div class="identity-wallet-info">
-                        <img src="/assets/icons/wallet.svg" alt="Wallet" class="identity-wallet-icon" />
-                        <div>
-                            <p class="identity-wallet-title">"Your identity.toml is your wallet"</p>
-                            <p class="identity-wallet-desc">
-                                "No separate wallet needed. Your Ed25519 keypair holds your BLS. "
-                                "Add beneficiaries to your identity.toml to designate asset transfers."
-                            </p>
-                        </div>
-                    </div>
-                    <a href="/login" class="btn btn-primary identity-wallet-btn">"Sign In to View Balance"</a>
-                </div>
+                // Identity wallet
+                {move || {
+                    match _app_state.auth.get() {
+                        AuthState::Authenticated(user) => {
+                            let balance = format!("{:.8}", user.bliss_balance as f64 / 1e18);
+                            view! {
+                                <div class="bliss-account-panel">
+                                    // Balance + Payout side by side
+                                    <div class="bliss-account-grid">
+                                        <div class="bliss-balance-card">
+                                            <span class="bliss-balance-label">"Balance"</span>
+                                            <span class="bliss-balance-amount">{balance}</span>
+                                            <span class="bliss-balance-unit">"BLS"</span>
+                                        </div>
+
+                                        <div class="bliss-payout-card">
+                                            <span class="bliss-payout-label">"Daily Payouts"</span>
+                                            <p class="bliss-payout-desc">
+                                                "Connect your bank to receive USD daily"
+                                            </p>
+                                            <button
+                                                class="btn btn-primary payout-connect-btn"
+                                                on:click=move |_| {
+                                                    let token: Option<String> = {
+                                                        use gloo_storage::Storage;
+                                                        gloo_storage::LocalStorage::get("auth_token").ok()
+                                                    };
+                                                    if let Some(token) = token {
+                                                        leptos::task::spawn_local(async move {
+                                                            let resp = gloo_net::http::Request::post(
+                                                                "https://api.eustress.dev/api/stripe/connect/onboard"
+                                                            )
+                                                            .header("Authorization", &format!("Bearer {}", token))
+                                                            .header("Content-Type", "application/json")
+                                                            .body("{}")
+                                                            .unwrap()
+                                                            .send()
+                                                            .await;
+
+                                                            if let Ok(resp) = resp {
+                                                                let status = resp.status();
+                                                                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                                                    if status == 200 {
+                                                                        if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                                                                            if let Some(window) = web_sys::window() {
+                                                                                let _ = window.location().set_href(url);
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        let msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                                                                        if let Some(window) = web_sys::window() {
+                                                                            let _ = window.alert_with_message(&format!("Stripe: {}", msg));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            >
+                                                "Connect Bank Account"
+                                            </button>
+                                            <span class="bliss-payout-note">"Stripe Connect + 1099s"</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        }
+                        _ => {
+                            view! {
+                                <div class="identity-wallet-section">
+                                    <div class="identity-wallet-info">
+                                        <img src="/assets/icons/wallet.svg" alt="Wallet" class="identity-wallet-icon" />
+                                        <div>
+                                            <p class="identity-wallet-title">"Your identity.toml is your wallet"</p>
+                                            <p class="identity-wallet-desc">
+                                                "Sign in to view your BLS balance."
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <a href="/login" class="btn btn-primary identity-wallet-btn">"Sign In"</a>
+                                </div>
+                            }.into_any()
+                        }
+                    }
+                }}
             </section>
 
             // =========================================================
@@ -177,7 +249,7 @@ pub fn BlissPage() -> impl IntoView {
                                 <span class="kpi-value">{k.treasury_balance.clone()}</span>
                             </div>
                             <div class="kpi-card">
-                                <span class="kpi-label">"Total Supply"</span>
+                                <span class="kpi-label">"Current Supply"</span>
                                 <span class="kpi-value">{k.total_supply.clone()}</span>
                             </div>
                             <div class="kpi-card">
@@ -219,7 +291,7 @@ pub fn BlissPage() -> impl IntoView {
                 </div>
                 <p class="section-subtitle">
                     "100% goes to the treasury. No middlemen, no VC extraction. "
-                    "Flat rate: 10 BLS per $1."
+                    "The treasury drips daily to active contributors — your investment directly rewards builders."
                 </p>
 
                 // One-time / Recurring toggle
@@ -251,11 +323,11 @@ pub fn BlissPage() -> impl IntoView {
                                         {move || if is_recurring.get() { "/mo" } else { "" }}
                                     </span>
                                 </div>
-                                <div class="tier-bls">{tier.bls_estimate}
-                                    <span class="tier-frequency">
-                                        {move || if is_recurring.get() { "/mo" } else { "" }}
-                                    </span>
-                                </div>
+                                {if !tier.impact.is_empty() {
+                                    Some(view! { <div class="tier-impact">{tier.impact}</div> })
+                                } else {
+                                    None
+                                }}
                                 <p class="tier-desc">{tier.description}</p>
                             </div>
                         }
@@ -282,29 +354,58 @@ pub fn BlissPage() -> impl IntoView {
                         />
                         <span class="currency-code">"USD"</span>
                     </div>
-                    {move || {
-                        let amt = custom_amount.get().parse::<f64>().unwrap_or(0.0);
-                        if amt >= 5.0 {
-                            let bls = amt * 10.0; // flat rate: 10 BLS per $1
-                            Some(view! {
-                                <p class="custom-estimate">{format!("~{:.0} BLS", bls)}</p>
-                            })
-                        } else {
-                            None
-                        }
-                    }}
                 </div>
 
-                <button class="invest-btn" disabled=move || {
-                    selected_tier.get().is_none() && custom_amount.get().is_empty()
-                }>
+                <button class="invest-btn"
+                    disabled=move || selected_tier.get().is_none() && custom_amount.get().is_empty()
+                    on:click=move |_| {
+                        let tier_names = ["seed", "growth", "sustainer", "patron"];
+                        let tier = selected_tier.get().map(|i| tier_names[i].to_string());
+                        let custom = custom_amount.get().parse::<f64>().ok().filter(|a| *a >= 5.0);
+                        let mode = if is_recurring.get() { "recurring" } else { "one_time" };
+
+                        let body = serde_json::json!({
+                            "tier": tier,
+                            "mode": mode,
+                            "custom_amount": custom,
+                        });
+
+                        let token: Option<String> = {
+                            use gloo_storage::Storage;
+                            gloo_storage::LocalStorage::get("auth_token").ok()
+                        };
+
+                        leptos::task::spawn_local(async move {
+                            let mut req = gloo_net::http::Request::post(
+                                "https://api.eustress.dev/api/stripe/checkout"
+                            ).header("Content-Type", "application/json");
+
+                            if let Some(ref t) = token {
+                                req = req.header("Authorization", &format!("Bearer {}", t));
+                            }
+
+                            if let Ok(resp) = req.body(body.to_string()).unwrap().send().await {
+                                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                    if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.location().set_href(url);
+                                        }
+                                    } else if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+                                        if let Some(window) = web_sys::window() {
+                                            let _ = window.alert_with_message(&format!("Error: {}", err));
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                >
                     {move || if is_recurring.get() { "Subscribe Monthly" } else { "Fund Treasury" }}
                 </button>
                 <div class="invest-footer">
                     <img src="/assets/icons/shield.svg" alt="Secure" class="invest-footer-icon" />
                     <p class="invest-note">
-                        "Secure payment via Stripe. 100% goes to the treasury. "
-                        "BLS allocated to your wallet after confirmation."
+                        "Secure payment via Stripe. 2.5% platform fee + Stripe processing."
                     </p>
                 </div>
             </section>
@@ -579,9 +680,10 @@ pub fn BlissPage() -> impl IntoView {
                     <div class="faq-item">
                         <h3>"Where does treasury funding go?"</h3>
                         <p>
-                            "100% goes to contributors. When you fund the treasury, you receive BLS "
-                            "at the flat rate (10 BLS per $1). The treasury drips daily to active "
-                            "contributors — your investment directly rewards the people building on Eustress."
+                            "100% goes to contributors. The treasury drips daily to active builders "
+                            "using exponential decay — large deposits taper naturally over months, "
+                            "not cliff-drop. Your investment directly rewards the people building on Eustress. "
+                            "This is not a token purchase — it's funding the people who create value."
                         </p>
                     </div>
 

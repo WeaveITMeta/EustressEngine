@@ -23,7 +23,9 @@
       "Bash(grep -E \"\\\\.\\(md|rs\\)$\")",
       "Bash(wrangler deploy:*)",
       "Bash(wrangler kv:namespace create SOCIAL)",
-      "Bash(wrangler kv:*)"
+      "Bash(wrangler kv:*)",
+      "Bash(stripe --version)",
+      "Bash(stripe products:*)"
     ]
   }
 }
