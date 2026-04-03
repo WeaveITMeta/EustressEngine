@@ -136,6 +136,12 @@ export default {
       if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
         return handlePayoutRate(env, cors);
 
+      // Accounting
+      if (url.pathname === '/api/accounting/dashboard' && request.method === 'GET')
+        return handleAccountingDashboard(request, env, cors);
+      if (url.pathname === '/api/accounting/costs' && request.method === 'POST')
+        return handleRecordCost(request, env, cors);
+
       // Health
       if (url.pathname === '/health')
         return handleHealth(env, cors);
@@ -1831,6 +1837,129 @@ async function handleTicketHistory(request, env, cors) {
 
   history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   return json({ history, count: history.length }, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ACCOUNTING — Revenue dashboard, cost tracking, automated flow
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Monthly infrastructure costs (auto-deducted daily as 1/30th)
+const INFRA_COSTS = {
+  cloudflare_workers: 5.00,    // Workers Paid plan
+  domain: 0.83,                // $10/year amortized
+  stripe_connect: 0,           // Charged per-transaction, not monthly
+  forge_base: 19.50,           // Nomad cluster base (scales with usage)
+  r2_storage: 0.75,            // Asset storage estimate
+  total_monthly: function() {
+    return this.cloudflare_workers + this.domain + this.forge_base + this.r2_storage;
+  },
+  daily: function() {
+    return this.total_monthly() / 30;
+  }
+};
+
+async function handleAccountingDashboard(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  // Revenue
+  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+  const platformUsd = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
+  const depositCount = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
+
+  // Costs
+  const totalCostsDeducted = parseFloat(await env.PAYOUTS.get('costs:total_deducted') || '0');
+  const forgeCosts = parseFloat(await env.PAYOUTS.get('costs:forge') || '0');
+  const stripeFees = parseFloat(await env.PAYOUTS.get('costs:stripe_fees') || '0');
+  const infraCosts = parseFloat(await env.PAYOUTS.get('costs:infrastructure') || '0');
+
+  // Payouts
+  const totalPaidToContributors = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
+
+  // Daily metrics
+  const dripRate = 0.00276;
+  const dailyDrip = treasuryUsd * dripRate;           // 100% to contributors
+  const dailyInfraCost = INFRA_COSTS.daily();          // Paid from platform revenue
+  const platformNetDaily = (platformUsd / 30) - dailyInfraCost; // Platform profit after costs
+
+  // User count
+  const userList = await env.USERS.list({ prefix: 'username:', limit: 1000 });
+  const totalUsers = userList.keys.length;
+
+  return json({
+    revenue: {
+      treasury_balance: treasuryUsd,
+      platform_balance: platformUsd,
+      total_deposits: depositCount,
+      total_revenue: treasuryUsd + platformUsd + totalCostsDeducted + totalPaidToContributors,
+    },
+    costs: {
+      monthly_infrastructure: INFRA_COSTS.total_monthly(),
+      daily_infrastructure: dailyInfraCost,
+      total_deducted: totalCostsDeducted,
+      breakdown: {
+        cloudflare: INFRA_COSTS.cloudflare_workers,
+        domain: INFRA_COSTS.domain,
+        forge_servers: INFRA_COSTS.forge_base,
+        r2_storage: INFRA_COSTS.r2_storage,
+        stripe_fees: stripeFees,
+        forge_compute: forgeCosts,
+      },
+    },
+    contributors: {
+      treasury_balance: treasuryUsd,
+      daily_drip: dailyDrip,
+      total_paid: totalPaidToContributors,
+      note: '100% of treasury drip goes to contributors. No deductions.',
+    },
+    platform: {
+      revenue: platformUsd,
+      costs_paid: totalCostsDeducted,
+      net_profit: platformUsd - totalCostsDeducted,
+      daily_net: platformNetDaily,
+      note: 'Costs paid from platform 50%, never from contributor treasury.',
+    },
+    users: {
+      total_registered: totalUsers,
+    },
+    health: {
+      profitable: platformUsd > totalCostsDeducted,
+      runway_days: dailyInfraCost > 0 ? Math.floor(platformUsd / dailyInfraCost) : 999,
+      margin_percent: platformUsd > 0
+        ? ((platformUsd - totalCostsDeducted) / platformUsd * 100).toFixed(1) + '%'
+        : 'N/A',
+    },
+    timestamp: new Date().toISOString(),
+  }, 200, cors);
+}
+
+// Record a cost (called by Forge autoscaler or admin)
+async function handleRecordCost(request, env, cors) {
+  const adminId = await requireAdmin(request, env);
+  if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
+
+  const { category, amount, description } = await request.json();
+  if (!category || !amount) return json({ error: 'category and amount required' }, 400, cors);
+
+  // Accumulate cost
+  const key = `costs:${category}`;
+  const current = parseFloat(await env.PAYOUTS.get(key) || '0');
+  await env.PAYOUTS.put(key, (current + amount).toString());
+
+  // Track total
+  const totalKey = 'costs:total_deducted';
+  const total = parseFloat(await env.PAYOUTS.get(totalKey) || '0');
+  await env.PAYOUTS.put(totalKey, (total + amount).toString());
+
+  // Log
+  await env.PAYOUTS.put(`cost:${Date.now()}`, JSON.stringify({
+    category, amount, description: description || '',
+    timestamp: new Date().toISOString(), recorded_by: adminId,
+  }), { expirationTtl: 86400 * 365 * 5 });
+
+  await auditLog(env, 'RECORD_COST', adminId, category, { amount, description });
+
+  return json({ success: true, category, amount, new_total: current + amount }, 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
