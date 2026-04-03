@@ -14,6 +14,8 @@ use crate::node::CosignResult;
 struct CosignRequest {
     user_id: String,
     contribution_hash: String,
+    contribution_type: String,
+    duration_secs: u64,
     timestamp: String,
 }
 
@@ -52,12 +54,16 @@ impl CosignClient {
         &self,
         user_id: &str,
         contribution_hash: &str,
+        contribution_type: &str,
+        duration_secs: u64,
     ) -> Result<CosignResult, BlissError> {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
         let request = CosignRequest {
             user_id: user_id.to_string(),
             contribution_hash: contribution_hash.to_string(),
+            contribution_type: contribution_type.to_string(),
+            duration_secs,
             timestamp,
         };
 
@@ -98,5 +104,32 @@ impl CosignClient {
     /// Get the fork ID this client operates under.
     pub fn fork_id(&self) -> &str {
         &self.fork_id
+    }
+
+    /// Send a heartbeat to the witness to report node status.
+    pub async fn heartbeat(
+        &self,
+        node_id: &str,
+        mode: &str,
+        players: u32,
+        uptime_secs: u64,
+    ) -> Result<(), BlissError> {
+        let url = format!("{}/api/node/heartbeat", self.witness_url);
+        let body = serde_json::json!({
+            "node_id": node_id,
+            "mode": mode,
+            "players": players,
+            "uptime_secs": uptime_secs,
+            "fork_id": self.fork_id,
+        });
+
+        let _ = self.http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(BlissError::Network)?;
+
+        Ok(())
     }
 }

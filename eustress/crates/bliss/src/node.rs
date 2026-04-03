@@ -248,6 +248,8 @@ impl BlissNode {
         &self,
         user_id: &str,
         contribution_hash: &str,
+        contribution_type: &str,
+        duration_secs: u64,
     ) -> Result<CosignResult, BlissError> {
         if !self.config.enabled {
             return Err(BlissError::Node("Node is disabled".to_string()));
@@ -262,15 +264,18 @@ impl BlissNode {
         // Request co-signature from witness Worker
         let result = self
             .cosign_client
-            .cosign(user_id, contribution_hash)
+            .cosign(user_id, contribution_hash, contribution_type, duration_secs)
             .await?;
 
         // Update local state
         let mut state = self.state.write().await;
         state.session_cosigns += 1;
-        // Apply node bonus multiplier to contribution score
-        let base_score = 1.0; // actual score comes from ContributionType weights
-        state.pending_score += base_score * self.config.mode.bonus_multiplier();
+        let weight = match contribution_type {
+            "Development" => 3.0, "Creation" => 2.5, "Education" => 2.2,
+            "Collaboration" => 2.0, "Optimization" => 2.0, "QualityAssurance" => 1.8,
+            "Moderation" => 1.5, "Documentation" => 1.5, _ => 1.0,
+        };
+        state.pending_score += weight * self.config.mode.bonus_multiplier();
 
         Ok(result)
     }

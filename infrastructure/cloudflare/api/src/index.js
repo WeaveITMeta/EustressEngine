@@ -136,6 +136,20 @@ export default {
       if (url.pathname === '/api/payouts/rate' && request.method === 'GET')
         return handlePayoutRate(env, cors);
 
+      // Node heartbeat
+      if (url.pathname === '/api/node/heartbeat' && request.method === 'POST')
+        return handleNodeHeartbeat(request, env, cors);
+      if (url.pathname === '/api/node/stats' && request.method === 'GET')
+        return handleNodeStats(env, cors);
+
+      // Simulations (published)
+      if (url.pathname === '/api/simulations' && request.method === 'GET')
+        return handleListSimulations(env, cors);
+      if (url.pathname === '/api/simulations/publish' && request.method === 'POST')
+        return handlePublishSimulation(request, env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+$/) && request.method === 'GET')
+        return handleGetSimulation(url.pathname.split('/').pop(), env, cors);
+
       // Accounting
       if (url.pathname === '/api/accounting/dashboard' && request.method === 'GET')
         return handleAccountingDashboard(request, env, cors);
@@ -425,10 +439,49 @@ async function handleCosign(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
-  // TODO: rate limit, validate contribution, sign with server key
+  const body = await request.json();
+  const { contribution_type, contribution_hash, duration_secs } = body;
+
+  if (!contribution_type || !contribution_hash)
+    return json({ error: 'contribution_type and contribution_hash required' }, 400, cors);
+
+  // Rate limit: max 120 cosigns per hour per user
+  const hourKey = `cosign-rate:${userId}:${new Date().toISOString().slice(0, 13)}`;
+  const count = parseInt(await env.CHALLENGES.get(hourKey) || '0');
+  if (count >= 120) return json({ error: 'Rate limit: 120 cosigns/hour' }, 429, cors);
+  await env.CHALLENGES.put(hourKey, (count + 1).toString(), { expirationTtl: 3600 });
+
+  // Contribution weights (from bliss-core/src/contribution.rs)
+  const weights = {
+    ActiveTime: 1.0, Creation: 2.5, Collaboration: 2.0, Education: 2.2,
+    Development: 3.0, Moderation: 1.5, QualityAssurance: 1.8,
+    Optimization: 2.0, Documentation: 1.5, Custom: 1.0,
+  };
+  const weight = weights[contribution_type] || 1.0;
+  const score = weight * Math.max(1, Math.min(duration_secs || 60, 3600)) / 60; // weighted minutes
+
+  // Accumulate on user record
+  const userData = await env.USERS.get(`user:${userId}`);
+  if (!userData) return json({ error: 'User not found' }, 404, cors);
+  const user = JSON.parse(userData);
+
+  user.contribution_score = (user.contribution_score || 0) + score;
+  user.total_cosigns = (user.total_cosigns || 0) + 1;
+  user.last_contribution = new Date().toISOString();
+  await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+
+  // Generate co-signature (hash of contribution + user + timestamp)
+  const payload = `cosign|${userId}|${contribution_hash}|${new Date().toISOString()}`;
+  const sigBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload)));
+  const signature = hexEncode(sigBytes);
+
   return json({
-    server_signature: 'cosign_placeholder',
+    server_signature: signature,
     co_signed_at: new Date().toISOString(),
+    contribution_type,
+    weight,
+    score_added: score,
+    total_score: user.contribution_score,
   }, 200, cors);
 }
 
@@ -1837,6 +1890,104 @@ async function handleTicketHistory(request, env, cors) {
 
   history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   return json({ history, count: history.length }, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NODE HEARTBEAT — Live stats for nodes and game servers
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function handleNodeHeartbeat(request, env, cors) {
+  const body = await request.json();
+  const { node_id, mode, players, uptime_secs, fork_id } = body;
+
+  if (!node_id) return json({ error: 'node_id required' }, 400, cors);
+
+  await env.SOCIAL.put(`node:${node_id}`, JSON.stringify({
+    node_id, mode: mode || 'light', players: players || 0,
+    uptime_secs: uptime_secs || 0, fork_id: fork_id || 'eustress.dev',
+    last_heartbeat: new Date().toISOString(),
+  }), { expirationTtl: 120 }); // Expires in 2 min if no heartbeat
+
+  return json({ ok: true }, 200, cors);
+}
+
+async function handleNodeStats(env, cors) {
+  const list = await env.SOCIAL.list({ prefix: 'node:', limit: 1000 });
+  let totalNodes = 0, totalPlayers = 0, lightNodes = 0, fullNodes = 0;
+
+  for (const key of list.keys) {
+    const data = await env.SOCIAL.get(key.name);
+    if (data) {
+      const node = JSON.parse(data);
+      totalNodes++;
+      totalPlayers += node.players || 0;
+      if (node.mode === 'full') fullNodes++;
+      else lightNodes++;
+    }
+  }
+
+  return json({
+    active_nodes: totalNodes, light_nodes: lightNodes, full_nodes: fullNodes,
+    online_players: totalPlayers, timestamp: new Date().toISOString(),
+  }, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIMULATIONS — Published spaces (gallery data)
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function handlePublishSimulation(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const body = await request.json();
+  const { name, description, genre, max_players, thumbnail_url, r2_key } = body;
+
+  if (!name) return json({ error: 'name required' }, 400, cors);
+
+  const userData = await env.USERS.get(`user:${userId}`);
+  const user = userData ? JSON.parse(userData) : {};
+
+  const simId = crypto.randomUUID();
+  const sim = {
+    id: simId, name, description: description || '',
+    genre: genre || 'all', max_players: max_players || 10,
+    author_id: userId, author_name: user.username || 'Unknown',
+    thumbnail_url: thumbnail_url || null, r2_key: r2_key || null,
+    play_count: 0, favorite_count: 0, version: 1,
+    published_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+  await env.SOCIAL.put(`sim-author:${userId}:${simId}`, simId);
+
+  // Increment author's sim count
+  const simCount = parseInt(await env.SOCIAL.get(`simCount:${userId}`) || '0') + 1;
+  await env.SOCIAL.put(`simCount:${userId}`, simCount.toString());
+
+  return json({ id: simId, ...sim }, 201, cors);
+}
+
+async function handleListSimulations(env, cors) {
+  const list = await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
+  const sims = [];
+
+  for (const key of list.keys) {
+    if (key.name.startsWith('sim-author:')) continue;
+    if (key.name.startsWith('simCount:')) continue;
+    const data = await env.SOCIAL.get(key.name);
+    if (data) sims.push(JSON.parse(data));
+  }
+
+  sims.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+  return json({ simulations: sims, total: sims.length }, 200, cors);
+}
+
+async function handleGetSimulation(simId, env, cors) {
+  const data = await env.SOCIAL.get(`sim:${simId}`);
+  if (!data) return json({ error: 'Simulation not found' }, 404, cors);
+  return json(JSON.parse(data), 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
