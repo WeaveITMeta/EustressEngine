@@ -1351,10 +1351,15 @@ async function handleStripeWebhook(request, env) {
         }
       }
 
-      // Revenue split: 50% to treasury
+      // Revenue split: 50% treasury, 50% platform
       const treasuryCut = amount * TREASURY_SPLIT;
-      const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-      await env.PAYOUTS.put('treasury:total_usd', (currentTotal + treasuryCut).toString());
+      const platformCut = amount - treasuryCut; // Remaining 50% to Eustress
+
+      const currentTreasury = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+      await env.PAYOUTS.put('treasury:total_usd', (currentTreasury + treasuryCut).toString());
+
+      const currentPlatform = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
+      await env.PAYOUTS.put('platform:total_usd', (currentPlatform + platformCut).toString());
 
       // Log transaction
       if (userId) {
@@ -1366,11 +1371,12 @@ async function handleStripeWebhook(request, env) {
         }), { expirationTtl: 86400 * 365 * 3 });
       }
 
-      // Record deposit
+      // Record deposit with full revenue breakdown
       await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
-        id: session.id, type: 'ticket_purchase', amount_usd: amount, treasury_cut: treasuryCut,
-        tickets_credited: ticketsToCredit, package: pkgKey, user_id: userId || 'anonymous',
-        timestamp: new Date().toISOString(),
+        id: session.id, type: 'ticket_purchase', amount_usd: amount,
+        treasury_cut: treasuryCut, platform_cut: platformCut,
+        tickets_credited: ticketsToCredit, package: pkgKey,
+        user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
       }));
 
     } else {
@@ -1676,8 +1682,11 @@ async function handlePayoutRate(env, cors) {
   const dailyBls = 13699;
   const blsToUsd = dailyBls > 0 ? dailyDripUsd / dailyBls : 0;
 
+  const platformUsd = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
+
   return json({
     treasury_usd: treasuryUsd,
+    platform_usd: platformUsd,
     daily_drip_usd: dailyDripUsd,
     daily_bls_emission: dailyBls,
     bls_to_usd_rate: blsToUsd,
