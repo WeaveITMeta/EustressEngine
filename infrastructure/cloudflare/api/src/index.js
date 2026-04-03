@@ -1368,6 +1368,7 @@ async function handleStripeConnectOnboard(request, env, cors) {
       'business_type': 'individual',
       'metadata[user_id]': userId,
       'metadata[username]': user.username,
+      'capabilities[card_payments][requested]': 'true',
       'capabilities[transfers][requested]': 'true',
       // ToS acceptance (required for custom accounts)
       'tos_acceptance[date]': Math.floor(Date.now() / 1000).toString(),
@@ -1375,7 +1376,8 @@ async function handleStripeConnectOnboard(request, env, cors) {
     };
 
     if (user.email) accountParams['email'] = user.email;
-    if (user.username) accountParams['individual[first_name]'] = user.username;
+    // Don't set first_name to username — Stripe will reject if it doesn't match the ID photo
+    // Name comes from the ID document uploaded via R2 sync or Stripe's own onboarding
     if (user.birthday) {
       const [y, m, d] = user.birthday.split('-');
       accountParams['individual[dob][year]'] = y;
@@ -1391,6 +1393,9 @@ async function handleStripeConnectOnboard(request, env, cors) {
     await env.USERS.put(`user:${userId}`, JSON.stringify(user));
 
     // Upload KYC docs from R2 to Stripe for identity verification
+    await syncKycDocsToStripe(userId, connectId, env);
+  } else {
+    // Account exists — re-sync docs in case they weren't uploaded before
     await syncKycDocsToStripe(userId, connectId, env);
   }
 
