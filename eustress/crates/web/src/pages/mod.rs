@@ -44,6 +44,7 @@ pub mod profile;
 pub mod projects;
 pub mod settings;
 pub mod terms;
+pub mod tickets;
 pub mod trust_registry;
 
 pub use about::AboutPage;
@@ -83,4 +84,5 @@ pub use profile::ProfilePage;
 pub use projects::ProjectsPage;
 pub use settings::SettingsPage;
 pub use terms::TermsPage;
+pub use tickets::TicketsPage;
 pub use trust_registry::TrustRegistryPage;

@@ -96,8 +96,14 @@ pub fn CentralNav(
                             let username = user.username.clone();
                             let avatar_url = user.avatar_url.clone();
                             
+                            let ticket_display = format!("{}", user.ticket_balance);
                             view! {
                                 <div class="nav-user-section">
+                                    // Ticket Balance
+                                    <a href="/tickets" class="nav-tickets">
+                                        <span class="ticket-icon">"🎟"</span>
+                                        <span class="ticket-amount">{ticket_display}</span>
+                                    </a>
                                     // Bliss Balance
                                     <a href="/bliss" class="nav-bliss">
                                         <img src="/assets/icons/bliss.svg" alt="Bliss" class="bliss-icon" />

@@ -26,6 +26,8 @@ pub struct User {
     pub avatar_url: Option<String>,
     pub discord_id: Option<String>,
     pub bliss_balance: u64,
+    #[serde(default)]
+    pub ticket_balance: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

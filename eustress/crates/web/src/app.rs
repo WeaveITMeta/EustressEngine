@@ -52,6 +52,7 @@ use crate::pages::{
     profile::ProfilePage,
     settings::SettingsPage,
     terms::TermsPage,
+    tickets::TicketsPage,
     trust_registry::TrustRegistryPage,
 };
 use crate::state::AppState;
@@ -169,6 +170,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/docs/realism") view=DocsRealismPage />
                 <Route path=path!("/docs/philosophy") view=DocsPhilosophyPage />
                 <Route path=path!("/bliss") view=BlissPage />
+                <Route path=path!("/tickets") view=TicketsPage />
                 <Route path=path!("/bliss-leaderboard") view=BlissLeaderboardPage />
                 <Route path=path!("/download") view=DownloadPage />
                 <Route path=path!("/downloads/player") view=DownloadPlayerPage />
