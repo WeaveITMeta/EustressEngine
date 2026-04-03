@@ -234,7 +234,7 @@ pub fn GalleryPage() -> impl IntoView {
                     <img src="/assets/icons/grid.svg" alt="All" class="section-icon" />
                     <h2>
                         {move || if search_query.get().is_empty() && selected_category.get() == "all" {
-                            "All Experiences".to_string()
+                            "All Simulations".to_string()
                         } else {
                             format!("Results ({})", filtered_experiences().len())
                         }}

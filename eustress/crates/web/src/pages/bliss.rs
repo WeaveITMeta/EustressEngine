@@ -67,17 +67,48 @@ pub fn BlissPage() -> impl IntoView {
     let selected_tier = RwSignal::new(Option::<usize>::None);
     let custom_amount = RwSignal::new(String::new());
 
-    // KPI data (simulated — in production, fetched from /api/bliss/kpis)
-    let kpi = RwSignal::new(BlissKpi {
-        total_supply: "2,847,391 BLS".to_string(),
-        circulating_supply: "1,923,456 BLS".to_string(),
-        treasury_balance: "$47,832 USD".to_string(),
-        active_nodes: 342,
-        total_contributors: 1_847,
-        avg_bliss_earned: "7.41 BLS".to_string(),
-        network_hashrate: "1.2 TH/s".to_string(),
-        blocks_mined: 48_291,
-        daily_distribution: "13,699 BLS".to_string(),
+    // KPI data — fetched live from Cloudflare Worker
+    let kpi = RwSignal::new(BlissKpi::default());
+
+    // Fetch real data on load
+    leptos::task::spawn_local(async move {
+        // Get treasury balance + payout rate
+        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/payouts/rate")
+            .send().await
+        {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                let treasury = data.get("treasury_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let daily_drip = data.get("daily_drip_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let deposits = data.get("deposit_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                kpi.update(|k| {
+                    k.treasury_balance = format!("${:.2} USD", treasury);
+                    k.daily_distribution = format!("{:.0} BLS", 13699.0); // Year 1 emission constant
+                    if daily_drip > 0.0 {
+                        k.avg_bliss_earned = format!("${:.4}/BLS", daily_drip / 13699.0);
+                    } else {
+                        k.avg_bliss_earned = "—".to_string();
+                    }
+                });
+            }
+        }
+
+        // Get community stats (contributors count)
+        if let Ok(resp) = gloo_net::http::Request::get("https://api.eustress.dev/api/community/stats")
+            .send().await
+        {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                let users = data.get("total_users").and_then(|v| v.as_u64()).unwrap_or(0);
+                kpi.update(|k| {
+                    k.total_contributors = users;
+                    // Initial supply + emissions (Year 1: 5% of 100M = 5M new)
+                    k.total_supply = "100,000,000 BLS".to_string();
+                    k.circulating_supply = format!("{} BLS", users * 0); // No distribution yet
+                    k.active_nodes = 0; // No node heartbeat system yet
+                    k.blocks_mined = 0;
+                });
+            }
+        }
     });
 
     // Payment mode: one-time or recurring (monthly)

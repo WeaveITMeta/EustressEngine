@@ -257,7 +257,7 @@ pub fn LearnPage() -> impl IntoView {
                     <div class="header-line"></div>
                 </div>
                 <h1 class="learn-title">"Master Eustress"</h1>
-                <p class="learn-subtitle">"Everything you need to build amazing 3D experiences"</p>
+                <p class="learn-subtitle">"Everything you need to build amazing 3D simulations"</p>
             </section>
             
             // MindSpace Feature Section

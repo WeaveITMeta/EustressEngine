@@ -1238,14 +1238,14 @@ async function stripeRequest(method, endpoint, body, env) {
 
 // Stripe price IDs
 const STRIPE_PRICES = {
-  seed_one_time: 'price_1THvJ6PiMzxNRJisA6uZ0055',
-  growth_one_time: 'price_1THvJ6PiMzxNRJisO3dHFqe0',
-  sustainer_one_time: 'price_1THvJ7PiMzxNRJisYP6tZzcO',
-  patron_one_time: 'price_1THvJ8PiMzxNRJisfsOnku2k',
-  seed_recurring: 'price_1THvJ8PiMzxNRJisJnZXhxRg',
-  growth_recurring: 'price_1THvJ9PiMzxNRJis2cAeFt5D',
-  sustainer_recurring: 'price_1THvJ9PiMzxNRJisu2gKnxIN',
-  patron_recurring: 'price_1THvJAPiMzxNRJis4loBIX84',
+  seed_one_time: 'price_1THyC7RgsC7hEeKMmD71Pdcm',
+  growth_one_time: 'price_1THyC7RgsC7hEeKMc59jIIrA',
+  sustainer_one_time: 'price_1THyC8RgsC7hEeKMaQTcj58e',
+  patron_one_time: 'price_1THyC9RgsC7hEeKMioXlaWy0',
+  seed_recurring: 'price_1THyC9RgsC7hEeKMLdz2AAlz',
+  growth_recurring: 'price_1THyCARgsC7hEeKMvMQWDog5',
+  sustainer_recurring: 'price_1THyCARgsC7hEeKM6QpYML0j',
+  patron_recurring: 'price_1THyCBRgsC7hEeKMLAlLI8pS',
 };
 
 // Platform fee: 2.5%
@@ -1284,7 +1284,7 @@ async function handleStripeCheckout(request, env, cors) {
   } else {
     // Custom amount — create price inline
     params['line_items[0][price_data][currency]'] = 'usd';
-    params['line_items[0][price_data][product]'] = 'prod_UGSDsAdsbUdE5l';
+    params['line_items[0][price_data][product]'] = 'prod_UGVCI0rliegrSC';
     params['line_items[0][price_data][unit_amount]'] = amountCents.toString();
     params['line_items[0][quantity]'] = '1';
     if (isRecurring) {
@@ -1691,11 +1691,11 @@ async function handlePayoutRate(env, cors) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const TICKET_PACKAGES = {
-  starter:  { name: 'Starter',  usd: 4.99,  base: 400,  bonus: 0,    total: 400,   price_id: 'price_1THx4CPiMzxNRJistc0F8czZ' },
-  standard: { name: 'Standard', usd: 9.99,  base: 800,  bonus: 80,   total: 880,   price_id: 'price_1THx4DPiMzxNRJisga9AGdlW' },
-  mega:     { name: 'Mega',     usd: 19.99, base: 1600, bonus: 240,  total: 1840,  price_id: 'price_1THx4EPiMzxNRJisFQdjQMOb' },
-  super:    { name: 'Super',    usd: 49.99, base: 4000, bonus: 1000, total: 5000,  price_id: 'price_1THx4EPiMzxNRJisxMuu6lh5' },
-  ultra:    { name: 'Ultra',    usd: 99.99, base: 8000, bonus: 2800, total: 10800, price_id: 'price_1THx4GPiMzxNRJismfkyhIbc' },
+  starter:  { name: 'Starter',  usd: 4.99,  base: 400,  bonus: 0,    total: 400,   price_id: 'price_1THyBSRgsC7hEeKMVPoXgzGp' },
+  standard: { name: 'Standard', usd: 9.99,  base: 800,  bonus: 80,   total: 880,   price_id: 'price_1THyBTRgsC7hEeKMqirqajPl' },
+  mega:     { name: 'Mega',     usd: 19.99, base: 1600, bonus: 240,  total: 1840,  price_id: 'price_1THyBURgsC7hEeKMXkupuaQR' },
+  super:    { name: 'Super',    usd: 49.99, base: 4000, bonus: 1000, total: 5000,  price_id: 'price_1THyBURgsC7hEeKMzwTi9Z2V' },
+  ultra:    { name: 'Ultra',    usd: 99.99, base: 8000, bonus: 2800, total: 10800, price_id: 'price_1THyBVRgsC7hEeKMHTMs0Hsq' },
 };
 
 const DEVELOPER_SHARE = 0.70;

@@ -372,7 +372,7 @@ pub fn ProjectsPage() -> impl IntoView {
                             <circle cx="12" cy="12" r="10"/>
                             <polyline points="12 6 12 12 16 14"/>
                         </svg>
-                        <span>"Real-time WebTransport streaming"</span>
+                        <span>"Real-time Eustress Streams"</span>
                     </div>
                     <div class="ai-feature">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

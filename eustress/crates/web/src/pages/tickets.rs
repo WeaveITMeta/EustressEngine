@@ -58,7 +58,8 @@ pub fn TicketsPage() -> impl IntoView {
             <section class="tickets-hero">
                 <h1 class="tickets-title">"Tickets"</h1>
                 <p class="tickets-subtitle">
-                    "Purchase Tickets for the marketplace, game passes, and simulation features. "
+                    "Purchase Tickets for the marketplace and simulation passes."
+                    <br />
                     "50% of every purchase funds the Bliss contributor treasury."
                 </p>
 
@@ -115,14 +116,18 @@ pub fn TicketsPage() -> impl IntoView {
                                     <span class="ticket-card-count">{format_tickets(pkg.base)}</span>
                                 </div>
                                 {if pkg.bonus > 0 {
-                                    Some(view! {
-                                        <span class="ticket-card-bonus">{format!("+{} Bonus", format_tickets(pkg.bonus))}</span>
-                                        <span class="ticket-card-total">{format!("Total: {} Tickets", format_tickets(pkg.total))}</span>
-                                    })
+                                    view! {
+                                        <div>
+                                            <span class="ticket-card-bonus">{format!("+{} Bonus", format_tickets(pkg.bonus))}</span>
+                                            <span class="ticket-card-total">{format!("Total: {} Tickets", format_tickets(pkg.total))}</span>
+                                        </div>
+                                    }.into_any()
                                 } else {
-                                    Some(view! {
-                                        <span class="ticket-card-total">{format!("Total: {} Tickets", format_tickets(pkg.total))}</span>
-                                    })
+                                    view! {
+                                        <div>
+                                            <span class="ticket-card-total">{format!("{} Tickets", format_tickets(pkg.total))}</span>
+                                        </div>
+                                    }.into_any()
                                 }}
                                 <div class="ticket-card-price">{format!("${:.2}", pkg.usd)}</div>
                             </div>

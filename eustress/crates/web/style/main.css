@@ -18584,6 +18584,24 @@ a.experience-card {
     font-size: 0.95rem;
 }
 
+.keys-empty {
+    text-align: center;
+    padding: var(--space-2xl);
+    color: var(--color-text-muted);
+}
+
+.keys-empty svg {
+    width: 48px;
+    height: 48px;
+    opacity: 0.2;
+    margin-bottom: var(--space-md);
+}
+
+.keys-empty p {
+    font-size: var(--text-sm);
+    margin: 0;
+}
+
 .btn-create-key {
     display: flex;
     align-items: center;
@@ -19447,16 +19465,17 @@ a.experience-card {
     display: flex;
     align-items: center;
     gap: var(--space-sm);
-    padding: var(--space-sm) var(--space-md);
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-lg);
+    background: rgba(128, 144, 160, 0.08);
+    border: 1px solid rgba(128, 144, 160, 0.12);
+    border-radius: var(--radius-full);
 }
 
 .ai-feature svg {
-    width: 18px;
-    height: 18px;
-    color: #a0a8b0;
+    width: 16px;
+    height: 16px;
+    color: var(--color-text-muted);
+    opacity: 0.7;
 }
 
 .ai-feature span {
