@@ -255,11 +255,8 @@ fn main() {
         .add_plugins(eustress_common::services::teleport::TeleportPlugin)
         .add_plugins(eustress_common::services::marketplace::MarketplacePlugin)
         
-        // Runtime (character, ownership)
-        // .add_plugins(eustress_runtime::EustressRuntimePlugin)
-        
-        // Networking (server mode)
-        // .add_plugins(eustress_networking::ServerNetworkPlugin::new(port))
+        // Networking (server mode — port configured via StartServer message)
+        .add_plugins(eustress_networking::server::ServerNetworkPlugin)
         
         // Server systems
         .add_systems(Startup, setup_server)
