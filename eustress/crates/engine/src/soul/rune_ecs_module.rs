@@ -205,6 +205,16 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(sound_stop)?;
     module.function_meta(sound_set_volume)?;
 
+    // MarketplaceService — Roblox-compatible marketplace API (Tickets currency)
+    module.ty::<ProductInfoRune>()?;
+    module.ty::<PlayerRune>()?;
+    module.function_meta(marketplace_prompt_purchase)?;
+    module.function_meta(marketplace_get_product_info)?;
+    module.function_meta(marketplace_player_owns_game_pass)?;
+    module.function_meta(marketplace_get_ticket_balance)?;
+    module.function_meta(players_get_player_by_user_id)?;
+    module.function_meta(players_get_local_player)?;
+
     Ok(module)
 }
 
@@ -2322,6 +2332,170 @@ fn sound_stop(sound: &mut SoundRune) {
 #[rune::function]
 fn sound_set_volume(sound: &mut SoundRune, volume: f64) {
     sound.volume = volume.clamp(0.0, 1.0);
+}
+
+// ============================================================================
+// MarketplaceService — Roblox-compatible marketplace API for Tickets
+// ============================================================================
+
+/// Product info returned by MarketplaceService:GetProductInfo()
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug, rune::Any)]
+struct ProductInfoRune {
+    #[rune(get)] product_id: i64,
+    #[rune(get)] name: String,
+    #[rune(get)] description: String,
+    #[rune(get)] price_in_tickets: i64,
+    #[rune(get)] is_for_sale: bool,
+    #[rune(get)] product_type: String, // "GamePass" | "DeveloperProduct"
+}
+
+/// Player info for scripting
+#[cfg(feature = "realism-scripting")]
+#[derive(Debug, rune::Any)]
+struct PlayerRune {
+    #[rune(get)] user_id: i64,
+    #[rune(get)] name: String,
+    #[rune(get)] entity_id: i64,
+    #[rune(get)] ticket_balance: i64,
+}
+
+/// Thread-local marketplace bridge
+thread_local! {
+    static MARKETPLACE_BRIDGE: std::cell::RefCell<Option<MarketplaceBridge>> = std::cell::RefCell::new(None);
+}
+
+/// Marketplace bridge data — set by the Bevy system before script execution
+#[derive(Clone)]
+pub struct MarketplaceBridge {
+    pub game_passes: std::collections::HashMap<i64, (String, String, i64, bool)>, // id → (name, desc, price, for_sale)
+    pub dev_products: std::collections::HashMap<i64, (String, String, i64, bool)>,
+    pub player_passes: std::collections::HashMap<i64, std::collections::HashSet<i64>>, // entity_id → owned pass IDs
+    pub player_tickets: std::collections::HashMap<i64, i64>, // entity_id → ticket balance
+    pub player_info: std::collections::HashMap<i64, (i64, String)>, // entity_id → (user_id, username)
+}
+
+pub fn set_marketplace_bridge(bridge: MarketplaceBridge) {
+    MARKETPLACE_BRIDGE.with(|cell| *cell.borrow_mut() = Some(bridge));
+}
+
+pub fn clear_marketplace_bridge() {
+    MARKETPLACE_BRIDGE.with(|cell| *cell.borrow_mut() = None);
+}
+
+fn with_marketplace<F, R>(fallback: R, callback: F) -> R
+where F: FnOnce(&MarketplaceBridge) -> R {
+    MARKETPLACE_BRIDGE.with(|cell| {
+        match cell.borrow().as_ref() {
+            Some(bridge) => callback(bridge),
+            None => {
+                warn!("[Rune Script] MarketplaceService not available");
+                fallback
+            }
+        }
+    })
+}
+
+/// MarketplaceService:PromptPurchase(player, productId)
+/// Triggers a purchase prompt for the player. Returns true if the prompt was shown.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_prompt_purchase(player_entity_id: i64, product_id: i64) -> bool {
+    info!("[Rune] MarketplaceService:PromptPurchase({}, {})", player_entity_id, product_id);
+    with_marketplace(false, |bridge| {
+        bridge.game_passes.contains_key(&product_id) || bridge.dev_products.contains_key(&product_id)
+    })
+}
+
+/// MarketplaceService:GetProductInfo(productId)
+/// Returns product info or None if product doesn't exist.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_get_product_info(product_id: i64) -> Option<ProductInfoRune> {
+    with_marketplace(None, |bridge| {
+        if let Some((name, desc, price, for_sale)) = bridge.game_passes.get(&product_id) {
+            Some(ProductInfoRune {
+                product_id,
+                name: name.clone(),
+                description: desc.clone(),
+                price_in_tickets: *price,
+                is_for_sale: *for_sale,
+                product_type: "GamePass".to_string(),
+            })
+        } else if let Some((name, desc, price, for_sale)) = bridge.dev_products.get(&product_id) {
+            Some(ProductInfoRune {
+                product_id,
+                name: name.clone(),
+                description: desc.clone(),
+                price_in_tickets: *price,
+                is_for_sale: *for_sale,
+                product_type: "DeveloperProduct".to_string(),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+/// MarketplaceService:PlayerOwnsGamePass(player, passId)
+/// Returns true if the player owns the specified game pass.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_player_owns_game_pass(player_entity_id: i64, pass_id: i64) -> bool {
+    with_marketplace(false, |bridge| {
+        bridge.player_passes
+            .get(&player_entity_id)
+            .map(|passes| passes.contains(&pass_id))
+            .unwrap_or(false)
+    })
+}
+
+/// MarketplaceService:GetTicketBalance(player)
+/// Returns the player's current Ticket balance.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn marketplace_get_ticket_balance(player_entity_id: i64) -> i64 {
+    with_marketplace(0, |bridge| {
+        *bridge.player_tickets.get(&player_entity_id).unwrap_or(&0)
+    })
+}
+
+/// Players:GetPlayerByUserId(userId)
+/// Returns player info or None.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn players_get_player_by_user_id(user_id: i64) -> Option<PlayerRune> {
+    with_marketplace(None, |bridge| {
+        for (entity_id, (uid, name)) in &bridge.player_info {
+            if *uid == user_id {
+                let tickets = *bridge.player_tickets.get(entity_id).unwrap_or(&0);
+                return Some(PlayerRune {
+                    user_id: *uid,
+                    name: name.clone(),
+                    entity_id: *entity_id,
+                    ticket_balance: tickets,
+                });
+            }
+        }
+        None
+    })
+}
+
+/// Players.LocalPlayer — get the local player
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn players_get_local_player() -> Option<PlayerRune> {
+    with_marketplace(None, |bridge| {
+        bridge.player_info.iter().next().map(|(entity_id, (uid, name))| {
+            let tickets = *bridge.player_tickets.get(entity_id).unwrap_or(&0);
+            PlayerRune {
+                user_id: *uid,
+                name: name.clone(),
+                entity_id: *entity_id,
+                ticket_balance: tickets,
+            }
+        })
+    })
 }
 
 /// Stub module when feature is disabled

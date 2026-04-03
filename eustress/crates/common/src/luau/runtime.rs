@@ -1749,6 +1749,92 @@ impl LuauRuntime {
         globals.set("_EustressHumanoidProto", humanoid_proto)
             .map_err(|e| format!("Failed to set _EustressHumanoidProto: {}", e))?;
 
+        // ====================================================================
+        // MarketplaceService — Roblox-compatible marketplace API (Tickets)
+        // ====================================================================
+        let marketplace_service = lua.create_table()
+            .map_err(|e| format!("Failed to create MarketplaceService: {}", e))?;
+
+        // MarketplaceService:PromptPurchase(player, productId)
+        marketplace_service.set("PromptPurchase", lua.create_function(|_, (player, product_id): (mlua::Table, i64)| {
+            let entity_id: i64 = player.get("_entityId").unwrap_or(0);
+            tracing::info!("[Luau] MarketplaceService:PromptPurchase({}, {})", entity_id, product_id);
+            // TODO: fire PromptPurchaseEvent via EventBus
+            Ok(true)
+        }).map_err(|e| format!("PromptPurchase: {}", e))?)
+            .map_err(|e| format!("set PromptPurchase: {}", e))?;
+
+        // MarketplaceService:GetProductInfo(productId)
+        marketplace_service.set("GetProductInfo", lua.create_function(|lua, product_id: i64| {
+            let info = lua.create_table()?;
+            info.set("ProductId", product_id)?;
+            info.set("Name", "")?;
+            info.set("Description", "")?;
+            info.set("PriceInTickets", 0)?;
+            info.set("IsForSale", false)?;
+            info.set("ProductType", "DeveloperProduct")?;
+            // TODO: populate from MarketplaceService bridge
+            Ok(info)
+        }).map_err(|e| format!("GetProductInfo: {}", e))?)
+            .map_err(|e| format!("set GetProductInfo: {}", e))?;
+
+        // MarketplaceService:PlayerOwnsGamePass(player, passId)
+        marketplace_service.set("PlayerOwnsGamePass", lua.create_function(|_, (_player, _pass_id): (mlua::Table, i64)| {
+            // TODO: check via MarketplaceService bridge
+            Ok(false)
+        }).map_err(|e| format!("PlayerOwnsGamePass: {}", e))?)
+            .map_err(|e| format!("set PlayerOwnsGamePass: {}", e))?;
+
+        // MarketplaceService:GetTicketBalance(player)
+        marketplace_service.set("GetTicketBalance", lua.create_function(|_, _player: mlua::Table| {
+            // TODO: read from bridge
+            Ok(0i64)
+        }).map_err(|e| format!("GetTicketBalance: {}", e))?)
+            .map_err(|e| format!("set GetTicketBalance: {}", e))?;
+
+        // MarketplaceService.PromptPurchaseFinished (signal stub)
+        let pf_signal = lua.create_table()
+            .map_err(|e| format!("PromptPurchaseFinished table: {}", e))?;
+        pf_signal.set("Connect", lua.create_function(|_, (_self_table, _callback): (mlua::Table, mlua::Function)| {
+            tracing::info!("[Luau] MarketplaceService.PromptPurchaseFinished:Connect()");
+            Ok(())
+        }).map_err(|e| format!("PF Connect: {}", e))?)
+            .map_err(|e| format!("set PF Connect: {}", e))?;
+        marketplace_service.set("PromptPurchaseFinished", pf_signal)
+            .map_err(|e| format!("set PromptPurchaseFinished: {}", e))?;
+
+        globals.set("MarketplaceService", marketplace_service)
+            .map_err(|e| format!("Failed to set MarketplaceService: {}", e))?;
+
+        // ====================================================================
+        // Players service — Roblox-compatible player API
+        // ====================================================================
+        let players_service = lua.create_table()
+            .map_err(|e| format!("Failed to create Players: {}", e))?;
+
+        // Players:GetPlayerByUserId(userId)
+        players_service.set("GetPlayerByUserId", lua.create_function(|lua, user_id: i64| {
+            let player = lua.create_table()?;
+            player.set("UserId", user_id)?;
+            player.set("Name", "")?;
+            player.set("_entityId", 0i64)?;
+            // TODO: populate from player bridge
+            Ok(player)
+        }).map_err(|e| format!("GetPlayerByUserId: {}", e))?)
+            .map_err(|e| format!("set GetPlayerByUserId: {}", e))?;
+
+        // Players.LocalPlayer (stub — set per-script)
+        let local_player = lua.create_table()
+            .map_err(|e| format!("LocalPlayer table: {}", e))?;
+        local_player.set("UserId", 0i64).map_err(|e| format!("LP UserId: {}", e))?;
+        local_player.set("Name", "").map_err(|e| format!("LP Name: {}", e))?;
+        local_player.set("_entityId", 0i64).map_err(|e| format!("LP entityId: {}", e))?;
+        players_service.set("LocalPlayer", local_player)
+            .map_err(|e| format!("set LocalPlayer: {}", e))?;
+
+        globals.set("Players", players_service)
+            .map_err(|e| format!("Failed to set Players: {}", e))?;
+
         Ok(())
     }
 }

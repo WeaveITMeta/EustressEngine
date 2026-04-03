@@ -37,6 +37,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
+// Tickets currency constants
+/// Currency key for Tickets in CurrencyBalance
+pub const TICKETS_CURRENCY: &str = "TKT";
+/// Developer receives 70% of Ticket price on marketplace sales
+pub const DEVELOPER_SHARE: f64 = 0.70;
+/// Platform retains 30% of Ticket price on marketplace sales
+pub const PLATFORM_SHARE: f64 = 0.30;
+
 // ============================================================================
 // Product Types
 // ============================================================================
