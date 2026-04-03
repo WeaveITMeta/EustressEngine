@@ -106,6 +106,18 @@ export default {
       if (url.pathname === '/api/admin/screening-report' && request.method === 'GET')
         return handleAdminScreeningReport(request, env, cors);
 
+      // Tickets
+      if (url.pathname === '/api/tickets/packages' && request.method === 'GET')
+        return handleTicketPackages(env, cors);
+      if (url.pathname === '/api/tickets/balance' && request.method === 'GET')
+        return handleTicketBalance(request, env, cors);
+      if (url.pathname === '/api/tickets/checkout' && request.method === 'POST')
+        return handleTicketCheckout(request, env, cors);
+      if (url.pathname === '/api/tickets/spend' && request.method === 'POST')
+        return handleTicketSpend(request, env, cors);
+      if (url.pathname === '/api/tickets/history' && request.method === 'GET')
+        return handleTicketHistory(request, env, cors);
+
       // Stripe
       if (url.pathname === '/api/stripe/checkout' && request.method === 'POST')
         return handleStripeCheckout(request, env, cors);
@@ -1317,25 +1329,64 @@ async function handleStripeWebhook(request, env) {
     const amount = (session.amount_total || 0) / 100; // dollars
     const userId = session.metadata?.user_id || session.client_reference_id;
 
-    // Record treasury deposit
-    const deposit = {
-      id: session.id,
-      amount_usd: amount,
-      user_id: userId || 'anonymous',
-      timestamp: new Date().toISOString(),
-      mode: session.mode,
-      stripe_payment_intent: session.payment_intent,
-    };
+    const isTicketPurchase = session.metadata?.type === 'ticket_purchase';
 
-    await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify(deposit));
+    if (isTicketPurchase) {
+      // TICKET PURCHASE — credit tickets + split revenue
+      const pkgKey = session.metadata?.package;
+      const pkg = TICKET_PACKAGES[pkgKey];
+      const ticketsToCredit = pkg ? pkg.total : parseInt(session.metadata?.tickets || '0');
 
-    // Update treasury total
-    const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-    await env.PAYOUTS.put('treasury:total_usd', (currentTotal + amount).toString());
+      // Idempotency check
+      const existing = await env.PAYOUTS.get(`deposit:${session.id}`);
+      if (existing) return new Response('OK', { status: 200 }); // Already processed
 
-    // Increment deposit count
-    const count = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
-    await env.PAYOUTS.put('treasury:deposit_count', (count + 1).toString());
+      // Credit tickets to user
+      if (userId) {
+        const userData = await env.USERS.get(`user:${userId}`);
+        if (userData) {
+          const user = JSON.parse(userData);
+          user.ticket_balance = (user.ticket_balance || 0) + ticketsToCredit;
+          await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+        }
+      }
+
+      // Revenue split: 50% to treasury
+      const treasuryCut = amount * TREASURY_SPLIT;
+      const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+      await env.PAYOUTS.put('treasury:total_usd', (currentTotal + treasuryCut).toString());
+
+      // Log transaction
+      if (userId) {
+        await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
+          id: session.id, user_id: userId, type: 'purchase', amount: ticketsToCredit,
+          currency: 'TKT', stripe_session_id: session.id, price_usd: amount,
+          description: `Purchased ${pkg?.name || 'Tickets'} package (${ticketsToCredit} TKT)`,
+          timestamp: new Date().toISOString(),
+        }), { expirationTtl: 86400 * 365 * 3 });
+      }
+
+      // Record deposit
+      await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
+        id: session.id, type: 'ticket_purchase', amount_usd: amount, treasury_cut: treasuryCut,
+        tickets_credited: ticketsToCredit, package: pkgKey, user_id: userId || 'anonymous',
+        timestamp: new Date().toISOString(),
+      }));
+
+    } else {
+      // TREASURY FUNDING — direct treasury deposit (existing flow)
+      await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
+        id: session.id, type: 'treasury_fund', amount_usd: amount,
+        user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
+        mode: session.mode, stripe_payment_intent: session.payment_intent,
+      }));
+
+      const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
+      await env.PAYOUTS.put('treasury:total_usd', (currentTotal + amount).toString());
+
+      const count = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
+      await env.PAYOUTS.put('treasury:deposit_count', (count + 1).toString());
+    }
   }
 
   return new Response('OK', { status: 200 });
@@ -1633,6 +1684,144 @@ async function handlePayoutRate(env, cors) {
     rate_display: blsToUsd > 0 ? `$${blsToUsd.toFixed(6)}/BLS` : 'No treasury funds',
     deposit_count: parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0'),
   }, 200, cors);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TICKETS — Purchasable currency for marketplace + simulation API
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TICKET_PACKAGES = {
+  starter:  { name: 'Starter',  usd: 4.99,  base: 400,  bonus: 0,    total: 400,   price_id: 'price_1THx4CPiMzxNRJistc0F8czZ' },
+  standard: { name: 'Standard', usd: 9.99,  base: 800,  bonus: 80,   total: 880,   price_id: 'price_1THx4DPiMzxNRJisga9AGdlW' },
+  mega:     { name: 'Mega',     usd: 19.99, base: 1600, bonus: 240,  total: 1840,  price_id: 'price_1THx4EPiMzxNRJisFQdjQMOb' },
+  super:    { name: 'Super',    usd: 49.99, base: 4000, bonus: 1000, total: 5000,  price_id: 'price_1THx4EPiMzxNRJisxMuu6lh5' },
+  ultra:    { name: 'Ultra',    usd: 99.99, base: 8000, bonus: 2800, total: 10800, price_id: 'price_1THx4GPiMzxNRJismfkyhIbc' },
+};
+
+const DEVELOPER_SHARE = 0.70;
+const PLATFORM_SHARE = 0.30;
+const TREASURY_SPLIT = 0.50;
+
+function handleTicketPackages(env, cors) {
+  const packages = Object.entries(TICKET_PACKAGES).map(([key, pkg]) => ({
+    id: key, name: pkg.name, usd: pkg.usd, base: pkg.base, bonus: pkg.bonus, total: pkg.total,
+  }));
+  return json({ packages }, 200, cors);
+}
+
+async function handleTicketBalance(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const userData = await env.USERS.get(`user:${userId}`);
+  if (!userData) return json({ error: 'User not found' }, 404, cors);
+  const user = JSON.parse(userData);
+
+  return json({ tickets: user.ticket_balance || 0, user_id: userId }, 200, cors);
+}
+
+async function handleTicketCheckout(request, env, cors) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
+
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Sign in to purchase tickets' }, 401, cors);
+
+  const { package: pkgKey } = await request.json();
+  const pkg = TICKET_PACKAGES[pkgKey];
+  if (!pkg) return json({ error: 'Invalid package' }, 400, cors);
+
+  const params = {
+    'mode': 'payment',
+    'success_url': 'https://eustress.dev/tickets?purchased=true',
+    'cancel_url': 'https://eustress.dev/tickets?purchased=false',
+    'line_items[0][price]': pkg.price_id,
+    'line_items[0][quantity]': '1',
+    'metadata[type]': 'ticket_purchase',
+    'metadata[package]': pkgKey,
+    'metadata[tickets]': pkg.total.toString(),
+    'metadata[user_id]': userId,
+    'client_reference_id': userId,
+  };
+
+  const session = await stripeRequest('POST', '/checkout/sessions', params, env);
+  if (session.error) return json({ error: session.error.message }, 400, cors);
+
+  return json({ url: session.url, session_id: session.id }, 200, cors);
+}
+
+async function handleTicketSpend(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const { product_id, price, developer_id } = await request.json();
+  if (!product_id || !price || price <= 0)
+    return json({ error: 'Invalid product or price' }, 400, cors);
+
+  // Get buyer
+  const buyerData = await env.USERS.get(`user:${userId}`);
+  if (!buyerData) return json({ error: 'Buyer not found' }, 404, cors);
+  const buyer = JSON.parse(buyerData);
+
+  const balance = buyer.ticket_balance || 0;
+  if (balance < price)
+    return json({ error: 'Insufficient tickets', balance, price }, 400, cors);
+
+  // Calculate split
+  const devCut = Math.floor(price * DEVELOPER_SHARE);
+  const platformCut = price - devCut;
+
+  // Deduct from buyer
+  buyer.ticket_balance = balance - price;
+  await env.USERS.put(`user:${userId}`, JSON.stringify(buyer));
+
+  // Credit developer (if provided)
+  if (developer_id) {
+    const devData = await env.USERS.get(`user:${developer_id}`);
+    if (devData) {
+      const dev = JSON.parse(devData);
+      dev.ticket_balance = (dev.ticket_balance || 0) + devCut;
+      await env.USERS.put(`user:${developer_id}`, JSON.stringify(dev));
+    }
+  }
+
+  // Log transactions
+  const txnId = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
+    id: txnId, user_id: userId, type: 'spend', amount: -price,
+    balance_after: buyer.ticket_balance, currency: 'TKT',
+    product_id, developer_id, description: `Purchased product ${product_id}`, timestamp: now,
+  }), { expirationTtl: 86400 * 365 * 3 });
+
+  if (developer_id) {
+    await env.INVENTORY.put(`txn:${developer_id}:${Date.now()}`, JSON.stringify({
+      id: crypto.randomUUID(), user_id: developer_id, type: 'dev_payout', amount: devCut,
+      currency: 'TKT', product_id, counterparty_id: userId,
+      description: `Sale: product ${product_id} (70% of ${price} TKT)`, timestamp: now,
+    }), { expirationTtl: 86400 * 365 * 3 });
+  }
+
+  return json({
+    success: true, price, developer_cut: devCut, platform_cut: platformCut,
+    buyer_balance: buyer.ticket_balance,
+  }, 200, cors);
+}
+
+async function handleTicketHistory(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const list = await env.INVENTORY.list({ prefix: `txn:${userId}:`, limit: 50 });
+  const history = [];
+
+  for (const key of list.keys) {
+    const data = await env.INVENTORY.get(key.name);
+    if (data) history.push(JSON.parse(data));
+  }
+
+  history.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return json({ history, count: history.length }, 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

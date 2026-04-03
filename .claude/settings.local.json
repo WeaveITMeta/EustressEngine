@@ -25,7 +25,8 @@
       "Bash(wrangler kv:namespace create SOCIAL)",
       "Bash(wrangler kv:*)",
       "Bash(stripe --version)",
-      "Bash(stripe products:*)"
+      "Bash(stripe products:*)",
+      "Bash(stripe prices:*)"
     ]
   }
 }
