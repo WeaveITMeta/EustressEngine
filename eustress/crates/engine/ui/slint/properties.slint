@@ -175,6 +175,173 @@ component SectionHeader inherits Rectangle {
     }
 }
 
+// Searchable material dropdown with scroll — shows all MaterialService options
+component MaterialDropdown inherits Rectangle {
+    in property <string> label: "Material";
+    in property <string> value: "Plastic";
+    in property <[string]> options: [];
+    in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+
+    callback value-changed(string);
+    callback open-learn-url(string);
+    callback focus-changed(bool);
+
+    property <bool> dropdown-open: false;
+
+    height: 28px;
+    border-radius: 2px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
+
+        Text {
+            width: 100px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        // Dropdown button
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 22px;
+            background: mat-btn-touch.has-hover ? Theme.explorer-item-hover : Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.dropdown-open ? Theme.accent-blue : Theme.input-border;
+
+            mat-btn-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.dropdown-open = !root.dropdown-open;
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 4px;
+                spacing: 4px;
+
+                Text {
+                    text: root.value;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+
+                Image {
+                    width: 10px;
+                    height: 10px;
+                    source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                    image-fit: contain;
+                    colorize: Theme.text-secondary;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Dropdown popup
+    if root.dropdown-open: Rectangle {
+        x: 112px;
+        y: parent.height;
+        width: parent.width - 120px;
+        height: min(320px, root.options.length * 24px + 12px);
+        background: #1e1e2e;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #3a3a4a;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000080;
+
+        // Must be above other properties
+        // Prevent clicks from going through to viewport
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 4px;
+            spacing: 2px;
+
+            // Scrollable option list
+            ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    spacing: 1px;
+
+                    for option[idx] in root.options: Rectangle {
+                        height: 24px;
+                        background: opt-touch.has-hover ? #3a3a5a : (option == root.value ? #2a2a4a : transparent);
+                        border-radius: 3px;
+
+                        opt-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.value-changed(option);
+                                root.dropdown-open = false;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 6px;
+
+                            // Selected checkmark
+                            Text {
+                                width: 14px;
+                                text: option == root.value ? "✓" : "";
+                                color: Theme.accent-blue;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: option;
+                                color: option == root.value ? Theme.accent-blue : Theme.text-primary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Close dropdown when clicking outside
+    if root.dropdown-open: Rectangle {
+        x: -1000px;
+        y: -1000px;
+        width: 10000px;
+        height: 10000px;
+
+        // This overlay behind the dropdown catches clicks outside
+        TouchArea {
+            clicked => {
+                root.dropdown-open = false;
+            }
+        }
+    }
+}
+
 // Generic property row with label + value editor - polished design
 component PropRow inherits Rectangle {
     in property <string> label: "";
@@ -1084,8 +1251,22 @@ export component PropertiesPanel inherits Rectangle {
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                     }
                     
+                    // Material — searchable dropdown with all MaterialService options
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "material": MaterialDropdown {
+                        label: prop.name;
+                        value: prop.value;
+                        options: prop.options;
+                        editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                    }
+
                     // String / float / int / enum — generic row
-                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool" && prop.property-type != "material": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

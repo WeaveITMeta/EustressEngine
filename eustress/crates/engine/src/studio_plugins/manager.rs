@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use super::api::{PluginApi, StudioPlugin, PluginAction, PluginNotification, SimClock, ScheduledEvent};
+use super::api::{PluginApi, PluginAction, PluginNotification, SimClock, ScheduledEvent};
 use super::registry::PluginRegistry;
 
 /// Manages all loaded plugins

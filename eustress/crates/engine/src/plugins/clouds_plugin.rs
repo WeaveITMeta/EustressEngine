@@ -376,7 +376,7 @@ pub struct PrecipitationParticle {
 /// Sync weather state with LightingService
 fn sync_weather_with_lighting(
     lighting: Option<Res<LightingService>>,
-    mut weather_state: ResMut<WeatherState>,
+    _weather_state: ResMut<WeatherState>,
 ) {
     // If LightingService exists, we could sync weather from it
     // For now, weather is managed independently but affects lighting

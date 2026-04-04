@@ -10,7 +10,7 @@ use bevy::prelude::*;
 pub struct MoonDiskPlugin;
 
 impl Plugin for MoonDiskPlugin {
-    fn build(&self, app: &mut App) {
+    fn build(&self, _app: &mut App) {
         // MoonDisk shader systems
         // Currently disabled - Bevy's built-in atmosphere handles this
     }

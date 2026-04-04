@@ -466,7 +466,7 @@ pub fn score_manufacturer(
     let mfr_price = PricingTier::price_for_qty(&manufacturer.pricing, pilot_qty)
         .unwrap_or(target_unit_cost_usd * 2.0);
     let cost_ratio = if target_unit_cost_usd > 0.0 {
-        (1.0 - ((mfr_price - target_unit_cost_usd) / target_unit_cost_usd).abs().min(1.0))
+        1.0 - ((mfr_price - target_unit_cost_usd) / target_unit_cost_usd).abs().min(1.0)
     } else {
         0.5
     };
@@ -474,7 +474,7 @@ pub fn score_manufacturer(
 
     // --- Speed (10%) ---
     let speed_ratio = if pilot_deadline_days > 0 {
-        (1.0 - (manufacturer.lead_time_days as f64 / pilot_deadline_days as f64).min(1.0))
+        1.0 - (manufacturer.lead_time_days as f64 / pilot_deadline_days as f64).min(1.0)
     } else {
         0.5
     };

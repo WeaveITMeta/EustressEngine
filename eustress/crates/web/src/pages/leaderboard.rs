@@ -58,69 +58,72 @@ impl TimePeriod {
 // Main Component
 // -----------------------------------------------------------------------------
 
-/// Full leaderboard page.
+/// Full leaderboard page — pulls real data from api.eustress.dev.
 #[component]
 pub fn LeaderboardPage() -> impl IntoView {
-    // State
-    let active_tab = RwSignal::new("work".to_string());
-    let time_period = RwSignal::new("all".to_string());
+    let app_state = expect_context::<crate::state::AppState>();
+    let time_period = RwSignal::new("alltime".to_string());
     let search_query = RwSignal::new(String::new());
-    
-    // Sample Play leaderboard data (extended)
-    let play_leaderboard = vec![
-        LeaderboardEntry { rank: 1, username: "NightRider".to_string(), avatar_url: None, hours: 2847.5, level: 99, spaces_created: 0, total_visits: 0, streak_days: 365 },
-        LeaderboardEntry { rank: 2, username: "SkyWalker99".to_string(), avatar_url: None, hours: 2654.2, level: 95, spaces_created: 0, total_visits: 0, streak_days: 280 },
-        LeaderboardEntry { rank: 3, username: "PixelMaster".to_string(), avatar_url: None, hours: 2501.8, level: 92, spaces_created: 0, total_visits: 0, streak_days: 245 },
-        LeaderboardEntry { rank: 4, username: "GameLord".to_string(), avatar_url: None, hours: 2389.3, level: 88, spaces_created: 0, total_visits: 0, streak_days: 200 },
-        LeaderboardEntry { rank: 5, username: "AdventureSeeker".to_string(), avatar_url: None, hours: 2156.7, level: 85, spaces_created: 0, total_visits: 0, streak_days: 180 },
-        LeaderboardEntry { rank: 6, username: "SpeedDemon".to_string(), avatar_url: None, hours: 2034.1, level: 82, spaces_created: 0, total_visits: 0, streak_days: 165 },
-        LeaderboardEntry { rank: 7, username: "CosmicPlayer".to_string(), avatar_url: None, hours: 1987.4, level: 80, spaces_created: 0, total_visits: 0, streak_days: 150 },
-        LeaderboardEntry { rank: 8, username: "VirtualHero".to_string(), avatar_url: None, hours: 1876.9, level: 78, spaces_created: 0, total_visits: 0, streak_days: 140 },
-        LeaderboardEntry { rank: 9, username: "QuestRunner".to_string(), avatar_url: None, hours: 1765.2, level: 75, spaces_created: 0, total_visits: 0, streak_days: 130 },
-        LeaderboardEntry { rank: 10, username: "EpicGamer".to_string(), avatar_url: None, hours: 1654.8, level: 72, spaces_created: 0, total_visits: 0, streak_days: 120 },
-        LeaderboardEntry { rank: 11, username: "StarChaser".to_string(), avatar_url: None, hours: 1543.2, level: 70, spaces_created: 0, total_visits: 0, streak_days: 110 },
-        LeaderboardEntry { rank: 12, username: "NeonKnight".to_string(), avatar_url: None, hours: 1432.6, level: 68, spaces_created: 0, total_visits: 0, streak_days: 100 },
-        LeaderboardEntry { rank: 13, username: "PhantomX".to_string(), avatar_url: None, hours: 1321.9, level: 65, spaces_created: 0, total_visits: 0, streak_days: 95 },
-        LeaderboardEntry { rank: 14, username: "BlazeFury".to_string(), avatar_url: None, hours: 1210.3, level: 62, spaces_created: 0, total_visits: 0, streak_days: 88 },
-        LeaderboardEntry { rank: 15, username: "ShadowStrike".to_string(), avatar_url: None, hours: 1098.7, level: 60, spaces_created: 0, total_visits: 0, streak_days: 80 },
-        LeaderboardEntry { rank: 16, username: "ThunderBolt".to_string(), avatar_url: None, hours: 987.1, level: 58, spaces_created: 0, total_visits: 0, streak_days: 75 },
-        LeaderboardEntry { rank: 17, username: "IceStorm".to_string(), avatar_url: None, hours: 876.5, level: 55, spaces_created: 0, total_visits: 0, streak_days: 70 },
-        LeaderboardEntry { rank: 18, username: "FireDragon".to_string(), avatar_url: None, hours: 765.8, level: 52, spaces_created: 0, total_visits: 0, streak_days: 65 },
-        LeaderboardEntry { rank: 19, username: "WindWalker".to_string(), avatar_url: None, hours: 654.2, level: 50, spaces_created: 0, total_visits: 0, streak_days: 60 },
-        LeaderboardEntry { rank: 20, username: "EarthShaker".to_string(), avatar_url: None, hours: 543.6, level: 48, spaces_created: 0, total_visits: 0, streak_days: 55 },
-    ];
-    
-    // Sample Work leaderboard data (extended)
-    let work_leaderboard = vec![
-        LeaderboardEntry { rank: 1, username: "BuilderPro".to_string(), avatar_url: None, hours: 3156.2, level: 99, spaces_created: 47, total_visits: 15_000_000, streak_days: 400 },
-        LeaderboardEntry { rank: 2, username: "CodeMaster".to_string(), avatar_url: None, hours: 2987.5, level: 97, spaces_created: 38, total_visits: 12_500_000, streak_days: 350 },
-        LeaderboardEntry { rank: 3, username: "DesignWizard".to_string(), avatar_url: None, hours: 2845.1, level: 94, spaces_created: 32, total_visits: 10_800_000, streak_days: 320 },
-        LeaderboardEntry { rank: 4, username: "ScriptNinja".to_string(), avatar_url: None, hours: 2654.8, level: 90, spaces_created: 28, total_visits: 8_900_000, streak_days: 290 },
-        LeaderboardEntry { rank: 5, username: "WorldCreator".to_string(), avatar_url: None, hours: 2543.2, level: 87, spaces_created: 25, total_visits: 7_500_000, streak_days: 260 },
-        LeaderboardEntry { rank: 6, username: "AssetForge".to_string(), avatar_url: None, hours: 2387.6, level: 84, spaces_created: 22, total_visits: 6_200_000, streak_days: 240 },
-        LeaderboardEntry { rank: 7, username: "LevelArchitect".to_string(), avatar_url: None, hours: 2256.3, level: 81, spaces_created: 19, total_visits: 5_100_000, streak_days: 220 },
-        LeaderboardEntry { rank: 8, username: "PluginDev".to_string(), avatar_url: None, hours: 2134.7, level: 78, spaces_created: 16, total_visits: 4_200_000, streak_days: 200 },
-        LeaderboardEntry { rank: 9, username: "StudioPro".to_string(), avatar_url: None, hours: 1998.4, level: 75, spaces_created: 14, total_visits: 3_500_000, streak_days: 180 },
-        LeaderboardEntry { rank: 10, username: "CreativeForce".to_string(), avatar_url: None, hours: 1876.1, level: 72, spaces_created: 12, total_visits: 2_900_000, streak_days: 165 },
-        LeaderboardEntry { rank: 11, username: "ArtisanMaker".to_string(), avatar_url: None, hours: 1754.8, level: 70, spaces_created: 11, total_visits: 2_400_000, streak_days: 150 },
-        LeaderboardEntry { rank: 12, username: "VoxelKing".to_string(), avatar_url: None, hours: 1632.5, level: 67, spaces_created: 10, total_visits: 2_000_000, streak_days: 140 },
-        LeaderboardEntry { rank: 13, username: "TerrainMaster".to_string(), avatar_url: None, hours: 1510.2, level: 64, spaces_created: 9, total_visits: 1_700_000, streak_days: 130 },
-        LeaderboardEntry { rank: 14, username: "ShaderGuru".to_string(), avatar_url: None, hours: 1387.9, level: 61, spaces_created: 8, total_visits: 1_400_000, streak_days: 120 },
-        LeaderboardEntry { rank: 15, username: "PhysicsWiz".to_string(), avatar_url: None, hours: 1265.6, level: 58, spaces_created: 7, total_visits: 1_200_000, streak_days: 110 },
-        LeaderboardEntry { rank: 16, username: "AudioEngineer".to_string(), avatar_url: None, hours: 1143.3, level: 55, spaces_created: 6, total_visits: 1_000_000, streak_days: 100 },
-        LeaderboardEntry { rank: 17, username: "UIDesigner".to_string(), avatar_url: None, hours: 1021.0, level: 52, spaces_created: 5, total_visits: 850_000, streak_days: 90 },
-        LeaderboardEntry { rank: 18, username: "NetworkPro".to_string(), avatar_url: None, hours: 898.7, level: 49, spaces_created: 4, total_visits: 700_000, streak_days: 80 },
-        LeaderboardEntry { rank: 19, username: "AnimationAce".to_string(), avatar_url: None, hours: 776.4, level: 46, spaces_created: 3, total_visits: 550_000, streak_days: 70 },
-        LeaderboardEntry { rank: 20, username: "ModelMaker".to_string(), avatar_url: None, hours: 654.1, level: 43, spaces_created: 2, total_visits: 400_000, streak_days: 60 },
-    ];
-    
+    let entries = RwSignal::new(Vec::<LeaderboardEntry>::new());
+    let featured = RwSignal::new(Option::<LeaderboardEntry>::None);
+    let loading = RwSignal::new(true);
+
+    // Fetch leaderboard from API whenever period changes
+    let api_url = app_state.api_url.clone();
+    Effect::new(move |_| {
+        let period = time_period.get();
+        let url = format!("{}/api/community/leaderboard?period={}", api_url, period);
+        loading.set(true);
+
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    let mut parsed = Vec::new();
+                    if let Some(arr) = data.get("entries").and_then(|v| v.as_array()) {
+                        for (i, e) in arr.iter().enumerate() {
+                            parsed.push(LeaderboardEntry {
+                                rank: e.get("rank").and_then(|v| v.as_u64()).unwrap_or(i as u64 + 1) as u32,
+                                username: e.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                avatar_url: e.get("avatar_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                hours: e.get("hours").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                level: 0,
+                                spaces_created: e.get("spaces_created").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                total_visits: e.get("total_visits").and_then(|v| v.as_u64()).unwrap_or(0),
+                                streak_days: 0,
+                            });
+                        }
+                    }
+                    entries.set(parsed);
+
+                    // Featured creator (random from top 20, rotates weekly)
+                    if let Some(f) = data.get("featured") {
+                        if f.is_object() {
+                            featured.set(Some(LeaderboardEntry {
+                                rank: 0,
+                                username: f.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                avatar_url: f.get("avatar_url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                hours: f.get("hours").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                level: 0,
+                                spaces_created: f.get("spaces_created").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                total_visits: f.get("total_visits").and_then(|v| v.as_u64()).unwrap_or(0),
+                                streak_days: 0,
+                            }));
+                        }
+                    }
+                }
+            }
+            loading.set(false);
+        });
+    });
+
     // Filter entries by search
-    let filter_entries = move |entries: Vec<LeaderboardEntry>| {
+    let filtered_entries = move || {
         let query = search_query.get().to_lowercase();
+        let all = entries.get();
         if query.is_empty() {
-            entries
+            all
         } else {
-            entries.into_iter()
+            all.into_iter()
                 .filter(|e| e.username.to_lowercase().contains(&query))
                 .collect()
         }

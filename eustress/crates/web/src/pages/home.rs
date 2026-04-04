@@ -292,7 +292,7 @@ pub fn HomePage() -> impl IntoView {
                             <tr>
                                 <td class="feature-name">"AI Integration"</td>
                                 <td class="eustress"><span class="check">"✓"</span>" Soul Language"</td>
-                                <td class="roblox"><span class="cross">"✗"</span>" None"</td>
+                                <td class="roblox"><span class="cross">"✗"</span>" Basic"</td>
                                 <td class="unity"><span class="warn">"~"</span>" Third-party"</td>
                                 <td class="unreal"><span class="warn">"~"</span>" Third-party"</td>
                             </tr>
@@ -312,9 +312,9 @@ pub fn HomePage() -> impl IntoView {
                             </tr>
                             <tr class="highlight-row">
                                 <td class="feature-name">"Overall Score"</td>
-                                <td class="eustress score"><span class="score-badge best">"8.5/10"</span></td>
+                                <td class="eustress score"><span class="score-badge best">"9.5/10"</span></td>
                                 <td class="roblox score"><span class="score-badge okay">"7.0/10"</span></td>
-                                <td class="unity score"><span class="score-badge okay">"7.0/10"</span></td>
+                                <td class="unity score"><span class="score-badge okay">"6.5/10"</span></td>
                                 <td class="unreal score"><span class="score-badge good">"8.5/10"</span></td>
                             </tr>
                         </tbody>
@@ -403,7 +403,7 @@ pub fn HomePage() -> impl IntoView {
                 </div>
                 
                 <a href="/gallery" class="btn-secondary-steel showcase-btn">
-                    "Explore All Games"
+                    "Explore All Simulations"
                     <span class="btn-icon">"→"</span>
                 </a>
             </section>

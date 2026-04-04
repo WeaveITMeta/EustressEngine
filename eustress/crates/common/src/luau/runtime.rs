@@ -262,9 +262,11 @@ impl LuauRuntime {
         globals.set("game", game_table)
             .map_err(|error| format!("Failed to set game: {}", error))?;
 
-        // Stub `workspace` as an empty table (alias populated by bridge)
+        // workspace table with Gravity property
         let workspace_table = lua.create_table()
             .map_err(|error| format!("Failed to create workspace table: {}", error))?;
+        workspace_table.set("Gravity", 9.80665f64)
+            .map_err(|error| format!("Failed to set workspace.Gravity: {}", error))?;
         globals.set("workspace", workspace_table)
             .map_err(|error| format!("Failed to set workspace: {}", error))?;
 
@@ -616,13 +618,162 @@ impl LuauRuntime {
                     })?;
                     Ok(mlua::Value::Function(clear_fn))
                 }
+                "GetAttribute" => {
+                    let get_attr_fn = lua.create_function(|_, (this, name): (mlua::Table, String)| {
+                        let attrs_key = format!("_attr_{}", name);
+                        let val: mlua::Value = this.raw_get(attrs_key)?;
+                        Ok(val)
+                    })?;
+                    Ok(mlua::Value::Function(get_attr_fn))
+                }
+                "SetAttribute" => {
+                    let set_attr_fn = lua.create_function(|_, (this, name, value): (mlua::Table, String, mlua::Value)| {
+                        let attrs_key = format!("_attr_{}", name);
+                        this.raw_set(attrs_key, value)?;
+                        Ok(())
+                    })?;
+                    Ok(mlua::Value::Function(set_attr_fn))
+                }
+                "GetAttributes" => {
+                    let get_attrs_fn = lua.create_function(|lua, this: mlua::Table| {
+                        let result = lua.create_table()?;
+                        for pair in this.pairs::<String, mlua::Value>() {
+                            let (k, v) = pair?;
+                            if let Some(attr_name) = k.strip_prefix("_attr_") {
+                                result.set(attr_name.to_string(), v)?;
+                            }
+                        }
+                        Ok(result)
+                    })?;
+                    Ok(mlua::Value::Function(get_attrs_fn))
+                }
+                "GetDescendants" => {
+                    let get_desc_fn = lua.create_function(|lua, this: mlua::Table| {
+                        let result = lua.create_table()?;
+                        let mut idx = 1;
+                        fn collect_descendants(table: &mlua::Table, result: &mlua::Table, idx: &mut i64) -> mlua::Result<()> {
+                            if let Ok(children) = table.raw_get::<mlua::Table>("_children") {
+                                for pair in children.pairs::<mlua::Value, mlua::Table>() {
+                                    let (_, child) = pair?;
+                                    result.set(*idx, child.clone())?;
+                                    *idx += 1;
+                                    collect_descendants(&child, result, idx)?;
+                                }
+                            }
+                            Ok(())
+                        }
+                        collect_descendants(&this, &result, &mut idx)?;
+                        Ok(result)
+                    })?;
+                    Ok(mlua::Value::Function(get_desc_fn))
+                }
+                "GetFullName" => {
+                    let get_full_name_fn = lua.create_function(|_, this: mlua::Table| {
+                        let mut parts: Vec<String> = Vec::new();
+                        let mut current = this;
+                        loop {
+                            let name: String = current.raw_get("Name").unwrap_or_else(|_| "???".to_string());
+                            parts.push(name);
+                            match current.raw_get::<mlua::Value>("Parent") {
+                                Ok(mlua::Value::Table(parent)) => current = parent,
+                                _ => break,
+                            }
+                        }
+                        parts.reverse();
+                        Ok(parts.join("."))
+                    })?;
+                    Ok(mlua::Value::Function(get_full_name_fn))
+                }
                 _ => Ok(mlua::Value::Nil)
             }
         }).map_err(|e| format!("Failed to create instance __index: {}", e))?;
         
         instance_mt.set("__index", instance_index)
             .map_err(|e| format!("Failed to set instance __index: {}", e))?;
-        
+
+        // __newindex: intercept property writes on instances.
+        // For BasePart properties (Position, Size, Color, Material, Anchored,
+        // Transparency, CanCollide), log the change for the engine to apply.
+        // All other properties are set directly on the table.
+        let instance_newindex = lua.create_function(|_, (this, key, value): (mlua::Table, String, mlua::Value)| {
+            match key.as_str() {
+                "Position" => {
+                    // Accept Vector3 userdata or table with X/Y/Z
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Position changed", name);
+                }
+                "Size" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Size changed", name);
+                }
+                "CFrame" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.CFrame changed", name);
+                }
+                "Color" | "Color3" | "BrickColor" => {
+                    this.raw_set("Color", value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Color changed", name);
+                }
+                "Material" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Material changed", name);
+                }
+                "Transparency" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Transparency changed", name);
+                }
+                "Anchored" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.Anchored changed", name);
+                }
+                "CanCollide" => {
+                    this.raw_set(key, value)?;
+                    let name: String = this.raw_get("Name").unwrap_or_default();
+                    tracing::debug!("[Luau] {}.CanCollide changed", name);
+                }
+                "Reflectance" => {
+                    this.raw_set(key, value)?;
+                }
+                "Parent" => {
+                    // Handle reparenting
+                    let entity_id: i64 = this.raw_get("_entityId").unwrap_or(0);
+
+                    // Remove from old parent's children
+                    let old_parent: mlua::Value = this.raw_get("Parent")?;
+                    if let mlua::Value::Table(ref old_pt) = old_parent {
+                        if let Ok(old_children) = old_pt.raw_get::<mlua::Table>("_children") {
+                            old_children.set(entity_id, mlua::Value::Nil)?;
+                        }
+                    }
+
+                    // Set new parent
+                    this.raw_set("Parent", value.clone())?;
+
+                    // Add to new parent's children
+                    if let mlua::Value::Table(ref new_pt) = value {
+                        if let Ok(new_children) = new_pt.raw_get::<mlua::Table>("_children") {
+                            new_children.set(entity_id, this.clone())?;
+                        }
+                    }
+                }
+                _ => {
+                    // Default: set directly on the table
+                    this.raw_set(key, value)?;
+                }
+            }
+            Ok(())
+        }).map_err(|e| format!("Failed to create instance __newindex: {}", e))?;
+
+        instance_mt.set("__newindex", instance_newindex)
+            .map_err(|e| format!("Failed to set instance __newindex: {}", e))?;
+
         // Store metatable for use by Instance.new
         globals.set("__INSTANCE_MT__", instance_mt)
             .map_err(|e| format!("Failed to set instance metatable: {}", e))?;
@@ -1834,6 +1985,89 @@ impl LuauRuntime {
 
         globals.set("Players", players_service)
             .map_err(|e| format!("Failed to set Players: {}", e))?;
+
+        // ====================================================================
+        // SimulationService — read/write watchpoint values (bridge with MCP tools)
+        // ====================================================================
+        let sim_service = lua.create_table()
+            .map_err(|e| format!("Failed to create SimulationService: {}", e))?;
+
+        // SimulationService:GetValue(key) -> number
+        sim_service.set("GetValue", lua.create_function(|_, key: String| {
+            // Reads from shared thread-local sim values
+            Ok(0.0f64) // TODO: bridge with SIM_VALUES thread-local
+        }).map_err(|e| format!("GetValue: {}", e))?)
+            .map_err(|e| format!("set GetValue: {}", e))?;
+
+        // SimulationService:SetValue(key, value)
+        sim_service.set("SetValue", lua.create_function(|_, (key, value): (String, f64)| {
+            tracing::debug!("[Luau] SimulationService:SetValue({}, {})", key, value);
+            // TODO: bridge with SIM_VALUES thread-local
+            Ok(())
+        }).map_err(|e| format!("SetValue: {}", e))?)
+            .map_err(|e| format!("set SetValue: {}", e))?;
+
+        // SimulationService:ListValues() -> table
+        sim_service.set("ListValues", lua.create_function(|lua, ()| {
+            let t = lua.create_table()?;
+            // TODO: populate from SIM_VALUES
+            Ok(t)
+        }).map_err(|e| format!("ListValues: {}", e))?)
+            .map_err(|e| format!("set ListValues: {}", e))?;
+
+        globals.set("SimulationService", sim_service)
+            .map_err(|e| format!("Failed to set SimulationService: {}", e))?;
+
+        // ====================================================================
+        // WorkspaceQuery — entity search + file access (bridge with MCP tools)
+        // ====================================================================
+        let workspace_query = lua.create_table()
+            .map_err(|e| format!("Failed to create WorkspaceQuery: {}", e))?;
+
+        // WorkspaceQuery:QueryEntities(classFilter?) -> {{name, class}}
+        workspace_query.set("QueryEntities", lua.create_function(|lua, class_filter: Option<String>| {
+            let t = lua.create_table()?;
+            // File-system query of Workspace — same logic as MCP query_entities tool
+            // TODO: bridge with Space root path
+            Ok(t)
+        }).map_err(|e| format!("QueryEntities: {}", e))?)
+            .map_err(|e| format!("set QueryEntities: {}", e))?;
+
+        // WorkspaceQuery:ReadFile(relativePath) -> string
+        workspace_query.set("ReadFile", lua.create_function(|_, path: String| {
+            if path.contains("..") {
+                return Ok(String::new());
+            }
+            // TODO: bridge with Space root path for sandboxed read
+            Ok(String::new())
+        }).map_err(|e| format!("ReadFile: {}", e))?)
+            .map_err(|e| format!("set ReadFile: {}", e))?;
+
+        // WorkspaceQuery:WriteFile(relativePath, content) -> bool
+        workspace_query.set("WriteFile", lua.create_function(|_, (path, content): (String, String)| {
+            if path.contains("..") {
+                return Ok(false);
+            }
+            // TODO: bridge with Space root path for sandboxed write
+            tracing::debug!("[Luau] WorkspaceQuery:WriteFile({}, {} bytes)", path, content.len());
+            Ok(false) // stub until bridge is connected
+        }).map_err(|e| format!("WriteFile: {}", e))?)
+            .map_err(|e| format!("set WriteFile: {}", e))?;
+
+        // WorkspaceQuery:QueryMaterial(materialName) -> {roughness, metallic, reflectance}
+        workspace_query.set("QueryMaterial", lua.create_function(|lua, material_name: String| {
+            let mat = crate::classes::Material::from_string(&material_name);
+            let (roughness, metallic, reflectance) = mat.pbr_params();
+            let t = lua.create_table()?;
+            t.set("roughness", roughness as f64)?;
+            t.set("metallic", metallic as f64)?;
+            t.set("reflectance", reflectance as f64)?;
+            Ok(t)
+        }).map_err(|e| format!("QueryMaterial: {}", e))?)
+            .map_err(|e| format!("set QueryMaterial: {}", e))?;
+
+        globals.set("WorkspaceQuery", workspace_query)
+            .map_err(|e| format!("Failed to set WorkspaceQuery: {}", e))?;
 
         Ok(())
     }

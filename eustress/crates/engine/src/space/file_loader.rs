@@ -74,7 +74,7 @@ impl FileType {
             "soul" | "md" => Some(Self::Soul), // .soul or .md files compile to .rune
             "rune" => Some(Self::Rune), // Compiled bytecode in cache
             "wasm" => Some(Self::Wasm),
-            "lua" => Some(Self::Lua),
+            "lua" | "luau" => Some(Self::Lua),
             "png" => Some(Self::Png),
             "jpg" | "jpeg" => Some(Self::Jpg),
             "tga" => Some(Self::Tga),
@@ -170,7 +170,10 @@ impl FileType {
             
             // MaterialService: Material definitions spawn as material entities
             (Self::Material, "MaterialService") => true,
-            
+
+            // AdornmentService: Adornment definition TOMLs spawn as adornment entities
+            (Self::Toml, "AdornmentService") => true,
+
             // Scripts in any service folder
             (Self::Soul | Self::Rune, _) => true,
             
@@ -354,9 +357,17 @@ pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
 
 /// Discover services by scanning for directories containing `_service.toml` marker files.
 /// This is EEP-compliant: services are defined by filesystem structure, not hardcoded.
+/// Well-known service directory names — auto-discovered even without _service.toml marker.
+const KNOWN_SERVICE_NAMES: &[&str] = &[
+    "Workspace", "Lighting", "StarterGui", "SoulService", "MaterialService",
+    "AdornmentService",
+    "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
+    "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
+];
+
 fn discover_services(space_path: &Path) -> Vec<String> {
     let mut services = Vec::new();
-    
+
     let entries = match std::fs::read_dir(space_path) {
         Ok(entries) => entries,
         Err(e) => {
@@ -364,28 +375,28 @@ fn discover_services(space_path: &Path) -> Vec<String> {
             return services;
         }
     };
-    
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() { continue; }
-        
-        // Check if this directory contains a _service.toml marker file
+
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+
+        // Discover via _service.toml marker OR well-known service name
         let service_marker = path.join("_service.toml");
-        if service_marker.exists() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                services.push(name.to_string());
-                debug!("Discovered service: {} (has _service.toml)", name);
-            }
+        if service_marker.exists() || KNOWN_SERVICE_NAMES.contains(&name) {
+            services.push(name.to_string());
+            debug!("Discovered service: {}", name);
         }
     }
-    
+
     // Sort for deterministic order (Workspace first for consistency)
     services.sort_by(|a, b| {
         if a == "Workspace" { std::cmp::Ordering::Less }
         else if b == "Workspace" { std::cmp::Ordering::Greater }
         else { a.cmp(b) }
     });
-    
+
     info!("📁 Discovered {} services from filesystem: {:?}", services.len(), services);
     services
 }
@@ -395,7 +406,7 @@ fn discover_services(space_path: &Path) -> Vec<String> {
 pub fn spawn_file_entry(
     commands: &mut Commands,
     asset_server: &Res<AssetServer>,
-    meshes: &mut ResMut<Assets<Mesh>>,
+    _meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     registry: &mut ResMut<SpaceFileRegistry>,
     material_registry: &mut ResMut<super::material_loader::MaterialRegistry>,
@@ -683,6 +694,13 @@ pub fn spawn_file_entry(
         }
     };
 
+    // Non-GUI files (scripts, sounds) inside StarterGui need a hidden Node
+    // so Bevy doesn't panic from mixing UI and non-UI entities in one hierarchy.
+    if file_meta.service == "StarterGui"
+        && !matches!(file_meta.file_type, FileType::GuiElement)
+    {
+        commands.entity(entity).insert(Node { display: Display::None, ..default() });
+    }
     // Parent to Folder entity if provided
     if let Some(parent) = parent_entity {
         commands.entity(entity).insert(ChildOf(parent));
@@ -717,42 +735,62 @@ pub fn spawn_directory_entry(
         return;
     }
 
-    // Check for _service.toml — this is a service root directory
+    // Check for service directory — either has _service.toml or is a well-known service name
     let service_toml_path = dir_meta.path.join("_service.toml");
-    if service_toml_path.exists() {
-        // Spawn as a Service entity, then parent children to it
-        match super::service_loader::load_service_definition(&service_toml_path) {
-            Ok(service_def) => {
-                let service_entity = super::service_loader::spawn_service(
-                    commands,
-                    service_toml_path.clone(),
-                    service_def,
-                );
-                registry.register(service_toml_path, service_entity, dir_meta.clone());
-                info!("🏢 Spawned Service '{}' with {} children", dir_meta.name, dir_meta.children.len());
-                
-                // Spawn all children parented to this service
-                for child in &dir_meta.children {
-                    match child.file_type {
-                        FileType::Directory => {
-                            spawn_directory_entry(
-                                commands, asset_server, meshes, materials, registry,
-                                material_registry, mesh_cache, space_path, child, Some(service_entity),
-                                class_defaults,
-                            );
-                        }
-                        _ => {
-                            spawn_file_entry(
-                                commands, asset_server, meshes, materials, registry,
-                                material_registry, mesh_cache, space_path, child, Some(service_entity),
-                                class_defaults,
-                            );
-                        }
-                    }
+    let is_known_service = KNOWN_SERVICE_NAMES.contains(&dir_meta.name.as_str());
+    if service_toml_path.exists() || is_known_service {
+        // Load service definition from _service.toml, or create a default for known services
+        let service_def = if service_toml_path.exists() {
+            match super::service_loader::load_service_definition(&service_toml_path) {
+                Ok(def) => def,
+                Err(err) => {
+                    error!("Failed to load service {:?}: {}", service_toml_path, err);
+                    return;
                 }
             }
-            Err(err) => {
-                error!("Failed to load service {:?}: {}", service_toml_path, err);
+        } else {
+            // Create a default definition for well-known services without _service.toml
+            super::service_loader::ServiceDefinition {
+                service: super::service_loader::ServiceProperties {
+                    class_name: dir_meta.name.clone(),
+                    icon: None,
+                    description: None,
+                    can_have_children: true,
+                    properties: std::collections::HashMap::new(),
+                },
+                metadata: super::service_loader::ServiceMetadata::default(),
+                properties: std::collections::HashMap::new(),
+            }
+        };
+
+        let is_gui_service = dir_meta.name == "StarterGui";
+        let service_entity = if is_gui_service {
+            // StarterGui must be a Bevy UI root so child ScreenGui/Frame entities render.
+            // A Transform+Visibility parent breaks the Bevy UI hierarchy chain.
+            super::service_loader::spawn_service_as_ui_root(commands, service_toml_path.clone(), service_def)
+        } else {
+            super::service_loader::spawn_service(commands, service_toml_path.clone(), service_def)
+        };
+        registry.register(dir_meta.path.clone(), service_entity, dir_meta.clone());
+        info!("🏢 Spawned Service '{}' with {} children", dir_meta.name, dir_meta.children.len());
+
+        // Spawn all children parented to this service
+        for child in &dir_meta.children {
+            match child.file_type {
+                FileType::Directory => {
+                    spawn_directory_entry(
+                        commands, asset_server, meshes, materials, registry,
+                        material_registry, mesh_cache, space_path, child, Some(service_entity),
+                        class_defaults,
+                    );
+                }
+                _ => {
+                    spawn_file_entry(
+                        commands, asset_server, meshes, materials, registry,
+                        material_registry, mesh_cache, space_path, child, Some(service_entity),
+                        class_defaults,
+                    );
+                }
             }
         }
         return;
@@ -830,7 +868,23 @@ pub fn spawn_directory_entry(
         )).id()
     };
 
-    // Parent to containing Folder or service root if provided
+    // Non-GUI directories (e.g. "scripts/") inside StarterGui need UI-compatible
+    // components so Bevy doesn't panic from mixing UI and 3D hierarchies.
+    // Replace Transform+Visibility with a hidden Node.
+    let is_non_gui_dir = dir_meta.service == "StarterGui" && !is_screen_gui
+        && !matches!(class_name,
+            eustress_common::classes::ClassName::Frame
+            | eustress_common::classes::ClassName::ScrollingFrame
+            | eustress_common::classes::ClassName::BillboardGui
+            | eustress_common::classes::ClassName::SurfaceGui
+        );
+    if is_non_gui_dir {
+        // Spawned with Transform+Visibility above — swap to hidden Node
+        commands.entity(folder_entity)
+            .remove::<Transform>()
+            .remove::<Visibility>()
+            .insert(Node { display: Display::None, ..default() });
+    }
     if let Some(parent) = parent_entity {
         commands.entity(folder_entity).insert(ChildOf(parent));
     }

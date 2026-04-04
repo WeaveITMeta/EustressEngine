@@ -172,6 +172,7 @@ export component AssetManager inherits Rectangle {
         // Toolbar: Search + Import
         Rectangle {
             height: 36px;
+            clip: true;
             background: Theme.header-background;
 
             HorizontalLayout {
@@ -206,13 +207,16 @@ export component AssetManager inherits Rectangle {
 
                     HorizontalLayout {
                         alignment: center;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
                         spacing: 4px;
 
                         Image {
-                            width: 12px;
-                            height: 12px;
+                            width: 14px;
+                            height: 14px;
                             source: @image-url("../../assets/icons/ui/import.svg");
                             image-fit: contain;
+                            colorize: white;
                             vertical-alignment: center;
                         }
 
@@ -241,7 +245,7 @@ export component AssetManager inherits Rectangle {
                 CategoryTab { label: "Meshes"; active: root.current-category == "Meshes"; clicked => { root.on-category-changed("Meshes"); } }
                 CategoryTab { label: "Textures"; active: root.current-category == "Textures"; clicked => { root.on-category-changed("Textures"); } }
                 CategoryTab { label: "Audio"; active: root.current-category == "Audio"; clicked => { root.on-category-changed("Audio"); } }
-                CategoryTab { label: "Materials"; active: root.current-category == "Materials"; clicked => { root.on-category-changed("Materials"); } }
+                CategoryTab { label: "Scripts"; active: root.current-category == "Scripts"; clicked => { root.on-category-changed("Scripts"); } }
             }
         }
 
@@ -276,15 +280,18 @@ export component AssetManager inherits Rectangle {
 
             VerticalLayout {
                 alignment: center;
+                horizontal-stretch: 1;
                 spacing: 4px;
 
-                Image {
-                    width: 48px;
-                    height: 48px;
-                    source: @image-url("../../assets/icons/ui/package.svg");
-                    image-fit: contain;
-                    horizontal-alignment: center;
-                    opacity: 0.4;
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        width: 48px;
+                        height: 48px;
+                        source: @image-url("../../assets/icons/ui/package.svg");
+                        image-fit: contain;
+                        opacity: 0.4;
+                    }
                 }
 
                 Text {

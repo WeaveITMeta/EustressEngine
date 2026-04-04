@@ -29,9 +29,14 @@ use crate::pages::{
     cookies::CookiesPage,
     dashboard::DashboardPage,
     dmca::DmcaPage,
+    docs_audio::DocsAudioPage,
+    docs_building::DocsBuildingPage,
+    docs_earning::DocsEarningPage,
+    docs_getting_started::DocsGettingStartedPage,
     docs_networking::DocsNetworkingPage,
     docs_philosophy::DocsPhilosophyPage,
     docs_physics::DocsPhysicsPage,
+    docs_publishing::DocsPublishingPage,
     docs_realism::DocsRealismPage,
     docs_scripting::DocsScriptingPage,
     docs_simulation::DocsSimulationPage,
@@ -162,12 +167,17 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/marketplace") view=MarketplacePage />
                 <Route path=path!("/marketplace/:id") view=MarketplaceItemPage />
                 <Route path=path!("/learn") view=LearnPage />
+                <Route path=path!("/docs/getting-started") view=DocsGettingStartedPage />
                 <Route path=path!("/docs/scripting") view=DocsScriptingPage />
-                <Route path=path!("/docs/physics") view=DocsPhysicsPage />
                 <Route path=path!("/docs/networking") view=DocsNetworkingPage />
+                <Route path=path!("/docs/physics") view=DocsPhysicsPage />
+                <Route path=path!("/docs/building") view=DocsBuildingPage />
                 <Route path=path!("/docs/ui") view=DocsUiPage />
                 <Route path=path!("/docs/simulation") view=DocsSimulationPage />
                 <Route path=path!("/docs/realism") view=DocsRealismPage />
+                <Route path=path!("/docs/audio") view=DocsAudioPage />
+                <Route path=path!("/docs/publishing") view=DocsPublishingPage />
+                <Route path=path!("/docs/earning") view=DocsEarningPage />
                 <Route path=path!("/docs/philosophy") view=DocsPhilosophyPage />
                 <Route path=path!("/bliss") view=BlissPage />
                 <Route path=path!("/tickets") view=TicketsPage />

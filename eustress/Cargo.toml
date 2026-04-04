@@ -93,6 +93,10 @@ opt-level = 1
 [profile.hotpatch.package."*"]
 opt-level = 3
 
+# Patch gpu-allocator to use windows 0.58 (matches wgpu-hal's windows version)
+[patch.crates-io]
+gpu-allocator = { path = ".patches/gpu-allocator-fresh" }
+
 [profile.release]
 opt-level = 3
 lto = false

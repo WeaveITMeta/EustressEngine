@@ -227,7 +227,7 @@ pub fn DocsPhysicsPage() -> impl IntoView {
                             <div class="feature-grid">
                                 <div class="feature-card">
                                     <div class="feature-icon">
-                                        <img src="/assets/icons/thermometer.svg" alt="Thermodynamics" />
+                                        <img src="/assets/icons/fire.svg" alt="Thermodynamics" />
                                     </div>
                                     <h4>"Thermodynamics"</h4>
                                     <p>"PV=nRT, heat transfer, phase transitions"</p>
@@ -241,14 +241,14 @@ pub fn DocsPhysicsPage() -> impl IntoView {
                                 </div>
                                 <div class="feature-card">
                                     <div class="feature-icon">
-                                        <img src="/assets/icons/droplet.svg" alt="Fluids" />
+                                        <img src="/assets/icons/physics.svg" alt="Fluids" />
                                     </div>
                                     <h4>"Fluid Dynamics"</h4>
                                     <p>"SPH simulation, Navier-Stokes, aerodynamics"</p>
                                 </div>
                                 <div class="feature-card">
                                     <div class="feature-icon">
-                                        <img src="/assets/icons/gpu.svg" alt="GPU" />
+                                        <img src="/assets/icons/monitor.svg" alt="GPU" />
                                     </div>
                                     <h4>"GPU Acceleration"</h4>
                                     <p>"WGPU compute shaders for 1M+ particles"</p>
@@ -317,7 +317,7 @@ realism-full = ["realism-symbolic", "realism-scripting",
                             </div>
                             
                             <div class="callout callout-info">
-                                <img src="/assets/icons/info.svg" alt="Info" />
+                                <img src="/assets/icons/help.svg" alt="Info" />
                                 <div>
                                     <strong>"Quick Start"</strong>
                                     <p>"For most games, use "<code>"realism"</code>" for basic physics or "
@@ -591,7 +591,7 @@ let custom = MaterialProperties {
                             </div>
                             
                             <div class="callout callout-tip">
-                                <img src="/assets/icons/lightbulb.svg" alt="Tip" />
+                                <img src="/assets/icons/sparkles.svg" alt="Tip" />
                                 <div>
                                     <strong>"Material Presets"</strong>
                                     <p>"Available presets: "<code>"steel()"</code>", "<code>"aluminum()"</code>", "
@@ -1028,7 +1028,7 @@ let fragments = voronoi_fracture(
                         </h2>
                         
                         <div class="callout callout-advanced">
-                            <img src="/assets/icons/atom.svg" alt="Advanced" />
+                            <img src="/assets/icons/physics.svg" alt="Advanced" />
                             <div>
                                 <strong>"Advanced Feature"</strong>
                                 <p>"Quantum effects are for specialized simulations. Most games don't need this!"</p>
@@ -1235,17 +1235,17 @@ println!("Thomas-Fermi radius: {} μm", bec.thomas_fermi_radius() * 1e6);"#}</co
                     
                     // Next/Prev Navigation
                     <nav class="docs-nav-footer">
-                        <a href="/docs/building" class="nav-prev">
+                        <a href="/docs/networking" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Building"</span>
+                                <span class="nav-title">"Networking"</span>
                             </div>
                         </a>
-                        <a href="/docs/networking" class="nav-next">
+                        <a href="/docs/building" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Networking"</span>
+                                <span class="nav-title">"Building"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

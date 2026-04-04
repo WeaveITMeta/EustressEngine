@@ -90,7 +90,8 @@ impl Plugin for PartRenderingPlugin {
         
         // Only add selection highlighting for native builds
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, update_selection_highlights);
+        app.init_resource::<HighlightGeneration>()
+            .add_systems(Update, update_selection_highlights);
     }
 }
 
@@ -372,18 +373,34 @@ fn update_part_transforms_old(
     }
 }
 
-/// Update selection highlights (native only - requires SelectionManager)
+/// Tracks last-seen selection generation for highlight sync.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default)]
+struct HighlightGeneration(u64);
+
+/// Update selection highlights (native only - requires SelectionManager).
+/// Uses generation tracking to skip frames where selection hasn't changed.
 #[cfg(not(target_arch = "wasm32"))]
 fn update_selection_highlights(
     mut commands: Commands,
     selection_manager: Option<Res<BevySelectionManager>>,
     part_entities: Res<PartEntities>,
     highlighted: Query<Entity, With<SelectionHighlight>>,
+    mut last_gen: ResMut<HighlightGeneration>,
     _parts: Query<&PartEntity>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
-    // Get currently selected part IDs
-    let selected = selection_manager.0.read().get_selected();
+    let mgr = selection_manager.0.read();
+    let current_gen = mgr.generation();
+
+    // Fast path: nothing changed
+    if current_gen == last_gen.0 {
+        return;
+    }
+    last_gen.0 = current_gen;
+
+    let selected = mgr.get_selected();
+    drop(mgr);
 
     // Remove all existing highlights
     for entity in highlighted.iter() {
@@ -394,7 +411,6 @@ fn update_selection_highlights(
     for part_id in selected {
         if let Some(&entity) = part_entities.map.get(&part_id) {
             commands.entity(entity).insert(SelectionHighlight);
-            // TODO: Add visual highlight material/glow
         }
     }
 }

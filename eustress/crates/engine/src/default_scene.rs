@@ -52,11 +52,11 @@ fn diagnose_scene_once(
 
 pub fn setup_default_scene(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    skybox_handle: Res<SkyboxHandle>,
+    _meshes: ResMut<Assets<Mesh>>,
+    _materials: ResMut<Assets<StandardMaterial>>,
+    _skybox_handle: Res<SkyboxHandle>,
     startup_args: Res<StartupArgs>,
-    asset_server: Res<AssetServer>,
+    _asset_server: Res<AssetServer>,
 ) {
     // Check if we're loading a scene file - if so, skip default content
     let loading_scene_file = startup_args.scene_file.is_some();

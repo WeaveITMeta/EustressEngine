@@ -156,7 +156,7 @@ pub fn GalleryPage() -> impl IntoView {
                     <input 
                         type="text"
                         class="search-input-industrial"
-                        placeholder="Search experiences, creators, or tags..."
+                        placeholder="Search simulations, creators, or tags..."
                         prop:value=move || search_query.get()
                         on:input=move |e| search_query.set(event_target_value(&e))
                     />
@@ -251,7 +251,7 @@ pub fn GalleryPage() -> impl IntoView {
                                 <path d="M8 8l6 6"></path>
                                 <path d="M14 8l-6 6"></path>
                             </svg>
-                            <h3>"No experiences found"</h3>
+                            <h3>"No simulations found"</h3>
                             <p>"Try adjusting your search or filters"</p>
                         </div>
                     }

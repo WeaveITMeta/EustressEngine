@@ -40,22 +40,22 @@ struct SearchResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct LeaderboardUser {
-    username: String,
-    avatar_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct LeaderboardApiEntry {
     rank: u32,
-    user: LeaderboardUser,
-    score: u64,
-    score_label: String,
+    username: String,
+    avatar_url: Option<String>,
+    #[serde(default)]
+    hours: f64,
+    #[serde(default)]
+    spaces_created: u32,
+    #[serde(default)]
+    total_visits: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct LeaderboardResponse {
     entries: Vec<LeaderboardApiEntry>,
+    featured: Option<LeaderboardApiEntry>,
     total: u64,
 }
 
@@ -131,12 +131,17 @@ impl From<LeaderboardApiEntry> for LeaderboardEntry {
             3 => Some("🥉".to_string()),
             _ => None,
         };
+        let hours_display = if entry.hours >= 1.0 {
+            format!("{:.0}h", entry.hours)
+        } else {
+            "< 1h".to_string()
+        };
         Self {
             rank: entry.rank,
-            username: entry.user.username,
-            avatar_url: entry.user.avatar_url,
-            score: entry.score,
-            score_label: entry.score_label,
+            username: entry.username,
+            avatar_url: entry.avatar_url,
+            score: entry.hours as u64,
+            score_label: hours_display,
             badge,
         }
     }
@@ -163,6 +168,8 @@ pub fn CommunityPage() -> impl IntoView {
     let total_simulations = RwSignal::new(0u64);
     let total_plays = RwSignal::new(0u64);
     let is_loading = RwSignal::new(true);
+    let featured_name = RwSignal::new("".to_string());
+    let featured_hours = RwSignal::new(0.0f64);
 
     // Fetch stats + leaderboard on mount
     spawn_local(async move {
@@ -177,6 +184,11 @@ pub fn CommunityPage() -> impl IntoView {
             &format!("{}/api/community/leaderboard", API_URL)
         ).send().await {
             if let Ok(data) = resp.json::<LeaderboardResponse>().await {
+                // Set featured creator (random from top 20, rotates weekly)
+                if let Some(f) = &data.featured {
+                    featured_name.set(f.username.clone());
+                    featured_hours.set(f.hours);
+                }
                 let entries: Vec<LeaderboardEntry> = data.entries.into_iter().map(Into::into).collect();
                 leaderboard.set(entries);
             }
@@ -385,9 +397,16 @@ pub fn CommunityPage() -> impl IntoView {
                             <div class="creator-avatar large">
                                 <img src="/assets/icons/user.svg" alt="Creator" />
                             </div>
-                            <h3>"BuilderPro"</h3>
-                            <p>"3,156 hours creating amazing worlds"</p>
-                            <a href="/profile/BuilderPro" class="highlight-link">"View Profile"</a>
+                            <h3>{move || {
+                                let name = featured_name.get();
+                                if name.is_empty() { "Loading...".to_string() } else { name }
+                            }}</h3>
+                            <p>{move || {
+                                let h = featured_hours.get();
+                                if h > 0.0 { format!("{:.0} hours creating amazing worlds", h) }
+                                else { "New creator".to_string() }
+                            }}</p>
+                            <a href=move || format!("/profile/{}", featured_name.get()) class="highlight-link">"View Profile"</a>
                         </div>
                     </div>
                     

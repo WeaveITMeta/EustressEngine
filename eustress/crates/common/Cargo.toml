@@ -43,6 +43,8 @@ crossbeam = "0.8"
 
 # Byte casting for GPU buffers
 bytemuck = { version = "1.14", features = ["derive"] }
+# Slint UI renderer (optional — enabled by `gui` feature for in-game UI)
+slint = { workspace = true, optional = true }
 
 # USD Binary Format
 byteorder = "1.5"
@@ -150,3 +152,5 @@ streaming = ["dep:eustress-stream", "tokio", "bytes", "notify", "rstar"]
 realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "realism-gpu"]
 # Enable Luau scripting runtime (Roblox Luau compatibility)
 luau = ["mlua", "ureq"]
+# Enable Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
+gui = ["dep:slint"]

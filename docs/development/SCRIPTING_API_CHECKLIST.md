@@ -101,9 +101,9 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `NumberRange.new()` | ❌ | ❌ | |
 | `NumberSequence.new()` | ❌ | ❌ | For particles |
 | `ColorSequence.new()` | ❌ | ❌ | For particles |
-| `TweenInfo.new()` | ❌ | ❌ | |
+| `TweenInfo.new()` | ✅ UserData | ✅ | P1 implemented (all 6 params) |
 | `Enum.*` | 🔶 Strings | 🔶 Strings | Use string literals |
-| `Instance.new()` | 🔶 Stub | ❌ | |
+| `Instance.new()` | ✅ | ✅ | P0 implemented |
 
 ---
 
@@ -169,12 +169,12 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `instance:FindFirstAncestor()` | ❌ | ❌ | |
 | `instance:FindFirstDescendant()` | ❌ | ❌ | |
 | `instance:GetChildren()` | ✅ | ✅ | `get_children()` |
-| `instance:GetDescendants()` | ✅ | ❌ | |
+| `instance:GetDescendants()` | ✅ | ❌ | Recursive child traversal |
 | `instance:WaitForChild()` | ❌ | ❌ | Async |
-| `instance:GetFullName()` | ✅ | ❌ | |
-| `instance:GetAttribute()` | ❌ | ❌ | |
-| `instance:SetAttribute()` | ❌ | ❌ | |
-| `instance:GetAttributes()` | ❌ | ❌ | |
+| `instance:GetFullName()` | ✅ | ❌ | Dot-separated path from root |
+| `instance:GetAttribute()` | ✅ | ✅ `instance_get_attribute` | Custom key-value pairs |
+| `instance:SetAttribute()` | ✅ | ✅ `instance_set_attribute` | Stored in memory |
+| `instance:GetAttributes()` | ✅ | ❌ | Luau returns table of all attrs |
 
 ### Instance Events
 
@@ -225,7 +225,7 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `workspace.Gravity` | ❌ | ❌ | Avian gravity |
+| `workspace.Gravity` | ✅ Property | ✅ `workspace_get/set_gravity` | Default 9.80665 m/s² |
 | `workspace.CurrentCamera` | ❌ | ❌ | |
 | `workspace.DistributedGameTime` | ❌ | ❌ | |
 | `workspace.Terrain` | ❌ | ❌ | |
@@ -238,15 +238,15 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `RunService.Heartbeat` | ✅ | ❌ | Per-frame after physics |
-| `RunService.Stepped` | ✅ | ❌ | Per-frame before physics |
-| `RunService.RenderStepped` | ✅ | ❌ | Per-frame render (client) |
-| `RunService:IsClient()` | ✅ | ❌ | |
-| `RunService:IsServer()` | ✅ | ❌ | |
-| `RunService:IsStudio()` | ✅ | ❌ | |
-| `RunService:IsRunning()` | ✅ | ❌ | |
-| `RunService:BindToRenderStep()` | ✅ | ❌ | |
-| `RunService:UnbindFromRenderStep()` | ✅ | ❌ | |
+| `RunService.Heartbeat` | ✅ | ❌ | Per-frame after physics (needs signal system) |
+| `RunService.Stepped` | ✅ | ❌ | Per-frame before physics (needs signal system) |
+| `RunService.RenderStepped` | ✅ | ❌ | Per-frame render (needs signal system) |
+| `RunService:IsClient()` | ✅ | ✅ `run_service_is_client` | Always true in engine |
+| `RunService:IsServer()` | ✅ | ✅ `run_service_is_server` | True on Forge server |
+| `RunService:IsStudio()` | ✅ | ✅ `run_service_is_studio` | True in editor |
+| `RunService:IsRunning()` | ✅ | ✅ `run_service_is_running` | True during play mode |
+| `RunService:BindToRenderStep()` | ✅ | ❌ | Needs signal system |
+| `RunService:UnbindFromRenderStep()` | ✅ | ❌ | Needs signal system |
 
 ### Players Service
 
@@ -349,14 +349,15 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `HttpResponse.Headers` | ✅ | ✅ | Table/HashMap |
 | `HttpResponse.Body` | ✅ | ✅ | String |
 
-### MarketplaceService
+### MarketplaceService (Eustress Tickets, NOT Robux)
 
-| Roblox API | Luau Status | Rune Status | Notes |
+| Eustress API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `MarketplaceService:PromptProductPurchase()` | ➖ | ➖ | Roblox-specific |
-| `MarketplaceService:PromptGamePassPurchase()` | ➖ | ➖ | |
-| `MarketplaceService:UserOwnsGamePassAsync()` | ➖ | ➖ | |
-| `MarketplaceService.PromptPurchaseFinished` | ➖ | ➖ | |
+| `MarketplaceService:PromptPurchase(player, productId)` | ✅ | ✅ | Tickets (TKT) currency |
+| `MarketplaceService:GetProductInfo(productId)` | ✅ | ✅ | Returns name, price, description |
+| `MarketplaceService:PlayerOwnsGamePass(player, passId)` | ✅ | ✅ | |
+| `MarketplaceService:GetTicketBalance(player)` | ✅ | ✅ | Eustress extension |
+| `MarketplaceService.PromptPurchaseFinished` | 🔶 Signal stub | ❌ | |
 
 ### PathfindingService
 
@@ -417,11 +418,11 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `signal:Connect(fn)` | ❌ | ❌ | Returns Connection |
-| `signal:Once(fn)` | ❌ | ❌ | Auto-disconnect |
-| `signal:Wait()` | ❌ | ❌ | Yield until fired |
-| `connection:Disconnect()` | ❌ | ❌ | |
-| `connection.Connected` | ❌ | ❌ | |
+| `signal:Connect(fn)` | ✅ | ❌ | Returns Connection with Disconnect() |
+| `signal:Once(fn)` | ✅ | ❌ | Auto-disconnect after first fire |
+| `signal:Wait()` | 🔶 Stub | ❌ | Returns immediately (needs coroutine scheduler) |
+| `connection:Disconnect()` | ✅ | ❌ | Removes callback from signal |
+| `connection.Connected` | ✅ | ❌ | Boolean property |
 
 ---
 
@@ -431,25 +432,25 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `part.Position` | ❌ | 🔶 `set_position` | |
-| `part.Orientation` | ❌ | 🔶 `set_rotation` | |
-| `part.Size` | ❌ | 🔶 `set_size` | |
-| `part.CFrame` | ❌ | ❌ | Full transform |
-| `part.Anchored` | ❌ | 🔶 `set_anchored` | |
-| `part.CanCollide` | ❌ | ❌ | |
+| `part.Position` | ❌ | ✅ `part_set_position` | Writes to .part.toml |
+| `part.Orientation` | ❌ | ✅ `part_set_rotation` | Euler deg → quaternion |
+| `part.Size` | ❌ | ✅ `part_set_size` | Writes scale to TOML |
+| `part.CFrame` | ❌ | ❌ | Full transform (use Position + Rotation) |
+| `part.Anchored` | ❌ | ✅ `part_set_anchored` | |
+| `part.CanCollide` | ✅ __newindex | ✅ `part_set_can_collide` | |
 | `part.CanTouch` | ❌ | ❌ | |
 | `part.CanQuery` | ❌ | ❌ | Raycast filter |
 | `part.Massless` | ❌ | ❌ | |
-| `part.Transparency` | ❌ | 🔶 | |
-| `part.Color` | ❌ | 🔶 `set_color` | |
-| `part.Material` | ❌ | 🔶 `set_material` | |
+| `part.Transparency` | ❌ | ✅ `part_set_transparency` | |
+| `part.Color` | ❌ | ✅ `part_set_color` | r, g, b (0-1 range) |
+| `part.Material` | ❌ | ✅ `part_set_material` | 19 presets |
 | `part.Reflectance` | ❌ | ❌ | |
 | `part.CastShadow` | ❌ | ❌ | |
-| `part.AssemblyLinearVelocity` | ❌ | ❌ | |
+| `part.AssemblyLinearVelocity` | ❌ | ✅ `part_get_velocity` | Returns (x,y,z) m/s |
 | `part.AssemblyAngularVelocity` | ❌ | ❌ | |
-| `part:ApplyImpulse()` | ❌ | ❌ | |
-| `part:ApplyAngularImpulse()` | ❌ | ❌ | |
-| `part:GetMass()` | ❌ | ❌ | |
+| `part:ApplyImpulse()` | ❌ | ✅ `part_apply_impulse` | Queued via PhysicsCommand |
+| `part:ApplyAngularImpulse()` | ❌ | ✅ `part_apply_angular_impulse` | Queued via PhysicsCommand |
+| `part:GetMass()` | ❌ | ✅ `part_get_mass` | Returns kg (stub: 1.0) |
 | `part:GetVelocityAtPosition()` | ❌ | ❌ | |
 
 ### BasePart Events
@@ -661,16 +662,16 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Camera.CFrame` | ✅ | ❌ | P3 implemented |
-| `Camera.CameraType` | ✅ | ❌ | P3 implemented |
-| `Camera.CameraSubject` | ✅ | ❌ | P3 implemented |
-| `Camera.FieldOfView` | ✅ | ❌ | P3 implemented |
-| `Camera.Focus` | ✅ | ❌ | P3 implemented |
-| `Camera.ViewportSize` | ✅ | ❌ | P3 implemented (Eustress extension) |
-| `Camera:ViewportPointToRay()` | ✅ | ❌ | P3 implemented |
-| `Camera:ScreenPointToRay()` | ✅ | ❌ | P3 implemented |
+| `Camera.CFrame` | ✅ | ✅ `camera_get_position` + `camera_get_look_vector` | Split into position + direction |
+| `Camera.CameraType` | ✅ | ❌ | |
+| `Camera.CameraSubject` | ✅ | ❌ | |
+| `Camera.FieldOfView` | ✅ | ✅ `camera_get_fov` / `camera_set_fov` | Degrees |
+| `Camera.Focus` | ✅ | ❌ | |
+| `Camera.ViewportSize` | ✅ | ✅ via CameraState | Width + height |
+| `Camera:ViewportPointToRay()` | ✅ | ❌ | |
+| `Camera:ScreenPointToRay()` | ✅ | ✅ `camera_screen_point_to_ray` | Returns ((origin), (direction)) |
 | `Camera:WorldToViewportPoint()` | ❌ | ❌ | |
-| `Camera:WorldToScreenPoint()` | ✅ | ❌ | P3 implemented |
+| `Camera:WorldToScreenPoint()` | ✅ | ❌ | |
 
 ---
 
@@ -678,8 +679,8 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Mouse.Hit` | ✅ | ❌ | P3 implemented (CFrame at cursor) |
-| `Mouse.Target` | ✅ | ❌ | P3 implemented (Part under cursor) |
+| `Mouse.Hit` | ✅ | ✅ `mouse_get_hit` | (x,y,z) world position |
+| `Mouse.Target` | ✅ | ✅ `mouse_get_target` | Entity name string |
 | `Mouse.TargetSurface` | ✅ | ❌ | P3 implemented |
 | `Mouse.X / Y` | ✅ | ❌ | P3 implemented (Screen position) |
 | `Mouse.UnitRay` | ✅ | ❌ | P3 implemented |
@@ -704,34 +705,102 @@ These are Eustress-specific APIs not found in Roblox:
 
 ### Physics Simulation (Realism)
 
-| Eustress API | Luau Status | Rune Status | Notes |
-|--------------|-------------|-------------|-------|
-| `get_voltage(entity)` | ❌ | 🔶 Stub | Battery simulation |
-| `get_soc(entity)` | ❌ | 🔶 Stub | State of charge |
-| `get_temperature(entity)` | ❌ | 🔶 Stub | Thermal simulation |
-| `get_dendrite_risk(entity)` | ❌ | 🔶 Stub | Battery degradation |
-| `get_sim_value(key)` | ❌ | 🔶 Stub | Generic sim values |
-| `set_sim_value(key, val)` | ❌ | 🔶 Stub | |
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `get_voltage(entity)` | ❌ | 🔶 Stub | ❌ | Battery simulation |
+| `get_soc(entity)` | ❌ | 🔶 Stub | ❌ | State of charge |
+| `get_temperature(entity)` | ❌ | 🔶 Stub | ❌ | Thermal simulation |
+| `get_dendrite_risk(entity)` | ❌ | 🔶 Stub | ❌ | Battery degradation |
+| `get_sim_value(key)` | ✅ SimulationService:GetValue | ✅ SIM_VALUES | ✅ get_sim_value | Shared thread-local storage |
+| `set_sim_value(key, val)` | ✅ SimulationService:SetValue | ✅ SIM_VALUES | ✅ set_sim_value | Shared thread-local storage |
+| `list_sim_values()` | ✅ SimulationService:ListValues | ✅ | ✅ list_sim_values | New in v2 |
+| `query_material_properties(name)` | ✅ WorkspaceQuery:QueryMaterial | ✅ | ✅ query_material | Returns roughness, metallic, reflectance |
+| `calculate_physics(equation, params)` | ❌ | ❌ | ✅ calculate_physics | 9 equations: kinetic_energy, ideal_gas, Nernst, drag, buoyancy, spring, gravity, heat_conduction, escape_velocity |
+
+### File / Entity Operations
+
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `query_workspace_entities(class?)` | ✅ WorkspaceQuery:QueryEntities | ✅ | ✅ query_entities | Scans .part.toml + .glb.toml |
+| `read_space_file(path)` | ✅ WorkspaceQuery:ReadFile | ✅ | ✅ read_file | Sandboxed to Universe root |
+| `write_space_file(path, content)` | ✅ WorkspaceQuery:WriteFile | ✅ | ✅ write_file | Sandboxed, rejects `..` traversal |
+| `create_entity(name, class, pos)` | ❌ | ❌ | ✅ create_entity | Writes .part.toml |
+| `update_entity(name, props)` | ❌ | ❌ | ✅ update_entity | Modifies .part.toml |
+| `delete_entity(name)` | ❌ | ❌ | ✅ delete_entity | Removes .part.toml |
 
 ### AI Integration
 
-| Eustress API | Luau Status | Rune Status | Notes |
-|--------------|-------------|-------------|-------|
-| `ai_generate_code(prompt)` | ❌ | ❌ | Claude integration |
-| `ai_analyze_image(path)` | ❌ | ❌ | Vision API |
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `ai_generate_code(prompt)` | ❌ | ❌ | via execute_rune | Claude tool_use generates code |
+| `ai_analyze_image(path)` | ❌ | ❌ | ❌ | Vision API planned |
 
 ### Workshop / Procedural
 
-| Eustress API | Luau Status | Rune Status | Notes |
-|--------------|-------------|-------------|-------|
-| `workshop_submit_idea()` | ❌ | ❌ | Ideation system |
-| `generate_mesh(params)` | ❌ | ❌ | Procedural geometry |
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `workshop_submit_idea()` | ❌ | ❌ | ❌ | via Workshop chat |
+| `generate_mesh(params)` | ❌ | ❌ | ❌ | Procedural geometry planned |
+| `remember(key, value)` | ❌ | ❌ | ✅ remember | Persistent memory across sessions |
+| `recall(query)` | ❌ | ❌ | ✅ recall | Search stored memories |
+| `stage_file_change(path, content)` | ❌ | ❌ | ✅ stage_file_change | Multi-file diff review |
+
+### Source Control
+
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `git_status()` | ❌ | ❌ | ✅ git_status | Repository status |
+| `git_commit(message)` | ❌ | ❌ | ✅ git_commit | Stage + commit |
+| `git_log(count)` | ❌ | ❌ | ✅ git_log | Commit history |
+| `git_diff(path?)` | ❌ | ❌ | ✅ git_diff | Uncommitted changes |
+
+### Tag / Collection Management
+
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `collection_add_tag` | ✅ | ✅ | ✅ add_tag | |
+| `collection_remove_tag` | ✅ | ✅ | ✅ remove_tag | |
+| `collection_has_tag` | ✅ | ✅ | via get_tagged | |
+| `collection_get_tagged` | ✅ | ✅ | ✅ get_tagged_entities | |
+
+### Data Persistence (MCP)
+
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `datastore_get` | ✅ | ✅ | ✅ datastore_get | |
+| `datastore_set` | ✅ | ✅ | ✅ datastore_set | |
+
+### Spatial / Raycast
+
+| Eustress API | Luau Status | Rune Status | MCP Tool | Notes |
+|--------------|-------------|-------------|----------|-------|
+| `workspace_raycast` | ✅ | ✅ | ✅ raycast | Origin + direction + max_distance |
+| `http_request` | ✅ | ✅ | ✅ http_request | GET/POST/PUT/DELETE |
+| `measure_distance` | (compute directly) | (compute directly) | ✅ measure_distance | Euclidean 3D distance |
+| `list_space_contents` | ❌ | ❌ | ✅ list_space_contents | Services + entities overview |
+
+### Manufacturing Mode (MCP only)
+
+| MCP Tool | Notes |
+|----------|-------|
+| `normalize_brief` | Convert conversation to ideation_brief.toml |
+| `query_manufacturers` | Filter by process, materials, certifications, capacity |
+| `query_investors` | Filter by vertical, check size, investor type |
+| `allocate_product` | AI scoring: 40% capability, 25% quality, 20% cost, 10% speed, 5% risk |
+
+### Simulation Mode (MCP only)
+
+| MCP Tool | Notes |
+|----------|-------|
+| `control_simulation` | play, pause, stop, step, set_time_scale |
+| `set_breakpoint` | Conditional pause on watchpoint threshold |
+| `export_recording` | Time-series data to CSV or JSON |
 
 ### XR / Spatial
 
 | Eustress API | Luau Status | Rune Status | Notes |
 |--------------|-------------|-------------|-------|
-| `xr_get_headset_pose()` | ❌ | ❌ | VR/AR |
+| `xr_get_headset_pose()` | ❌ | ❌ | VR/AR planned |
 | `xr_get_controller_pose()` | ❌ | ❌ | |
 | `xr_haptic_pulse()` | ❌ | ❌ | |
 

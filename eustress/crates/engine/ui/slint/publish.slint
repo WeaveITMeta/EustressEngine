@@ -1,13 +1,49 @@
 // ============================================================================
-// Eustress Engine Studio - Publish Dialog
-// Experience publishing workflow
+// Eustress Engine - Publish Dialog
+// Simulation publishing workflow
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, TextEdit, Button, CheckBox, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, TextEdit, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+component PubSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+component PubHint inherits Rectangle {
+    in property <string> text: "";
+    height: 16px;
+    background: transparent;
+    Text {
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width;
+    }
+}
+
 export component PublishDialog inherits Rectangle {
-    // Properties
     in-out property <string> experience-name: "";
     in-out property <string> description: "";
     in-out property <string> genre: "All";
@@ -20,262 +56,300 @@ export component PublishDialog inherits Rectangle {
     in property <string> error-message: "";
     in property <bool> is-update: false;
     in property <bool> is-as-new: false;
-    
-    // Callbacks
+
     callback on-publish(string, string, string, bool, bool, bool, bool);
     callback on-close();
-    
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
     TouchArea {
         clicked => { root.on-close(); }
+        scroll-event(event) => {
+            return accept;
+        }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 500px;
-        height: 560px;
-        background: Theme.dialog-background;
+        width: 540px;
+        height: min(parent.height - 80px, 500px);
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
         TouchArea {
-            // Prevent click-through
+            scroll-event(event) => {
+                return accept;
+            }
         }
-        
-        VerticalBox {
-            padding: 24px;
-            spacing: 16px;
-            
-            // Header
-            HorizontalBox {
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
                 Text {
-                    text: root.is-as-new ? "Publish As New Experience" : root.is-update ? "Update Experience" : "Publish Experience";
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.is-as-new ? "Publish As New Simulation" : root.is-update ? "Update Simulation" : "Publish Simulation";
                     color: Theme.text-primary;
-                    font-size: 20px;
+                    font-size: 13px;
                     font-weight: 600;
-                }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
-                Rectangle {
-                    width: 28px;
-                    height: 28px;
-                    background: close-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 4px;
-                    
-                    close-touch := TouchArea {
-                        clicked => { root.on-close(); }
-                    }
-                    
-                    Image {
-                        width: 12px;
-                        height: 12px;
-                        source: @image-url("../../assets/icons/ui/close.svg");
-                        image-fit: contain;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-            
-            // Name field
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Experience Name";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
-                Rectangle {
-                    height: 36px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    
-                    LineEdit {
-                        text <=> root.experience-name;
-                        // placeholder-text: "My Awesome Experience";
-                    }
-                }
-            }
-            
-            // Description field
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Description";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
-                Rectangle {
-                    height: 100px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    
-                    TextEdit {
-                        text <=> root.description;
-                    }
-                }
-            }
-            
-            // Genre selector
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Genre";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
-                ComboBox {
-                    model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
-                    current-value <=> root.genre;
-                }
-            }
-            
-            // Visibility
-            HorizontalBox {
-                spacing: 8px;
-                
-                CheckBox {
-                    text: "Public";
-                    checked <=> root.is-public;
-                }
-                
-                Text {
-                    text: root.is-public ? "Anyone can play" : "Only you can access";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
+                    horizontal-alignment: center;
                     vertical-alignment: center;
                 }
-            }
-            
-            // Publish options
-            VerticalBox {
-                spacing: 8px;
 
-                HorizontalBox {
-                    spacing: 8px;
-
-                    CheckBox {
-                        text: "Open Source";
-                        checked <=> root.open-source;
-                    }
-
-                    Text {
-                        text: "Allow source access and reuse";
-                        color: Theme.text-secondary;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                HorizontalBox {
-                    spacing: 8px;
-
-                    CheckBox {
-                        text: "Studio Editable";
-                        checked <=> root.studio-editable;
-                    }
-
-                    Text {
-                        text: "Allow Studio download and editing";
-                        color: Theme.text-secondary;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Text {
-                    text: "Target: " + root.publish-target + " • Sync: " + root.sync-status;
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                }
-            }
-
-            // Error message
-            if root.error-message != "": Rectangle {
-                height: 36px;
-                background: #4a2020;
-                border-radius: 4px;
-                
-                HorizontalBox {
-                    padding: 8px;
-                    
-                    Text {
-                        text: root.error-message;
-                        color: Theme.text-error;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-            
-            Rectangle { vertical-stretch: 1; }
-            
-            // Actions
-            HorizontalBox {
-                spacing: 8px;
-                alignment: end;
-                
                 Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
-                    
+
                     Text {
-                        text: "Cancel";
-                        color: Theme.text-primary;
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
-                
+
                 Rectangle {
-                    width: 100px;
-                    height: 36px;
-                    background: root.is-publishing ? Theme.button-background : Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        enabled: !root.is-publishing && root.experience-name != "";
-                        clicked => {
-                            root.on-publish(
-                                root.experience-name,
-                                root.description,
-                                root.genre,
-                                root.is-public,
-                                root.open-source,
-                                root.studio-editable,
-                                root.is-as-new,
-                            );
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content ──
+            ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 4px;
+                    alignment: start;
+                    width: 500px;
+
+                    PubSection { title: "DETAILS"; }
+
+                    Rectangle {
+                        height: 28px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                width: 110px;
+                                text: "Simulation Name";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                height: 22px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    text <=> root.experience-name;
+                                }
+                            }
                         }
                     }
-                    
+
+                    Rectangle { height: 4px; }
+
                     Text {
-                        text: root.is-publishing ? "Publishing..." : root.is-as-new ? "Publish As New" : root.is-update ? "Update" : "Publish";
-                        color: root.is-publishing ? Theme.text-secondary : white;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                        text: "Description";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                    }
+                    Rectangle {
+                        height: 80px;
+                        background: Theme.input-background;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: Theme.input-border;
+
+                        TextEdit {
+                            width: parent.width;
+                            height: parent.height;
+                            text <=> root.description;
+                        }
+                    }
+
+                    Rectangle { height: 4px; }
+
+                    Rectangle {
+                        height: 28px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                width: 110px;
+                                text: "Genre";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
+                                current-value <=> root.genre;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 8px; }
+                    PubSection { title: "VISIBILITY"; }
+
+                    Rectangle {
+                        height: 28px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Public";
+                                checked <=> root.is-public;
+                            }
+                            Text {
+                                text: root.is-public ? "Anyone can play" : "Only you can access";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 28px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Open Source";
+                                checked <=> root.open-source;
+                            }
+                            Text {
+                                text: "Allow source access and reuse";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 4px; }
+                    PubHint { text: "Target: " + root.publish-target + " • Sync: " + root.sync-status; }
+
+                    if root.error-message != "": Rectangle {
+                        height: 28px;
+                        background: #2a1515;
+                        border-radius: 3px;
+                        border-width: 1px;
+                        border-color: #4a2020;
+
+                        Text {
+                            x: 10px;
+                            text: root.error-message;
+                            color: Theme.text-error;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: center;
+
+                    Rectangle {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        cancel-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-close(); }
+                        }
+
+                        Text {
+                            text: "Cancel";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        width: 120px; height: 32px;
+                        border-radius: 5px;
+                        background: root.is-publishing || root.experience-name == "" ?
+                            Theme.button-background :
+                            (pub-ta.has-hover ? #1a4a2a : #152a1e);
+                        border-width: 1px;
+                        border-color: root.is-publishing || root.experience-name == "" ?
+                            Theme.border-color :
+                            (pub-ta.has-hover ? #4caf50 : #2a5a32);
+
+                        pub-ta := TouchArea {
+                            mouse-cursor: root.is-publishing || root.experience-name == "" ? default : pointer;
+                            enabled: !root.is-publishing && root.experience-name != "";
+                            clicked => {
+                                root.on-publish(
+                                    root.experience-name,
+                                    root.description,
+                                    root.genre,
+                                    root.is-public,
+                                    root.open-source,
+                                    false,
+                                    root.is-as-new,
+                                );
+                            }
+                        }
+
+                        Text {
+                            text: root.is-publishing ? "Publishing..." : root.is-as-new ? "Publish As New" : root.is-update ? "Update" : "Publish";
+                            color: root.is-publishing || root.experience-name == "" ?
+                                Theme.text-secondary :
+                                (pub-ta.has-hover ? #a5d6a7 : #66bb6a);
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

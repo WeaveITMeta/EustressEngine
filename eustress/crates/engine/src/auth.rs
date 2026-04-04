@@ -53,13 +53,16 @@ impl Default for AuthState {
 
 /// Bliss node state — tracks node mode and balance for the engine UI.
 /// Light node runs by default. Full node is opt-in (+10% BLS bonus).
+/// BLS has 18 decimal places.
 #[derive(Resource, Clone, Debug)]
 pub struct BlissNodeState {
     /// "Light" or "Full"
     pub mode: String,
-    /// Current BLS balance (display string)
+    /// Current BLS balance — full 18 decimals (for dropdown)
     pub balance: String,
-    /// Pending BLS (display string, e.g. "+8.50")
+    /// Current BLS balance — shortened 2 decimals (for badge)
+    pub balance_short: String,
+    /// Pending BLS (display string, e.g. "+0.000000000000000000")
     pub pending: String,
     /// Bonus multiplier display (e.g. "1.0x" or "1.1x")
     pub bonus: String,
@@ -71,8 +74,9 @@ impl Default for BlissNodeState {
     fn default() -> Self {
         Self {
             mode: "Light".to_string(),
-            balance: "0.00000000".to_string(),
-            pending: "+0.00000000".to_string(),
+            balance: "0.000000000000000000".to_string(),
+            balance_short: "0.00".to_string(),
+            pending: "+0.000000000000000000".to_string(),
             bonus: "1.0x".to_string(),
             enabled: true,
         }
@@ -109,6 +113,7 @@ pub struct AuthUser {
     pub steam_id: Option<String>,
     pub discord_id: Option<String>,
     pub bliss_balance: i64,
+    pub total_hours: f64,
 }
 
 /// Authentication status
@@ -226,6 +231,7 @@ impl AuthState {
             steam_id: None,
             discord_id: None,
             bliss_balance: 0,
+            total_hours: 0.0,
         });
     }
     
@@ -331,6 +337,7 @@ fn try_real_login(email: &str, password: &str, remember: bool) -> AuthResult {
                 steam_id: user_json["steam_id"].as_str().map(|s| s.to_string()),
                 discord_id: user_json["discord_id"].as_str().map(|s| s.to_string()),
                 bliss_balance: user_json["bliss_balance"].as_i64().unwrap_or(0),
+                total_hours: user_json["total_hours"].as_f64().unwrap_or(0.0),
             };
             
             if user.id.is_empty() {
@@ -379,9 +386,10 @@ fn mock_login(email: &str, remember: bool) -> AuthResult {
         avatar_url: None,
         steam_id: None,
         discord_id: None,
-        bliss_balance: 1000, // Give dev users some mock balance
+        bliss_balance: 0,
+        total_hours: 0.0,
     };
-    
+
     // Save token if remember me is checked
     if remember {
         save_token(&mock_token);
@@ -406,9 +414,10 @@ fn mock_steam_login() -> AuthResult {
         avatar_url: None,
         steam_id: Some("76561198000000000".to_string()), // Mock Steam ID
         discord_id: None,
-        bliss_balance: 1000,
+        bliss_balance: 0,
+        total_hours: 0.0,
     };
-    
+
     // Save the token
     save_token(&mock_token);
     
@@ -532,6 +541,7 @@ fn validate_and_fetch_user(token: &str) -> AuthResult {
                 steam_id: json["steam_id"].as_str().map(|s| s.to_string()),
                 discord_id: json["discord_id"].as_str().map(|s| s.to_string()),
                 bliss_balance: json["bliss_balance"].as_i64().unwrap_or(0),
+                total_hours: json["total_hours"].as_f64().unwrap_or(0.0),
             };
             
             if user.id.is_empty() {

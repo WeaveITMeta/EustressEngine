@@ -550,7 +550,7 @@ impl VigaPipeline {
             code_now.as_str(),
         );
         let duration_ms = task.start_time.elapsed().as_millis() as u64;
-        let is_best = similarity > task.context.best_similarity;
+        let _is_best = similarity > task.context.best_similarity;
 
         // Add iteration to history
         let history_entry = IterationHistory {

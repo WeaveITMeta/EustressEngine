@@ -9,7 +9,7 @@ use bevy::prelude::*;
 pub struct EmbeddedClientPlugin;
 
 impl Plugin for EmbeddedClientPlugin {
-    fn build(&self, app: &mut App) {
+    fn build(&self, _app: &mut App) {
         // Embedded client systems will be added here
         // This shares code with the standalone client for consistency
     }

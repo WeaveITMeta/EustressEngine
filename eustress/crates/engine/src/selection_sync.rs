@@ -20,6 +20,10 @@ const ABSTRACT_CLASSES: &[ClassName] = &[
 #[derive(Resource)]
 pub struct SelectionSyncManager(pub Arc<RwLock<SelectionManager>>);
 
+/// Tracks the last-seen generation so we can skip frames where nothing changed.
+#[derive(Resource, Default)]
+struct SelectionGeneration(u64);
+
 /// Plugin to synchronize SelectionManager state with Bevy SelectionBox components
 pub struct SelectionSyncPlugin {
     pub selection_manager: Arc<RwLock<SelectionManager>>,
@@ -29,6 +33,7 @@ impl Plugin for SelectionSyncPlugin {
     fn build(&self, app: &mut App) {
         app
             .insert_resource(SelectionSyncManager(self.selection_manager.clone()))
+            .init_resource::<SelectionGeneration>()
             .add_systems(Update, sync_selection_boxes);
     }
 }
@@ -57,33 +62,43 @@ fn is_abstract_celestial(instance: Option<&Instance>) -> bool {
     }
 }
 
-/// System to add/remove SelectionBox components based on SelectionManager state
-/// Supports both PartEntity (legacy) and Instance (modern) components
-/// Excludes abstract celestial services (Atmosphere, Sun, Moon, Sky) from selection boxes
+/// System to add/remove SelectionBox components based on SelectionManager state.
+/// Uses generation tracking to skip the O(n) entity scan when selection hasn't changed.
 fn sync_selection_boxes(
     mut commands: Commands,
     selection_manager: Res<SelectionSyncManager>,
+    mut last_gen: ResMut<SelectionGeneration>,
     // Query entities that could be selected (have PartEntity OR Instance)
     unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<PartEntity>, With<Instance>)>)>,
     selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<SelectionBox>>,
 ) {
-    let selected_ids = selection_manager.0.read().get_selected();
+    let mgr = selection_manager.0.read();
+    let current_gen = mgr.generation();
+
+    // Fast path: nothing changed since last frame — skip entirely
+    if current_gen == last_gen.0 {
+        return;
+    }
+    last_gen.0 = current_gen;
+
+    let selected_ids = mgr.get_selected();
+    drop(mgr);
     let selected_set: std::collections::HashSet<String> = selected_ids.into_iter().collect();
-    
+
     // Add SelectionBox to newly selected entities
     for (entity, part_entity, instance) in &unselected_query {
         // Skip abstract celestial services - they don't get selection boxes
         if is_abstract_celestial(instance) {
             continue;
         }
-        
+
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {
             if selected_set.contains(&part_id) {
                 commands.entity(entity).insert(SelectionBox);
             }
         }
     }
-    
+
     // Remove SelectionBox from deselected entities
     for (entity, part_entity, instance) in &selected_query {
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {

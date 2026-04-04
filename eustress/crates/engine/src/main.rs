@@ -68,6 +68,7 @@ mod txt_to_toml_watcher; // Automatic .txt to .toml converter
 mod workshop;           // Workshop Panel (System 0: Ideation)
 mod manufacturing;      // Manufacturing Program: investor + manufacturer registry + AI allocation
 mod frame_diagnostics;  // Frame time tracking to identify stutters
+mod network_benchmark;  // Stress test with sysinfo hardware detection
 
 mod plugins;
 mod shaders;
@@ -242,6 +243,10 @@ fn main() {
         .add_plugins(TransformSpacePlugin)
         // Gizmo tools
         .add_plugins(GizmoToolsPlugin)
+        // Mesh optimization (runtime meshopt on loaded GLBs)
+        .add_plugins(eustress_engine::mesh_optimizer::MeshOptPlugin)
+        // Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
+        .add_plugins(eustress_common::gui::SlintGuiPlugin)
         // Selection box
         .add_plugins(SelectionBoxPlugin)
         // Tools
@@ -276,8 +281,9 @@ fn main() {
         .add_plugins(runtime::RuntimePlugin)
         // Seats
         .add_plugins(seats::SeatPlugin)
-        // Soul scripting
+        // Soul scripting + physics bridge
         .add_plugins(EngineSoulPlugin)
+        .add_plugins(soul::physics_bridge::RunePhysicsBridgePlugin)
         // Workshop (System 0: Ideation — conversational product creation)
         .add_plugins(WorkshopPlugin)
         // Generative pipeline
@@ -306,7 +312,8 @@ fn main() {
     // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]
     {
-        app.add_systems(Update, part_selection::part_selection_system);
+        app.add_systems(Update, part_selection::part_selection_system
+            .after(ui::slint_ui::SlintSystems::Drain));
     }
 
     // Streaming — must use a separate block because #[cfg] cannot gate

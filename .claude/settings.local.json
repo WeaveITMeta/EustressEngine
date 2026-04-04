@@ -26,7 +26,8 @@
       "Bash(wrangler kv:*)",
       "Bash(stripe --version)",
       "Bash(stripe products:*)",
-      "Bash(stripe prices:*)"
+      "Bash(stripe prices:*)",
+      "Bash(npx wrangler:*)"
     ]
   }
 }

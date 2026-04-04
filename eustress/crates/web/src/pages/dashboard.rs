@@ -159,7 +159,7 @@ pub fn DashboardPage() -> impl IntoView {
                             </div>
                             <div class="action-content">
                                 <h3>"Explore Gallery"</h3>
-                                <p>"Discover amazing experiences"</p>
+                                <p>"Discover amazing simulations"</p>
                             </div>
                             <span class="action-arrow">"→"</span>
                         </a>

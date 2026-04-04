@@ -409,6 +409,9 @@ pub fn save_space(world: &mut World) {
                 thermodynamic: None,
                 electrochemical: None,
                 ui: None,
+                attributes: None,
+                tags: None,
+                parameters: None,
                 extra: std::collections::HashMap::new(),
             };
 
@@ -812,7 +815,7 @@ last_modified = "{now}"
     )
 }
 
-fn service_toml(name: &str, class: &str, icon: &str, description: &str) -> String {
+fn service_toml(_name: &str, class: &str, icon: &str, description: &str) -> String {
     let now = Utc::now().to_rfc3339();
     format!(
         r#"# EEP _service.toml — marks this folder as a Service container.
@@ -892,57 +895,6 @@ reflectance = 0.2
 anchored = true
 can_collide = true
 locked = false
-"#,
-        now = now,
-    )
-}
-
-fn sky_toml() -> String {
-    let now = Utc::now().to_rfc3339();
-    format!(
-        r#"# EEP Sky instance
-[instance]
-name = "Sky"
-class_name = "Sky"
-archivable = true
-ai = false
-
-[metadata]
-id = "sky-001"
-created = "{now}"
-last_modified = "{now}"
-
-[sky]
-skybox_texture = ""
-celestial_bodies_shown = true
-sun_angular_velocity = 0.0
-"#,
-        now = now,
-    )
-}
-
-fn atmosphere_toml() -> String {
-    let now = Utc::now().to_rfc3339();
-    format!(
-        r#"# EEP Atmosphere instance
-[instance]
-name = "Atmosphere"
-class_name = "Atmosphere"
-archivable = true
-ai = false
-
-[metadata]
-id = "atmosphere-001"
-created = "{now}"
-last_modified = "{now}"
-
-[atmosphere]
-density = 0.395
-offset = 0.25
-color = [0.784, 0.859, 1.0, 1.0]
-decay = 1.0
-glare = 0.0
-haze = 0.0
 "#,
         now = now,
     )

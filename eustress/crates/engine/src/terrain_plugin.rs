@@ -229,7 +229,7 @@ fn update_brush_preview(
 ) {
     let Ok(window) = windows.single() else { return };
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
-    let Ok(config) = terrain_query.single() else { return };
+    let Ok(_config) = terrain_query.single() else { return };
 
     let Some(cursor_pos) = window.cursor_position() else {
         preview.position = None;

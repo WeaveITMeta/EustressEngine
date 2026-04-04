@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, ScrollView, StandardListView, CheckBox, Slider, GridBox, GroupBox, SpinBox, TextEdit } from "std-widgets.slint";
-import { Ribbon } from "ribbon.slint";
+import { Ribbon, SavedIdentityData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData } from "properties.slint";
 import { OutputConsole, LogData } from "output.slint";
@@ -32,11 +32,11 @@ import { NetworkPanel } from "network_panel.slint";
 import { FindDialog } from "find_dialog.slint";
 import { ServiceProperties } from "service_properties.slint";
 // Modal dialogs
-import { SoulSettingsDialog } from "soul_settings.slint";
 import { SimulationSettingsDialog, WatchpointData, SimOutputBinding } from "simulation_settings.slint";
 import { ForgeConnectDialog } from "forge_connect.slint";
 import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
+import { KeybindingsDialog } from "keybindings.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.slint";
@@ -110,10 +110,17 @@ export component StudioWindow inherits Window {
     in-out property <bool> publish-is-update: false;
     in-out property <string> publish-target: "Cloudflare bucket";
     in-out property <bool> show-login-dialog: false;
+    in-out property <string> login-identity-path: "";
+    in-out property <string> login-error: "";
+    in-out property <string> login-status: "";
+    in-out property <bool> login-loading: false;
+    callback browse-identity();
+    callback login-with-identity();
     in-out property <bool> show-keybindings-dialog: false;
     in-out property <bool> show-soul-settings-dialog: false;
     in-out property <bool> show-exit-confirmation: false;
     in-out property <bool> show-settings-dialog: false;
+    in-out property <int> settings-active-tab: 0;
     in-out property <bool> show-find-dialog: false;
     
     // New panels for egui parity
@@ -127,6 +134,16 @@ export component StudioWindow inherits Window {
     // Additional modal dialogs
     in-out property <bool> show-forge-connect-dialog: false;
     in-out property <bool> show-stress-test-dialog: false;
+    // Stress test live state (pushed from Rust each frame)
+    in-out property <int> stress-max-clients: 50;
+    in-out property <bool> stress-running: false;
+    in-out property <float> stress-progress: 0;
+    in-out property <string> stress-status: "";
+    in-out property <int> stress-total-messages: 0;
+    in-out property <float> stress-avg-latency: 0;
+    in-out property <int> stress-errors: 0;
+    callback start-stress-test(int, int, int, bool, bool); // clients, rate, duration, movement, interactions
+    callback stop-stress-test();
     in-out property <bool> show-sync-domain-dialog: false;
     in-out property <bool> show-simulation-settings-dialog: false;
 
@@ -180,10 +197,16 @@ export component StudioWindow inherits Window {
     in-out property <string> account-name: "Guest";
     in-out property <string> account-status: "Logged out";
     in-out property <string> sync-status: "Local-first";
+    in-out property <string> session-hours: "0h 0m";
+    in-out property <string> total-hours: "0h";
+    in-out property <[SavedIdentityData]> saved-identities: [];
+    callback switch-identity(string);
+    callback remove-identity(string);
 
     // Bliss node state
-    in-out property <string> bliss-balance: "0.00000000";
-    in-out property <string> bliss-pending: "+0.00000000";
+    in-out property <string> bliss-balance: "0.000000000000000000";
+    in-out property <string> bliss-balance-short: "0.00";
+    in-out property <string> bliss-pending: "+0.000000000000000000";
     in-out property <string> bliss-node-mode: "Light";
     in-out property <string> bliss-bonus: "1.0x";
     in-out property <bool> bliss-enabled: true;
@@ -411,6 +434,7 @@ export component StudioWindow inherits Window {
     
     // Soul/Scripts
     callback build-script(int);
+    callback summarize-script(int);
     callback open-script(int);
     
     // Center tab management
@@ -538,9 +562,16 @@ export component StudioWindow inherits Window {
             account-name: root.account-name;
             account-status: root.account-status;
             sync-status: root.sync-status;
+            session-hours: root.session-hours;
+            total-hours: root.total-hours;
+            saved-identities: root.saved-identities;
+            on-sign-out => { root.logout(); }
+            on-switch-identity(username) => { root.switch-identity(username); }
+            on-remove-identity(username) => { root.remove-identity(username); }
 
             // Bliss
             bliss-balance: root.bliss-balance;
+            bliss-balance-short: root.bliss-balance-short;
             bliss-pending: root.bliss-pending;
             bliss-node-mode: root.bliss-node-mode;
             bliss-bonus: root.bliss-bonus;
@@ -612,8 +643,10 @@ export component StudioWindow inherits Window {
             // Other
             on-toggle-command-bar => { root.show-command-bar = !root.show-command-bar; }
             on-show-keybindings => { root.show-keybindings-dialog = true; }
-            on-show-soul-settings => { root.show-soul-settings-dialog = true; }
+            on-show-soul-settings => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
+            on-show-settings => { root.show-settings-dialog = true; }
             on-open-url(url) => { root.open-url(url); }
+            on-open-login => { root.show-login-dialog = true; }
             on-menu-action(action) => { root.menu-action(action); }
         }
 
@@ -748,10 +781,12 @@ export component StudioWindow inherits Window {
                                     clicked => { more-panels-popup.show(); }
                                 }
 
-                                Text {
-                                    text: "▾";
-                                    color: Theme.text-secondary;
-                                    font-size: 14px;
+                                Image {
+                                    width: 12px;
+                                    height: 12px;
+                                    source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                                    image-fit: contain;
+                                    colorize: Theme.text-secondary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -807,6 +842,7 @@ export component StudioWindow inherits Window {
                     // Tab content (must stretch to fill remaining space so inner ScrollView works)
                     Rectangle {
                         vertical-stretch: 1;
+                        clip: true;
                         background: Theme.panel-background;
                         
                         if root.left-tab-index == 2: ExplorerPanel {
@@ -1190,31 +1226,32 @@ export component StudioWindow inherits Window {
                                     }
                                 }
 
-                                // Close button (X) — rightmost, vertically centered via VerticalLayout
-                                VerticalLayout {
-                                    alignment: center;
-                                    width: 22px;
-                                    Rectangle {
-                                        width: 22px;
-                                        height: 22px;
-                                        background: close-area.has-hover ? #ffffff18 : transparent;
-                                        border-radius: 4px;
+                                // Spacer for close button area
+                                Rectangle { width: 22px; }
+                            }
 
-                                        close-area := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.close-center-tab(index); }
-                                        }
+                            // Close button (X) — absolutely positioned on top so it intercepts clicks above tab-hover
+                            Rectangle {
+                                x: parent.width - 26px;
+                                y: (parent.height - 22px) / 2;
+                                width: 22px;
+                                height: 22px;
+                                background: close-area.has-hover ? #ffffff18 : transparent;
+                                border-radius: 4px;
 
-                                        Image {
-                                            width: 12px;
-                                            height: 12px;
-                                            source: @image-url("../../assets/icons/ui/close.svg");
-                                            image-fit: contain;
-                                            colorize: close-area.has-hover ? Theme.text-primary : Theme.text-secondary;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
-                                    }
+                                close-area := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.close-center-tab(index); }
+                                }
+
+                                Image {
+                                    width: 12px;
+                                    height: 12px;
+                                    source: @image-url("../../assets/icons/ui/close.svg");
+                                    image-fit: contain;
+                                    colorize: close-area.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
@@ -1486,28 +1523,7 @@ export component StudioWindow inherits Window {
                             entity-count: root.current-entity-count;
                         }
                         
-                        // Snap status (bottom-center)
-                        Rectangle {
-                            x: (parent.width - self.width) / 2;
-                            y: parent.height - self.height - 8px;
-                            width: snap-label.preferred-width + 24px;
-                            height: 24px;
-                            background: Theme.overlay-background;
-                            border-radius: 12px;
-                            
-                            snap-label := Text {
-                                text: root.snap-enabled ? "Snap: " + root.snap-size + " m" : "Snap: Off";
-                                color: root.snap-enabled ? Theme.text-primary : Theme.text-secondary;
-                                font-size: 11px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                            
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.toggle-snap(); }
-                            }
-                        }
+                        // Snap status — hidden (accessible via keybinds 1/2/3)
                         
                         // Play mode indicator
                         if root.play-state != "stopped": Rectangle {
@@ -1560,6 +1576,11 @@ export component StudioWindow inherits Window {
                         on-build => {
                             if root.center-active-tab > 0 && root.center-active-tab <= root.center-tabs.length {
                                 root.build-script(root.center-tabs[root.center-active-tab - 1].entity-id);
+                            }
+                        }
+                        on-summarize => {
+                            if root.center-active-tab > 0 && root.center-active-tab <= root.center-tabs.length {
+                                root.summarize-script(root.center-tabs[root.center-active-tab - 1].entity-id);
                             }
                         }
                     }
@@ -1789,6 +1810,7 @@ export component StudioWindow inherits Window {
                     // Tab content (must stretch to fill remaining space so inner ScrollView works)
                     Rectangle {
                         vertical-stretch: 1;
+                        clip: true;
                         background: Theme.panel-background;
                         
                         if root.right-tab-index == 0: PropertiesPanel {
@@ -1924,9 +1946,11 @@ export component StudioWindow inherits Window {
             clicked => { root.show-context-menu = false; }
         }
         
-        ContextMenu {
+        ctx-menu := ContextMenu {
             x: min(root.context-menu-x, root.width - 224px);
-            y: min(root.context-menu-y, root.height - 270px);
+            y: min(root.context-menu-y, root.height - self.height);
+            width: 220px;
+            height: self.preferred-height;
             items: root.context-menu-items;
             on-action(action) => {
                 root.context-action(action);
@@ -1955,10 +1979,20 @@ export component StudioWindow inherits Window {
         on-close => { root.show-publish-dialog = false; }
     }
     
-    // Login dialog
+    // Login dialog — SPI (Sign in with Private Identity)
     if root.show-login-dialog: LoginDialog {
-        on-login => { root.login(); }
-        on-close => { root.show-login-dialog = false; }
+        identity-path: root.login-identity-path;
+        error-message: root.login-error;
+        status-message: root.login-status;
+        is-loading: root.login-loading;
+        on-browse-identity => { root.browse-identity(); }
+        on-login => { root.login-with-identity(); }
+        on-close => {
+            root.show-login-dialog = false;
+            root.login-error = "";
+            root.login-status = "";
+            root.login-identity-path = "";
+        }
     }
     
     // Exit confirmation
@@ -1978,6 +2012,7 @@ export component StudioWindow inherits Window {
     
     // Settings dialog
     if root.show-settings-dialog: SettingsDialog {
+        active-tab <=> root.settings-active-tab;
         show-help-icons <=> root.show-help-icons;
         help-opens-in-tab <=> root.help-opens-in-tab;
         on-help-icons-changed(val) => { root.help-icons-changed(val); }
@@ -2079,12 +2114,6 @@ export component StudioWindow inherits Window {
         on-close => { root.show-find-dialog = false; }
     }
     
-    // Soul settings dialog
-    if root.show-soul-settings-dialog: SoulSettingsDialog {
-        on-save => { root.show-soul-settings-dialog = false; }
-        on-close => { root.show-soul-settings-dialog = false; }
-    }
-    
     // Forge connect dialog
     if root.show-forge-connect-dialog: ForgeConnectDialog {
         on-connect => { root.connect-forge(); }
@@ -2093,8 +2122,22 @@ export component StudioWindow inherits Window {
     
     // Stress test dialog
     if root.show-stress-test-dialog: StressTestDialog {
-        on-start => { /* start stress test */ }
-        on-stop => { /* stop stress test */ }
+        running: root.stress-running;
+        progress: root.stress-progress;
+        status: root.stress-status;
+        total-messages: root.stress-total-messages;
+        avg-latency: root.stress-avg-latency;
+        errors: root.stress-errors;
+        on-start => {
+            root.start-stress-test(
+                self.client-count,
+                self.message-rate,
+                self.duration-seconds,
+                self.simulate-movement,
+                self.simulate-interactions,
+            );
+        }
+        on-stop => { root.stop-stress-test(); }
         on-close => { root.show-stress-test-dialog = false; }
     }
     
@@ -2107,6 +2150,11 @@ export component StudioWindow inherits Window {
     if root.show-sync-domain-dialog: SyncDomainDialog {
         on-sync => { root.show-sync-domain-dialog = false; }
         on-close => { root.show-sync-domain-dialog = false; }
+    }
+
+    // Keyboard shortcuts dialog
+    if root.show-keybindings-dialog: KeybindingsDialog {
+        on-close => { root.show-keybindings-dialog = false; }
     }
 
     // Simulation settings dialog

@@ -26,6 +26,7 @@ pub mod rune_api;
 pub mod error_tracker;
 pub mod vm_pool;
 pub mod rune_ecs_module;
+pub mod physics_bridge;
 pub mod parallel_execution;
 
 pub use builder::*;
@@ -380,7 +381,7 @@ fn update_build_status(
 fn cleanup_removed_soulscripts(
     mut removed: RemovedComponents<SoulScriptData>,
     mut compiler: ResMut<HotCompiler>,
-    names_query: Query<&Name>,
+    _names_query: Query<&Name>,
 ) {
     for entity in removed.read() {
         // Try to get the name of the removed entity for the module name

@@ -695,7 +695,7 @@ pub fn apply_ui_actions(
     action_queue: Option<ResMut<UIActionQueue>>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    _meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     selection_manager: Option<Res<BevySelectionManager>>,
     expanded: Option<ResMut<super::ExplorerExpanded>>,

@@ -360,6 +360,11 @@ pub enum SlintAction {
     SpawnSyntheticClients(i32),
     DisconnectAllClients,
     
+    // Stress test
+    ShowStressTest,
+    StartStressTest { clients: i32, rate: i32, duration: i32, movement: bool, interactions: bool },
+    StopStressTest,
+
     // Data
     OpenGlobalSources,
     OpenDomains,
@@ -373,6 +378,10 @@ pub enum SlintAction {
     // Auth
     Login,
     Logout,
+    BrowseIdentity,
+    LoginWithIdentity,
+    SwitchIdentity(String),
+    RemoveIdentity(String),
 
     // Bliss node
     BlissSetLight,
@@ -381,6 +390,8 @@ pub enum SlintAction {
     
     // Scripts
     BuildScript(i32),
+    SummarizeScript(i32),
+    SummarizeComplete(String, String), // (script_name, summary_markdown)
     OpenScript(i32),
     
     // Center tab management
@@ -524,6 +535,7 @@ pub struct StudioState {
     pub show_stress_test_window: bool,
     pub synthetic_client_count: u32,
     pub synthetic_clients_changed: bool,
+
     
     // Data windows
     pub show_global_sources_window: bool,
@@ -565,6 +577,7 @@ pub struct StudioState {
     pub pending_open_script: Option<(i32, String)>,
     pub pending_open_web: Option<String>, // URL to open in new web tab
     pub pending_close_tab: Option<i32>,
+    pub pending_build_entity: Option<Entity>,
     pub pending_reorder: Option<(i32, i32)>, // (from, to)
     pub script_editor_content: String,
     pub script_content_dirty: bool,     // Set when user types; triggers line-number re-sync
@@ -662,6 +675,7 @@ impl Default for StudioState {
             tabs_dirty: false,
             pending_open_script: None,
             pending_open_web: None,
+            pending_build_entity: None,
             pending_close_tab: None,
             pending_reorder: None,
             script_editor_content: String::new(),
@@ -823,6 +837,12 @@ pub struct UnifiedExplorerState {
     pub needs_immediate_sync: bool,
     /// Hash of last pushed tree model to avoid flickering on redundant pushes
     pub last_tree_hash: u64,
+    /// Cached terrain file count (avoid re-reading directory every 30 frames)
+    pub cached_terrain_file_count: usize,
+    /// Cached dynamic service names (avoid scanning space root every 30 frames)
+    pub cached_dynamic_services: Vec<(String, String)>, // (name, icon_name)
+    /// Whether explorer filesystem cache is stale (set by file watcher)
+    pub explorer_fs_stale: bool,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -845,6 +865,9 @@ impl Default for UnifiedExplorerState {
             file_path_cache: std::collections::HashMap::new(),
             needs_immediate_sync: false,
             last_tree_hash: 0,
+            cached_terrain_file_count: 0,
+            cached_dynamic_services: Vec::new(),
+            explorer_fs_stale: true,
         }
     }
 }
@@ -1140,6 +1163,7 @@ impl Plugin for SlintUiPlugin {
                 .after(SlintSystems::Drain)
                 .before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, drain_pending_build.after(SlintSystems::Drain))
             .init_resource::<super::file_event_handler::PendingFileActions>()
             // UI systems
             .add_systems(Update, handle_window_close_request)
@@ -1420,11 +1444,19 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_mindspace_connect(move || q.push(SlintAction::MindspaceConnect));
     
-    // Auth
+    // Auth — SPI (Sign in with Private Identity)
     let q = queue.clone();
     ui.on_login(move || q.push(SlintAction::Login));
     let q = queue.clone();
     ui.on_logout(move || q.push(SlintAction::Logout));
+    let q = queue.clone();
+    ui.on_switch_identity(move |username| q.push(SlintAction::SwitchIdentity(username.to_string())));
+    let q = queue.clone();
+    ui.on_remove_identity(move |username| q.push(SlintAction::RemoveIdentity(username.to_string())));
+    let q = queue.clone();
+    ui.on_browse_identity(move || q.push(SlintAction::BrowseIdentity));
+    let q = queue.clone();
+    ui.on_login_with_identity(move || q.push(SlintAction::LoginWithIdentity));
 
     // Bliss node mode
     let q = queue.clone();
@@ -1611,6 +1643,20 @@ fn setup_slint_overlay(world: &mut World) {
         overlay_layer,
         SlintOverlaySprite,
         Name::new("Slint Overlay Quad"),
+    ));
+
+    // Spawn a dedicated Bevy UI camera at order 200 so ScreenGui elements
+    // render ABOVE the Slint overlay (order 100). Without this, Bevy UI
+    // renders at order 0 and gets painted over by the Slint quad.
+    world.spawn((
+        Camera2d,
+        Camera {
+            order: 200,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        bevy::ui::IsDefaultUiCamera,
+        Name::new("Bevy UI Camera"),
     ));
     
     // Store Slint state as NonSend resource (requires World access)
@@ -2015,8 +2061,57 @@ fn update_slint_ui_focus(
 }
 
 /// Try to restore auth session on startup
-fn try_restore_auth_session(mut auth_state: ResMut<crate::auth::AuthState>) {
+fn try_restore_auth_session(
+    mut auth_state: ResMut<crate::auth::AuthState>,
+    settings: Option<Res<crate::editor_settings::EditorSettings>>,
+) {
+    // First try JWT token restore
     auth_state.try_restore_session();
+
+    // If no JWT session, try auto-login from saved identity file
+    if !auth_state.is_logged_in() {
+        if let Some(ref settings) = settings {
+            if let Some(identity) = settings.saved_identities.first() {
+                if let Ok(content) = std::fs::read_to_string(&identity.path) {
+                    let mut public_key = String::new();
+                    let mut username = String::new();
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("public_key") {
+                            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                            }
+                        }
+                        if trimmed.starts_with("username") {
+                            if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                username = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                            }
+                        }
+                    }
+                    if !public_key.is_empty() {
+                        let display_name = if username.is_empty() {
+                            public_key[..std::cmp::min(8, public_key.len())].to_string()
+                        } else {
+                            username
+                        };
+                        auth_state.user = Some(crate::auth::AuthUser {
+                            id: public_key.clone(),
+                            username: display_name.clone(),
+                            email: None,
+                            avatar_url: None,
+                            steam_id: None,
+                            discord_id: None,
+                            bliss_balance: 0,
+                            total_hours: 0.0,
+                        });
+                        auth_state.token = Some(public_key);
+                        auth_state.status = crate::auth::AuthStatus::LoggedIn;
+                        tracing::info!("Auto-login from saved identity: {}", display_name);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -2091,6 +2186,15 @@ struct DrainResources<'w> {
     brush_state: Option<ResMut<'w, BrushState>>,
     /// Standard materials for spawning instances
     materials: ResMut<'w, Assets<StandardMaterial>>,
+    /// Soul service settings for API key access
+    soul_settings: Option<Res<'w, crate::soul::SoulServiceSettings>>,
+    global_soul_settings: Option<Res<'w, crate::soul::GlobalSoulSettings>>,
+    /// Stress test state
+    stress_test: Option<ResMut<'w, crate::network_benchmark::StressTestState>>,
+    /// Play server state (for stress test port)
+    play_server: Option<Res<'w, crate::play_server::PlayServerState>>,
+    /// Action queue ref for background thread callbacks
+    action_queue: Option<Res<'w, SlintActionQueue>>,
     /// Task 12: change queue — emit SceneDeltas on property write-back (streaming feature only).
     #[cfg(feature = "streaming")]
     change_queue: Option<Res<'w, eustress_common::change_queue::ChangeQueue>>,
@@ -2396,7 +2500,32 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::DisconnectAllClients => {}
-            
+
+            // Stress test
+            SlintAction::ShowStressTest => {
+                if let Some(ref mut s) = res.state {
+                    s.show_stress_test_window = true;
+                }
+            }
+            SlintAction::StartStressTest { clients, rate, duration, movement, interactions } => {
+                if let Some(ref mut stress) = res.stress_test {
+                    stress.target_clients = clients;
+                    stress.message_rate = rate;
+                    stress.duration_secs = duration as u64;
+                    stress.simulate_movement = movement;
+                    stress.simulate_interactions = interactions;
+                    let port = res.play_server.as_ref().map(|r| r.port).unwrap_or(42069);
+                    crate::network_benchmark::start_stress_test(&mut *stress, port);
+                    info!("🔥 Stress test started: {} clients, {} msg/s, {}s", clients, rate, duration);
+                }
+            }
+            SlintAction::StopStressTest => {
+                if let Some(ref stress) = res.stress_test {
+                    stress.counters.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                    info!("⏹️ Stress test stop requested");
+                }
+            }
+
             // Data → StudioState
             SlintAction::OpenGlobalSources => {
                 if let Some(ref mut s) = res.state {
@@ -2441,6 +2570,161 @@ fn drain_slint_actions(
                     }
                 }
             }
+            SlintAction::SwitchIdentity(username) => {
+                // Find the saved identity by username and login with it
+                if let Some(ref settings) = res.editor_settings {
+                    if let Some(identity) = settings.saved_identities.iter().find(|i| i.username == username) {
+                        let path = identity.path.clone();
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let mut public_key = String::new();
+                            let mut uname = String::new();
+                            for line in content.lines() {
+                                let trimmed = line.trim();
+                                if trimmed.starts_with("public_key") {
+                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                        public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                                    }
+                                }
+                                if trimmed.starts_with("username") {
+                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                        uname = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                                    }
+                                }
+                            }
+                            if !public_key.is_empty() {
+                                let display = if uname.is_empty() { public_key[..std::cmp::min(8, public_key.len())].to_string() } else { uname };
+                                if let Some(ref mut auth) = res.auth_state {
+                                    auth.user = Some(crate::auth::AuthUser {
+                                        id: public_key.clone(), username: display.clone(),
+                                        email: None, avatar_url: None, steam_id: None, discord_id: None,
+                                        bliss_balance: 0, total_hours: 0.0,
+                                    });
+                                    auth.token = Some(public_key);
+                                    auth.status = crate::auth::AuthStatus::LoggedIn;
+                                }
+                                // Move this identity to front (active)
+                                if let Some(ref mut settings) = res.editor_settings {
+                                    if let Some(pos) = settings.saved_identities.iter().position(|i| i.username == username) {
+                                        let identity = settings.saved_identities.remove(pos);
+                                        settings.saved_identities.insert(0, identity);
+                                    }
+                                }
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Switched to {}", display));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SlintAction::RemoveIdentity(username) => {
+                if let Some(ref mut settings) = res.editor_settings {
+                    settings.saved_identities.retain(|i| i.username != username);
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Removed saved identity: {}", username));
+                }
+            }
+            SlintAction::BrowseIdentity => {
+                // Open file picker for identity.toml (synchronous — blocks briefly)
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Select identity.toml")
+                    .add_filter("Identity File", &["toml"])
+                    .pick_file()
+                {
+                    let path_str = path.to_string_lossy().to_string();
+                    if let Some(ref ui) = ui {
+                        ui.set_login_identity_path(path_str.into());
+                        ui.set_login_error("".into());
+                    }
+                }
+            }
+            SlintAction::LoginWithIdentity => {
+                // Read identity.toml and authenticate via SPI
+                let identity_path: String = ui.as_ref()
+                    .map(|u| { let p: String = u.get_login_identity_path().into(); p })
+                    .unwrap_or_default();
+
+                if identity_path.is_empty() {
+                    if let Some(ref ui) = ui {
+                        ui.set_login_error("No identity file selected".into());
+                    }
+                } else {
+                    match std::fs::read_to_string(&identity_path) {
+                        Ok(content) => {
+                            let mut public_key = String::new();
+                            let mut username = String::new();
+                            for line in content.lines() {
+                                let trimmed = line.trim();
+                                if trimmed.starts_with("public_key") {
+                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                        public_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                                    }
+                                }
+                                if trimmed.starts_with("username") {
+                                    if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                        username = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                                    }
+                                }
+                            }
+                            if public_key.is_empty() {
+                                if let Some(ref ui) = ui {
+                                    ui.set_login_error("No public_key found in identity.toml".into());
+                                }
+                            } else {
+                                let display_name = if username.is_empty() {
+                                    public_key[..std::cmp::min(8, public_key.len())].to_string()
+                                } else {
+                                    username.clone()
+                                };
+                                // Update AuthState resource so the sync system reflects the login
+                                if let Some(ref mut auth) = res.auth_state {
+                                    auth.user = Some(crate::auth::AuthUser {
+                                        id: public_key.clone(),
+                                        username: display_name.clone(),
+                                        email: None,
+                                        avatar_url: None,
+                                        steam_id: None,
+                                        discord_id: None,
+                                        bliss_balance: 0,
+                                        total_hours: 0.0,
+                                    });
+                                    auth.token = Some(public_key.clone());
+                                    auth.status = crate::auth::AuthStatus::LoggedIn;
+                                    auth.offline_mode = false;
+                                }
+                                if let Some(ref ui) = ui {
+                                    ui.set_show_login_dialog(false);
+                                    ui.set_login_error("".into());
+                                    ui.set_login_identity_path("".into());
+                                }
+                                if let Some(ref mut s) = res.state {
+                                    s.trigger_login = true;
+                                }
+                                // Save identity to settings for auto-login + quick switch
+                                if let Some(ref mut settings) = res.editor_settings {
+                                    let new_identity = crate::editor_settings::SavedIdentity {
+                                        username: display_name.clone(),
+                                        path: identity_path.clone(),
+                                        public_key_short: public_key[..std::cmp::min(8, public_key.len())].to_string(),
+                                    };
+                                    // Remove existing entry for same username, then insert at front (active)
+                                    settings.saved_identities.retain(|i| i.username != display_name);
+                                    settings.saved_identities.insert(0, new_identity);
+                                }
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Signed in as {}", display_name));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(ref ui) = ui {
+                                ui.set_login_error(format!("Failed to read: {}", e).into());
+                            }
+                        }
+                    }
+                }
+            }
 
             // Bliss node mode
             SlintAction::BlissSetLight => {
@@ -2470,11 +2754,83 @@ fn drain_slint_actions(
             }
 
             // Scripts
-            SlintAction::BuildScript(id) => {
-                if let Some(ref mut out) = res.output {
-                    out.info(format!("Building script #{}", id));
+            SlintAction::BuildScript(_id) => {
+                // Find the entity for this script by matching the active tab's entity
+                let entity = res.tab_manager.as_ref()
+                    .and_then(|mgr| mgr.active())
+                    .and_then(|tab| tab.entity);
+                if let Some(entity) = entity {
+                    // Store pending build entity — picked up by build_pipeline system
+                    if let Some(ref mut s) = res.state {
+                        s.pending_build_entity = Some(entity);
+                    }
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("🔨 Build triggered for {:?}", entity));
+                    }
+                } else {
+                    if let Some(ref mut out) = res.output {
+                        out.warn("Build: no entity associated with active tab".to_string());
+                    }
                 }
-                // TODO: Trigger Soul script compilation for entity with this instance ID
+            }
+            SlintAction::SummarizeScript(_id) => {
+                // Reverse build: generate a markdown summary from existing code via Claude API.
+                // Get the active tab's code content and script name.
+                let (script_name, code) = res.tab_manager.as_ref()
+                    .and_then(|mgr| mgr.active())
+                    .map(|tab| (tab.name.clone(), tab.content.clone()))
+                    .unwrap_or_default();
+
+                if code.trim().is_empty() {
+                    if let Some(ref mut out) = res.output {
+                        out.warn("Summarize: no code content in active tab".to_string());
+                    }
+                } else {
+                    // Get API key
+                    let api_key = res.soul_settings.as_ref()
+                        .zip(res.global_soul_settings.as_ref())
+                        .map(|(s, g)| s.effective_api_key(g))
+                        .unwrap_or_default();
+
+                    if api_key.is_empty() {
+                        if let Some(ref mut out) = res.output {
+                            out.warn("Summarize: no API key configured. Set it in Settings → Soul tab.".to_string());
+                        }
+                    } else {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("📝 Generating summary for {}...", script_name));
+                        }
+                        // Spawn background thread for Claude API call
+                        let queue = res.action_queue.as_ref().map(|q| q.0.clone());
+                        std::thread::spawn(move || {
+                            let summary = generate_code_summary(&api_key, &script_name, &code);
+                            if let Some(q) = queue {
+                                q.lock().unwrap().push(SlintAction::SummarizeComplete(script_name, summary));
+                            }
+                        });
+                    }
+                }
+            }
+            SlintAction::SummarizeComplete(name, summary) => {
+                // Summary came back from Claude — update the active tab's content
+                // and switch to Summary mode
+                if let Some(ref mut mgr) = res.tab_manager {
+                    if let Some(tab) = mgr.active_mut() {
+                        if let super::center_tabs::CenterTabType::SoulScript { ref mut mode } = tab.tab_type {
+                            // Prepend or replace summary content
+                            tab.content = summary.clone();
+                            *mode = super::center_tabs::SoulScriptMode::Summary;
+                            mgr.dirty = true;
+                        }
+                    }
+                }
+                if let Some(ref mut state) = res.state {
+                    state.script_editor_content = summary;
+                    state.script_content_dirty = true;
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("📝 Summary generated for {}", name));
+                }
             }
             SlintAction::OpenScript(id) => {
                 // Open a Soul Script in a new center tab (or focus existing)
@@ -2786,19 +3142,19 @@ fn drain_slint_actions(
                             // by scanning service_components for entities whose name matches the ID.
                             let service_name = queries.service_components.iter()
                                 .find_map(|sc| {
-                                    // ServiceComponent.class_name matches the service display name
-                                    if -(sc.class_name.len() as i32) == id {
+                                    if service_name_to_id(&sc.class_name) == id {
                                         Some(sc.class_name.clone())
                                     } else {
                                         None
                                     }
                                 });
-                            // Fallback: look up known service names by their negative ID
+                            // Fallback: look up known service names by their hash ID
                             let name = service_name.or_else(|| {
                                 let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
                                     "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                    "ServerScriptService","SoulService","SoundService","Teams","Chat"];
-                                known.iter().find(|n| -(n.len() as i32) == id).map(|n| n.to_string())
+                                    "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                    "MaterialService","AdornmentService"];
+                                known.iter().find(|n| service_name_to_id(n) == id).map(|n| n.to_string())
                             });
                             es.selected = name.map(SelectedItem::Service).unwrap_or(SelectedItem::None);
                             // Clear entity selection — service nodes are not focusable parts
@@ -2847,8 +3203,9 @@ fn drain_slint_actions(
                             // Negative ID — service header node. Recover name from known list.
                             let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
                                 "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                "ServerScriptService","SoulService","SoundService","Teams","Chat"];
-                            if let Some(name) = known.iter().find(|n| -(n.len() as i32) == id) {
+                                "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                "MaterialService","AdornmentService"];
+                            if let Some(name) = known.iter().find(|n| service_name_to_id(n) == id) {
                                 es.expanded_services.insert(name.to_string());
                             }
                         } else {
@@ -2873,8 +3230,9 @@ fn drain_slint_actions(
                             // Negative ID — service header node.
                             let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
                                 "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                "ServerScriptService","SoulService","SoundService","Teams","Chat"];
-                            if let Some(name) = known.iter().find(|n| -(n.len() as i32) == id) {
+                                "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                "MaterialService","AdornmentService"];
+                            if let Some(name) = known.iter().find(|n| service_name_to_id(n) == id) {
                                 es.expanded_services.remove(*name);
                             }
                         } else {
@@ -4154,13 +4512,13 @@ fn drain_slint_actions(
 
             // Asset Manager actions
             SlintAction::AssetSelect(id) => {
-                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                if let Some(am) = res.asset_manager_state.as_mut() {
                     am.selected = Some(id);
                     am.dirty = true;
                 }
             }
             SlintAction::AssetExpand(id) => {
-                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                if let Some(am) = res.asset_manager_state.as_mut() {
                     if am.expanded.contains(&id) {
                         am.expanded.remove(&id);
                     } else {
@@ -4214,19 +4572,19 @@ fn drain_slint_actions(
                         out.info(format!("Imported {} asset(s)", imported));
                     }
                     // Refresh the asset tree
-                    if let Some(mut am) = res.asset_manager_state.as_mut() {
+                    if let Some(am) = res.asset_manager_state.as_mut() {
                         am.dirty = true;
                     }
                 }
             }
             SlintAction::AssetSearch(text) => {
-                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                if let Some(am) = res.asset_manager_state.as_mut() {
                     am.search = text;
                     am.dirty = true;
                 }
             }
             SlintAction::AssetCategoryChanged(cat) => {
-                if let Some(mut am) = res.asset_manager_state.as_mut() {
+                if let Some(am) = res.asset_manager_state.as_mut() {
                     am.category = cat;
                     am.dirty = true;
                 }
@@ -4269,9 +4627,27 @@ fn drain_slint_actions(
                         registry.clear();
                     }
 
+                    // Clear selection so properties panel doesn't show stale data
+                    if let Some(ref sm) = res.selection_manager {
+                        sm.0.write().clear();
+                    }
+
+                    // Clear explorer state
+                    if let Some(ref mut es) = res.explorer_state {
+                        es.entity_id_cache.clear();
+                        es.expanded_entities.clear();
+                        es.dirty = true;
+                        es.needs_immediate_sync = true;
+                    }
+
                     // Set new space root and trigger rescan
-                    commands.insert_resource(crate::space::SpaceRoot(space_path));
+                    commands.insert_resource(crate::space::SpaceRoot(space_path.clone()));
                     commands.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
+
+                    // Save last space path so it restores on next launch
+                    if let Some(ref mut settings) = res.editor_settings {
+                        settings.last_space_path = Some(space_path.to_string_lossy().to_string());
+                    }
 
                     // Reset file watcher for new space
                     // (will be re-created on next file watcher tick)
@@ -4522,6 +4898,56 @@ fn sync_bevy_to_slint(
         ui.set_sync_status(sync_status.into());
     }
 
+    // Sync saved identities to UI (for multi-user quick switch)
+    if let Some(ref settings) = editor_settings {
+        if !settings.saved_identities.is_empty() {
+            let active_username = auth_state.as_ref()
+                .and_then(|a| a.user.as_ref())
+                .map(|u| u.username.clone())
+                .unwrap_or_default();
+            let identities: Vec<crate::ui::slint_ui::SavedIdentityData> = settings.saved_identities.iter().map(|i| {
+                crate::ui::slint_ui::SavedIdentityData {
+                    username: i.username.clone().into(),
+                    public_key_short: i.public_key_short.clone().into(),
+                    active: i.username == active_username,
+                }
+            }).collect();
+            let model = slint::ModelRc::new(slint::VecModel::from(identities));
+            ui.set_saved_identities(model);
+        }
+    }
+
+    // Session hours (uses process start time, updates only when minute changes)
+    {
+        use std::sync::OnceLock;
+        static START: OnceLock<std::time::Instant> = OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        let elapsed_secs = start.elapsed().as_secs();
+        let hours = elapsed_secs / 3600;
+        let minutes = (elapsed_secs % 3600) / 60;
+        let session_str = format!("{}h {}m", hours, minutes);
+        let current_session: String = ui.get_session_hours().into();
+        if current_session != session_str {
+            ui.set_session_hours(session_str.into());
+        }
+
+        // Total hours from auth state (cumulative across all sessions)
+        if let Some(ref auth) = auth_state {
+            if let Some(ref user) = auth.user {
+                let total_h = user.total_hours + (elapsed_secs as f64 / 3600.0);
+                let total_str = if total_h >= 1.0 {
+                    format!("{:.0}h", total_h)
+                } else {
+                    "< 1h".to_string()
+                };
+                let current_total: String = ui.get_total_hours().into();
+                if current_total != total_str {
+                    ui.set_total_hours(total_str.into());
+                }
+            }
+        }
+    }
+
     // Bliss node state sync
     if let Some(ref bliss) = bliss_state {
         let current_mode: String = ui.get_bliss_node_mode().into();
@@ -4533,6 +4959,7 @@ fn sync_bevy_to_slint(
         let current_balance: String = ui.get_bliss_balance().into();
         if current_balance != bliss.balance {
             ui.set_bliss_balance(bliss.balance.clone().into());
+            ui.set_bliss_balance_short(bliss.balance_short.clone().into());
             ui.set_bliss_pending(bliss.pending.clone().into());
         }
     }
@@ -4911,10 +5338,12 @@ fn sync_unified_explorer_to_slint(
 
     // Bypass throttle when a user interaction (select/expand/collapse) demands
     // an immediate refresh; otherwise throttle to every 30 frames.
+    // Always sync on the first 5 frames to pick up deferred ChildOf relationships
+    // from the initial space load (commands are deferred, ChildOf isn't applied immediately).
     if explorer_state.needs_immediate_sync {
         explorer_state.needs_immediate_sync = false;
     } else if let Some(ref perf) = perf {
-        if perf.should_throttle(30) { return; }
+        if perf.frame_counter > 5 && perf.should_throttle(30) { return; }
     }
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -5001,6 +5430,8 @@ fn sync_unified_explorer_to_slint(
     let mut lighting_roots: Vec<Entity> = Vec::new();
     let mut starter_gui_roots: Vec<Entity> = Vec::new();
     let mut soul_service_roots: Vec<Entity> = Vec::new();
+    let mut material_service_roots: Vec<Entity> = Vec::new();
+    let mut adornment_service_roots: Vec<Entity> = Vec::new();
     // Dynamic services: entities whose LoadedFromFile.service is not one of the
     // hardcoded names above. Keyed by service name for Explorer rendering.
     let mut dynamic_service_roots: std::collections::HashMap<String, Vec<Entity>> = std::collections::HashMap::new();
@@ -5008,7 +5439,8 @@ fn sync_unified_explorer_to_slint(
     // Set of hardcoded service names — entities in these are handled by the
     // dedicated buckets above, everything else goes to dynamic_service_roots.
     let hardcoded_services: std::collections::HashSet<&str> = [
-        "Workspace", "Lighting", "StarterGui", "SoulService",
+        "Workspace", "Lighting", "StarterGui", "SoulService", "MaterialService",
+        "AdornmentService",
         "Players", "StarterPack", "StarterPlayer", "ReplicatedStorage",
         "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
         // Also skip StarterCharacterScripts and StarterPlayerScripts if present
@@ -5034,6 +5466,8 @@ fn sync_unified_explorer_to_slint(
                         "Lighting" => lighting_roots.push(*child),
                         "StarterGui" => starter_gui_roots.push(*child),
                         "SoulService" => soul_service_roots.push(*child),
+                        "MaterialService" => material_service_roots.push(*child),
+                        "AdornmentService" => adornment_service_roots.push(*child),
                         other if !hardcoded_services.contains(other) => {
                             dynamic_service_roots.entry(other.to_string()).or_default().push(*child);
                         }
@@ -5064,6 +5498,8 @@ fn sync_unified_explorer_to_slint(
                     "Lighting" => lighting_roots.push(*entity),
                     "StarterGui" => starter_gui_roots.push(*entity),
                     "SoulService" => soul_service_roots.push(*entity),
+                    "MaterialService" => material_service_roots.push(*entity),
+                    "AdornmentService" => adornment_service_roots.push(*entity),
                     other if !hardcoded_services.contains(other) => {
                         dynamic_service_roots.entry(other.to_string()).or_default().push(*entity);
                     }
@@ -5092,7 +5528,7 @@ fn sync_unified_explorer_to_slint(
     // Takes entity_id_cache and next_id by mutable reference so it can register IDs
     // without a ResMut borrow conflict with the immutable borrows above.
     #[allow(clippy::too_many_arguments)]
-    let mut build_entity_nodes = |root_list: &[Entity],
+    let build_entity_nodes = |root_list: &[Entity],
                                    base_depth: i32,
                                    entity_id_cache: &mut std::collections::HashMap<i32, Entity>,
                                    next_id: &mut i32| -> Vec<TreeNode> {
@@ -5282,18 +5718,20 @@ fn sync_unified_explorer_to_slint(
             // Terrain folder node (depth 1, child of Workspace)
             let terrain_folder_id = next_id;
             next_id += 1;
-            
+
             // Register in file_path_cache for expand/collapse actions
             explorer_state.file_path_cache.insert(terrain_folder_id, terrain_dir.clone());
-            
+
             let terrain_expanded = explorer_state.expanded_dirs.contains(&terrain_dir);
             let terrain_selected = matches!(&explorer_state.selected, SelectedItem::File(p) if p == &terrain_dir);
-            
-            // Count total files in terrain dir for display
-            let mut file_count = 0;
-            if let Ok(entries) = std::fs::read_dir(&terrain_dir) {
-                file_count = entries.flatten().filter(|e| e.path().is_file()).count();
+
+            // Use cached file count — only rescan when file watcher signals change
+            if explorer_state.explorer_fs_stale || explorer_state.cached_terrain_file_count == 0 {
+                if let Ok(entries) = std::fs::read_dir(&terrain_dir) {
+                    explorer_state.cached_terrain_file_count = entries.flatten().filter(|e| e.path().is_file()).count();
+                }
             }
+            let file_count = explorer_state.cached_terrain_file_count;
             
             let folder_icon = {
                 let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon("folder"));
@@ -5490,6 +5928,20 @@ fn sync_unified_explorer_to_slint(
         tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
+    // Service: MaterialService (depth 0) + material children (depth 1+)
+    let ms_has = !material_service_roots.is_empty();
+    tree_nodes.push(make_service_node("MaterialService", "materialservice", 0, ms_has, svc_expanded("MaterialService"), &explorer_state));
+    if svc_expanded("MaterialService") {
+        tree_nodes.extend(build_entity_nodes(&material_service_roots, 1, &mut entity_id_cache, &mut next_id));
+    }
+
+    // Service: AdornmentService (depth 0) + adornment children (depth 1+)
+    let as_has = !adornment_service_roots.is_empty();
+    tree_nodes.push(make_service_node("AdornmentService", "adornment", 0, as_has, svc_expanded("AdornmentService"), &explorer_state));
+    if svc_expanded("AdornmentService") {
+        tree_nodes.extend(build_entity_nodes(&adornment_service_roots, 1, &mut entity_id_cache, &mut next_id));
+    }
+
     // Service: SoundService (depth 0) - no editor children
     tree_nodes.push(make_service_node("SoundService", "soundservice", 0, false, false, &explorer_state));
 
@@ -5505,35 +5957,37 @@ fn sync_unified_explorer_to_slint(
     // ================================================================
     {
         let space_root = &crate::space::default_space_root();
-        if let Ok(read_dir) = std::fs::read_dir(space_root) {
-            let mut dynamic_names: Vec<String> = Vec::new();
-            for entry in read_dir.flatten() {
-                let path = entry.path();
-                if !path.is_dir() { continue; }
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-                // Skip hardcoded services — they are already rendered above
-                if hardcoded_services.contains(name) { continue; }
-                // Must have _service.toml to be a valid service
-                if !path.join("_service.toml").exists() { continue; }
-                dynamic_names.push(name.to_string());
-            }
-            dynamic_names.sort();
 
-            for svc_name in &dynamic_names {
-                // Load icon from _service.toml if available
-                let svc_toml = space_root.join(svc_name).join("_service.toml");
-                let icon_name = std::fs::read_to_string(&svc_toml)
-                    .ok()
-                    .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-                    .and_then(|v| v.get("service").and_then(|s| s.get("icon")).and_then(|i| i.as_str().map(|s| s.to_string())))
-                    .unwrap_or_else(|| svc_name.to_lowercase());
-
-                let children = dynamic_service_roots.get(svc_name).cloned().unwrap_or_default();
-                let has = !children.is_empty();
-                tree_nodes.push(make_service_node(svc_name, &icon_name, 0, has, svc_expanded(svc_name), &explorer_state));
-                if svc_expanded(svc_name) && has {
-                    tree_nodes.extend(build_entity_nodes(&children, 1, &mut entity_id_cache, &mut next_id));
+        // Use cached dynamic services — only rescan filesystem when file watcher signals change
+        if explorer_state.explorer_fs_stale || explorer_state.cached_dynamic_services.is_empty() {
+            let mut dynamic = Vec::new();
+            if let Ok(read_dir) = std::fs::read_dir(space_root) {
+                for entry in read_dir.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() { continue; }
+                    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                    if hardcoded_services.contains(name) { continue; }
+                    if !path.join("_service.toml").exists() { continue; }
+                    let svc_toml = path.join("_service.toml");
+                    let icon_name = std::fs::read_to_string(&svc_toml)
+                        .ok()
+                        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                        .and_then(|v| v.get("service").and_then(|s| s.get("icon")).and_then(|i| i.as_str().map(|s| s.to_string())))
+                        .unwrap_or_else(|| name.to_lowercase());
+                    dynamic.push((name.to_string(), icon_name));
                 }
+            }
+            dynamic.sort_by(|a, b| a.0.cmp(&b.0));
+            explorer_state.cached_dynamic_services = dynamic;
+            explorer_state.explorer_fs_stale = false;
+        }
+
+        for (svc_name, icon_name) in &explorer_state.cached_dynamic_services.clone() {
+            let children = dynamic_service_roots.get(svc_name.as_str()).cloned().unwrap_or_default();
+            let has = !children.is_empty();
+            tree_nodes.push(make_service_node(svc_name, icon_name, 0, has, svc_expanded(svc_name), &explorer_state));
+            if svc_expanded(svc_name) && has {
+                tree_nodes.extend(build_entity_nodes(&children, 1, &mut entity_id_cache, &mut next_id));
             }
         }
     }
@@ -5586,6 +6040,61 @@ fn sync_unified_explorer_to_slint(
 /// Create a service header node (Workspace, Lighting, Players, etc.)
 /// `has_children` — whether this service has any child entities (controls arrow visibility)
 /// `is_expanded`  — whether the service is currently expanded (controls arrow direction)
+/// Compute a stable negative i32 ID for a service name.
+/// Uses a simple hash to avoid collisions (e.g. StarterPack and SoulService both len 11).
+/// Call Claude API to generate a markdown summary from source code.
+/// Runs on a background thread — blocks until the API responds.
+fn generate_code_summary(api_key: &str, script_name: &str, code: &str) -> String {
+    let prompt = format!(
+        "Analyze this Rune/Lua script named \"{}\" and produce a concise markdown summary.\n\
+         Include:\n\
+         - **Purpose**: One sentence describing what the script does\n\
+         - **Key Functions**: Bullet list of public functions with brief descriptions\n\
+         - **Dependencies**: What game services/APIs it uses\n\
+         - **Behavior**: How it works at runtime (event-driven, polling, etc.)\n\n\
+         Output ONLY the markdown summary, no code fences or preamble.\n\n\
+         ```\n{}\n```",
+        script_name, code
+    );
+
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-6-20250514",
+        "max_tokens": 1024,
+        "messages": [{ "role": "user", "content": prompt }]
+    });
+
+    let request = ureq::post("https://api.anthropic.com/v1/messages")
+        .set("x-api-key", api_key)
+        .set("anthropic-version", "2023-06-01")
+        .set("content-type", "application/json");
+
+    match request.send_json(&body) {
+        Ok(resp) => {
+            match resp.into_json::<serde_json::Value>() {
+                Ok(json) => {
+                    json["content"]
+                        .as_array()
+                        .and_then(|arr: &Vec<serde_json::Value>| arr.first())
+                        .and_then(|block| block["text"].as_str())
+                        .unwrap_or("Failed to parse summary response")
+                        .to_string()
+                }
+                Err(e) => format!("Failed to parse Claude API response: {}", e),
+            }
+        }
+        Err(e) => format!("Claude API error: {}", e),
+    }
+}
+
+fn service_name_to_id(name: &str) -> i32 {
+    let mut h: u32 = 5381;
+    for b in name.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    // Ensure negative and non-zero; mask to 30 bits to stay safely in i32 range
+    -((h & 0x3FFF_FFFF) as i32 + 1)
+}
+
 fn make_service_node(
     name: &str,
     icon_name: &str,
@@ -5596,7 +6105,7 @@ fn make_service_node(
 ) -> TreeNode {
     let is_selected = matches!(&state.selected, SelectedItem::Service(s) if s == name);
     TreeNode {
-        id: -(name.len() as i32), // Negative IDs for services
+        id: service_name_to_id(name), // Stable negative hash ID for services
         name: name.into(),
         icon: load_service_icon(icon_name),
         depth,
@@ -5793,7 +6302,7 @@ fn build_file_tree_nodes(
             "wav" | "ogg" | "mp3" | "flac" | "aac" | "m4a" | "opus" => "audio",
             "pdf" => "pdf",
             "glb" | "gltf" => "model",
-            "hgt" | "tif" | "tiff" | "geotiff" => "image",
+            "hgt" | "geotiff" => "image",
             _ => "file",
         };
         let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5851,6 +6360,7 @@ fn sync_properties_to_slint(
     )>,
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
+    material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -6026,12 +6536,47 @@ fn sync_properties_to_slint(
             add_prop("Appearance", "Transparency", format!("{:.3}", toml_def.properties.transparency), "float", true);
             add_prop("Appearance", "Reflectance", format!("{:.3}", toml_def.properties.reflectance), "float", true);
             add_prop("Appearance", "CastShadow", toml_def.properties.cast_shadow.to_string(), "bool", true);
-            add_prop("Appearance", "Material", toml_def.properties.material.clone(), "string", true);
+            add_prop("Appearance", "Material", toml_def.properties.material.clone(), "material", true);
             
             // -- Physics section --
             add_prop("Physics", "Anchored", toml_def.properties.anchored.to_string(), "bool", true);
             add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
             add_prop("Physics", "Locked", toml_def.properties.locked.to_string(), "bool", true);
+
+            // -- Attributes section (custom key-value pairs from [attributes] in TOML) --
+            if let Some(ref attrs) = toml_def.attributes {
+                for (key, value) in attrs {
+                    let val_str = match value {
+                        toml::Value::String(s) => s.clone(),
+                        toml::Value::Integer(i) => i.to_string(),
+                        toml::Value::Float(f) => format!("{:.4}", f),
+                        toml::Value::Boolean(b) => b.to_string(),
+                        other => format!("{}", other),
+                    };
+                    add_prop("Attributes", key, val_str, "string", true);
+                }
+            }
+
+            // -- Tags section (array from [tags] in TOML) --
+            if let Some(ref tags) = toml_def.tags {
+                let tags_str = tags.join(", ");
+                add_prop("Tags", "Tags", tags_str, "string", true);
+            }
+
+            // -- Parameters section (from [parameters] in TOML) --
+            if let Some(ref params) = toml_def.parameters {
+                for (key, value) in params {
+                    let val_str = match value {
+                        toml::Value::String(s) => s.clone(),
+                        toml::Value::Integer(i) => i.to_string(),
+                        toml::Value::Float(f) => format!("{:.4}", f),
+                        toml::Value::Boolean(b) => b.to_string(),
+                        other => format!("{}", other),
+                    };
+                    add_prop("Parameters", key, val_str, "string", true);
+                }
+            }
+
             } // end non-UI branch
             
             // -- Material section (realism, optional) --
@@ -6216,6 +6761,33 @@ fn sync_properties_to_slint(
         }
     }
     
+    // Populate material dropdown options: built-in presets + MaterialService custom materials
+    {
+        let mut material_options: Vec<slint::SharedString> = vec![
+            "Plastic".into(), "SmoothPlastic".into(), "Wood".into(), "WoodPlanks".into(),
+            "Metal".into(), "CorrodedMetal".into(), "DiamondPlate".into(), "Foil".into(),
+            "Grass".into(), "Concrete".into(), "Brick".into(), "Granite".into(),
+            "Marble".into(), "Slate".into(), "Sand".into(), "Fabric".into(),
+            "Glass".into(), "Neon".into(), "Ice".into(),
+        ];
+        // Add custom materials from MaterialRegistry (loaded from .mat.toml in MaterialService)
+        if let Some(ref mat_reg) = material_registry {
+            for name in mat_reg.names() {
+                let ss: slint::SharedString = name.into();
+                if !material_options.contains(&ss) {
+                    material_options.push(ss);
+                }
+            }
+        }
+        let options_model = slint::ModelRc::new(slint::VecModel::from(material_options));
+        for prop in &mut flat_props {
+            let pt: String = prop.property_type.to_string();
+            if pt == "material" {
+                prop.options = options_model.clone();
+            }
+        }
+    }
+
     // Hash-based change detection: only push to Slint when the model data actually
     // changes. Re-pushing an identical model destroys and recreates all `for` loop
     // items in Slint, which resets hover state and causes visible flickering.
@@ -6872,6 +7444,17 @@ fn build_service_properties(
 
 /// Bridges CenterTabManager → StudioState.center_tabs when the tab manager is dirty.
 /// This allows files opened via the unified explorer (OpenNode) to appear in the Slint tab bar.
+/// Drain pending_build_entity from StudioState and fire TriggerBuildEvent
+fn drain_pending_build(
+    mut state: Option<ResMut<StudioState>>,
+    mut events: MessageWriter<crate::soul::TriggerBuildEvent>,
+) {
+    let Some(ref mut state) = state else { return };
+    if let Some(entity) = state.pending_build_entity.take() {
+        events.write(crate::soul::TriggerBuildEvent { entity });
+    }
+}
+
 fn sync_tab_manager_to_studio_state(
     mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
     mut state: Option<ResMut<StudioState>>,
@@ -7006,19 +7589,25 @@ fn sync_center_tabs_to_slint(
         }
     }
     
-    // Update active-tab-type property - only when changed
+    // Update active-tab-type property — deferred by one frame when tabs change
+    // to avoid Slint property recursion (setting tab model + active-tab-type in the
+    // same frame causes conditional view creation/destruction during property evaluation)
     let tab_type = if state.active_center_tab <= 0 {
         "scene"
     } else {
         let idx = (state.active_center_tab - 1) as usize;
         state.center_tabs.get(idx).map(|t| t.tab_type.as_str()).unwrap_or("scene")
     };
-    let current_tab_type: String = ui.get_active_tab_type().into();
-    if current_tab_type != tab_type {
-        ui.set_active_tab_type(tab_type.into());
+    if !tabs_changed {
+        // Only update tab type when tabs did NOT change this frame
+        // (when tabs changed, the model was just set — wait for next frame)
+        let current_tab_type: String = ui.get_active_tab_type().into();
+        if current_tab_type != tab_type {
+            ui.set_active_tab_type(tab_type.into());
+        }
     }
     
-    // Push tab data to Slint when changed
+    // Push tab data to Slint when changed — guard against re-entrant property updates
     if tabs_changed {
         let slint_tabs: Vec<CenterTab> = state.center_tabs.iter().map(|t| {
             CenterTab {
@@ -7035,10 +7624,16 @@ fn sync_center_tabs_to_slint(
                 can_go_forward: false,
             }
         }).collect();
-        
+
+        // Set active tab BEFORE setting the model to avoid Slint re-evaluating
+        // conditional views (active-tab-type) while the model is being swapped.
+        let current_active = ui.get_center_active_tab();
+        if current_active != state.active_center_tab {
+            ui.set_center_active_tab(state.active_center_tab);
+        }
+
         let model_rc = std::rc::Rc::new(slint::VecModel::from(slint_tabs));
         ui.set_center_tabs(slint::ModelRc::from(model_rc));
-        ui.set_center_active_tab(state.active_center_tab);
     }
 
     // Sync editor content + line numbers to Slint when a script or code tab is active.
@@ -7188,6 +7783,12 @@ pub struct AssetManagerState {
     pub dirty: bool,
     /// Hash of last pushed model to avoid flickering on redundant pushes
     pub last_hash: u64,
+    /// Cached directory scan results — only rescanned on file watcher events.
+    pub cached_universe_files: Vec<(String, std::path::PathBuf, u64)>,
+    pub cached_mesh_files: Vec<(String, std::path::PathBuf, u64)>,
+    pub cached_space_files: Vec<(String, std::path::PathBuf, u64)>,
+    /// Whether cache needs rebuilding (set by file watcher, cleared after scan)
+    pub cache_stale: bool,
 }
 
 /// Classify a file extension into an asset category string
@@ -7197,7 +7798,7 @@ fn asset_category_for_extension(ext: &str) -> &'static str {
         "png" | "jpg" | "jpeg" | "bmp" | "tga" | "tiff" | "webp" | "hdr" | "exr" => "Textures",
         "ogg" | "mp3" | "wav" | "flac" => "Audio",
         "mat.toml" => "Materials",
-        "soul" | "rune" | "lua" | "wasm" => "Scripts",
+        "soul" | "rune" | "lua" | "luau" | "wasm" => "Scripts",
         "ttf" | "otf" | "woff" | "woff2" => "Fonts",
         _ => "Other",
     }
@@ -7275,8 +7876,10 @@ fn sync_asset_manager_to_slint(
     space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     state.frame += 1;
-    // Throttle: sync every 60 frames or when dirty
-    if !state.dirty && state.frame % 60 != 1 { return; }
+    // Only rebuild tree when dirty (user interaction) or cache is stale (file watcher event).
+    // NEVER do periodic filesystem scans — they cause 100-200ms frame hitches.
+    let needs_rescan = state.cache_stale;
+    if !state.dirty && !needs_rescan { return; }
     state.dirty = false;
 
     let Some(ctx) = slint_context.as_ref() else { return };
@@ -7286,19 +7889,24 @@ fn sync_asset_manager_to_slint(
         .unwrap_or_else(crate::space::default_space_root);
 
     let universe_root = crate::space::universe_root_for_path(&space_root);
-    let category = &state.category;
+    let category = state.category.clone();
     let search = state.search.to_lowercase();
 
     let mut asset_nodes: Vec<(i32, String, slint::Image, String, i32, bool, bool, bool, String, String)> = Vec::new();
     let mut next_id: i32 = 1;
     let mut universe_count: i32 = 0;
-    let mut space_count: i32 = 0;
+    let mut space_count: i32;
 
     // Section IDs (negative to avoid collision with file IDs)
     let universe_section_id: i32 = -1;
     let engine_parts_id: i32 = -2;
     let custom_meshes_id: i32 = -3;
     let space_section_id: i32 = -4;
+
+    // Auto-expand Space Assets on first load
+    if state.frame <= 1 {
+        state.expanded.insert(space_section_id);
+    }
 
     // Check expansion state
     let universe_expanded = state.expanded.contains(&universe_section_id);
@@ -7318,8 +7926,13 @@ fn sync_asset_manager_to_slint(
         let parts_dir = uni_root.join(".eustress").join("assets").join("parts");
         let meshes_dir = uni_root.join(".eustress").join("assets").join("meshes");
 
-        let parts_files = scan_asset_dir(&parts_dir, &parts_dir);
-        let mesh_files = scan_asset_dir(&meshes_dir, &meshes_dir);
+        // Only rescan filesystem when file watcher signals a change
+        if needs_rescan || state.cached_universe_files.is_empty() {
+            state.cached_universe_files = scan_asset_dir(&parts_dir, &parts_dir);
+            state.cached_mesh_files = scan_asset_dir(&meshes_dir, &meshes_dir);
+        }
+        let parts_files = &state.cached_universe_files;
+        let mesh_files = &state.cached_mesh_files;
         let uni_total = parts_files.len() + mesh_files.len();
         universe_count = uni_total as i32;
 
@@ -7333,7 +7946,7 @@ fn sync_asset_manager_to_slint(
                 asset_icon("folder"), "folder", 1, has_parts, engine_parts_expanded, "", "");
 
             if engine_parts_expanded {
-                for (rel, full_path, size) in &parts_files {
+                for (rel, full_path, size) in parts_files.iter() {
                     let ext = compound_ext(full_path);
                     let cat = asset_category_for_extension(&ext);
                     let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -7354,7 +7967,7 @@ fn sync_asset_manager_to_slint(
                 asset_icon("folder"), "folder", 1, has_meshes, custom_meshes_expanded, "", "");
 
             if custom_meshes_expanded {
-                for (rel, full_path, size) in &mesh_files {
+                for (rel, full_path, size) in mesh_files.iter() {
                     let ext = compound_ext(full_path);
                     let cat = asset_category_for_extension(&ext);
                     let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -7370,24 +7983,32 @@ fn sync_asset_manager_to_slint(
     }
 
     // ── Space Assets section ────────────────────────────────────────────
-    // Scan current Space for non-marker, non-service TOML and media files
+    // Use cached space files — only rescanned on file watcher events
     {
-        let space_files = scan_asset_dir(&space_root, &space_root);
+        if needs_rescan || state.cached_space_files.is_empty() {
+            state.cached_space_files = scan_asset_dir(&space_root, &space_root);
+            state.cache_stale = false;
+        }
+        let space_files = &state.cached_space_files;
         // Filter to actual asset files (not _service.toml, _instance.toml, space.toml, etc.)
         let space_assets: Vec<_> = space_files.iter().filter(|(rel, path, _)| {
             let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Skip marker files and config
+            // Skip marker files, config, and service directories
             if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml"
                 || fname == ".gitignore" || rel.starts_with(".eustress")
-                || rel.starts_with("src") { return false; }
+                || rel.starts_with("src")
+                || rel.contains("Service/") || rel.contains("Service\\")
+                || rel.starts_with("StarterGui") || rel.starts_with("Workspace/")
+                || rel.starts_with("Workspace\\")
+                { return false; }
             let ext = compound_ext(path);
             let cat = asset_category_for_extension(&ext);
             // Category filter
             if category != "All" && cat != category.as_str() { return false; }
             // Search filter
             if !search.is_empty() && !fname.to_lowercase().contains(&search) { return false; }
-            // Only show recognized asset types
-            cat != "Other"
+            // Only show recognized asset types (Materials belong to MaterialService, not Assets)
+            cat != "Other" && cat != "Materials"
         }).collect();
 
         space_count = space_assets.len() as i32;

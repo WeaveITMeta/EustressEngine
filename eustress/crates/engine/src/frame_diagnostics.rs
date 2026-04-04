@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::ecs::schedule::ScheduleLabel;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
@@ -14,7 +13,7 @@ pub struct FrameTimeTracker {
 
 impl Default for FrameTimeTracker {
     fn default() -> Self {
-        Self::new(100)
+        Self::new(1000) // Only log frames over 1 second
     }
 }
 
@@ -54,14 +53,15 @@ pub fn track_frame_time(mut tracker: ResMut<FrameTimeTracker>) {
                 tracker.stutter_threshold.as_secs_f64() * 1000.0
             );
             
-            // Log top 10 slowest systems this frame
-            let mut sorted: Vec<_> = tracker.system_times.iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(a.1));
-            
-            warn!("Top systems this frame:");
-            for (name, duration) in sorted.iter().take(10) {
-                if duration.as_millis() > 10 {
-                    warn!("  - {}: {:.1}ms", name, duration.as_secs_f64() * 1000.0);
+            // Log top 10 slowest systems this frame (only if instrumented)
+            if !tracker.system_times.is_empty() {
+                let mut sorted: Vec<_> = tracker.system_times.iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(a.1));
+                warn!("Top systems this frame:");
+                for (name, duration) in sorted.iter().take(10) {
+                    if duration.as_millis() > 10 {
+                        warn!("  - {}: {:.1}ms", name, duration.as_secs_f64() * 1000.0);
+                    }
                 }
             }
         }

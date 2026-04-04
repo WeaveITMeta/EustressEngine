@@ -22,7 +22,7 @@ path = "src/bin/generate_benchmark_map.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["physics", "realism", "luau"] }
+eustress-common = { path = "../common", features = ["physics", "realism", "luau", "gui"] }
 eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node" }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
@@ -119,6 +119,10 @@ smol = "2"
 spin_on = "0.1"
 # Byte casting for GPU buffer operations
 bytemuck = { version = "1.16", features = ["derive"] }
+# Mesh optimization (runtime vertex cache, LOD, meshlets)
+meshopt = "0.4"
+# System info detection for stress test scaling
+sysinfo = "0.33"
 
 [build-dependencies]
 winres = "0.1"

@@ -1,318 +1,388 @@
 // ============================================================================
-// Eustress Engine Studio - Stress Test Dialog
+// Eustress Engine - Stress Test Dialog
 // Network stress testing configuration
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, Slider, CheckBox, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Slider, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+component StressSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
 export component StressTestDialog inherits Rectangle {
-    // Properties
-    in-out property <int> client-count: 50;
-    in-out property <int> message-rate: 10; // messages per second
+    in-out property <int> client-count: 1;
+    in-out property <int> message-rate: 10;
     in-out property <int> duration-seconds: 60;
     in-out property <bool> simulate-movement: true;
     in-out property <bool> simulate-interactions: false;
     in property <bool> running: false;
     in property <float> progress: 0;
     in property <string> status: "";
-    
-    // Results
     in property <int> total-messages: 0;
     in property <float> avg-latency: 0;
     in property <int> errors: 0;
-    
-    // Callbacks
+
     callback on-start();
     callback on-stop();
     callback on-close();
-    
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
     TouchArea {
         clicked => { root.on-close(); }
+        scroll-event(event) => {
+            return accept;
+        }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 450px;
+        width: 500px;
         height: 480px;
-        background: Theme.dialog-background;
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        TouchArea {}
-        
-        VerticalBox {
-            padding: 24px;
-            spacing: 16px;
-            
-            // Header
-            HorizontalBox {
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
                 Text {
+                    width: parent.width;
+                    height: parent.height;
                     text: "Stress Test";
                     color: Theme.text-primary;
-                    font-size: 20px;
+                    font-size: 13px;
                     font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
+
                 Rectangle {
-                    width: 28px;
-                    height: 28px;
-                    background: close-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 4px;
-                    
-                    close-touch := TouchArea {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
-                    
-                    Image {
-                        width: 12px;
-                        height: 12px;
-                        source: @image-url("../../assets/icons/ui/close.svg");
-                        image-fit: contain;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-            
-            // Configuration
-            Text {
-                text: "Configuration";
-                color: Theme.text-secondary;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            
-            HorizontalBox {
-                spacing: 8px;
-                
-                Text {
-                    width: 120px;
-                    text: "Clients";
-                    color: Theme.text-primary;
-                    vertical-alignment: center;
-                }
-                
-                Slider {
-                    horizontal-stretch: 1;
-                    minimum: 1;
-                    maximum: 200;
-                    value: root.client-count;
-                }
-                
-                Text {
-                    width: 40px;
-                    text: root.client-count;
-                    color: Theme.text-secondary;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-            }
-            
-            HorizontalBox {
-                spacing: 8px;
-                
-                Text {
-                    width: 120px;
-                    text: "Messages/sec";
-                    color: Theme.text-primary;
-                    vertical-alignment: center;
-                }
-                
-                Slider {
-                    horizontal-stretch: 1;
-                    minimum: 1;
-                    maximum: 100;
-                    value: root.message-rate;
-                }
-                
-                Text {
-                    width: 40px;
-                    text: root.message-rate;
-                    color: Theme.text-secondary;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-            }
-            
-            HorizontalBox {
-                spacing: 8px;
-                
-                Text {
-                    width: 120px;
-                    text: "Duration (sec)";
-                    color: Theme.text-primary;
-                    vertical-alignment: center;
-                }
-                
-                Slider {
-                    horizontal-stretch: 1;
-                    minimum: 10;
-                    maximum: 300;
-                    value: root.duration-seconds;
-                }
-                
-                Text {
-                    width: 40px;
-                    text: root.duration-seconds;
-                    color: Theme.text-secondary;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-            }
-            
-            CheckBox {
-                text: "Simulate movement";
-                checked <=> root.simulate-movement;
-            }
-            
-            CheckBox {
-                text: "Simulate interactions";
-                checked <=> root.simulate-interactions;
-            }
-            
-            // Progress
-            if root.running: VerticalBox {
-                spacing: 8px;
-                
-                Text {
-                    text: root.status;
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
-                Rectangle {
-                    height: 8px;
-                    background: Theme.background-secondary;
-                    border-radius: 4px;
-                    
-                    Rectangle {
-                        width: parent.width * root.progress;
-                        height: 100%;
-                        background: Theme.accent-blue;
-                        border-radius: 4px;
-                    }
-                }
-            }
-            
-            // Results
-            if root.total-messages > 0: Rectangle {
-                height: 80px;
-                background: Theme.background-tertiary;
-                border-radius: 4px;
-                
-                HorizontalBox {
-                    padding: 12px;
-                    spacing: 16px;
-                    
-                    VerticalBox {
-                        horizontal-stretch: 1;
-                        
-                        Text {
-                            text: root.total-messages;
-                            color: Theme.accent-blue;
-                            font-size: 20px;
-                            font-weight: 600;
-                        }
-                        
-                        Text {
-                            text: "Messages";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                        }
-                    }
-                    
-                    VerticalBox {
-                        horizontal-stretch: 1;
-                        
-                        Text {
-                            text: round(root.avg-latency) + "ms";
-                            color: Theme.accent-green;
-                            font-size: 20px;
-                            font-weight: 600;
-                        }
-                        
-                        Text {
-                            text: "Avg Latency";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                        }
-                    }
-                    
-                    VerticalBox {
-                        horizontal-stretch: 1;
-                        
-                        Text {
-                            text: root.errors;
-                            color: root.errors > 0 ? Theme.accent-red : Theme.accent-green;
-                            font-size: 20px;
-                            font-weight: 600;
-                        }
-                        
-                        Text {
-                            text: "Errors";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                        }
-                    }
-                }
-            }
-            
-            Rectangle { vertical-stretch: 1; }
-            
-            // Footer
-            HorizontalBox {
-                spacing: 8px;
-                alignment: end;
-                
-                Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-close(); }
-                    }
-                    
+
                     Text {
-                        text: "Close";
-                        color: Theme.text-primary;
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
-                
+
                 Rectangle {
-                    width: 100px;
-                    height: 36px;
-                    background: root.running ? Theme.accent-red : Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => {
-                            if root.running {
-                                root.on-stop();
-                            } else {
-                                root.on-start();
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content ──
+            VerticalLayout {
+                vertical-stretch: 1;
+                padding: 20px;
+                spacing: 4px;
+                alignment: start;
+
+                StressSection { title: "CONFIGURATION"; }
+
+                // Clients slider
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 110px;
+                            text: "Clients";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 1;
+                            maximum: 200;
+                            value: root.client-count;
+                        }
+                        Text {
+                            width: 36px;
+                            text: root.client-count;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Messages/sec slider
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 110px;
+                            text: "Messages/sec";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 1;
+                            maximum: 100;
+                            value: root.message-rate;
+                        }
+                        Text {
+                            width: 36px;
+                            text: root.message-rate;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Duration slider
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 110px;
+                            text: "Duration (sec)";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 10;
+                            maximum: 300;
+                            value: root.duration-seconds;
+                        }
+                        Text {
+                            width: 36px;
+                            text: root.duration-seconds;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle { height: 8px; }
+                StressSection { title: "OPTIONS"; }
+
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        CheckBox { text: "Simulate movement"; checked <=> root.simulate-movement; }
+                    }
+                }
+
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        CheckBox { text: "Simulate interactions"; checked <=> root.simulate-interactions; }
+                    }
+                }
+
+                // Progress bar (when running)
+                if root.running: Rectangle {
+                    height: 40px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: root.status;
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                        }
+                        Rectangle {
+                            height: 6px;
+                            background: #1a1a2e;
+                            border-radius: 3px;
+
+                            Rectangle {
+                                width: parent.width * root.progress;
+                                height: 100%;
+                                background: Theme.accent-blue;
+                                border-radius: 3px;
                             }
                         }
                     }
-                    
-                    Text {
-                        text: root.running ? "Stop" : "Start Test";
-                        color: white;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                }
+
+                // Results (after test)
+                if root.total-messages > 0: Rectangle {
+                    height: 60px;
+                    background: #0f0f1a;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+
+                    HorizontalLayout {
+                        padding: 12px;
+                        spacing: 16px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.total-messages;
+                                color: Theme.accent-blue;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text { text: "Messages"; color: Theme.text-secondary; font-size: 9px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text {
+                                text: round(root.avg-latency) + "ms";
+                                color: #66bb6a;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text { text: "Avg Latency"; color: Theme.text-secondary; font-size: 9px; }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.errors;
+                                color: root.errors > 0 ? #ef5350 : #66bb6a;
+                                font-size: 16px;
+                                font-weight: 600;
+                            }
+                            Text { text: "Errors"; color: Theme.text-secondary; font-size: 9px; }
+                        }
+                    }
+                }
+            }
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: center;
+
+                    // Close
+                    Rectangle {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: close-btn.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        close-btn := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-close(); }
+                        }
+
+                        Text {
+                            text: "Close";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Start Test / Stop (green / red)
+                    Rectangle {
+                        width: 100px; height: 32px;
+                        border-radius: 5px;
+                        background: root.running ?
+                            (stop-ta.has-hover ? #4a1515 : #2a1515) :
+                            (start-ta.has-hover ? #1a4a2a : #152a1e);
+                        border-width: 1px;
+                        border-color: root.running ?
+                            (stop-ta.has-hover ? #ef5350 : #5a2020) :
+                            (start-ta.has-hover ? #4caf50 : #2a5a32);
+
+                        start-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            visible: !root.running;
+                            clicked => { root.on-start(); }
+                        }
+
+                        stop-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            visible: root.running;
+                            clicked => { root.on-stop(); }
+                        }
+
+                        Text {
+                            text: root.running ? "Stop" : "Start Test";
+                            color: root.running ?
+                                (stop-ta.has-hover ? #ef5350 : #e57373) :
+                                (start-ta.has-hover ? #a5d6a7 : #66bb6a);
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

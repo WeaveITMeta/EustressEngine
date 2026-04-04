@@ -6,6 +6,13 @@
 import { HorizontalBox, VerticalBox, ScrollView, Slider } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
 
+// Saved identity for multi-user quick switch
+export struct SavedIdentityData {
+    username: string,
+    public-key-short: string,
+    active: bool,
+}
+
 // Floating brush settings modal that appears beneath toolbar buttons
 component BrushSettingsModal inherits PopupWindow {
     in property <string> brush-name: "";
@@ -293,10 +300,17 @@ export component Ribbon inherits Rectangle {
     in property <string> account-name: "Guest";
     in property <string> account-status: "Logged out";
     in property <string> sync-status: "Local-first";
+    in property <string> session-hours: "0h 0m";
+    in property <string> total-hours: "0h";
+    in property <[SavedIdentityData]> saved-identities: [];
+    callback on-sign-out();
+    callback on-switch-identity(string);    // username to switch to
+    callback on-remove-identity(string);    // username to remove from saved list
 
     // Bliss node state
-    in property <string> bliss-balance: "0.00000000";
-    in property <string> bliss-pending: "+0.00000000";
+    in property <string> bliss-balance: "0.000000000000000000";
+    in property <string> bliss-balance-short: "0.00";
+    in property <string> bliss-pending: "+0.000000000000000000";
     in property <string> bliss-node-mode: "Light";  // "Light" or "Full"
     in property <string> bliss-bonus: "1.0x";
     in property <bool> bliss-enabled: true;
@@ -380,7 +394,9 @@ export component Ribbon inherits Rectangle {
     callback on-toggle-command-bar();
     callback on-show-keybindings();
     callback on-show-soul-settings();
+    callback on-show-settings();
     callback on-open-url(string);
+    callback on-open-login();
     callback on-menu-action(string);
     
     // Active ribbon tab: "home", "model", "ui", "terrain", "test", "mindspace"
@@ -441,7 +457,7 @@ export component Ribbon inherits Rectangle {
                                 
                                 DropdownItem { label: "New Universe..."; shortcut: "Ctrl+Shift+N"; clicked => { root.on-new-universe(); } }
                                 DropdownItem { label: "New Space"; shortcut: "Ctrl+N"; clicked => { root.on-new-scene(); } }
-                                DropdownItem { label: "Open Space..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
+                                DropdownItem { label: "Open File..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
                                 DropdownItem { label: "Save Space"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
                                 DropdownItem { label: "Save Space As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
                                 DropdownSeparator {}
@@ -450,6 +466,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownSeparator {}
                                 DropdownItem { label: "Keyboard Shortcuts..."; clicked => { root.on-show-keybindings(); } }
                                 DropdownItem { label: "Soul Settings..."; clicked => { root.on-show-soul-settings(); } }
+                                DropdownItem { label: "Settings..."; clicked => { root.on-show-settings(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Exit"; clicked => { root.on-exit(); } }
                             }
@@ -1047,7 +1064,7 @@ export component Ribbon inherits Rectangle {
 
                 // Bliss node badge + dropdown
                 Rectangle {
-                    width: 150px;
+                    width: 110px;
                     height: 20px;
                     background: root.bliss-enabled ? #2a2a3a : Theme.background-secondary;
                     border-radius: 4px;
@@ -1071,7 +1088,7 @@ export component Ribbon inherits Rectangle {
                         }
 
                         Text {
-                            text: root.bliss-balance;
+                            text: root.bliss-balance-short;
                             color: Theme.text-primary;
                             font-size: 10px;
                             vertical-alignment: center;
@@ -1275,17 +1292,59 @@ export component Ribbon inherits Rectangle {
                 // 8px gap before account badge
                 Rectangle { width: 8px; }
 
-                // Account badge
-                Rectangle {
-                    width: 120px;
+                // Account badge / Sign In button
+                if root.account-status == "Logged out": Rectangle {
+                    width: 70px;
                     height: 20px;
-                    background: Theme.background-secondary;
+                    background: #2563eb;
                     border-radius: 4px;
+
+                    sign-in-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-open-login(); }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+
+                        Text {
+                            text: "Sign In";
+                            color: #ffffff;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                if root.account-status != "Logged out": Rectangle {
+                    width: 100px;
+                    height: 20px;
+                    background: account-touch.has-hover ? #3a3a4a : Theme.background-secondary;
+                    border-radius: 4px;
+
+                    account-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { account-popup.show(); }
+                    }
 
                     HorizontalLayout {
                         padding-left: 10px;
                         padding-right: 10px;
-                        spacing: 0px;
+                        spacing: 4px;
+
+                        // Green online dot
+                        VerticalLayout {
+                            alignment: center;
+                            width: 6px;
+                            Rectangle {
+                                width: 6px;
+                                height: 6px;
+                                border-radius: 3px;
+                                background: #4caf50;
+                            }
+                        }
 
                         Text {
                             text: root.account-name;
@@ -1293,15 +1352,215 @@ export component Ribbon inherits Rectangle {
                             font-size: 10px;
                             vertical-alignment: center;
                             overflow: elide;
+                            horizontal-stretch: 1;
                         }
+                    }
 
-                        Rectangle { horizontal-stretch: 1; }
+                    account-popup := PopupWindow {
+                        x: -80px;
+                        y: parent.height + 2px;
+                        width: 200px;
 
-                        Text {
-                            text: root.account-status;
-                            color: Theme.text-secondary;
-                            font-size: 10px;
-                            vertical-alignment: center;
+                        Rectangle {
+                            background: #1e1e1e;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000080;
+                            width: 200px;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 4px;
+
+                                // Username header
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    padding-bottom: 4px;
+
+                                    Text {
+                                        text: root.account-name;
+                                        color: #ffffff;
+                                        font-size: 13px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.account-status;
+                                        color: #4caf50;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Separator
+                                Rectangle {
+                                    height: 1px;
+                                    background: #3a3a3a;
+                                }
+
+                                // Session time
+                                HorizontalLayout {
+                                    padding-top: 4px;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: "Session";
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.session-hours;
+                                        color: Theme.text-primary;
+                                        font-size: 10px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Total time
+                                HorizontalLayout {
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: "Total";
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.total-hours;
+                                        color: Theme.text-primary;
+                                        font-size: 10px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Sync status
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    padding-bottom: 4px;
+
+                                    Text {
+                                        text: "Sync";
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text {
+                                        text: root.sync-status;
+                                        color: Theme.text-primary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Separator
+                                Rectangle {
+                                    height: 1px;
+                                    background: #3a3a3a;
+                                }
+
+                                // Saved identities (quick switch)
+                                if root.saved-identities.length > 1: Rectangle {
+                                    height: root.saved-identities.length * 24px + 20px;
+
+                                    VerticalLayout {
+                                        padding-top: 4px;
+                                        spacing: 1px;
+
+                                        Text {
+                                            text: "Switch Account";
+                                            color: Theme.text-secondary;
+                                            font-size: 9px;
+                                            font-weight: 600;
+                                            horizontal-alignment: left;
+                                        }
+
+                                        for identity[idx] in root.saved-identities: Rectangle {
+                                            height: 24px;
+                                            background: id-touch.has-hover ? #3a3a4a : (identity.active ? #2a2a3a : transparent);
+                                            border-radius: 3px;
+
+                                            id-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => {
+                                                    if !identity.active {
+                                                        root.on-switch-identity(identity.username);
+                                                    }
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 6px;
+
+                                                // Active indicator
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    width: 6px;
+                                                    Rectangle {
+                                                        width: 6px;
+                                                        height: 6px;
+                                                        border-radius: 3px;
+                                                        background: identity.active ? #4caf50 : #3a3a3a;
+                                                    }
+                                                }
+
+                                                Text {
+                                                    text: identity.username;
+                                                    color: identity.active ? Theme.text-primary : Theme.text-secondary;
+                                                    font-size: 10px;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                    overflow: elide;
+                                                }
+
+                                                Text {
+                                                    text: identity.public-key-short;
+                                                    color: Theme.text-secondary;
+                                                    font-size: 8px;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Separator before sign out
+                                Rectangle {
+                                    height: 1px;
+                                    background: #3a3a3a;
+                                }
+
+                                // Sign Out button
+                                Rectangle {
+                                    height: 28px;
+                                    background: sign-out-touch.has-hover ? #3a3a3a : transparent;
+                                    border-radius: 4px;
+
+                                    sign-out-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.on-sign-out(); }
+                                    }
+
+                                    Text {
+                                        text: "Sign Out";
+                                        color: #ef5350;
+                                        font-size: 11px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1468,7 +1727,7 @@ export component Ribbon inherits Rectangle {
                 ToolGroup {
                     label: "File";
                     IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; tooltip: "New Space (Ctrl+N)"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open Space (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open File (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; tooltip: "Save Space (Ctrl+S)"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
                 }
                 GroupDivider {}

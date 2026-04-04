@@ -238,8 +238,6 @@ fn handle_scale_interaction(
     };
 
     if mouse.just_pressed(MouseButton::Left) {
-        let mut clicked_handle = false;
-
         for (entity, global_transform, transform, basepart_opt, _, _, _) in query.iter() {
             let t = global_transform.compute_transform();
             let pos = t.translation;
@@ -300,7 +298,6 @@ fn handle_scale_interaction(
                 if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, pos, Vec3::Y) {
                     state.initial_mouse_world = ray.origin + *ray.direction * t;
                 }
-                clicked_handle = true;
                 break;
             }
         }

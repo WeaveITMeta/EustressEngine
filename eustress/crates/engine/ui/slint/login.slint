@@ -1,6 +1,6 @@
 // ============================================================================
 // Eustress Engine Studio - Login Dialog
-// SSO authentication dialog
+// SPI (Sign in with Private Identity) — identity.toml
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, Button } from "std-widgets.slint";
@@ -11,49 +11,49 @@ export component LoginDialog inherits Rectangle {
     in property <bool> is-loading: false;
     in property <string> error-message: "";
     in property <string> status-message: "";
-    
+    in property <string> identity-path: "";
+
     // Callbacks
     callback on-login();
     callback on-close();
-    callback on-login-with-google();
-    callback on-login-with-github();
-    
+    callback on-browse-identity();
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
     TouchArea {
         clicked => { root.on-close(); }
+        scroll-event(event) => {
+            return accept;
+        }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 400px;
-        height: 360px;
-        background: Theme.dialog-background;
+        width: 420px;
+        height: 380px;
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
         TouchArea {
             // Prevent click-through
+            scroll-event(event) => {
+                return accept;
+            }
         }
-        
+
         VerticalBox {
             padding: 24px;
-            spacing: 16px;
-            alignment: center;
-            
-            // Logo/Title
-            Image {
-                width: 48px;
-                height: 48px;
-                source: @image-url("../../assets/icons/ui/gamepad.svg");
-                image-fit: contain;
-                horizontal-alignment: center;
-            }
-            
+            spacing: 12px;
+            alignment: start;
+
+            // Title
             Text {
                 text: "Sign in to Eustress";
                 color: Theme.text-primary;
@@ -61,112 +61,144 @@ export component LoginDialog inherits Rectangle {
                 font-weight: 600;
                 horizontal-alignment: center;
             }
-            
+
             Text {
-                text: "Connect your account to publish experiences and access cloud features";
+                text: "Use your eustress-username.toml to authenticate";
                 color: Theme.text-secondary;
                 font-size: 12px;
                 horizontal-alignment: center;
                 wrap: word-wrap;
             }
-            
+
             Rectangle { height: 8px; }
-            
-            // SSO Buttons
+
+            // Identity file section
+            Text {
+                text: "Identity File";
+                color: Theme.text-secondary;
+                font-size: 11px;
+                font-weight: 600;
+            }
+
+            // File picker — entire row is clickable
             Rectangle {
-                height: 44px;
-                background: white;
+                height: 36px;
+                background: file-row-touch.has-hover ? #2a2a3a : Theme.background-secondary;
                 border-radius: 4px;
-                
-                TouchArea {
+                border-width: 1px;
+                border-color: root.error-message != "" ? Theme.text-error : (file-row-touch.has-hover ? #4a4a5a : #3a3a3a);
+
+                file-row-touch := TouchArea {
+                    mouse-cursor: pointer;
                     enabled: !root.is-loading;
-                    clicked => { root.on-login-with-google(); }
+                    clicked => { root.on-browse-identity(); }
                 }
-                
-                HorizontalBox {
-                    padding: 12px;
-                    spacing: 12px;
-                    alignment: center;
-                    
-                    Text {
-                        text: "G";
-                        color: #4285f4;
-                        font-size: 18px;
-                        font-weight: 700;
-                        vertical-alignment: center;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+
+                    // Folder icon (centered vertically)
+                    VerticalLayout {
+                        alignment: center;
+                        width: 14px;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/import.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-secondary;
+                        }
                     }
-                    
+
                     Text {
-                        text: "Continue with Google";
-                        color: #333333;
-                        font-weight: 500;
+                        text: root.identity-path != "" ? root.identity-path : "Click to select your eustress .toml file...";
+                        color: root.identity-path != "" ? Theme.text-primary : Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+
+                    Text {
+                        text: "Browse";
+                        color: #8ab4f8;
+                        font-size: 10px;
+                        font-weight: 600;
                         vertical-alignment: center;
                     }
                 }
             }
-            
+
+            // Info box
             Rectangle {
-                height: 44px;
-                background: #24292e;
+                height: 56px;
+                background: #1a2a3a;
                 border-radius: 4px;
-                
-                TouchArea {
-                    enabled: !root.is-loading;
-                    clicked => { root.on-login-with-github(); }
-                }
-                
+                border-width: 1px;
+                border-color: #2a3a4a;
+
                 HorizontalBox {
-                    padding: 12px;
-                    spacing: 12px;
-                    alignment: center;
-                    
-                    Image {
-                        width: 16px;
-                        height: 16px;
-                        source: @image-url("../../assets/icons/ui/settings.svg");
-                        image-fit: contain;
-                        vertical-alignment: center;
-                    }
-                    
+                    padding: 10px;
+                    spacing: 8px;
+
                     Text {
-                        text: "Continue with GitHub";
-                        color: white;
-                        font-weight: 500;
+                        text: "Your eustress-username.toml contains your Ed25519 keypair.\nGet one at eustress.dev/login if you don't have one.\nNever share your private key.";
+                        color: #8ab4f8;
+                        font-size: 10px;
                         vertical-alignment: center;
+                        wrap: word-wrap;
                     }
                 }
             }
-            
+
+            Rectangle { height: 4px; }
+
+            // Sign In button
+            Rectangle {
+                height: 40px;
+                background: root.identity-path != "" && !root.is-loading ? #2563eb : #1a3a5a;
+                border-radius: 4px;
+
+                login-touch := TouchArea {
+                    mouse-cursor: root.identity-path != "" && !root.is-loading ? pointer : default;
+                    enabled: root.identity-path != "" && !root.is-loading;
+                    clicked => { root.on-login(); }
+                }
+
+                Text {
+                    text: root.is-loading ? "Authenticating..." : "Sign In with Identity";
+                    color: root.identity-path != "" && !root.is-loading ? #ffffff : #ffffff80;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
             // Status/Error
             if root.status-message != "": Text {
                 text: root.status-message;
                 color: Theme.text-secondary;
-                font-size: 12px;
+                font-size: 11px;
                 horizontal-alignment: center;
             }
-            
+
             if root.error-message != "": Text {
                 text: root.error-message;
                 color: Theme.text-error;
-                font-size: 12px;
+                font-size: 11px;
                 horizontal-alignment: center;
             }
-            
-            // Loading indicator
-            if root.is-loading: Text {
-                text: "Connecting...";
-                color: Theme.text-secondary;
-                font-size: 12px;
-                horizontal-alignment: center;
-            }
-            
+
             Rectangle { vertical-stretch: 1; }
-            
-            // Close link
+
+            // Cancel link
             TouchArea {
                 height: 20px;
                 clicked => { root.on-close(); }
-                
+
                 Text {
                     text: "Cancel";
                     color: Theme.text-secondary;

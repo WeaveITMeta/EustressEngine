@@ -261,7 +261,7 @@ Given an ideation brief (TOML), generate EustressEngine_Requirements.md with:
    - Script bindings (which watchpoints to expose)
 3. **Simulation Laws** — the physics/chemistry equations to implement:
    - Governing equations with variable names matching TOML property keys
-   - Time integration method (explicit Euler, RK4, etc.)
+   - Time integration method (explicit Euler, Verlet, RK4, or adaptive RK45)
    - Stability constraints (max timestep for numerical accuracy)
 4. **Fitness Function Definition** — how to score simulation results:
    - Primary metric, secondary metrics, safety constraints
@@ -475,7 +475,7 @@ background_transparency = 1.0
 
 For the Rune UI script (placed in scripts/ subdirectory), use the ECS bindings API:
 - `ecs.get_sim("watchpoint_name")` — read simulation values
-- `ecs.get_voltage("entity")`, `ecs.get_temperature("entity")`, etc.
+- `ecs.get_voltage("entity")`, `ecs.get_temperature("entity")`, `ecs.get_pressure("entity")`, `ecs.get_property("entity", "key")`
 - `log_info("message")` — debug logging
 - The script runs each frame and updates UI text labels with current sim data
 
@@ -986,7 +986,7 @@ Recommend a warehousing model based on product characteristics:
 
 ### 6. Regulatory and Customs
 - Import classifications (HTS codes) for target markets
-- Required certifications before shipping (FCC, CE, RoHS, etc. — infer from product type)
+- Required certifications before shipping (FCC, CE, RoHS, UL, REACH — infer from product type and target market)
 - Country-of-origin documentation requirements
 - Any restricted goods considerations
 

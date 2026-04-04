@@ -6,8 +6,8 @@
 //! 3. ScenarioHeader — Lightweight metadata for listing without full deserialization
 //! 4. ScenarioBundle — Multiple scenarios packed into a single binary
 
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

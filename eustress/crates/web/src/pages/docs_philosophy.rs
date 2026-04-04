@@ -736,19 +736,23 @@ When the player's health reaches zero, show the game over screen."}</code></pre>
                         </div>
                     </section>
 
-                    // Footer
-                    <footer class="docs-footer">
-                        <div class="docs-nav-links">
-                            <a href="/docs/realism" class="nav-prev">
-                                <img src="/assets/icons/arrow-left.svg" alt="Previous" />
-                                <span>"Realism Platform"</span>
-                            </a>
-                            <a href="/learn" class="nav-next">
-                                <span>"Back to Learn"</span>
-                                <img src="/assets/icons/arrow-right.svg" alt="Next" />
-                            </a>
-                        </div>
-                    </footer>
+                    // Navigation footer
+                    <nav class="docs-nav-footer">
+                        <a href="/docs/earning" class="nav-prev">
+                            <img src="/assets/icons/arrow-left.svg" alt="Previous" />
+                            <div>
+                                <span class="nav-label">"Previous"</span>
+                                <span class="nav-title">"Earning"</span>
+                            </div>
+                        </a>
+                        <a href="/learn" class="nav-next">
+                            <div>
+                                <span class="nav-label">"Next"</span>
+                                <span class="nav-title">"Back to Learn"</span>
+                            </div>
+                            <img src="/assets/icons/arrow-right.svg" alt="Next" />
+                        </a>
+                    </nav>
                 </main>
             </div>
 

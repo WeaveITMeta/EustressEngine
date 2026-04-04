@@ -14,10 +14,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::scenarios::types::{
-    BranchLogic, BranchNode, BranchStatus, DataSourceRef, EntityRelationship,
-    EntityRole, Evidence, EvidencePolarity, EvidenceType, GeoPoint, Outcome,
-    OutcomeData, OutcomeSeverity, ParameterValue, Scenario, ScenarioEntity,
-    ScenarioParameter, ScenarioScale, ScenarioStatus,
+    BranchNode, DataSourceRef, Evidence, EvidenceType, GeoPoint, Outcome,
+    OutcomeSeverity, Scenario, ScenarioEntity, ScenarioParameter, ScenarioScale,
+    ScenarioStatus,
 };
 
 // ─────────────────────────────────────────────

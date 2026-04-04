@@ -110,9 +110,10 @@ impl SpaceFileWatcher {
             return None;
         }
         
-        // Determine file type
-        let ext = path.extension()?.to_str()?;
-        let file_type = FileType::from_extension(ext)?;
+        // Determine file type — use from_path() for compound extensions
+        // (.glb.toml, .screengui.toml, .textlabel.toml, etc.)
+        let file_type = FileType::from_path(&path)
+            .or_else(|| path.extension().and_then(|e| e.to_str()).and_then(FileType::from_extension))?;
         
         // Determine service from path
         let service = self.extract_service_from_path(&path)?;
@@ -200,6 +201,8 @@ pub fn process_file_changes(
     // Query for Soul scripts
     mut soul_scripts: Query<&mut crate::soul::SoulScriptData>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
+    mut asset_manager_state: Option<ResMut<crate::ui::slint_ui::AssetManagerState>>,
+    mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
 ) {
     let _start = std::time::Instant::now();
     let Some(watcher) = watcher else {
@@ -212,6 +215,16 @@ pub fn process_file_changes(
     let events = watcher.poll_events();
     
     if !events.is_empty() {
+        // Mark asset manager and explorer caches stale so they rescan on next sync
+        if let Some(ref mut ams) = asset_manager_state {
+            ams.cache_stale = true;
+            ams.dirty = true;
+        }
+        if let Some(ref mut es) = explorer_state {
+            es.explorer_fs_stale = true;
+            es.needs_immediate_sync = true;
+        }
+
         let elapsed = _start.elapsed();
         if elapsed.as_millis() > 50 {
             warn!("🐌 process_file_changes took {:.1}ms ({} events)", elapsed.as_secs_f64() * 1000.0, events.len());

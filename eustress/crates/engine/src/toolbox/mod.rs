@@ -137,6 +137,9 @@ pub fn insert_mesh_instance_at(
         thermodynamic: None,
         electrochemical: None,
         ui: None,
+        attributes: None,
+        tags: None,
+        parameters: None,
         extra: std::collections::HashMap::new(),
     };
 
@@ -186,9 +189,12 @@ pub fn insert_mesh_instance(
         thermodynamic: None,
         electrochemical: None,
         ui: None,
+        attributes: None,
+        tags: None,
+        parameters: None,
         extra: std::collections::HashMap::new(),
     };
-    
+
     // Write to Workspace folder
     let workspace_path = space_root.join("Workspace");
     fs::create_dir_all(&workspace_path)

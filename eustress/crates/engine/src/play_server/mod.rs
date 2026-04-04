@@ -296,24 +296,24 @@ fn process_incoming_connections(
 fn process_client_messages(
     server_state: Res<PlayServerState>,
     session_manager: Res<SessionManager>,
-    mut commands: Commands,
+    _commands: Commands,
 ) {
     let Some(server) = &server_state.server else { return };
     let Some(handle) = &server_state.runtime else { return };
-    
+
     // Poll for messages from all sessions
     for session in session_manager.sessions.iter() {
         let session_id = *session.key();
         let server_clone = Arc::clone(server);
-        
+
         let messages = handle.block_on(async {
             let srv = server_clone.read().await;
             srv.receive_messages(session_id)
         });
-        
+
         for msg in messages {
             match msg {
-                GameMessage::PlayerInput(input) => {
+                GameMessage::PlayerInput(_input) => {
                     // Apply player input to their character
                     // This will be handled by the replication system
                 }

@@ -97,6 +97,7 @@ html {
     font-size: 16px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
 }
 
 body {
@@ -5245,7 +5246,8 @@ p {
     width: 48px;
     height: 48px;
     opacity: 0.3;
-    margin-bottom: var(--space-md);
+    margin: 0 auto var(--space-md);
+    display: block;
     color: var(--color-text-muted);
 }
 

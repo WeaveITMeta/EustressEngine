@@ -558,10 +558,21 @@ fn eustress_camera_controls(
         return;
     }
 
-    // Block ALL camera input when a modal settings dialog is open.
+    // Block ALL camera input when ANY modal dialog is open.
     // Consume events to prevent buildup, then return early.
     let modal_open = studio_state.as_ref().map_or(false, |s| {
-        s.show_settings_window || s.show_soul_settings_window || s.show_keybindings_window
+        s.show_settings_window
+            || s.show_soul_settings_window
+            || s.show_keybindings_window
+            || s.show_publish_dialog
+            || s.show_forge_connect_window
+            || s.show_stress_test_window
+            || s.show_global_sources_window
+            || s.show_domains_window
+            || s.show_global_variables_window
+            || s.show_sync_domain_modal
+            || s.show_exit_confirmation
+            || s.show_find_dialog
     });
     if modal_open {
         ev_motion.clear();

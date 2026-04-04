@@ -15,7 +15,6 @@
 //! Rune scripts that use the Scenario API, enabling the NL→Rune pipeline (task 206c).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -284,7 +283,7 @@ impl ScenarioScriptEngine {
         let t_start = std::time::Instant::now();
         let context = ScriptContext::from_scenario(scenario, branch_id)?;
         let result = self.execute(source, &context);
-        let execution_us = t_start.elapsed().as_micros() as u64;
+        let _execution_us = t_start.elapsed().as_micros() as u64;
 
         // Publish audit record to Iggy before applying (captures pre-apply state).
         #[cfg(feature = "streaming")]

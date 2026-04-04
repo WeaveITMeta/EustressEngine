@@ -62,6 +62,8 @@ pub mod soul;
 pub mod luau;
 pub mod scripting;
 pub mod terrain;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod types;
 pub mod usd;
 pub mod utils;

@@ -21,19 +21,28 @@ export component ExitConfirmationDialog inherits Rectangle {
     
     TouchArea {
         clicked => { root.on-cancel(); }
+        scroll-event(event) => {
+            return accept;
+        }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 400px;
         height: 200px;
-        background: Theme.dialog-background;
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        TouchArea {}
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
         
         VerticalBox {
             padding: 24px;

@@ -9,7 +9,7 @@ use bevy::prelude::*;
 pub struct RuntimePlugin;
 
 impl Plugin for RuntimePlugin {
-    fn build(&self, app: &mut App) {
+    fn build(&self, _app: &mut App) {
         // Runtime systems:
         // - Physics event handling
         // - Lighting time-of-day updates

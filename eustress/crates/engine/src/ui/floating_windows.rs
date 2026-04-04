@@ -256,7 +256,7 @@ fn process_pending_window_closes(
 fn sync_floating_window_state(
     manager: Res<FloatingWindowManager>,
     windows: Query<(Entity, &FloatingPanelWindow, &Window)>,
-    mut removed: RemovedComponents<Window>,
+    _removed: RemovedComponents<Window>,
 ) {
     // Handle windows that were closed by the user (X button)
     // This would need additional logic to sync back to Slint UI

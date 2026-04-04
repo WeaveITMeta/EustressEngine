@@ -126,6 +126,13 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     // Simulation values
     module.function_meta(get_sim_value)?;
     module.function_meta(set_sim_value)?;
+    module.function_meta(list_sim_values)?;
+
+    // Entity query + file access (bridge with MCP tools)
+    module.function_meta(query_workspace_entities)?;
+    module.function_meta(read_space_file)?;
+    module.function_meta(write_space_file)?;
+    module.function_meta(query_material_properties)?;
     
     // Logging
     module.function_meta(log_info)?;
@@ -215,6 +222,49 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(players_get_player_by_user_id)?;
     module.function_meta(players_get_local_player)?;
 
+    // RunService API — environment queries
+    module.function_meta(run_service_is_client)?;
+    module.function_meta(run_service_is_server)?;
+    module.function_meta(run_service_is_studio)?;
+    module.function_meta(run_service_is_running)?;
+
+    // BasePart property access
+    module.function_meta(part_set_position)?;
+    module.function_meta(part_set_rotation)?;
+    module.function_meta(part_set_size)?;
+    module.function_meta(part_set_anchored)?;
+    module.function_meta(part_set_color)?;
+    module.function_meta(part_set_material)?;
+    module.function_meta(part_set_transparency)?;
+    module.function_meta(part_set_can_collide)?;
+    module.function_meta(instance_delete)?;
+
+    // Attribute system
+    module.function_meta(instance_set_attribute)?;
+    module.function_meta(instance_get_attribute)?;
+
+    // Workspace properties
+    module.function_meta(workspace_get_gravity)?;
+    module.function_meta(workspace_set_gravity)?;
+
+    // Camera API
+    module.function_meta(camera_get_position)?;
+    module.function_meta(camera_get_look_vector)?;
+    module.function_meta(camera_get_fov)?;
+    module.function_meta(camera_set_fov)?;
+    module.function_meta(camera_screen_point_to_ray)?;
+
+    // Mouse API
+    module.function_meta(mouse_get_hit)?;
+    module.function_meta(mouse_get_target)?;
+
+    // Physics forces
+    module.function_meta(part_apply_impulse)?;
+    module.function_meta(part_apply_angular_impulse)?;
+    module.function_meta(part_get_mass)?;
+    module.function_meta(part_get_velocity)?;
+    module.function_meta(part_set_velocity)?;
+
     Ok(module)
 }
 
@@ -260,18 +310,150 @@ fn get_dendrite_risk(entity_name: &str) -> f32 {
     0.0 // Placeholder
 }
 
-/// Get a simulation value by key
+// Shared simulation value storage — accessible by both Rune scripts and MCP tools.
+thread_local! {
+    /// Simulation watchpoint values: key → f64.
+    /// Set by scripts via set_sim_value(), read by scripts and MCP tools.
+    pub static SIM_VALUES: std::cell::RefCell<std::collections::HashMap<String, f64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Get a simulation watchpoint value by key.
+/// Returns 0.0 if the key does not exist.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn get_sim_value(key: &str) -> f64 {
-    0.0 // Placeholder
+    SIM_VALUES.with(|sv| sv.borrow().get(key).copied().unwrap_or(0.0))
 }
 
-/// Set a simulation value
+/// Set a simulation watchpoint value.
+/// Both Rune scripts and MCP tools can read values set here.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn set_sim_value(key: &str, value: f64) {
-    // Placeholder
+    SIM_VALUES.with(|sv| {
+        sv.borrow_mut().insert(key.to_string(), value);
+    });
+}
+
+/// List all simulation watchpoint keys and their current values.
+/// Returns a Vec of (key, value) pairs.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn list_sim_values() -> Vec<(String, f64)> {
+    SIM_VALUES.with(|sv| {
+        sv.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect()
+    })
+}
+
+/// Query entities in the current Space's Workspace folder.
+/// Returns a Vec of (name, class) pairs for all .part.toml and .glb.toml files.
+/// Optionally filter by class_name.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn query_workspace_entities(class_filter: Option<String>) -> Vec<(String, String)> {
+    SPACE_ROOT.with(|root| {
+        let root = root.borrow();
+        let workspace = root.as_ref()
+            .map(|r| r.join("Workspace"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        let mut results = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&workspace) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !fname.ends_with(".part.toml") && !fname.ends_with(".glb.toml") { continue; }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = toml::from_str::<toml::Value>(&content) {
+                        let class = val.get("metadata")
+                            .and_then(|m| m.get("class_name"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("Unknown");
+                        let name = val.get("metadata")
+                            .and_then(|m| m.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or(fname);
+                        if let Some(ref filter) = class_filter {
+                            if class != filter.as_str() { continue; }
+                        }
+                        results.push((name.to_string(), class.to_string()));
+                    }
+                }
+            }
+        }
+        results
+    })
+}
+
+/// Read a file from the Space directory.
+/// Path is relative to the Space root. Returns file content as a String.
+/// Returns empty string if the file doesn't exist or is binary.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn read_space_file(relative_path: &str) -> String {
+    SPACE_ROOT.with(|root| {
+        let root = root.borrow();
+        let base = root.as_ref()
+            .cloned()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // Reject path traversal
+        if relative_path.contains("..") {
+            return String::new();
+        }
+        let path = base.join(relative_path);
+        if !path.starts_with(&base) {
+            return String::new();
+        }
+        std::fs::read_to_string(&path).unwrap_or_default()
+    })
+}
+
+// Thread-local for Space root path (set before script execution)
+thread_local! {
+    pub static SPACE_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Set the Space root path for the current thread before Rune execution.
+pub fn set_space_root(path: std::path::PathBuf) {
+    SPACE_ROOT.with(|r| *r.borrow_mut() = Some(path));
+}
+
+/// Clear the Space root path after Rune execution.
+pub fn clear_space_root() {
+    SPACE_ROOT.with(|r| *r.borrow_mut() = None);
+}
+
+/// Write a file to the Space directory.
+/// Path is relative to Space root. Rejects `..` traversal.
+/// Returns true on success, false on failure.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn write_space_file(relative_path: &str, content: &str) -> bool {
+    if relative_path.contains("..") { return false; }
+    SPACE_ROOT.with(|root| {
+        let root = root.borrow();
+        let base = match root.as_ref() {
+            Some(r) => r.clone(),
+            None => return false,
+        };
+        let path = base.join(relative_path);
+        if !path.starts_with(&base) { return false; }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, content).is_ok()
+    })
+}
+
+/// Query material PBR properties by preset name.
+/// Returns (roughness, metallic, reflectance) tuple.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn query_material_properties(material_name: &str) -> (f32, f32, f32) {
+    let mat = eustress_common::classes::Material::from_string(material_name);
+    mat.pbr_params()
 }
 
 // ============================================================================
@@ -2496,6 +2678,535 @@ fn players_get_local_player() -> Option<PlayerRune> {
             }
         })
     })
+}
+
+// ============================================================================
+// RunService API — Environment Queries
+// ============================================================================
+
+/// RunService:IsClient() — always returns true in engine (single-process)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn run_service_is_client() -> bool { true }
+
+/// RunService:IsServer() — returns true when running as Forge server
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn run_service_is_server() -> bool { false }
+
+/// RunService:IsStudio() — returns true when running in EustressEngine editor
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn run_service_is_studio() -> bool { true }
+
+/// RunService:IsRunning() — returns true when simulation is playing
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn run_service_is_running() -> bool {
+    // TODO: bridge with PlayModeState resource
+    false
+}
+
+// ============================================================================
+// BasePart Property Setters (write to TOML via SPACE_ROOT)
+// ============================================================================
+
+/// Set an entity's position by name (writes to .part.toml)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_position(entity_name: &str, x: f64, y: f64, z: f64) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
+            transform.insert("position".to_string(), toml::Value::Array(vec![
+                toml::Value::Float(x), toml::Value::Float(y), toml::Value::Float(z),
+            ]));
+        }
+    });
+}
+
+/// Set an entity's rotation by name (Euler angles in degrees)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_rotation(entity_name: &str, rx: f64, ry: f64, rz: f64) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
+            // Convert degrees to quaternion stored as [x, y, z, w]
+            let (sx, cx) = (rx.to_radians() * 0.5).sin_cos();
+            let (sy, cy) = (ry.to_radians() * 0.5).sin_cos();
+            let (sz, cz) = (rz.to_radians() * 0.5).sin_cos();
+            let qx = sx * cy * cz - cx * sy * sz;
+            let qy = cx * sy * cz + sx * cy * sz;
+            let qz = cx * cy * sz - sx * sy * cz;
+            let qw = cx * cy * cz + sx * sy * sz;
+            transform.insert("rotation".to_string(), toml::Value::Array(vec![
+                toml::Value::Float(qx), toml::Value::Float(qy),
+                toml::Value::Float(qz), toml::Value::Float(qw),
+            ]));
+        }
+    });
+}
+
+/// Set an entity's scale/size by name
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_size(entity_name: &str, x: f64, y: f64, z: f64) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
+            transform.insert("scale".to_string(), toml::Value::Array(vec![
+                toml::Value::Float(x), toml::Value::Float(y), toml::Value::Float(z),
+            ]));
+        }
+    });
+}
+
+/// Set an entity's anchored state
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_anchored(entity_name: &str, anchored: bool) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
+            props.insert("anchored".to_string(), toml::Value::Boolean(anchored));
+        }
+    });
+}
+
+/// Set an entity's color (r, g, b in 0-1 range)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_color(entity_name: &str, r: f64, g: f64, b: f64) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
+            props.insert("color".to_string(), toml::Value::Array(vec![
+                toml::Value::Float(r), toml::Value::Float(g),
+                toml::Value::Float(b), toml::Value::Float(1.0),
+            ]));
+        }
+    });
+}
+
+/// Set an entity's material preset
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_material(entity_name: &str, material: &str) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
+            props.insert("material".to_string(), toml::Value::String(material.to_string()));
+        }
+    });
+}
+
+/// Set an entity's transparency (0.0 = opaque, 1.0 = invisible)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_transparency(entity_name: &str, transparency: f64) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
+            props.insert("transparency".to_string(), toml::Value::Float(transparency));
+        }
+    });
+}
+
+/// Set an entity's CanCollide property
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_can_collide(entity_name: &str, can_collide: bool) {
+    update_part_toml(entity_name, |doc| {
+        if let Some(props) = doc.get_mut("properties").and_then(|p| p.as_table_mut()) {
+            props.insert("can_collide".to_string(), toml::Value::Boolean(can_collide));
+        }
+    });
+}
+
+// ============================================================================
+// Attribute System (custom key-value properties)
+// ============================================================================
+
+// Thread-local attribute storage: entity_name → { key → value }
+thread_local! {
+    static INSTANCE_ATTRIBUTES: std::cell::RefCell<std::collections::HashMap<String, std::collections::HashMap<String, String>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Set a custom attribute on an instance by name.
+/// Attributes are string key-value pairs stored in memory (not persisted to TOML).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn instance_set_attribute(entity_name: &str, key: &str, value: &str) {
+    INSTANCE_ATTRIBUTES.with(|attrs| {
+        attrs.borrow_mut()
+            .entry(entity_name.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_string());
+    });
+}
+
+/// Get a custom attribute from an instance by name.
+/// Returns None if the attribute doesn't exist.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn instance_get_attribute(entity_name: &str, key: &str) -> Option<String> {
+    INSTANCE_ATTRIBUTES.with(|attrs| {
+        attrs.borrow()
+            .get(entity_name)
+            .and_then(|m| m.get(key))
+            .cloned()
+    })
+}
+
+// ============================================================================
+// Camera API
+// ============================================================================
+
+// Thread-local camera state (set by Bevy camera system before script execution)
+thread_local! {
+    pub static CAMERA_STATE: std::cell::RefCell<CameraState> = std::cell::RefCell::new(CameraState::default());
+}
+
+#[derive(Default, Clone)]
+pub struct CameraState {
+    pub position: [f64; 3],
+    pub look_vector: [f64; 3],
+    pub right_vector: [f64; 3],
+    pub up_vector: [f64; 3],
+    pub fov: f64,
+    pub viewport_width: f64,
+    pub viewport_height: f64,
+}
+
+/// Set the camera state before Rune script execution.
+pub fn set_camera_state(state: CameraState) {
+    CAMERA_STATE.with(|cs| *cs.borrow_mut() = state);
+}
+
+/// Camera position as (x, y, z)
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn camera_get_position() -> (f64, f64, f64) {
+    CAMERA_STATE.with(|cs| {
+        let s = cs.borrow();
+        (s.position[0], s.position[1], s.position[2])
+    })
+}
+
+/// Camera forward direction as (x, y, z) unit vector
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn camera_get_look_vector() -> (f64, f64, f64) {
+    CAMERA_STATE.with(|cs| {
+        let s = cs.borrow();
+        (s.look_vector[0], s.look_vector[1], s.look_vector[2])
+    })
+}
+
+/// Camera field of view in degrees
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn camera_get_fov() -> f64 {
+    CAMERA_STATE.with(|cs| cs.borrow().fov)
+}
+
+/// Set camera field of view in degrees
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn camera_set_fov(fov: f64) {
+    CAMERA_STATE.with(|cs| cs.borrow_mut().fov = fov);
+}
+
+/// Convert a screen point (x, y) to a world-space ray (origin, direction).
+/// Returns ((ox, oy, oz), (dx, dy, dz)).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn camera_screen_point_to_ray(x: f64, y: f64) -> ((f64, f64, f64), (f64, f64, f64)) {
+    CAMERA_STATE.with(|cs| {
+        let s = cs.borrow();
+        let origin = (s.position[0], s.position[1], s.position[2]);
+        // Simplified: project screen point through camera frustum
+        let ndc_x = (x / s.viewport_width.max(1.0)) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (y / s.viewport_height.max(1.0)) * 2.0;
+        let fov_rad = s.fov.to_radians();
+        let aspect = s.viewport_width / s.viewport_height.max(1.0);
+        let dir_x = s.look_vector[0] + s.right_vector[0] * ndc_x * (fov_rad * 0.5).tan() * aspect + s.up_vector[0] * ndc_y * (fov_rad * 0.5).tan();
+        let dir_y = s.look_vector[1] + s.right_vector[1] * ndc_x * (fov_rad * 0.5).tan() * aspect + s.up_vector[1] * ndc_y * (fov_rad * 0.5).tan();
+        let dir_z = s.look_vector[2] + s.right_vector[2] * ndc_x * (fov_rad * 0.5).tan() * aspect + s.up_vector[2] * ndc_y * (fov_rad * 0.5).tan();
+        let len = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z).sqrt().max(1e-10);
+        (origin, (dir_x / len, dir_y / len, dir_z / len))
+    })
+}
+
+// ============================================================================
+// Mouse API
+// ============================================================================
+
+// Thread-local mouse state (set by Bevy input system before script execution)
+thread_local! {
+    pub static MOUSE_STATE: std::cell::RefCell<MouseState> = std::cell::RefCell::new(MouseState::default());
+}
+
+#[derive(Default, Clone)]
+pub struct MouseState {
+    /// World-space hit position (raycast from cursor into scene)
+    pub hit_position: [f64; 3],
+    /// Name of the entity under the cursor (empty if none)
+    pub target_name: String,
+    /// Screen-space cursor position
+    pub screen_x: f64,
+    pub screen_y: f64,
+}
+
+pub fn set_mouse_state(state: MouseState) {
+    MOUSE_STATE.with(|ms| *ms.borrow_mut() = state);
+}
+
+/// Mouse.Hit — world-space position where the cursor ray hits geometry.
+/// Returns (x, y, z).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn mouse_get_hit() -> (f64, f64, f64) {
+    MOUSE_STATE.with(|ms| {
+        let s = ms.borrow();
+        (s.hit_position[0], s.hit_position[1], s.hit_position[2])
+    })
+}
+
+/// Mouse.Target — name of the entity under the cursor.
+/// Returns empty string if the cursor is not over any entity.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn mouse_get_target() -> String {
+    MOUSE_STATE.with(|ms| ms.borrow().target_name.clone())
+}
+
+// ============================================================================
+// Physics Forces (Avian3d bridge)
+// ============================================================================
+
+// Thread-local physics command queue (collected by Bevy system after script execution)
+thread_local! {
+    pub static PHYSICS_COMMANDS: std::cell::RefCell<Vec<PhysicsCommand>> = std::cell::RefCell::new(Vec::new());
+}
+
+#[derive(Debug, Clone)]
+pub enum PhysicsCommand {
+    ApplyImpulse { entity_name: String, x: f64, y: f64, z: f64 },
+    ApplyAngularImpulse { entity_name: String, x: f64, y: f64, z: f64 },
+    SetVelocity { entity_name: String, x: f64, y: f64, z: f64 },
+}
+
+/// Drain all queued physics commands (called by Bevy system after script execution).
+pub fn drain_physics_commands() -> Vec<PhysicsCommand> {
+    PHYSICS_COMMANDS.with(|cmds| {
+        let mut cmds = cmds.borrow_mut();
+        std::mem::take(&mut *cmds)
+    })
+}
+
+/// Apply a linear impulse to an entity (instantaneous force).
+/// Units: kg·m/s (mass × velocity change).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_apply_impulse(entity_name: &str, x: f64, y: f64, z: f64) {
+    PHYSICS_COMMANDS.with(|cmds| {
+        cmds.borrow_mut().push(PhysicsCommand::ApplyImpulse {
+            entity_name: entity_name.to_string(), x, y, z,
+        });
+    });
+}
+
+/// Apply an angular impulse to an entity (instantaneous torque).
+/// Units: kg·m²/s (moment of inertia × angular velocity change).
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_apply_angular_impulse(entity_name: &str, x: f64, y: f64, z: f64) {
+    PHYSICS_COMMANDS.with(|cmds| {
+        cmds.borrow_mut().push(PhysicsCommand::ApplyAngularImpulse {
+            entity_name: entity_name.to_string(), x, y, z,
+        });
+    });
+}
+
+// Thread-local physics state snapshot (populated by Bevy system before script execution)
+thread_local! {
+    pub static PHYSICS_STATE: std::cell::RefCell<std::collections::HashMap<String, PhysicsSnapshot>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhysicsSnapshot {
+    pub mass: f64,
+    pub velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+}
+
+/// Populate physics state from Avian3d before Rune script execution.
+pub fn set_physics_state(states: std::collections::HashMap<String, PhysicsSnapshot>) {
+    PHYSICS_STATE.with(|ps| *ps.borrow_mut() = states);
+}
+
+/// Clear physics state after Rune script execution.
+pub fn clear_physics_state() {
+    PHYSICS_STATE.with(|ps| ps.borrow_mut().clear());
+}
+
+/// Get the mass of an entity in kg.
+/// Reads from the physics snapshot populated before script execution.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_get_mass(entity_name: &str) -> f64 {
+    PHYSICS_STATE.with(|ps| {
+        ps.borrow().get(entity_name).map(|s| s.mass).unwrap_or(1.0)
+    })
+}
+
+/// Get the linear velocity of an entity as (x, y, z) in m/s.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_get_velocity(entity_name: &str) -> (f64, f64, f64) {
+    PHYSICS_STATE.with(|ps| {
+        ps.borrow().get(entity_name)
+            .map(|s| (s.velocity[0], s.velocity[1], s.velocity[2]))
+            .unwrap_or((0.0, 0.0, 0.0))
+    })
+}
+
+/// Set the linear velocity of an entity directly.
+/// Units: m/s.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn part_set_velocity(entity_name: &str, x: f64, y: f64, z: f64) {
+    PHYSICS_COMMANDS.with(|cmds| {
+        cmds.borrow_mut().push(PhysicsCommand::SetVelocity {
+            entity_name: entity_name.to_string(), x, y, z,
+        });
+    });
+}
+
+// ============================================================================
+// Workspace Properties
+// ============================================================================
+
+thread_local! {
+    /// Gravity value — defaults to Earth gravity (9.80665 m/s²).
+    /// Shared between Rune scripts and the Avian3d physics engine.
+    pub static WORKSPACE_GRAVITY: std::cell::RefCell<f64> = std::cell::RefCell::new(9.80665);
+}
+
+/// Get the current workspace gravity in m/s².
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn workspace_get_gravity() -> f64 {
+    WORKSPACE_GRAVITY.with(|g| *g.borrow())
+}
+
+/// Set the workspace gravity in m/s². Affects all physics simulation.
+/// Earth = 9.80665, Moon = 1.625, Mars = 3.72076, zero-g = 0.0.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn workspace_set_gravity(gravity: f64) {
+    WORKSPACE_GRAVITY.with(|g| *g.borrow_mut() = gravity);
+}
+
+// ============================================================================
+// Instance Delete
+// ============================================================================
+
+/// Delete an instance by removing its TOML file and referenced mesh binary
+/// from any service directory. Searches Workspace, SoulService, MaterialService,
+/// StarterGui, and all other top-level service directories in the Space.
+/// Will not delete scaffolding files (_service.toml, _instance.toml, space.toml).
+/// If the TOML references a .glb mesh asset, that binary is also deleted.
+/// The engine despawns the entity on the next file-watcher cycle.
+/// Returns true if found and deleted, false otherwise.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn instance_delete(entity_name: &str) -> bool {
+    SPACE_ROOT.with(|root| {
+        let root = root.borrow();
+        let Some(base) = root.as_ref() else { return false };
+        let safe = entity_name.replace(' ', "_").replace('/', "_");
+
+        let extensions = [
+            ".part.toml", ".glb.toml", ".instance.toml",
+            ".mat.toml", ".rune", ".lua", ".luau", ".soul",
+        ];
+
+        let mut search_dirs = vec![base.clone()];
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('.') {
+                        search_dirs.push(path);
+                    }
+                }
+            }
+        }
+
+        for dir in &search_dirs {
+            for ext in &extensions {
+                let candidate = dir.join(format!("{}{}", safe, ext));
+                if !candidate.exists() { continue; }
+
+                let fname = candidate.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if fname.starts_with('_') || fname == "space.toml" || fname == "simulation.toml" {
+                    continue;
+                }
+
+                // Before deleting, check if the TOML references a mesh binary
+                if fname.ends_with(".glb.toml") || fname.ends_with(".part.toml") {
+                    if let Ok(content) = std::fs::read_to_string(&candidate) {
+                        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
+                            // Check [asset].path or [metadata].asset for referenced .glb
+                            let mesh_path = val.get("asset")
+                                .and_then(|a| a.get("path"))
+                                .and_then(|p| p.as_str())
+                                .or_else(|| val.get("metadata")
+                                    .and_then(|m| m.get("asset"))
+                                    .and_then(|a| a.as_str()));
+
+                            if let Some(mesh_rel) = mesh_path {
+                                // Resolve relative to the TOML file's parent directory
+                                let mesh_abs = candidate.parent()
+                                    .unwrap_or(dir)
+                                    .join(mesh_rel);
+                                if mesh_abs.exists() && mesh_abs.starts_with(base) {
+                                    let _ = std::fs::remove_file(&mesh_abs);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return std::fs::remove_file(&candidate).is_ok();
+            }
+        }
+        false
+    })
+}
+
+/// Helper: find an entity's TOML file by name and apply a mutation.
+/// Searches Workspace/ for matching .part.toml or .glb.toml files.
+fn update_part_toml(entity_name: &str, mutate: impl FnOnce(&mut toml::Value)) {
+    SPACE_ROOT.with(|root| {
+        let root = root.borrow();
+        let Some(base) = root.as_ref() else { return };
+        let workspace = base.join("Workspace");
+        let safe = entity_name.replace(' ', "_").replace('/', "_");
+        let candidates = [
+            workspace.join(format!("{}.part.toml", safe)),
+            workspace.join(format!("{}.glb.toml", safe)),
+        ];
+        for path in &candidates {
+            if !path.exists() { continue; }
+            let Ok(content) = std::fs::read_to_string(path) else { continue };
+            let Ok(mut doc) = toml::from_str::<toml::Value>(&content) else { continue };
+            mutate(&mut doc);
+            if let Ok(new_content) = toml::to_string_pretty(&doc) {
+                let _ = std::fs::write(path, new_content);
+            }
+            return;
+        }
+    });
 }
 
 /// Stub module when feature is disabled

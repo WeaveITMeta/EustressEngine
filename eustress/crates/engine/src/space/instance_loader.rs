@@ -38,6 +38,15 @@ pub struct InstanceDefinition {
     /// Optional UI class properties (TextLabel, TextButton, Frame, ImageLabel, etc.)
     #[serde(default)]
     pub ui: Option<UiInstanceProperties>,
+    /// Custom attributes (key-value pairs for scripting)
+    #[serde(default)]
+    pub attributes: Option<std::collections::HashMap<String, toml::Value>>,
+    /// Tags for CollectionService grouping
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// Instance parameters (custom configuration values)
+    #[serde(default)]
+    pub parameters: Option<std::collections::HashMap<String, toml::Value>>,
     /// All unknown top-level sections (e.g. [Appearance], [Position], [Lighting]) captured
     /// via flatten so rich-schema .instance.toml files work without hardcoded field names.
     #[serde(flatten)]
@@ -1255,54 +1264,51 @@ pub fn write_instance_changes_system(
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
-    let _start = std::time::Instant::now();
     // Collect entities that were just added this tick — skip them entirely.
     // Bevy marks newly-inserted components as Changed, so without this check
     // ALL 10K entities would trigger 20K disk I/O ops on their first frame.
     let just_added: std::collections::HashSet<Entity> = added_instances.iter().collect();
 
-    let mut write_count = 0;
+    // Collect all write jobs this frame, then dispatch to background thread.
+    let mut jobs: Vec<(std::path::PathBuf, TransformData)> = Vec::new();
+
     for (entity, transform, instance_file) in instances.iter() {
-        // Skip freshly-spawned entities — their Transform is "changed" only because
-        // it was just inserted, not because the user moved anything
         if just_added.contains(&entity) {
             continue;
         }
-        // Skip if file was recently written (prevents hot-reload loop)
-        // This happens when hot-reload inserts a Transform, triggering Changed<Transform>
         if recently_written.was_recently_written(&instance_file.toml_path) {
             continue;
         }
-        
-        // Load current instance definition
-        let mut instance = match load_instance_definition(&instance_file.toml_path) {
-            Ok(inst) => inst,
-            Err(e) => {
-                error!("Failed to load instance for write-back: {}", e);
-                continue;
-            }
-        };
-        
-        // Update transform
-        instance.transform = TransformData::from(*transform);
-        
-        // Update last_modified timestamp
-        instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-        
-        // Mark file as recently written to prevent hot-reload loop
+
         recently_written.mark_written(instance_file.toml_path.clone());
-        
-        // Write back to file
-        if let Err(e) = write_instance_definition(&instance_file.toml_path, &instance) {
-            error!("Failed to write instance: {}", e);
-        } else {
-            debug!("💾 Wrote transform changes to {:?}", instance_file.toml_path);
-            write_count += 1;
+        jobs.push((instance_file.toml_path.clone(), TransformData::from(*transform)));
+    }
+
+    if jobs.is_empty() {
+        return;
+    }
+
+    // Dispatch all writes to a background thread — never block the main frame.
+    let job_count = jobs.len();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        for (path, transform_data) in &jobs {
+            match load_instance_definition(path) {
+                Ok(mut instance) => {
+                    instance.transform = transform_data.clone();
+                    instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+                    if let Err(e) = write_instance_definition(path, &instance) {
+                        tracing::error!("Failed to write instance {:?}: {}", path, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load instance for write-back {:?}: {}", path, e);
+                }
+            }
         }
-    }
-    
-    let elapsed = _start.elapsed();
-    if write_count > 0 && elapsed.as_millis() > 50 {
-        warn!("🐌 write_instance_changes_system took {:.1}ms ({} writes)", elapsed.as_secs_f64() * 1000.0, write_count);
-    }
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 50 {
+            tracing::warn!("🐌 Background instance writes: {:.1}ms ({} files)", elapsed.as_secs_f64() * 1000.0, job_count);
+        }
+    });
 }

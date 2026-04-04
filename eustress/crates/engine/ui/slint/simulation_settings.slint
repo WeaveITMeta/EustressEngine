@@ -352,7 +352,12 @@ export component SimulationSettingsDialog inherits Rectangle {
     height: 100%;
     background: Theme.modal-backdrop;
 
-    TouchArea { clicked => { root.on-close(); } }
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => {
+            return accept;
+        }
+    }
 
     // ── Modal card ──
     Rectangle {
@@ -367,7 +372,11 @@ export component SimulationSettingsDialog inherits Rectangle {
         drop-shadow-blur: 28px;
         drop-shadow-color: #000000a0;
 
-        TouchArea { }
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
 
         VerticalLayout {
             padding: 0px;

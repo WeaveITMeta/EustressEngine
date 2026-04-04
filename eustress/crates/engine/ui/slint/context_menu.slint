@@ -135,14 +135,15 @@ export component ContextMenu inherits Rectangle {
     
     // Explicit height computed from item count so Slint commits to a concrete
     // size before layout — prevents the menu from being clipped by panel bounds.
-    // Default (entity) menu: 9 items × 28px + 3 separators × 1px + 8px padding = 261px
+    // Default (entity) menu: 10 items × 28px + 3 separators × 1px + 8px padding = 291px
     // Dynamic items menu: items.length × 28px + separator rows + 8px padding
     property <length> items-height: root.items.length == 0
-        ? (root.show-insert-submenu ? 600px : 261px)
+        ? (root.show-insert-submenu ? 600px : 291px)
         : (root.items.length * 28px + 8px);
     
     width: 220px;
     height: root.items-height;
+    preferred-height: root.items-height;
     clip: false;
     background: Theme.dialog-background;
     border-radius: 4px;
@@ -155,7 +156,8 @@ export component ContextMenu inherits Rectangle {
         padding-top: 4px;
         padding-bottom: 4px;
         spacing: 0px;
-        
+        alignment: start;
+
         // Default items if none provided
         if root.items.length == 0 && !root.show-insert-submenu: VerticalLayout {
             spacing: 0px;

@@ -129,7 +129,7 @@ pub fn DocsNetworkingPage() -> impl IntoView {
                 // Floating TOC Sidebar
                 <aside class="docs-toc">
                     <div class="toc-header">
-                        <img src="/assets/icons/globe.svg" alt="Networking" class="toc-icon" />
+                        <img src="/assets/icons/network.svg" alt="Networking" class="toc-icon" />
                         <h2>"Networking"</h2>
                     </div>
                     <nav class="toc-nav">
@@ -629,16 +629,22 @@ teleport_service.teleport_to_reserved(player_entity, access_code);"}</code></pre
                     </section>
 
                     // Navigation footer
-                    <div class="docs-nav-footer">
-                        <a href="/docs/scripting" class="nav-link prev">
+                    <nav class="docs-nav-footer">
+                        <a href="/docs/scripting" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
-                            "Previous: Scripting"
+                            <div>
+                                <span class="nav-label">"Previous"</span>
+                                <span class="nav-title">"Scripting"</span>
+                            </div>
                         </a>
-                        <a href="/docs/physics" class="nav-link next">
-                            "Next: Physics System"
+                        <a href="/docs/physics" class="nav-next">
+                            <div>
+                                <span class="nav-label">"Next"</span>
+                                <span class="nav-title">"Physics System"</span>
+                            </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>
-                    </div>
+                    </nav>
                 </main>
             </div>
 

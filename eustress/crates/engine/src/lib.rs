@@ -62,6 +62,7 @@ pub mod embedded_client;
 pub mod studio_plugins;
 pub mod grid_snapping;
 pub mod collision_snapping;
+pub mod mesh_optimizer;
 pub mod replication;
 pub mod asset_resolver;
 pub mod xr_support;

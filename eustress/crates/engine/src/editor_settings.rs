@@ -58,6 +58,28 @@ pub struct EditorSettings {
     
     /// Enable auto-save for scenes
     pub auto_save_enabled: bool,
+
+    /// Saved identity file paths for quick-switch login.
+    /// Each entry is (username, absolute path to eustress-username.toml).
+    /// The first entry is the active identity (auto-login on startup).
+    #[serde(default)]
+    pub saved_identities: Vec<SavedIdentity>,
+
+    /// Last opened space path — restored on next launch instead of defaulting
+    /// to the first alphabetical space.
+    #[serde(default)]
+    pub last_space_path: Option<String>,
+}
+
+/// A saved identity for quick-switch login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedIdentity {
+    /// Username extracted from the identity file.
+    pub username: String,
+    /// Absolute path to the identity TOML file.
+    pub path: String,
+    /// Public key (first 8 chars for display).
+    pub public_key_short: String,
 }
 
 fn default_surface_snap() -> bool {
@@ -102,6 +124,8 @@ impl Default for EditorSettings {
             grid_size: 9.80665,
             auto_save_interval: 300.0, // 5 minutes
             auto_save_enabled: true,
+            saved_identities: Vec::new(),
+            last_space_path: None,
         }
     }
 }

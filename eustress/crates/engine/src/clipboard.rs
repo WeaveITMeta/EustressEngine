@@ -720,7 +720,7 @@ pub fn handle_duplicate_event(
 fn spawn_entity_from_data(
     commands: &mut Commands,
     asset_server: &AssetServer,
-    meshes: &mut ResMut<Assets<Mesh>>,
+    _meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     data: &ClipboardEntityData2,
     offset: Vec3,

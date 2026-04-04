@@ -33,6 +33,7 @@ pub fn LoginPage() -> impl IntoView {
 
     // Register: form state
     let reg_username = RwSignal::new(String::new());
+    let reg_email = RwSignal::new(String::new());
     let reg_birthday = RwSignal::new(String::new());
     let reg_id_type = RwSignal::new("passport".to_string());
     let reg_id_number = RwSignal::new(String::new());
@@ -260,7 +261,7 @@ pub fn LoginPage() -> impl IntoView {
                                             if identity_file_loaded.get() {
                                                 "Identity loaded — ready to sign in"
                                             } else {
-                                                "Choose identity.toml or drag here"
+                                                "Choose eustress-username.toml or drag here"
                                             }
                                         }}
                                     </div>
@@ -393,6 +394,21 @@ pub fn LoginPage() -> impl IntoView {
 
                                     <div class="form-field">
                                         <label class="form-label">
+                                            "Email"
+                                            <span class="required">"*"</span>
+                                        </label>
+                                        <input
+                                            type="email"
+                                            class="form-input"
+                                            placeholder="you@example.com"
+                                            prop:value=move || reg_email.get()
+                                            on:input=move |e| reg_email.set(event_target_value(&e))
+                                        />
+                                        <p class="form-hint">"A backup copy of your identity file will be emailed to you."</p>
+                                    </div>
+
+                                    <div class="form-field">
+                                        <label class="form-label">
                                             "Date of Birth"
                                             <span class="required">"*"</span>
                                         </label>
@@ -407,7 +423,7 @@ pub fn LoginPage() -> impl IntoView {
                                     <button
                                         type="button"
                                         class="btn btn-primary"
-                                        disabled=move || reg_username.get().trim().is_empty() || reg_birthday.get().is_empty()
+                                        disabled=move || reg_username.get().trim().is_empty() || reg_email.get().trim().is_empty() || !reg_email.get().contains('@') || reg_birthday.get().is_empty()
                                         on:click=move |_| reg_step.set(2)
                                     >"Continue"</button>
                                 </div>
@@ -589,6 +605,7 @@ pub fn LoginPage() -> impl IntoView {
                             // Step 3: Generate Identity
                             {move || (reg_step.get() == 3).then(|| {
                                 let username = reg_username.get();
+                                let email = reg_email.get();
                                 let birthday = reg_birthday.get();
                                 let id_type = reg_id_type.get();
                                 let id_number = reg_id_number.get();
@@ -600,6 +617,10 @@ pub fn LoginPage() -> impl IntoView {
                                             <div class="identity-field">
                                                 <span class="field-label">"Username"</span>
                                                 <span class="field-value">{username.clone()}</span>
+                                            </div>
+                                            <div class="identity-field">
+                                                <span class="field-label">"Email"</span>
+                                                <span class="field-value">{email.clone()}</span>
                                             </div>
                                             <div class="identity-field">
                                                 <span class="field-label">"Date of Birth"</span>
@@ -619,6 +640,7 @@ pub fn LoginPage() -> impl IntoView {
                                             disabled=loading.get()
                                             on:click=move |_| {
                                                 let uname = username.clone();
+                                                let email_addr = email.clone();
                                                 let bday = birthday.clone();
                                                 let idt = id_type.clone();
                                                 let idn = id_number.clone();
@@ -627,8 +649,10 @@ pub fn LoginPage() -> impl IntoView {
                                                     Ok((toml_content, pub_key, priv_key)) => {
                                                         let pub_key_clone = pub_key.clone();
                                                         let uname_clone = uname.clone();
+                                                        let email_clone = email_addr.clone();
                                                         let bday_clone = bday.clone();
                                                         let idt_clone = idt.clone();
+                                                        let toml_for_email = toml_content.clone();
                                                         let id_hash = sha256_hex(&format!("{}:{}:{}", idt, idn, bday));
 
                                                         // Register first — only download TOML on success
@@ -653,8 +677,27 @@ pub fn LoginPage() -> impl IntoView {
                                                             ).await {
                                                                 Ok(response) => {
                                                                     // Registration succeeded — download both files
-                                                                    download_file("identity.toml", &toml_content);
+                                                                    let toml_filename = format!("eustress-{}.toml", uname_clone);
+                                                                    download_file(&toml_filename, &toml_content);
                                                                     download_file("README - Eustress Identity.txt", &identity_readme(&uname_clone));
+
+                                                                    // Email a backup copy of identity.toml (fire-and-forget)
+                                                                    if !email_clone.is_empty() {
+                                                                        let email_client = ApiClient::new(&api_url);
+                                                                        let email_to = email_clone.clone();
+                                                                        let email_toml = toml_for_email.clone();
+                                                                        let email_user = uname_clone.clone();
+                                                                        spawn_local(async move {
+                                                                            let _ = email_client.post("/api/identity/email-backup")
+                                                                                .json(&serde_json::json!({
+                                                                                    "email": email_to,
+                                                                                    "username": email_user,
+                                                                                    "toml_content": email_toml,
+                                                                                }))
+                                                                                .send()
+                                                                                .await;
+                                                                        });
+                                                                    }
 
                                                                     identity_public_key.set(pub_key);
                                                                     identity_private_key.set(priv_key);
@@ -662,7 +705,7 @@ pub fn LoginPage() -> impl IntoView {
                                                                     identity_file_loaded.set(true);
 
                                                                     loading.set(false);
-                                                                    identity_status.set("Registered — save your identity.toml!".to_string());
+                                                                    identity_status.set("Registered — save your eustress identity file!".to_string());
                                                                     app_state_c.login_with_token(response.token, response.user);
                                                                     nav("/dashboard", Default::default());
                                                                 }
@@ -772,7 +815,7 @@ fn identity_readme(username: &str) -> String {
 
 WHAT IS THIS FILE?
 
-  The "identity.toml" file in this folder IS your Eustress
+  The "eustress-{username}.toml" file in this folder IS your Eustress
   account. It contains your Ed25519 keypair — your private
   key is your password, your public key is your username's
   cryptographic proof. There is no email, no password, no

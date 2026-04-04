@@ -46,6 +46,18 @@ export default {
       if (url.pathname === '/api/auth/me' && request.method === 'GET')
         return handleMe(request, env, cors);
 
+      // Identity backup email
+      if (url.pathname === '/api/identity/email-backup' && request.method === 'POST')
+        return handleEmailIdentityBackup(request, env, cors);
+
+      // Workshop Context (persistent memories + rules across devices)
+      if (url.pathname === '/api/workshop/context' && request.method === 'GET')
+        return handleGetWorkshopContext(request, env, cors);
+      if (url.pathname === '/api/workshop/context' && request.method === 'PUT')
+        return handlePutWorkshopContext(request, env, cors);
+      if (url.pathname === '/api/workshop/context/memory' && request.method === 'POST')
+        return handleAddWorkshopMemory(request, env, cors);
+
       // KYC
       if (url.pathname === '/api/kyc/jurisdiction')
         return handleJurisdiction(request, env, cors);
@@ -147,6 +159,8 @@ export default {
         return handleListSimulations(env, cors);
       if (url.pathname === '/api/simulations/publish' && request.method === 'POST')
         return handlePublishSimulation(request, env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
+        return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+$/) && request.method === 'GET')
         return handleGetSimulation(url.pathname.split('/').pop(), env, cors);
 
@@ -173,7 +187,7 @@ export default {
 
 async function handleRegister(request, env, cors) {
   const body = await request.json();
-  const { username, public_key, birthday, id_type, id_hash, kyc_session_id } = body;
+  const { username, public_key, birthday, id_type, id_hash, kyc_session_id, email } = body;
 
   if (!username || username.length < 3 || username.length > 32)
     return json({ error: 'Username must be 3-32 characters' }, 400, cors);
@@ -236,7 +250,7 @@ async function handleRegister(request, env, cors) {
     id_hash: id_hash || null,
     bliss_balance: 0,
     created_at: now,
-    email: null,
+    email: email || null,
     avatar_url: null,
     discord_id: null,
     // Screening
@@ -340,6 +354,185 @@ async function handleVerify(request, env, cors) {
   const token = await createJwt(userId, env.JWT_SECRET);
 
   return json({ token, user: publicUser(user) }, 200, cors);
+}
+
+// ── Identity Backup Email ───────────────────────────────────────────────────
+async function handleEmailIdentityBackup(request, env, cors) {
+  const body = await request.json();
+  const { email, username, toml_content } = body;
+
+  if (!email || !email.includes('@'))
+    return json({ error: 'Valid email required' }, 400, cors);
+  if (!toml_content || toml_content.length < 50)
+    return json({ error: 'Invalid TOML content' }, 400, cors);
+
+  // Use Cloudflare Email Workers (MailChannels API — free for Workers)
+  const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:40px 20px;">
+    <div style="background:#161b22;border-radius:12px;border:1px solid #30363d;overflow:hidden;">
+      <!-- Header -->
+      <div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);padding:32px;text-align:center;">
+        <h1 style="margin:0;color:#f0f6fc;font-size:24px;font-weight:700;">Eustress Identity Backup</h1>
+        <p style="margin:8px 0 0;color:#8b949e;font-size:14px;">Your Ed25519 keypair — keep this safe</p>
+      </div>
+      <!-- Body -->
+      <div style="padding:24px 32px;">
+        <p style="color:#f0f6fc;font-size:14px;margin:0 0 16px;">
+          Hello <strong>${username || 'Creator'}</strong>,
+        </p>
+        <p style="color:#8b949e;font-size:14px;margin:0 0 24px;">
+          Below is your <code style="background:#21262d;padding:2px 6px;border-radius:4px;color:#79c0ff;">eustress-${username || 'identity'}.toml</code> file.
+          This is your permanent Eustress identity — it contains your Ed25519 private key.
+          Store it securely and never share it.
+        </p>
+        <!-- TOML Content -->
+        <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;margin:0 0 24px;">
+          <pre style="margin:0;color:#c9d1d9;font-size:12px;font-family:'SF Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all;">${toml_content.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
+        </div>
+        <!-- Instructions -->
+        <div style="background:#1a2a3a;border:1px solid #2a3a4a;border-radius:8px;padding:16px;margin:0 0 24px;">
+          <p style="color:#8ab4f8;font-size:13px;margin:0 0 8px;font-weight:600;">How to use this backup:</p>
+          <ol style="color:#8ab4f8;font-size:12px;margin:0;padding-left:20px;line-height:1.8;">
+            <li>Save the text above as <code style="background:#21262d;padding:1px 4px;border-radius:3px;">eustress-${username || 'identity'}.toml</code></li>
+            <li>Use it to sign in at <a href="https://eustress.dev/login" style="color:#58a6ff;">eustress.dev/login</a></li>
+            <li>Or load it in EustressEngine via the Sign In dialog</li>
+          </ol>
+        </div>
+        <p style="color:#f85149;font-size:12px;margin:0;text-align:center;">
+          ⚠ Never share your private_key with anyone. Eustress staff will never ask for it.
+        </p>
+      </div>
+      <!-- Footer -->
+      <div style="background:#0d1117;padding:16px 32px;text-align:center;border-top:1px solid #30363d;">
+        <p style="color:#484f58;font-size:11px;margin:0;">
+          Eustress Engine — Build, simulate, earn.
+        </p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  try {
+    // Send via MailChannels (free for Cloudflare Workers)
+    const emailResp = await fetch('https://api.mailchannels.net/tx/v1/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email }] }],
+        from: { email: 'identity@eustress.dev', name: 'Eustress Identity' },
+        subject: `Your Eustress Identity Backup — ${username || 'Creator'}`,
+        content: [
+          { type: 'text/html', value: htmlBody },
+          { type: 'text/plain', value: `Eustress Identity Backup for ${username}\n\nSave the following as identity.toml:\n\n${toml_content}\n\nNever share your private_key.` },
+        ],
+      }),
+    });
+
+    if (emailResp.ok || emailResp.status === 202) {
+      return json({ ok: true, message: 'Backup emailed' }, 200, cors);
+    }
+
+    const errText = await emailResp.text();
+    console.error('MailChannels error:', emailResp.status, errText);
+    return json({ error: 'Email delivery failed', detail: errText }, 502, cors);
+  } catch (e) {
+    console.error('Email send error:', e);
+    return json({ error: 'Email service unavailable' }, 503, cors);
+  }
+}
+
+// ── Workshop Context (Persistent Memories + Global Rules) ───────────────────
+
+async function handleGetWorkshopContext(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Sign in to sync Workshop context across devices' }, 401, cors);
+
+  const url = new URL(request.url);
+  const projectId = url.searchParams.get('project_id') || 'default';
+  const key = `ctx:${userId}:${projectId}`;
+
+  const data = await env.WORKSHOP_CONTEXT.get(key);
+  if (!data) {
+    return json({
+      version: 1,
+      user_id: userId,
+      project_id: projectId,
+      memories: [],
+      global_rules: [],
+      session_summaries: [],
+      last_synced: new Date().toISOString(),
+    }, 200, cors);
+  }
+
+  return json(JSON.parse(data), 200, cors);
+}
+
+async function handlePutWorkshopContext(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Sign in to sync Workshop context across devices' }, 401, cors);
+
+  const body = await request.json();
+  const projectId = body.project_id || 'default';
+  const key = `ctx:${userId}:${projectId}`;
+
+  const doc = {
+    version: 1,
+    user_id: userId,
+    project_id: projectId,
+    memories: body.memories || [],
+    global_rules: body.global_rules || [],
+    session_summaries: (body.session_summaries || []).slice(-20), // Keep last 20 summaries
+    last_synced: new Date().toISOString(),
+  };
+
+  await env.WORKSHOP_CONTEXT.put(key, JSON.stringify(doc));
+  return json({ ok: true, last_synced: doc.last_synced }, 200, cors);
+}
+
+async function handleAddWorkshopMemory(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  if (!userId) return json({ error: 'Sign in to sync Workshop memories' }, 401, cors);
+
+  const body = await request.json();
+  const { project_id, key: memKey, value, category, source } = body;
+
+  if (!memKey || !value) return json({ error: 'key and value required' }, 400, cors);
+
+  const ctxKey = `ctx:${userId}:${project_id || 'default'}`;
+  const existing = await env.WORKSHOP_CONTEXT.get(ctxKey);
+  const doc = existing ? JSON.parse(existing) : {
+    version: 1, user_id: userId, project_id: project_id || 'default',
+    memories: [], global_rules: [], session_summaries: [],
+  };
+
+  // Upsert memory by key
+  const idx = doc.memories.findIndex(m => m.key === memKey);
+  const memory = {
+    key: memKey,
+    value,
+    category: category || 'preference',
+    source: source || 'user',
+    updated_at: new Date().toISOString(),
+  };
+
+  if (idx >= 0) {
+    doc.memories[idx] = memory;
+  } else {
+    doc.memories.push(memory);
+  }
+
+  doc.last_synced = new Date().toISOString();
+  await env.WORKSHOP_CONTEXT.put(ctxKey, JSON.stringify(doc));
+
+  return json({ ok: true, memory_count: doc.memories.length }, 200, cors);
 }
 
 async function handleMe(request, env, cors) {
@@ -641,33 +834,70 @@ async function searchWithGrok(query, apiKey) {
 }
 
 async function handleCommunityLeaderboard(env, cors) {
-  // Build leaderboard from KV users sorted by bliss_balance
+  // Build leaderboard from KV users — sorted by hours, filterable by period
+  const url = new URL(request.url);
+  const period = url.searchParams.get('period') || 'alltime'; // alltime | month | week | today
+
   const entries = [];
   const list = await env.USERS.list({ prefix: 'user:', limit: 1000 });
 
+  const now = new Date();
+
   for (const key of list.keys) {
     const userData = await env.USERS.get(key.name);
-    if (userData) {
-      const user = JSON.parse(userData);
-      entries.push({
-        username: user.username,
-        avatar_url: user.avatar_url || null,
-        bliss_balance: user.bliss_balance || 0,
-        created_at: user.created_at,
-      });
+    if (!userData) continue;
+    const user = JSON.parse(userData);
+    if (user.banned) continue;
+
+    let hours = user.total_hours || 0;
+
+    // For time-filtered periods, sum daily hour entries
+    if (period !== 'alltime') {
+      hours = 0;
+      const daysBack = period === 'today' ? 1 : period === 'week' ? 7 : 30;
+      for (let d = 0; d < daysBack; d++) {
+        const date = new Date(now);
+        date.setDate(date.getDate() - d);
+        const dateStr = date.toISOString().split('T')[0];
+        const dKey = `hours_daily:${user.id}:${dateStr}`;
+        const val = await env.SOCIAL.get(dKey);
+        if (val) hours += parseFloat(val);
+      }
     }
+
+    // Count published simulations
+    const simList = await env.INVENTORY.list({ prefix: `sim:${user.id}:`, limit: 100 });
+    const spacesCreated = simList.keys.length;
+
+    entries.push({
+      username: user.username,
+      avatar_url: user.avatar_url || null,
+      hours: Math.round(hours * 10) / 10,
+      bliss_balance: user.bliss_balance || 0,
+      spaces_created: spacesCreated,
+      total_visits: user.total_visits || 0,
+      last_active: user.last_active || user.created_at,
+    });
   }
 
-  // Sort by bliss balance descending
-  entries.sort((a, b) => b.bliss_balance - a.bliss_balance);
+  // Sort by hours descending
+  entries.sort((a, b) => b.hours - a.hours);
   const top = entries.slice(0, 20).map((e, i) => ({
     rank: i + 1,
-    user: { username: e.username, avatar_url: e.avatar_url },
-    score: e.bliss_balance,
-    score_label: `${e.bliss_balance} BLS`,
+    username: e.username,
+    avatar_url: e.avatar_url,
+    hours: e.hours,
+    bliss_balance: e.bliss_balance,
+    spaces_created: e.spaces_created,
+    total_visits: e.total_visits,
   }));
 
-  return json({ entries: top, category: 'bliss', total: entries.length }, 200, cors);
+  // Pick a random featured creator from top 20 (changes weekly via date seed)
+  const weekSeed = Math.floor(now.getTime() / (7 * 86400000));
+  const featuredIndex = weekSeed % Math.max(top.length, 1);
+  const featured = top[featuredIndex] || top[0] || null;
+
+  return json({ entries: top, featured, period, total: entries.length }, 200, cors);
 }
 
 async function handleUserProfile(username, request, env, cors) {
@@ -1898,7 +2128,7 @@ async function handleTicketHistory(request, env, cors) {
 
 async function handleNodeHeartbeat(request, env, cors) {
   const body = await request.json();
-  const { node_id, mode, players, uptime_secs, fork_id } = body;
+  const { node_id, mode, players, uptime_secs, fork_id, user_id } = body;
 
   if (!node_id) return json({ error: 'node_id required' }, 400, cors);
 
@@ -1908,7 +2138,59 @@ async function handleNodeHeartbeat(request, env, cors) {
     last_heartbeat: new Date().toISOString(),
   }), { expirationTtl: 120 }); // Expires in 2 min if no heartbeat
 
-  return json({ ok: true }, 200, cors);
+  // Return current BLS balance if user_id provided (engine polls this)
+  // Also accumulate session hours from uptime_secs
+  let bliss_balance = 0;
+  let pending_score = 0;
+  if (user_id) {
+    const userData = await env.USERS.get(`user:${user_id}`);
+    if (userData) {
+      const user = JSON.parse(userData);
+      bliss_balance = user.bliss_balance || 0;
+
+      // Accumulate session hours from heartbeat uptime
+      // Track per-day, per-week, per-month, and all-time hours
+      const now = new Date();
+      const today = now.toISOString().split('T')[0];
+      const heartbeatHours = (uptime_secs || 0) / 3600;
+
+      // Store per-period hours (overwrite with latest session uptime per node)
+      const hourKey = `hours:${user_id}:${node_id}`;
+      const prevData = await env.SOCIAL.get(hourKey);
+      const prev = prevData ? JSON.parse(prevData) : { date: '', hours: 0 };
+
+      // Only accumulate if this is a new day or growing session
+      if (prev.date !== today) {
+        // New day — add previous session to totals, start fresh
+        if (prev.hours > 0) {
+          user.total_hours = (user.total_hours || 0) + prev.hours;
+          // Per-period accumulators
+          const dKey = `hours_daily:${user_id}:${prev.date}`;
+          const existing = parseFloat(await env.SOCIAL.get(dKey) || '0');
+          await env.SOCIAL.put(dKey, String(existing + prev.hours), { expirationTtl: 86400 * 90 });
+        }
+        await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
+      } else if (heartbeatHours > prev.hours) {
+        // Same day, session grew — update
+        await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
+      }
+
+      // Update user record with cumulative hours
+      user.total_hours = (user.total_hours || 0);
+      user.last_active = now.toISOString();
+      await env.USERS.put(`user:${user_id}`, JSON.stringify(user));
+    }
+    // Check today's pending contributions
+    const today = new Date().toISOString().split('T')[0];
+    const pendingKey = `contrib:${user_id}:${today}`;
+    const pendingData = await env.INVENTORY.get(pendingKey);
+    if (pendingData) {
+      const pending = JSON.parse(pendingData);
+      pending_score = pending.total_score || 0;
+    }
+  }
+
+  return json({ ok: true, bliss_balance, pending_score }, 200, cors);
 }
 
 async function handleNodeStats(env, cors) {
@@ -1988,6 +2270,72 @@ async function handleGetSimulation(simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
   return json(JSON.parse(data), 200, cors);
+}
+
+// Play a simulation — returns server connection info
+async function handlePlaySimulation(request, simId, env, cors) {
+  const data = await env.SOCIAL.get(`sim:${simId}`);
+  if (!data) return json({ error: 'Simulation not found' }, 404, cors);
+
+  const sim = JSON.parse(data);
+
+  // Increment play count
+  sim.play_count = (sim.play_count || 0) + 1;
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+
+  // Increment author's total plays
+  if (sim.author_id) {
+    const plays = parseInt(await env.SOCIAL.get(`totalPlays:${sim.author_id}`) || '0') + 1;
+    await env.SOCIAL.put(`totalPlays:${sim.author_id}`, plays.toString());
+  }
+
+  // Check for an active server running this simulation
+  const nodeList = await env.SOCIAL.list({ prefix: 'node:', limit: 100 });
+  let activeServer = null;
+
+  for (const key of nodeList.keys) {
+    const nodeData = await env.SOCIAL.get(key.name);
+    if (nodeData) {
+      const node = JSON.parse(nodeData);
+      if (node.simulation_id === simId && node.players < (sim.max_players || 100)) {
+        activeServer = node;
+        break;
+      }
+    }
+  }
+
+  if (activeServer) {
+    // Existing server has room
+    return json({
+      status: 'ready',
+      server: {
+        node_id: activeServer.node_id,
+        address: activeServer.address || 'localhost',
+        port: activeServer.port || 7777,
+        protocol: 'quic',
+        players: activeServer.players,
+        max_players: sim.max_players || 100,
+      },
+      simulation: { id: sim.id, name: sim.name },
+    }, 200, cors);
+  }
+
+  // No active server — return launch instructions
+  // In production: Forge SDK dispatches Nomad job here
+  // For now: client launches local server
+  return json({
+    status: 'spawn',
+    launch: {
+      command: 'eustress-server',
+      args: [
+        '--port', '7777',
+        '--max-players', (sim.max_players || 100).toString(),
+        '--place-id', simId,
+      ],
+      r2_key: sim.r2_key || null,
+    },
+    simulation: { id: sim.id, name: sim.name },
+  }, 200, cors);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

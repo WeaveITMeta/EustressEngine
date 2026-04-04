@@ -1106,12 +1106,22 @@ use eustress_common::prelude::*;"}</code></pre>
                     </section>
 
                     // Navigation footer
-                    <div class="docs-nav-footer">
-                        <a href="/docs/physics" class="nav-link next">
-                            "Next: Physics System"
+                    <nav class="docs-nav-footer">
+                        <a href="/docs/getting-started" class="nav-prev">
+                            <img src="/assets/icons/arrow-left.svg" alt="Previous" />
+                            <div>
+                                <span class="nav-label">"Previous"</span>
+                                <span class="nav-title">"Getting Started"</span>
+                            </div>
+                        </a>
+                        <a href="/docs/networking" class="nav-next">
+                            <div>
+                                <span class="nav-label">"Next"</span>
+                                <span class="nav-title">"Networking"</span>
+                            </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>
-                    </div>
+                    </nav>
                 </main>
             </div>
 

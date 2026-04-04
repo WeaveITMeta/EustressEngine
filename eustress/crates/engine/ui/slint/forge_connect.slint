@@ -1,198 +1,316 @@
 // ============================================================================
-// Eustress Engine Studio - Forge Connect Dialog
+// Eustress Engine - Forge Connect Dialog
 // Connect to Forge cloud infrastructure
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, CheckBox, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, CheckBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+component ForgeSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+component ForgeHint inherits Rectangle {
+    in property <string> text: "";
+    height: 16px;
+    background: transparent;
+    Text {
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width;
+    }
+}
+
 export component ForgeConnectDialog inherits Rectangle {
-    // Properties
     in-out property <string> server-url: "https://forge.eustress.dev";
     in-out property <string> api-key: "";
     in-out property <bool> remember-credentials: true;
     in property <bool> connecting: false;
     in property <string> status-message: "";
     in property <string> error-message: "";
-    
-    // Callbacks
+
     callback on-connect();
     callback on-close();
-    
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
     TouchArea {
         clicked => { root.on-close(); }
+        scroll-event(event) => {
+            return accept;
+        }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 420px;
-        height: 340px;
-        background: Theme.dialog-background;
+        width: 480px;
+        height: 380px;
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        TouchArea {}
-        
-        VerticalBox {
-            padding: 24px;
-            spacing: 16px;
-            
-            // Header
-            HorizontalBox {
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea {
+            scroll-event(event) => {
+                return accept;
+            }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
                 Text {
+                    width: parent.width;
+                    height: parent.height;
                     text: "Connect to Forge";
                     color: Theme.text-primary;
-                    font-size: 20px;
+                    font-size: 13px;
                     font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
-                
-                Rectangle { horizontal-stretch: 1; }
-                
+
                 Rectangle {
-                    width: 28px;
-                    height: 28px;
-                    background: close-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 4px;
-                    
-                    close-touch := TouchArea {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
-                    
-                    Image {
-                        width: 12px;
-                        height: 12px;
-                        source: @image-url("../../assets/icons/ui/close.svg");
-                        image-fit: contain;
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
-            }
-            
-            // Server URL
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "Server URL";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
+
                 Rectangle {
-                    height: 36px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    
-                    LineEdit {
-                        text <=> root.server-url;
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content ──
+            VerticalLayout {
+                vertical-stretch: 1;
+                padding: 20px;
+                spacing: 4px;
+                alignment: start;
+
+                ForgeSection { title: "CONNECTION"; }
+
+                // Server URL
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 100px;
+                            text: "Server URL";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 22px;
+                            background: Theme.input-background;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: Theme.input-border;
+
+                            LineEdit {
+                                width: 100%; height: 100%;
+                                text <=> root.server-url;
+                            }
+                        }
                     }
                 }
-            }
-            
-            // API Key
-            VerticalBox {
-                spacing: 4px;
-                
-                Text {
-                    text: "API Key";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                }
-                
+
+                ForgeHint { text: "Forge server endpoint for multiplayer game hosting and autoscaling."; }
+
+                Rectangle { height: 4px; }
+
+                // API Key
                 Rectangle {
-                    height: 36px;
-                    background: Theme.input-background;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-                    
-                    LineEdit {
-                        text <=> root.api-key;
-                        input-type: password;
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            width: 100px;
+                            text: "API Key";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 22px;
+                            background: Theme.input-background;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: Theme.input-border;
+
+                            LineEdit {
+                                width: 100%; height: 100%;
+                                text <=> root.api-key;
+                                input-type: password;
+                            }
+                        }
                     }
                 }
-            }
-            
-            CheckBox {
-                text: "Remember credentials";
-                checked <=> root.remember-credentials;
-            }
-            
-            // Status/Error
-            if root.status-message != "": Text {
-                text: root.status-message;
-                color: Theme.text-secondary;
-                font-size: 12px;
-            }
-            
-            if root.error-message != "": Rectangle {
-                height: 36px;
-                background: #4a2020;
-                border-radius: 4px;
-                
-                HorizontalBox {
-                    padding: 8px;
-                    
+
+                ForgeHint { text: "Your Forge API key. Stored locally, never transmitted outside of Forge connections."; }
+
+                Rectangle { height: 8px; }
+
+                ForgeSection { title: "OPTIONS"; }
+
+                Rectangle {
+                    height: 28px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        CheckBox {
+                            text: "Remember credentials";
+                            checked <=> root.remember-credentials;
+                        }
+                    }
+                }
+
+                // Status
+                if root.status-message != "": Rectangle {
+                    height: 20px;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: root.status-message; color: Theme.text-secondary; font-size: 10px; vertical-alignment: center; }
+                    }
+                }
+
+                // Error
+                if root.error-message != "": Rectangle {
+                    height: 28px;
+                    background: #2a1515;
+                    border-radius: 3px;
+                    border-width: 1px;
+                    border-color: #4a2020;
+
                     Text {
+                        x: 10px;
                         text: root.error-message;
                         color: Theme.text-error;
-                        font-size: 12px;
+                        font-size: 10px;
                         vertical-alignment: center;
                     }
                 }
             }
-            
-            Rectangle { vertical-stretch: 1; }
-            
-            // Footer
-            HorizontalBox {
-                spacing: 8px;
-                alignment: end;
-                
-                Rectangle {
-                    width: 80px;
-                    height: 36px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-close(); }
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: center;
+
+                    // Cancel
+                    Rectangle {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        cancel-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-close(); }
+                        }
+
+                        Text {
+                            text: "Cancel";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
-                    
-                    Text {
-                        text: "Cancel";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                Rectangle {
-                    width: 100px;
-                    height: 36px;
-                    background: root.connecting ? Theme.button-background : Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        enabled: !root.connecting;
-                        clicked => { root.on-connect(); }
-                    }
-                    
-                    Text {
-                        text: root.connecting ? "Connecting..." : "Connect";
-                        color: root.connecting ? Theme.text-secondary : white;
-                        font-weight: 500;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+
+                    // Connect (green)
+                    Rectangle {
+                        width: 100px; height: 32px;
+                        border-radius: 5px;
+                        background: root.connecting ?
+                            Theme.button-background :
+                            (connect-ta.has-hover ? #1a4a2a : #152a1e);
+                        border-width: 1px;
+                        border-color: root.connecting ?
+                            Theme.border-color :
+                            (connect-ta.has-hover ? #4caf50 : #2a5a32);
+
+                        connect-ta := TouchArea {
+                            mouse-cursor: root.connecting ? default : pointer;
+                            enabled: !root.connecting;
+                            clicked => { root.on-connect(); }
+                        }
+
+                        Text {
+                            text: root.connecting ? "Connecting..." : "Connect";
+                            color: root.connecting ?
+                                Theme.text-secondary :
+                                (connect-ta.has-hover ? #a5d6a7 : #66bb6a);
+                            font-size: 12px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

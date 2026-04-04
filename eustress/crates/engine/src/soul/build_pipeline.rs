@@ -92,7 +92,7 @@ fn extract_missing_local(error: &str) -> Option<String> {
 fn inject_variable_declaration(code: &str, var_name: &str) -> String {
     // Check if already declared at the top level of main (not in a nested scope)
     // We need to be smarter - just check if it's declared right after main's opening brace
-    let decl_pattern = format!("let {} = 0;", var_name);
+    let _decl_pattern = format!("let {} = 0;", var_name);
     
     // Find "pub fn main()" or "fn main()"
     let main_pos = code.find("pub fn main()")

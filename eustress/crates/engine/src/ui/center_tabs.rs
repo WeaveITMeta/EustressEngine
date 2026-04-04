@@ -390,6 +390,10 @@ impl CenterTabManager {
         self.tabs.get(self.active_tab)
     }
 
+    pub fn active_mut(&mut self) -> Option<&mut CenterTabEntry> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
     /// Get the active tab type string for Slint routing
     pub fn active_tab_type_string(&self) -> &'static str {
         self.active().map(|t| t.tab_type.type_string()).unwrap_or("scene")

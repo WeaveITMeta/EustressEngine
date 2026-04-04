@@ -679,19 +679,23 @@ assert(error < 5.0, \"Simulation accuracy within 5%\");"}</code></pre>
                         </div>
                     </section>
 
-                    // Footer
-                    <footer class="docs-footer">
-                        <div class="docs-nav-links">
-                            <a href="/docs/simulation" class="nav-prev">
-                                <img src="/assets/icons/arrow-left.svg" alt="Previous" />
-                                <span>"Simulation"</span>
-                            </a>
-                            <a href="/docs/philosophy" class="nav-next">
-                                <span>"Philosophy"</span>
-                                <img src="/assets/icons/arrow-right.svg" alt="Next" />
-                            </a>
-                        </div>
-                    </footer>
+                    // Navigation footer
+                    <nav class="docs-nav-footer">
+                        <a href="/docs/simulation" class="nav-prev">
+                            <img src="/assets/icons/arrow-left.svg" alt="Previous" />
+                            <div>
+                                <span class="nav-label">"Previous"</span>
+                                <span class="nav-title">"Simulation"</span>
+                            </div>
+                        </a>
+                        <a href="/docs/audio" class="nav-next">
+                            <div>
+                                <span class="nav-label">"Next"</span>
+                                <span class="nav-title">"Audio"</span>
+                            </div>
+                            <img src="/assets/icons/arrow-right.svg" alt="Next" />
+                        </a>
+                    </nav>
                 </main>
             </div>
 

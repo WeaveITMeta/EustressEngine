@@ -8,8 +8,6 @@
 //! 5. RecallTrace — Instant lot/serial trace through provenance chain
 //! 6. RouteOption — Route & cost optimization alternatives
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

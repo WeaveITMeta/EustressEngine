@@ -242,6 +242,65 @@ pub fn spawn_service(
     entity
 }
 
+/// Spawn a service entity as a Bevy UI root (for StarterGui).
+/// Uses Node + GlobalZIndex instead of Transform + Visibility so child
+/// ScreenGui / Frame / TextLabel entities form a valid Bevy UI hierarchy.
+pub fn spawn_service_as_ui_root(
+    commands: &mut Commands,
+    path: std::path::PathBuf,
+    definition: ServiceDefinition,
+) -> Entity {
+    let props = &definition.service;
+    let class_name = props.class_name.clone();
+    let icon = props.icon.clone()
+        .unwrap_or_else(|| class_name.to_lowercase());
+
+    let mut properties = HashMap::new();
+    for (key, value) in &props.properties {
+        if let Some(prop_val) = toml_to_property_value(value) {
+            properties.insert(key.clone(), prop_val);
+        }
+    }
+
+    let service_component = ServiceComponent {
+        class_name: class_name.clone(),
+        toml_path: path.clone(),
+        icon,
+        description: props.description.clone().unwrap_or_default(),
+        can_have_children: props.can_have_children,
+        properties,
+    };
+
+    let entity = commands.spawn((
+        eustress_common::classes::Instance {
+            name: class_name.clone(),
+            class_name: eustress_common::classes::ClassName::Folder,
+            archivable: true,
+            id: 0,
+            ai: false,
+        },
+        service_component,
+        super::file_loader::LoadedFromFile {
+            path: path.clone(),
+            file_type: super::file_loader::FileType::Toml,
+            service: class_name.clone(),
+        },
+        Name::new(class_name),
+        // Bevy UI root — transparent fullscreen container so children can be UI nodes
+        bevy::prelude::Node {
+            width: bevy::prelude::Val::Percent(100.0),
+            height: bevy::prelude::Val::Percent(100.0),
+            position_type: bevy::prelude::PositionType::Absolute,
+            ..Default::default()
+        },
+        bevy::prelude::GlobalZIndex(99), // Below ScreenGui (100), above 3D
+        bevy::prelude::BackgroundColor(bevy::prelude::Color::NONE),
+    )).id();
+
+    info!("🏛️ Spawned UI service entity (StarterGui) from {:?}", path);
+    entity
+}
+
 /// Save service properties back to _service.toml file
 /// Preserves all dynamic properties
 pub fn save_service_to_file(service: &ServiceComponent) -> Result<(), String> {

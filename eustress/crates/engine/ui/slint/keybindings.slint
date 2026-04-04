@@ -1,0 +1,243 @@
+// ============================================================================
+// Eustress Engine - Keyboard Shortcuts Dialog
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+component ShortcutRow inherits Rectangle {
+    in property <string> action: "";
+    in property <string> shortcut: "";
+    height: 26px;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.action;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            width: 140px;
+            height: 20px;
+            background: #1a1a2e;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #2a2a3a;
+
+            Text {
+                text: root.shortcut;
+                color: Theme.text-secondary;
+                font-size: 10px;
+                font-weight: 500;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+component ShortcutSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+export component KeybindingsDialog inherits Rectangle {
+    callback on-close();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 480px;
+        height: min(parent.height - 80px, 560px);
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Keyboard Shortcuts";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-close(); }
+                    }
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Content ──
+            ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 2px;
+
+                    ShortcutSection { title: "FILE"; }
+                    ShortcutRow { action: "New Space"; shortcut: "Ctrl + N"; }
+                    ShortcutRow { action: "New Universe"; shortcut: "Ctrl + Shift + N"; }
+                    ShortcutRow { action: "Open File"; shortcut: "Ctrl + O"; }
+                    ShortcutRow { action: "Save"; shortcut: "Ctrl + S"; }
+                    ShortcutRow { action: "Save As"; shortcut: "Ctrl + Shift + S"; }
+                    ShortcutRow { action: "Publish"; shortcut: "Ctrl + P"; }
+
+                    Rectangle { height: 8px; }
+                    ShortcutSection { title: "EDIT"; }
+                    ShortcutRow { action: "Undo"; shortcut: "Ctrl + Z"; }
+                    ShortcutRow { action: "Redo"; shortcut: "Ctrl + Y"; }
+                    ShortcutRow { action: "Cut"; shortcut: "Ctrl + X"; }
+                    ShortcutRow { action: "Copy"; shortcut: "Ctrl + C"; }
+                    ShortcutRow { action: "Paste"; shortcut: "Ctrl + V"; }
+                    ShortcutRow { action: "Delete"; shortcut: "Delete"; }
+                    ShortcutRow { action: "Duplicate"; shortcut: "Ctrl + D"; }
+                    ShortcutRow { action: "Select All"; shortcut: "Ctrl + A"; }
+                    ShortcutRow { action: "Find"; shortcut: "Ctrl + F"; }
+
+                    Rectangle { height: 8px; }
+                    ShortcutSection { title: "TOOLS"; }
+                    ShortcutRow { action: "Select"; shortcut: "Alt + Z"; }
+                    ShortcutRow { action: "Move"; shortcut: "Alt + X"; }
+                    ShortcutRow { action: "Scale"; shortcut: "Alt + C"; }
+                    ShortcutRow { action: "Rotate"; shortcut: "Alt + V"; }
+                    ShortcutRow { action: "Focus Selected"; shortcut: "F"; }
+
+                    Rectangle { height: 8px; }
+                    ShortcutSection { title: "VIEW"; }
+                    ShortcutRow { action: "Toggle Grid"; shortcut: "G"; }
+                    ShortcutRow { action: "Toggle Snap"; shortcut: "T"; }
+                    ShortcutRow { action: "Snap 1 Unit"; shortcut: "1"; }
+                    ShortcutRow { action: "Snap 0.2 Unit"; shortcut: "2"; }
+                    ShortcutRow { action: "Snap Off"; shortcut: "3"; }
+                    ShortcutRow { action: "Front View"; shortcut: "Numpad 1"; }
+                    ShortcutRow { action: "Right View"; shortcut: "Numpad 3"; }
+                    ShortcutRow { action: "Top View"; shortcut: "Numpad 7"; }
+
+                    Rectangle { height: 8px; }
+                    ShortcutSection { title: "SIMULATION"; }
+                    ShortcutRow { action: "Play Solo"; shortcut: "F5"; }
+                    ShortcutRow { action: "Play Here"; shortcut: "F6"; }
+                    ShortcutRow { action: "Pause"; shortcut: "F7"; }
+                    ShortcutRow { action: "Stop"; shortcut: "F8"; }
+                    ShortcutRow { action: "Start Server"; shortcut: "F9"; }
+
+                    Rectangle { height: 8px; }
+                    ShortcutSection { title: "TABS"; }
+                    ShortcutRow { action: "Close Tab"; shortcut: "Ctrl + W"; }
+                    ShortcutRow { action: "New Web Tab"; shortcut: "Ctrl + T"; }
+                }
+            }
+
+            // ── Footer ──
+            Rectangle {
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: close-btn.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        close-btn := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-close(); }
+                        }
+
+                        Text {
+                            text: "Close";
+                            color: Theme.text-primary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

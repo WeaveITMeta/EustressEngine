@@ -34,15 +34,6 @@ const DRAG_THRESHOLD: f32 = 5.0;
 /// Box selection threshold - must drag this far to start box select (in pixels)
 const BOX_SELECT_THRESHOLD: f32 = 3.0;
 
-/// Maximum raycast distance for surface detection
-const MAX_RAYCAST_DISTANCE: f32 = 1000.0;
-
-/// Smoothing factor for drag position (0 = no smoothing, 1 = max smoothing)
-const DRAG_SMOOTHING: f32 = 0.3;
-
-/// Minimum position change to apply (prevents micro-jitter)
-const MIN_POSITION_CHANGE: f32 = 0.001;
-
 /// Resource tracking the select tool drag state
 #[derive(Resource)]
 pub struct SelectToolState {

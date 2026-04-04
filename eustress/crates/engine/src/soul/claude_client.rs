@@ -32,12 +32,72 @@ pub struct ClaudeRequest {
     pub system: Option<String>,
 }
 
-/// Claude API response content block
+/// Claude API response content block (text or tool_use)
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContentBlock {
     #[serde(rename = "type")]
     pub content_type: String,
     pub text: Option<String>,
+    // Tool use fields (present when content_type == "tool_use")
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub input: Option<serde_json::Value>,
+}
+
+// ============================================================================
+// Tool Use Types (Agentic API)
+// ============================================================================
+
+/// Tool definition for Claude tool_use (matches Anthropic API schema).
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// A tool call extracted from Claude's response.
+#[derive(Debug, Clone)]
+pub struct ToolUseBlock {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+/// Tool result to send back to Claude in the multi-turn loop.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolResultContent {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    pub tool_use_id: String,
+    pub content: String,
+}
+
+/// Extended request body that includes tools array.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaudeRequestWithTools {
+    pub model: String,
+    pub max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    pub messages: Vec<serde_json::Value>,
+    pub tools: Vec<ClaudeTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+}
+
+/// Parsed agentic response — may contain text, tool calls, or both.
+#[derive(Debug, Clone)]
+pub struct AgenticResponse {
+    /// Final text content (if any).
+    pub text: String,
+    /// Tool use blocks to execute.
+    pub tool_uses: Vec<ToolUseBlock>,
+    /// Stop reason from Claude.
+    pub stop_reason: String,
+    /// Token usage.
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 /// Claude API response
@@ -587,8 +647,8 @@ Output the corrected code:"#.to_string()
         scene_entities: &[String],
         validator: &super::validator::SoulValidator,
     ) -> Result<GenerationResult, ClaudeError> {
-        let start = Instant::now();
-        
+        let _start = Instant::now();
+
         // Use Sonnet tier for natural language interpretation (good balance)
         let tier = ModelTier::Sonnet;
         
@@ -671,9 +731,9 @@ Output the corrected code:"#.to_string()
         let start = Instant::now();
         
         let mut code = self.call_api_with_system(&prompt, &system_prompt, tier)?;
-        let mut iterations = 0;
+        let iterations = 0;
         let total_tokens = 0;
-        let mut was_fixed = false;
+        let was_fixed = false;
         
         // Extract code from response
         code = self.extract_code(&code);
@@ -928,6 +988,145 @@ Generate a complete, compilable Rust module with a Plugin implementation."#,
         self.call_api_with_system(prompt, system_prompt, ModelTier::Sonnet)
             .map_err(|e| e.to_string())
     }
+
+    // ====================================================================
+    // AGENTIC TOOL USE API
+    // ====================================================================
+
+    /// Make a single Claude API call with tools. Returns the parsed response
+    /// containing text and/or tool_use blocks. The caller is responsible for
+    /// the multi-turn loop (execute tools → send results → call again).
+    pub fn call_with_tools(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[ClaudeTool],
+        system_prompt: Option<&str>,
+    ) -> Result<AgenticResponse, ClaudeError> {
+        let api_key = self.config.api_key.as_ref()
+            .ok_or(ClaudeError::NoApiKey)?;
+
+        let model = self.config.model_for_tier(ModelTier::Sonnet);
+        let timeout = Duration::from_secs(ModelTier::Sonnet.timeout_secs());
+
+        let request = ClaudeRequestWithTools {
+            model: model.to_string(),
+            max_tokens: 4096,
+            system: system_prompt.map(|s| s.to_string()),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            tool_choice: Some(serde_json::json!({"type": "auto"})),
+        };
+
+        let response = ureq::post("https://api.anthropic.com/v1/messages")
+            .set("x-api-key", api_key)
+            .set("anthropic-version", "2023-06-01")
+            .set("content-type", "application/json")
+            .timeout(timeout)
+            .send_json(&request);
+
+        match response {
+            Ok(resp) => {
+                let body: serde_json::Value = resp.into_json()
+                    .map_err(|e| ClaudeError::InvalidResponse(e.to_string()))?;
+
+                Self::parse_agentic_response(&body)
+            }
+            Err(ureq::Error::Status(429, _)) => {
+                Err(ClaudeError::RateLimited { retry_after: None })
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                Err(ClaudeError::ApiError {
+                    error_type: format!("HTTP {}", code),
+                    message: body,
+                })
+            }
+            Err(ureq::Error::Transport(e)) => {
+                if e.to_string().contains("timed out") {
+                    Err(ClaudeError::Timeout)
+                } else {
+                    Err(ClaudeError::NetworkError(e.to_string()))
+                }
+            }
+        }
+    }
+
+    /// Parse an agentic response JSON into text + tool_use blocks.
+    fn parse_agentic_response(body: &serde_json::Value) -> Result<AgenticResponse, ClaudeError> {
+        let content = body.get("content").and_then(|c| c.as_array())
+            .ok_or_else(|| ClaudeError::InvalidResponse("Missing content array".to_string()))?;
+
+        let mut text = String::new();
+        let mut tool_uses = Vec::new();
+
+        for block in content {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match block_type {
+                "text" => {
+                    if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+                "tool_use" => {
+                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                    tool_uses.push(ToolUseBlock { id, name, input });
+                }
+                _ => {}
+            }
+        }
+
+        let stop_reason = body.get("stop_reason").and_then(|s| s.as_str())
+            .unwrap_or("end_turn").to_string();
+        let usage = body.get("usage");
+        let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+        Ok(AgenticResponse {
+            text,
+            tool_uses,
+            stop_reason,
+            input_tokens,
+            output_tokens,
+        })
+    }
+
+    /// Build a Claude message with role "user" containing tool results.
+    /// Used in the multi-turn loop after executing tools.
+    pub fn build_tool_results_message(results: &[(String, String)]) -> serde_json::Value {
+        let content: Vec<serde_json::Value> = results.iter().map(|(tool_use_id, result_text)| {
+            serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_text,
+            })
+        }).collect();
+
+        serde_json::json!({
+            "role": "user",
+            "content": content,
+        })
+    }
+
+    /// Build a Claude message with role "assistant" echoing the tool_use blocks.
+    /// Required by the Anthropic API — assistant messages must contain the
+    /// tool_use blocks before the user sends tool_result.
+    pub fn build_assistant_tool_use_message(tool_uses: &[ToolUseBlock]) -> serde_json::Value {
+        let content: Vec<serde_json::Value> = tool_uses.iter().map(|tu| {
+            serde_json::json!({
+                "type": "tool_use",
+                "id": tu.id,
+                "name": tu.name,
+                "input": tu.input,
+            })
+        }).collect();
+
+        serde_json::json!({
+            "role": "assistant",
+            "content": content,
+        })
+    }
     
     /// Call the Claude API (uses default system prompt)
     fn call_api(&self, prompt: &str, tier: ModelTier) -> Result<String, ClaudeError> {
@@ -1140,10 +1339,10 @@ impl ClaudeClient {
         
         // Make the API call
         let response = self.call_vision_api(&request)?;
-        let mut code = self.extract_code(&response);
-        
+        let code = self.extract_code(&response);
+
         info!("📝 Generated {} chars of Rune code", code.len());
-        
+
         // Validate Rune syntax
         let validation = validator.validate_rune_syntax(&code);
         

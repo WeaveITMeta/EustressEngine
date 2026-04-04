@@ -128,10 +128,11 @@ export component ScriptEditor inherits Rectangle {
     callback on-content-changed(string);
     callback on-save();
     callback on-build();
+    callback on-summarize();        // Reverse build: generate summary from code via Claude
     callback on-toggle-mode(int);   // Toggle summary/code for tab at index
 
     // Derived: active tab mode ("summary" | "code" | "")
-    property <string> active-mode: root.tabs.length > 0 && root.active-tab < root.tabs.length
+    property <string> active-mode: root.tabs.length > 0 && root.active-tab >= 0 && root.active-tab < root.tabs.length
         ? root.tabs[root.active-tab].mode
         : "";
     property <bool> is-soul-script: root.active-mode == "summary" || root.active-mode == "code";
@@ -234,7 +235,7 @@ export component ScriptEditor inherits Rectangle {
                     }
                 }
 
-                // Build button — immediately right of the Code toggle, only in code mode
+                // Build button — only in code mode for soul scripts
                 if !root.is-summary && root.is-soul-script: Rectangle {
                     width: 70px;
                     height: 24px;
@@ -255,6 +256,30 @@ export component ScriptEditor inherits Rectangle {
                             text: "Build"; color: white;
                             font-size: 12px; vertical-alignment: center;
                         }
+                    }
+                }
+
+                // Summarize button — generates summary from code via Claude API
+                if !root.is-summary && root.is-soul-script: Rectangle {
+                    width: 90px;
+                    height: 24px;
+                    background: summarize-ta.has-hover ? #1a4a2a : #152a1e;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: summarize-ta.has-hover ? #4caf50 : #2a5a32;
+
+                    summarize-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-summarize(); }
+                    }
+
+                    Text {
+                        text: "+ Summary";
+                        color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
+                        font-size: 11px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
 

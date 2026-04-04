@@ -1091,7 +1091,7 @@ pub fn save_binary_scene(
         Option<&Sky>,
     )>();
     
-    for (entity, instance, base_part_opt, transform_opt, child_of_opt, children_opt,
+    for (_entity, instance, base_part_opt, transform_opt, child_of_opt, children_opt,
          point_light_opt, spot_light_opt, dir_light_opt, humanoid_opt, camera_opt,
          atmosphere_opt, sky_opt) in query.iter(world) {
         

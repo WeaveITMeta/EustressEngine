@@ -1,24 +1,52 @@
 // ============================================================================
-// Eustress Engine Studio - Settings Dialog
-// Application settings and keybindings
+// Eustress Engine - Settings Dialog
+// Application settings (General, Graphics, Audio, Soul)
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, CheckBox, ComboBox, Slider, LineEdit, TabWidget } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-// Keybinding data
-export struct KeybindingData {
-    action: string,
-    category: string,
-    current-key: string,
-    default-key: string,
+component SettingsSection inherits Rectangle {
+    in property <string> title: "";
+    height: 28px;
+    background: transparent;
+
+    Rectangle {
+        x: 0px; y: 6px;
+        width: 3px; height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent-blue;
+    }
+
+    Text {
+        x: 10px;
+        text: root.title;
+        color: Theme.text-primary;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
+    }
+}
+
+component SettingsHint inherits Rectangle {
+    in property <string> text: "";
+    height: 16px;
+    background: transparent;
+    Text {
+        text: root.text;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width;
+    }
 }
 
 export component SettingsDialog inherits Rectangle {
     // Properties
-    in-out property <int> active-tab: 0; // 0=General, 1=Keybindings, 2=Graphics, 3=Audio
-    in property <[KeybindingData]> keybindings: [];
-    
+    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul
+
     // General settings
     in-out property <bool> auto-save: true;
     in-out property <int> auto-save-interval: 5; // minutes
@@ -26,533 +54,671 @@ export component SettingsDialog inherits Rectangle {
     in-out property <bool> snap-to-grid: true;
     in-out property <float> grid-size: 1.0;
     in-out property <bool> dark-theme: true;
-    // Show help (?) icons in the Properties panel next to documented properties
     in-out property <bool> show-help-icons: true;
-    // Open /learn links in the tabbed viewer instead of the system browser
     in-out property <bool> help-opens-in-tab: false;
-    
+
     // Graphics settings
     in-out property <string> render-quality: "High";
     in-out property <bool> vsync: true;
     in-out property <bool> shadows: true;
     in-out property <bool> anti-aliasing: true;
     in-out property <int> max-fps: 60;
-    
+
     // Audio settings
     in-out property <float> master-volume: 1.0;
     in-out property <float> sfx-volume: 1.0;
     in-out property <float> music-volume: 0.5;
-    
+
+    // Soul settings
+    in-out property <string> soul-api-key: "";
+    in-out property <bool> soul-use-global-key: true;
+    in-out property <string> soul-model: "claude-sonnet-4-6-20250514";
+    in property <bool> soul-api-key-valid: false;
+    in property <string> soul-error-message: "";
+
     // Callbacks
     callback on-close();
     callback on-save();
     callback on-reset-defaults();
-    callback on-rebind-key(string); // action name
-    // Fired immediately when the help icon settings change (no need to hit Save)
     callback on-help-icons-changed(bool);
     callback on-help-opens-in-tab-changed(bool);
-    
+    callback on-test-soul-connection();
+
     width: 100%;
     height: 100%;
     background: Theme.modal-backdrop;
-    
+
     TouchArea {
         clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
     }
-    
+
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         width: 600px;
-        height: 500px;
-        background: Theme.dialog-background;
+        height: min(parent.height - 80px, 520px);
+        background: Theme.background-secondary;
         border-radius: 8px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: Theme.shadow-color;
-        
-        TouchArea {}
-        
-        VerticalBox {
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
+        VerticalLayout {
             padding: 0px;
             spacing: 0px;
-            
-            // Header
+
+            // ── Title bar ──
             Rectangle {
-                height: 48px;
-                background: Theme.header-background;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                
-                HorizontalBox {
-                    padding: 16px;
-                    
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Settings";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-close(); }
+                    }
+
                     Text {
-                        text: "Settings";
-                        color: Theme.text-primary;
-                        font-size: 18px;
-                        font-weight: 600;
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    
-                    Rectangle { horizontal-stretch: 1; }
-                    
-                    Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        background: close-touch.has-hover ? Theme.button-hover : transparent;
-                        border-radius: 4px;
-                        
-                        close-touch := TouchArea {
-                            clicked => { root.on-close(); }
-                        }
-                        
-                        Image {
-                            width: 12px;
-                            height: 12px;
-                            source: @image-url("../../assets/icons/ui/close.svg");
-                            image-fit: contain;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
                 }
             }
-            
-            // Tab bar
+
+            // ── Tab bar ──
             Rectangle {
-                height: 40px;
-                background: Theme.background-secondary;
-                
-                HorizontalBox {
-                    padding: 4px;
-                    spacing: 2px;
-                    
-                    for tab[idx] in ["General", "Keybindings", "Graphics", "Audio"]: Rectangle {
-                        horizontal-stretch: 1;
-                        background: idx == root.active-tab ? Theme.tab-active : Theme.tab-inactive;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.active-tab = idx; }
+                height: 36px;
+                background: #0f0f1a;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 4px;
+                    alignment: start;
+
+                    for tab-def[i] in [
+                        { name: "General" },
+                        { name: "Graphics" },
+                        { name: "Audio" },
+                        { name: "Soul" },
+                    ] : Rectangle {
+                        width: stab-t.preferred-width + 24px;
+                        height: 36px;
+
+                        Rectangle {
+                            y: parent.height - 2px;
+                            height: 2px;
+                            width: parent.width;
+                            background: root.active-tab == i ? Theme.accent-blue : transparent;
                         }
-                        
-                        Text {
-                            text: tab;
-                            color: idx == root.active-tab ? Theme.text-primary : Theme.text-secondary;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.active-tab = i; }
+                        }
+
+                        stab-t := Text {
+                            text: tab-def.name;
+                            color: root.active-tab == i ? Theme.text-primary : Theme.text-secondary;
+                            font-size: 11px;
+                            font-weight: root.active-tab == i ? 600 : 400;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
                 }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
             }
-            
-            // Content
+
+            // ── Content ──
             Rectangle {
                 vertical-stretch: 1;
-                
+
                 // General tab
                 if root.active-tab == 0: ScrollView {
-                    VerticalBox {
-                        padding: 16px;
-                        spacing: 16px;
-                        
-                        // Auto-save section
-                        Text {
-                            text: "Auto-Save";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        SettingsSection { title: "AUTO-SAVE"; }
+
                         CheckBox {
                             text: "Enable auto-save";
                             checked <=> root.auto-save;
                         }
-                        
-                        HorizontalBox {
-                            spacing: 8px;
-                            
-                            Text {
-                                text: "Interval (minutes):";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Slider {
-                                width: 150px;
-                                minimum: 1;
-                                maximum: 30;
-                                value: root.auto-save-interval;
-                            }
-                            
-                            Text {
-                                text: root.auto-save-interval;
-                                color: Theme.text-secondary;
-                                vertical-alignment: center;
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 148px;
+                                    text: "Interval (minutes)";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    width: 150px;
+                                    minimum: 1;
+                                    maximum: 30;
+                                    value: root.auto-save-interval;
+                                }
+                                Text {
+                                    text: root.auto-save-interval;
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
-                        
+
                         Rectangle { height: 8px; }
-                        
-                        // Grid section
-                        Text {
-                            text: "Grid & Snapping";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                        SettingsSection { title: "GRID & SNAPPING"; }
+
                         CheckBox {
                             text: "Show grid";
                             checked <=> root.show-grid;
                         }
-                        
+
                         CheckBox {
                             text: "Snap to grid";
                             checked <=> root.snap-to-grid;
                         }
-                        
-                        HorizontalBox {
-                            spacing: 8px;
-                            
-                            Text {
-                                text: "Grid size:";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            ComboBox {
-                                width: 100px;
-                                model: ["0.25", "0.5", "1.0", "2.0", "4.0"];
-                                current-value: "1.0";
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 148px;
+                                    text: "Grid Size";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                ComboBox {
+                                    width: 100px;
+                                    model: ["0.25", "0.5", "1.0", "2.0", "4.0"];
+                                    current-value: "1.0";
+                                }
                             }
                         }
-                        
+
                         Rectangle { height: 8px; }
-                        
-                        // Theme section
-                        Text {
-                            text: "Appearance";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                        SettingsSection { title: "APPEARANCE"; }
+
                         CheckBox {
                             text: "Dark theme";
                             checked <=> root.dark-theme;
                         }
 
                         Rectangle { height: 8px; }
-
-                        // Properties panel section
-                        Text {
-                            text: "Properties Panel";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
+                        SettingsSection { title: "PROPERTIES PANEL"; }
 
                         CheckBox {
-                            text: "Show Help Icons (? tooltip next to documented properties)";
+                            text: "Show Help Icons (? next to documented properties)";
                             checked <=> root.show-help-icons;
                             toggled => { root.on-help-icons-changed(root.show-help-icons); }
                         }
 
                         CheckBox {
-                            text: "Open Help links in Tabbed Viewer (instead of system browser)";
+                            text: "Open Help links in Tabbed Viewer";
                             checked <=> root.help-opens-in-tab;
                             toggled => { root.on-help-opens-in-tab-changed(root.help-opens-in-tab); }
                         }
                     }
                 }
-                
-                // Keybindings tab
+
+                // Graphics tab
                 if root.active-tab == 1: ScrollView {
-                    VerticalBox {
-                        padding: 16px;
-                        spacing: 8px;
-                        
-                        Text {
-                            text: "Click on a keybinding to change it";
-                            color: Theme.text-secondary;
-                            font-size: 12px;
-                        }
-                        
-                        for binding in root.keybindings: Rectangle {
-                            height: 36px;
-                            background: binding-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 4px;
-                            
-                            binding-touch := TouchArea {
-                                clicked => { root.on-rebind-key(binding.action); }
-                            }
-                            
-                            HorizontalBox {
-                                padding: 8px;
-                                
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        SettingsSection { title: "RENDER QUALITY"; }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
                                 Text {
-                                    horizontal-stretch: 1;
-                                    text: binding.action;
-                                    color: Theme.text-primary;
+                                    width: 148px;
+                                    text: "Preset";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
                                     vertical-alignment: center;
                                 }
-                                
-                                Rectangle {
-                                    width: 100px;
-                                    height: 24px;
-                                    background: Theme.input-background;
-                                    border-radius: 4px;
-                                    border-width: 1px;
-                                    border-color: Theme.input-border;
-                                    
-                                    Text {
-                                        text: binding.current-key;
-                                        color: Theme.text-primary;
-                                        font-size: 12px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                    }
+                                ComboBox {
+                                    width: 200px;
+                                    model: ["Low", "Medium", "High", "Ultra"];
+                                    current-value <=> root.render-quality;
                                 }
                             }
                         }
-                    }
-                }
-                
-                // Graphics tab
-                if root.active-tab == 2: ScrollView {
-                    VerticalBox {
-                        padding: 16px;
-                        spacing: 16px;
-                        
-                        Text {
-                            text: "Render Quality";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
-                        ComboBox {
-                            width: 200px;
-                            model: ["Low", "Medium", "High", "Ultra"];
-                            current-value <=> root.render-quality;
-                        }
-                        
+
                         Rectangle { height: 8px; }
-                        
-                        Text {
-                            text: "Display";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                        SettingsSection { title: "DISPLAY"; }
+
                         CheckBox {
                             text: "V-Sync";
                             checked <=> root.vsync;
                         }
-                        
-                        HorizontalBox {
-                            spacing: 8px;
-                            
-                            Text {
-                                text: "Max FPS:";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Slider {
-                                width: 150px;
-                                minimum: 30;
-                                maximum: 240;
-                                value: root.max-fps;
-                            }
-                            
-                            Text {
-                                text: root.max-fps;
-                                color: Theme.text-secondary;
-                                vertical-alignment: center;
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 148px;
+                                    text: "Max FPS";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    width: 150px;
+                                    minimum: 30;
+                                    maximum: 240;
+                                    value: root.max-fps;
+                                }
+                                Text {
+                                    text: root.max-fps;
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
-                        
+
                         Rectangle { height: 8px; }
-                        
-                        Text {
-                            text: "Effects";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                        SettingsSection { title: "EFFECTS"; }
+
                         CheckBox {
                             text: "Shadows";
                             checked <=> root.shadows;
                         }
-                        
+
                         CheckBox {
                             text: "Anti-aliasing";
                             checked <=> root.anti-aliasing;
                         }
                     }
                 }
-                
+
                 // Audio tab
+                if root.active-tab == 2: ScrollView {
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        SettingsSection { title: "VOLUME"; }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 80px;
+                                    text: "Master";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    horizontal-stretch: 1;
+                                    minimum: 0;
+                                    maximum: 1;
+                                    value <=> root.master-volume;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.master-volume * 100) + "%";
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 80px;
+                                    text: "Effects";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    horizontal-stretch: 1;
+                                    minimum: 0;
+                                    maximum: 1;
+                                    value <=> root.sfx-volume;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.sfx-volume * 100) + "%";
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 80px;
+                                    text: "Music";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Slider {
+                                    horizontal-stretch: 1;
+                                    minimum: 0;
+                                    maximum: 1;
+                                    value <=> root.music-volume;
+                                }
+                                Text {
+                                    width: 40px;
+                                    text: round(root.music-volume * 100) + "%";
+                                    color: Theme.text-primary;
+                                    font-size: 11px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Soul tab (Claude API configuration)
                 if root.active-tab == 3: ScrollView {
-                    VerticalBox {
-                        padding: 16px;
-                        spacing: 16px;
-                        
-                        Text {
-                            text: "Volume";
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            font-weight: 600;
-                        }
-                        
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        SettingsSection { title: "API CONFIGURATION"; }
+
                         HorizontalBox {
                             spacing: 8px;
-                            
+                            height: 28px;
+
                             Text {
-                                width: 80px;
-                                text: "Master";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 1;
-                                value <=> root.master-volume;
-                            }
-                            
-                            Text {
-                                width: 40px;
-                                text: round(root.master-volume * 100) + "%";
+                                width: 148px;
+                                text: "Use Global API Key";
                                 color: Theme.text-secondary;
-                                horizontal-alignment: right;
+                                font-size: 11px;
                                 vertical-alignment: center;
                             }
-                        }
-                        
-                        HorizontalBox {
-                            spacing: 8px;
-                            
-                            Text {
-                                width: 80px;
-                                text: "Effects";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
+
+                            Rectangle {
+                                width: 36px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: root.soul-use-global-key ? Theme.accent-blue : #333344;
+                                y: (28px - self.height) / 2;
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.soul-use-global-key = !root.soul-use-global-key; }
+                                }
+
+                                Rectangle {
+                                    x: root.soul-use-global-key ? 18px : 2px;
+                                    y: 2px;
+                                    width: 14px; height: 14px;
+                                    border-radius: 7px;
+                                    background: white;
+                                    animate x { duration: 120ms; easing: ease-out; }
+                                }
                             }
-                            
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 1;
-                                value <=> root.sfx-volume;
-                            }
-                            
+
                             Text {
-                                width: 40px;
-                                text: round(root.sfx-volume * 100) + "%";
-                                color: Theme.text-secondary;
-                                horizontal-alignment: right;
+                                text: root.soul-use-global-key ? "On" : "Off";
+                                color: root.soul-use-global-key ? Theme.text-primary : Theme.text-secondary;
+                                font-size: 10px;
                                 vertical-alignment: center;
                             }
                         }
-                        
+
+                        Rectangle { height: 4px; }
+
                         HorizontalBox {
                             spacing: 8px;
-                            
+                            height: 28px;
+
                             Text {
-                                width: 80px;
-                                text: "Music";
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Slider {
-                                horizontal-stretch: 1;
-                                minimum: 0;
-                                maximum: 1;
-                                value <=> root.music-volume;
-                            }
-                            
-                            Text {
-                                width: 40px;
-                                text: round(root.music-volume * 100) + "%";
+                                width: 148px;
+                                text: "API Key";
                                 color: Theme.text-secondary;
-                                horizontal-alignment: right;
+                                font-size: 11px;
                                 vertical-alignment: center;
+                            }
+
+                            Rectangle {
+                                width: 200px;
+                                height: 22px;
+                                background: Theme.input-background;
+                                border-radius: 3px;
+                                border-width: 1px;
+                                border-color: Theme.input-border;
+
+                                LineEdit {
+                                    width: 100%; height: 100%;
+                                    text <=> root.soul-api-key;
+                                    input-type: password;
+                                }
+                            }
+                        }
+
+                        SettingsHint { text: "Your BYOK (Bring Your Own Key) Anthropic API key. Stored locally, never transmitted to Eustress servers."; }
+
+                        if root.soul-api-key-valid: HorizontalBox {
+                            spacing: 4px;
+                            height: 16px;
+                            alignment: start;
+                            Text { text: "✓"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
+                            Text { text: "API key validated"; color: Theme.accent-green; font-size: 10px; vertical-alignment: center; }
+                        }
+
+                        Rectangle { height: 8px; }
+                        SettingsSection { title: "MODEL"; }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 148px;
+                                    text: "Model";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                ComboBox {
+                                    width: 260px;
+                                    model: ["claude-sonnet-4-6-20250514", "claude-opus-4-6-20250514", "claude-haiku-4-5-20251001"];
+                                    current-value <=> root.soul-model;
+                                }
+                            }
+                        }
+
+                        SettingsHint { text: "Sonnet 4.6 is recommended for speed and cost. Opus 4.6 produces higher quality at ~5x the cost. Haiku 4.5 is fastest and cheapest."; }
+
+                        if root.soul-error-message != "": Rectangle {
+                            height: 28px;
+                            background: #2a1515;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: #4a2020;
+
+                            Text {
+                                x: 10px;
+                                text: root.soul-error-message;
+                                color: Theme.text-error;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle { height: 8px; }
+                        SettingsSection { title: "ACTIONS"; }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            height: 32px;
+
+                            Rectangle {
+                                width: 120px; height: 28px;
+                                border-radius: 4px;
+                                background: test-soul-ta.has-hover ? #1a1a2e : Theme.button-background;
+                                border-width: 1px;
+                                border-color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.border-color;
+
+                                test-soul-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.on-test-soul-connection(); }
+                                }
+
+                                Text {
+                                    text: "Test Connection";
+                                    color: test-soul-ta.has-hover ? Theme.accent-blue : Theme.text-primary;
+                                    font-size: 11px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }
                 }
             }
-            
-            // Footer
+
+            // ── Footer ──
             Rectangle {
-                height: 56px;
-                background: Theme.header-background;
-                border-bottom-left-radius: 8px;
-                border-bottom-right-radius: 8px;
-                
-                HorizontalBox {
-                    padding: 12px;
-                    spacing: 8px;
-                    
+                height: 1px; background: Theme.border-color;
+            }
+            Rectangle {
+                height: 52px;
+                background: #0f0f1a;
+                border-radius: 8px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 10px;
+                    alignment: center;
+
                     Rectangle {
-                        width: 120px;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
+                        width: 100px; height: 32px;
+                        border-radius: 5px;
+                        background: reset-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        reset-ta := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.on-reset-defaults(); }
                         }
-                        
+
                         Text {
                             text: "Reset Defaults";
                             color: Theme.text-primary;
+                            font-size: 12px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
-                    
-                    Rectangle { horizontal-stretch: 1; }
-                    
+
                     Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        cancel-ta := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.on-close(); }
                         }
-                        
+
                         Text {
                             text: "Cancel";
                             color: Theme.text-primary;
+                            font-size: 12px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
-                    
+
                     Rectangle {
-                        width: 80px;
-                        height: 32px;
-                        background: Theme.button-primary;
-                        border-radius: 4px;
-                        
-                        TouchArea {
+                        width: 80px; height: 32px;
+                        border-radius: 5px;
+                        background: save-ta.has-hover ? #1a4a2a : #152a1e;
+                        border-width: 1px;
+                        border-color: save-ta.has-hover ? #4caf50 : #2a5a32;
+
+                        save-ta := TouchArea {
+                            mouse-cursor: pointer;
                             clicked => { root.on-save(); }
                         }
-                        
+
                         Text {
                             text: "Save";
-                            color: white;
-                            font-weight: 500;
+                            color: save-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            font-size: 12px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }

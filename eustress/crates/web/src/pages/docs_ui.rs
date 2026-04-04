@@ -738,19 +738,23 @@ pub fn on_quit_click() {
                         </div>
                     </section>
 
-                    // Footer
-                    <footer class="docs-footer">
-                        <div class="docs-nav-links">
-                            <a href="/docs/scripting" class="nav-prev">
-                                <img src="/assets/icons/arrow-left.svg" alt="Previous" />
-                                <span>"Scripting"</span>
-                            </a>
-                            <a href="/docs/simulation" class="nav-next">
-                                <span>"Simulation"</span>
-                                <img src="/assets/icons/arrow-right.svg" alt="Next" />
-                            </a>
-                        </div>
-                    </footer>
+                    // Navigation footer
+                    <nav class="docs-nav-footer">
+                        <a href="/docs/building" class="nav-prev">
+                            <img src="/assets/icons/arrow-left.svg" alt="Previous" />
+                            <div>
+                                <span class="nav-label">"Previous"</span>
+                                <span class="nav-title">"Building"</span>
+                            </div>
+                        </a>
+                        <a href="/docs/simulation" class="nav-next">
+                            <div>
+                                <span class="nav-label">"Next"</span>
+                                <span class="nav-title">"Simulation"</span>
+                            </div>
+                            <img src="/assets/icons/arrow-right.svg" alt="Next" />
+                        </a>
+                    </nav>
                 </main>
             </div>
 

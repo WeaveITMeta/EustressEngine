@@ -102,6 +102,23 @@ pub fn first_space_root_in_universe(universe_root: &Path) -> Option<PathBuf> {
 }
 
 pub fn default_space_root() -> PathBuf {
+    // Try to restore last opened space from editor settings
+    if let Some(home) = dirs::home_dir() {
+        let settings_path = home.join(".eustress_studio").join("settings.json");
+        if let Ok(contents) = std::fs::read_to_string(&settings_path) {
+            if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents) {
+                if let Some(last) = settings.get("last_space_path").and_then(|v| v.as_str()) {
+                    let path = PathBuf::from(last);
+                    if path.exists() {
+                        info!("📂 Restoring last space: {:?}", path);
+                        return path;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: first alphabetical space
     let workspace = workspace_root();
 
     if let Ok(read_dir) = std::fs::read_dir(&workspace) {

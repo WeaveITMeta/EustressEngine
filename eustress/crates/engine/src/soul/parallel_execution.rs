@@ -4,7 +4,6 @@
 //! Leverages VM pooling for efficient reuse and zero-copy ECS bindings.
 
 use std::sync::Arc;
-use rayon::prelude::*;
 
 #[cfg(feature = "realism-scripting")]
 use rune::{Context, Vm, Source, Sources, Value as RuneValue};

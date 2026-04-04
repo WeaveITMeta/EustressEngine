@@ -31,8 +31,6 @@ const SELECTION_EDGE_COLOR: Color = Color::srgba(0.5, 0.9, 1.0, 1.0);
 const CORNER_DOT_COLOR: Color = Color::srgba(0.9, 0.97, 1.0, 1.0);
 /// Hover highlight color (yellow-orange, semi-transparent)
 const HOVER_COLOR: Color = Color::srgba(1.0, 0.85, 0.2, 0.75);
-/// Corner dot radius in world units (scales with part size)
-const CORNER_DOT_BASE_RADIUS: f32 = 0.06;
 /// Minimum corner dot radius
 const CORNER_DOT_MIN_RADIUS: f32 = 0.04;
 /// Maximum corner dot radius

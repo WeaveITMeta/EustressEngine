@@ -9,7 +9,7 @@ use bevy::prelude::*;
 pub struct SeatPlugin;
 
 impl Plugin for SeatPlugin {
-    fn build(&self, app: &mut App) {
+    fn build(&self, _app: &mut App) {
         // Seat systems:
         // - Auto-sit when player touches seat
         // - Controller input routing for vehicles

@@ -134,7 +134,7 @@ pub fn handle_spawn_part_events(
         
         // Select the newly spawned entity
         {
-            let mut selection = selection_manager.0.write();
+            let selection = selection_manager.0.write();
             selection.clear();
             // Format entity as string for selection manager (e.g., "123v4")
             let entity_str = format!("{}v{}", spawned_entity.index(), spawned_entity.generation());
@@ -236,7 +236,7 @@ pub fn handle_paste_part_events(
     
     // Select all pasted entities
     if !pasted_entities.is_empty() {
-        let mut selection = selection_manager.0.write();
+        let selection = selection_manager.0.write();
         selection.clear();
         for entity in &pasted_entities {
             let entity_str = format!("{}v{}", entity.index(), entity.generation());

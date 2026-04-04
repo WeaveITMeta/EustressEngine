@@ -36,35 +36,55 @@ pub fn part_selection_system(
     rotate_state: Res<crate::rotate_tool::RotateToolState>,
     _studio_state: Res<crate::ui::StudioState>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
-    let Some(selection_manager) = selection_manager else { return };
+    let Some(selection_manager) = selection_manager else {
+        // Log once per second to avoid spam
+        return;
+    };
     // Only trigger on left click press
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
     }
-    
+
+    info!("[select] LEFT CLICK detected — processing selection");
+
+    // Block selection when Slint UI has focus (mouse over panels)
+    if let Some(ref focus) = ui_focus {
+        if focus.has_focus {
+            info!("[select] blocked — SlintUIFocus.has_focus=true");
+            return;
+        }
+    }
+
     // Check if click is within the viewport bounds (not on UI panels)
     let window = match windows.single() {
         Ok(w) => w,
         Err(_) => return,
     };
-    
+
     let cursor_position = match window.cursor_position() {
         Some(pos) => pos,
         None => return,
     };
-    
+
     // Block selection if click is outside the 3D viewport area
     if let Some(vb) = viewport_bounds.as_ref() {
         if vb.width > 0.0 && vb.height > 0.0 {
-            let in_viewport = cursor_position.x >= vb.x 
+            let in_viewport = cursor_position.x >= vb.x
                 && cursor_position.x <= vb.x + vb.width
-                && cursor_position.y >= vb.y 
+                && cursor_position.y >= vb.y
                 && cursor_position.y <= vb.y + vb.height;
             if !in_viewport {
-                return; // Click is on UI, not viewport
+                debug!("[select] blocked — cursor ({:.0},{:.0}) outside viewport ({:.0},{:.0} {}x{})",
+                    cursor_position.x, cursor_position.y, vb.x, vb.y, vb.width, vb.height);
+                return;
             }
+        } else {
+            debug!("[select] viewport bounds zero — allowing click");
         }
+    } else {
+        debug!("[select] no ViewportBounds resource — allowing click");
     }
     
     // Check if Shift or Ctrl is pressed for multi-select

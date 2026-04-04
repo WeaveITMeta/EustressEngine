@@ -192,7 +192,7 @@ fn track_transform_changes(
     mut query: Query<(&NetworkId, &Transform, &mut ReplicatedEntity), Changed<Transform>>,
     replication_state: Res<ReplicationState>,
 ) {
-    for (network_id, transform, mut replicated) in query.iter_mut() {
+    for (_network_id, transform, mut replicated) in query.iter_mut() {
         // Check if change is significant enough to replicate
         if let Some(last) = replicated.last_transform {
             let pos_delta = (transform.translation - last.translation).length();
@@ -225,7 +225,7 @@ fn collect_replication_updates(
     
     replication_state.pending_updates.clear();
     
-    for (network_id, transform, replicated, name, instance) in query.iter() {
+    for (network_id, transform, replicated, _name, _instance) in query.iter() {
         // Check if this entity should update this tick based on priority
         let interval = replicated.priority.interval() as u64;
         if current_tick - replicated.last_tick < interval {
@@ -288,7 +288,7 @@ pub fn despawn_replicated_entity(
 
 /// Apply a replication update to an entity
 pub fn apply_replication_update(
-    entity: Entity,
+    _entity: Entity,
     transform: &mut Transform,
     update: &PendingUpdate,
 ) {

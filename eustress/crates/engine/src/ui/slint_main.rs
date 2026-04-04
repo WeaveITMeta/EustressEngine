@@ -192,6 +192,12 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_spawn_synthetic_clients(move |count| q.push(SlintAction::SpawnSyntheticClients(count)));
     let q = queue.clone(); ui.on_disconnect_all_clients(move || q.push(SlintAction::DisconnectAllClients));
 
+    // Stress test
+    let q = queue.clone(); ui.on_start_stress_test(move |clients, rate, duration, movement, interactions| {
+        q.push(SlintAction::StartStressTest { clients, rate, duration, movement, interactions });
+    });
+    let q = queue.clone(); ui.on_stop_stress_test(move || q.push(SlintAction::StopStressTest));
+
     // Data
     let q = queue.clone(); ui.on_open_global_sources(move || q.push(SlintAction::OpenGlobalSources));
     let q = queue.clone(); ui.on_open_domains(move || q.push(SlintAction::OpenDomains));
@@ -208,6 +214,7 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
 
     // Scripts
     let q = queue.clone(); ui.on_build_script(move |id| q.push(SlintAction::BuildScript(id)));
+    let q = queue.clone(); ui.on_summarize_script(move |id| q.push(SlintAction::SummarizeScript(id)));
     let q = queue.clone(); ui.on_open_script(move |id| q.push(SlintAction::OpenScript(id)));
 
     // Center tab management

@@ -39,6 +39,10 @@ id = "276638d8157344589cd2a82d4f1865bb"
 binding = "PAYOUTS"
 id = "c1d7016c782641aeba8662e2fa08b28b"
 
+[[kv_namespaces]]
+binding = "WORKSHOP_CONTEXT"
+id = "44abf849a950492c8699a3fd3b7e3c27"
+
 # R2 bucket for KYC documents (global, jurisdiction prefix in object key)
 [[r2_buckets]]
 binding = "KYC_BUCKET"

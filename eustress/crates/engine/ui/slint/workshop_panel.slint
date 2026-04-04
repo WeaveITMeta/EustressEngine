@@ -390,6 +390,12 @@ export component WorkshopPanel inherits Rectangle {
     in property <string> estimated-cost: "$0.00";
     in property <bool> api-key-valid: false;
 
+    // Stage 2: Active modes (AI-inferred, multiple simultaneous) + command bar
+    in property <string> active-modes-text: "⚡ General";   // formatted badge text
+    in-out property <string> command-text: "";
+    in property <int> tool-count: 0;
+    in property <string> active-tool: "";          // currently executing tool name (empty = idle)
+
     // ---- Callbacks ----
     callback on-send-message(string);               // User sends a message
     callback on-approve-mcp(int);                   // User approves an MCP command by message id
@@ -402,6 +408,7 @@ export component WorkshopPanel inherits Rectangle {
     callback on-cancel-pipeline();                  // Cancel the whole thing
     callback on-configure-api();                    // Open Soul Settings for API key
     callback on-optimize-and-build();               // Hand off to Systems 1-8
+    callback on-execute-command(string);             // Command bar executed (Rune, /run workflow, etc.)
 
     background: Theme.panel-background;
 
@@ -729,8 +736,97 @@ export component WorkshopPanel inherits Rectangle {
 
             VerticalLayout {
                 padding: 8px;
-                spacing: 6px;
+                spacing: 4px;
 
+                // ── Active modes (AI-inferred, passive display) ──
+                HorizontalLayout {
+                    height: 22px;
+                    spacing: 4px;
+
+                    // Mode badges (set by AI based on conversation context)
+                    Text {
+                        text: root.active-modes-text;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+
+                    // Active tool indicator
+                    if root.active-tool != "": Text {
+                        text: "⟳ " + root.active-tool;
+                        color: #4caf50;
+                        font-size: 9px;
+                        vertical-alignment: center;
+                    }
+
+                    // Tool count
+                    if root.active-tool == "" && root.tool-count > 0: Text {
+                        text: root.tool-count + " tools";
+                        color: Theme.text-secondary;
+                        font-size: 9px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // ── Command bar (Rune / workflow execution) ──
+                HorizontalLayout {
+                    height: 26px;
+                    spacing: 4px;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: Theme.background-tertiary;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: cmd-input.has-focus ? Theme.accent-blue : #2a2a2a;
+
+                        cmd-input := TextInput {
+                            x: 8px;
+                            width: parent.width - 16px;
+                            height: parent.height;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            text <=> root.command-text;
+                            single-line: true;
+
+                            accepted => {
+                                if root.command-text != "" {
+                                    root.on-execute-command(root.command-text);
+                                    root.command-text = "";
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 50px;
+                        height: 24px;
+                        background: root.command-text != "" ? (exec-touch.has-hover ? #2d7d46 : #1a5a2a) : #1a1a2a;
+                        border-radius: 4px;
+
+                        exec-touch := TouchArea {
+                            mouse-cursor: root.command-text != "" ? pointer : default;
+                            enabled: root.command-text != "";
+                            clicked => {
+                                root.on-execute-command(root.command-text);
+                                root.command-text = "";
+                            }
+                        }
+
+                        Text {
+                            text: "Run";
+                            color: root.command-text != "" ? white : Theme.text-disabled;
+                            font-size: 10px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // ── Chat input ──
                 HorizontalLayout {
                     spacing: 6px;
 

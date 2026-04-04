@@ -24,11 +24,15 @@ pub mod persistence;
 pub mod normalizer;
 pub mod claude_bridge;
 pub mod artifact_gen;
+pub mod modes;
+pub mod tools;
+pub mod context;
+pub mod streams;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::manufacturing::{AllocationDecision, AllocationStatus};
+use crate::manufacturing::AllocationDecision;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -1174,8 +1178,81 @@ pub struct WorkshopPlugin;
 
 impl Plugin for WorkshopPlugin {
     fn build(&self, app: &mut App) {
+        // Build the tool registry — General + domain-specific tools
+        let mut registry = tools::ToolRegistry::default();
+        // General tools (always available in every mode)
+        registry.register(tools::entity_tools::CreateEntityTool);
+        registry.register(tools::entity_tools::QueryEntitiesTool);
+        registry.register(tools::entity_tools::UpdateEntityTool);
+        registry.register(tools::entity_tools::DeleteEntityTool);
+        registry.register(tools::file_tools::ReadFileTool);
+        registry.register(tools::file_tools::WriteFileTool);
+        registry.register(tools::script_tools::ExecuteRuneTool);
+        registry.register(tools::script_tools::ExecuteLuauTool);
+        registry.register(tools::script_tools::ImageToCodeTool);
+        registry.register(tools::script_tools::DocumentToCodeTool);
+        registry.register(tools::script_tools::GenerateDocsTool);
+        registry.register(tools::memory_tools::RememberTool);
+        registry.register(tools::memory_tools::RecallTool);
+        registry.register(tools::memory_tools::ListRulesTool);
+        registry.register(tools::memory_tools::ListWorkflowsTool);
+        registry.register(tools::memory_tools::QueryStreamEventsTool);
+        registry.register(tools::diff_tools::StageFileChangeTool);
+        registry.register(tools::git_tools::GitStatusTool);
+        registry.register(tools::git_tools::GitCommitTool);
+        registry.register(tools::git_tools::GitLogTool);
+        registry.register(tools::git_tools::GitDiffTool);
+        // Simulation bridge tools (shared with Rune/Luau scripting API)
+        registry.register(tools::simulation_tools::GetSimValueTool);
+        registry.register(tools::simulation_tools::SetSimValueTool);
+        registry.register(tools::simulation_tools::ListSimValuesTool);
+        registry.register(tools::simulation_tools::GetTaggedEntitiesTool);
+        registry.register(tools::simulation_tools::RaycastTool);
+        registry.register(tools::simulation_tools::HttpRequestTool);
+        registry.register(tools::simulation_tools::DataStoreGetTool);
+        registry.register(tools::simulation_tools::DataStoreSetTool);
+        registry.register(tools::simulation_tools::AddTagTool);
+        registry.register(tools::simulation_tools::RemoveTagTool);
+        // Physics tools (Realism system bridge)
+        registry.register(tools::physics_tools::QueryMaterialTool);
+        registry.register(tools::physics_tools::CalculatePhysicsTool);
+        // Spatial tools
+        registry.register(tools::spatial_tools::MeasureDistanceTool);
+        registry.register(tools::spatial_tools::ListSpaceContentsTool);
+        // Manufacturing mode tools
+        registry.register(modes::manufacturing::NormalizeBriefTool);
+        registry.register(modes::manufacturing::QueryManufacturersTool);
+        registry.register(modes::manufacturing::QueryInvestorsTool);
+        registry.register(modes::manufacturing::AllocateProductTool);
+        // Simulation mode tools
+        registry.register(modes::simulation::ControlSimulationTool);
+        registry.register(modes::simulation::SetBreakpointTool);
+        registry.register(modes::simulation::ExportRecordingTool);
+        // Supply Chain mode tools
+        registry.register(modes::supply_chain::RunScenarioTool);
+        registry.register(modes::supply_chain::ForecastDemandTool);
+        registry.register(modes::supply_chain::ScoreSupplierRiskTool);
+        // Warehousing mode tools
+        registry.register(modes::warehousing::InventoryCheckTool);
+        registry.register(modes::warehousing::StorageOptimizeTool);
+        // Finance mode tools
+        registry.register(modes::finance::CalculateCostTool);
+        registry.register(modes::finance::EstimateTaxTool);
+        // Fabrication mode tools
+        registry.register(modes::fabrication::SelectProcessTool);
+        // Shopping mode tools
+        registry.register(modes::shopping::PriceProductTool);
+        // Travel mode tools
+        registry.register(modes::travel::EstimateShippingTool);
+        tracing::info!("Workshop: registered {} MCP tools", registry.tool_count());
+
         app
-            // Resources
+            // Stage 2: Tool registry + context + streams
+            .insert_resource(registry)
+            .init_resource::<streams::StreamAwareContext>()
+            // Stage 3: Staged diffs
+            .init_resource::<tools::diff_tools::StagedChanges>()
+            // Legacy resources (kept for Manufacturing mode compatibility)
             .init_resource::<IdeationPipeline>()
             .init_resource::<claude_bridge::WorkshopClaudeTasks>()
             // Events
