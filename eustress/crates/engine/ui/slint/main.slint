@@ -54,6 +54,10 @@ export struct GuiElementData {
     height: float,
     z-order: int,
     visible: bool,
+    clip-children: bool,
+    // Scroll (ScrollingFrame)
+    scroll-x: float,
+    scroll-y: float,
     // Appearance
     bg-r: float,
     bg-g: float,
@@ -73,6 +77,11 @@ export struct GuiElementData {
     text-a: float,
     font-size: float,
     text-align: string, // "left", "center", "right"
+    // Image (empty = no image)
+    image-source: image,
+    has-image: bool,
+    // Class type for specialized rendering
+    class-type: string, // "frame", "textlabel", "textbutton", "scrollingframe", "imagelabel", etc.
 }
 
 // ============================================================================
@@ -1713,8 +1722,10 @@ export component StudioWindow inherits Window {
                     }
                 }
                 // ── ScreenGui overlay ─────────────────────────────────────
-                // Renders GUI elements from TOML definitions (Frame, TextLabel, TextButton)
-                // positioned absolutely within the viewport area.
+                // Renders GUI elements from TOML definitions through the Slint
+                // software renderer. Supports Frame, TextLabel, TextButton, TextBox,
+                // ScrollingFrame (clip+scroll), ImageLabel/ImageButton (images),
+                // and placeholder media classes.
                 for elem[i] in root.gui-elements: Rectangle {
                     x: elem.x * 1px;
                     y: elem.y * 1px;
@@ -1725,8 +1736,20 @@ export component StudioWindow inherits Window {
                     border-width: elem.border-size * 1px;
                     border-color: rgba(elem.border-r * 255, elem.border-g * 255, elem.border-b * 255, elem.border-a);
                     border-radius: elem.corner-radius * 1px;
+                    clip: elem.clip-children;
 
+                    // Image content (ImageLabel, ImageButton)
+                    if elem.has-image: Image {
+                        width: 100%;
+                        height: 100%;
+                        source: elem.image-source;
+                        image-fit: contain;
+                    }
+
+                    // Text content
                     if elem.text != "": Text {
+                        x: elem.scroll-x * -1px;
+                        y: elem.scroll-y * -1px;
                         text: elem.text;
                         color: rgba(elem.text-r * 255, elem.text-g * 255, elem.text-b * 255, elem.text-a);
                         font-size: max(elem.font-size * 1px, 8px);

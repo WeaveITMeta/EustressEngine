@@ -248,6 +248,8 @@ fn main() {
         .add_plugins(eustress_engine::mesh_optimizer::MeshOptPlugin)
         // Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
         .add_plugins(eustress_common::gui::SlintGuiPlugin)
+        // Billboard/SurfaceGui 3D rendering (manual pixel renderer with atlas)
+        .add_plugins(eustress_common::gui::BillboardRendererPlugin)
         // Selection box
         .add_plugins(SelectionBoxPlugin)
         // Tools

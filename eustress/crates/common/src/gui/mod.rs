@@ -28,3 +28,9 @@ pub use plugin::SlintGuiPlugin;
 
 #[cfg(feature = "gui")]
 pub use generator::{GuiElement, generate_slint_markup};
+
+#[cfg(feature = "gui")]
+pub mod billboard_renderer;
+
+#[cfg(feature = "gui")]
+pub use billboard_renderer::BillboardRendererPlugin;

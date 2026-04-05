@@ -25,25 +25,10 @@ use std::path::Path;
 
 use crate::spawn::{TextLabelMarker, TextBoxMarker};
 
-/// Component storing GUI element display data for Slint rendering.
-/// Attached to every GUI entity so sync_gui_to_slint can push them to the Slint overlay.
-#[derive(Component, Debug, Clone)]
-pub struct GuiElementDisplay {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    pub z_order: i32,
-    pub visible: bool,
-    pub bg_color: [f32; 4],
-    pub border_size: f32,
-    pub border_color: [f32; 4],
-    pub corner_radius: f32,
-    pub text: String,
-    pub text_color: [f32; 4],
-    pub font_size: f32,
-    pub text_align: String,
-}
+pub use eustress_common::gui::billboard_renderer::{BillboardGuiMarker, SurfaceGuiMarker};
+
+// Re-export from common crate so engine code can use it
+pub use eustress_common::gui::billboard_renderer::GuiElementDisplay;
 
 // ============================================================================
 // 1. TOML deserialization structs
@@ -347,7 +332,7 @@ fn spawn_screen_gui_element(
 
 /// Frame — container with background color and optional border
 /// Build a GuiElementDisplay from TOML properties + optional text
-fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>) -> GuiElementDisplay {
+fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
     let (text, text_color, font_size, text_align) = if let Some(tp) = text_props {
         (
             tp.text.clone(),
@@ -366,6 +351,9 @@ fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlTe
         height: gui.size[1],
         z_order: gui.z_index,
         visible: gui.visible,
+        clip_children: class_type == "scrollingframe",
+        scroll_x: 0.0,
+        scroll_y: 0.0,
         bg_color: gui.background_color,
         border_size: gui.border_size,
         border_color: gui.border_color,
@@ -374,6 +362,8 @@ fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlTe
         text_color,
         font_size,
         text_align,
+        image_path: String::new(),
+        class_type: class_type.to_string(),
     }
 }
 
@@ -389,7 +379,7 @@ fn spawn_frame_element(
         Name::new(display_name.to_string()),
         // Minimal Node for Bevy hierarchy — actual rendering is done by Slint overlay
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, None),
+        gui_display_from_props(gui, None, "frame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -404,17 +394,19 @@ fn spawn_frame_element_with_text(
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
+    let class = instance.class_name;
+    let class_str = format!("{:?}", class).to_lowercase();
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props),
+        gui_display_from_props(gui, text_props, &class_str),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
 }
 
-/// ScrollingFrame — frame with scroll overflow
+/// ScrollingFrame — container with clip and scroll
 fn spawn_scrolling_frame_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
@@ -426,13 +418,13 @@ fn spawn_scrolling_frame_element(
         instance,
         Name::new(display_name.to_string()),
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, None),
+        gui_display_from_props(gui, None, "scrollingframe"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
 }
 
-/// TextLabel — non-interactive text display with background
+/// TextLabel — non-interactive text display
 fn spawn_text_label_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
@@ -446,13 +438,13 @@ fn spawn_text_label_element(
         Name::new(display_name.to_string()),
         TextLabelMarker,
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props),
+        gui_display_from_props(gui, text_props, "textlabel"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
 }
 
-/// TextButton — clickable text with background and border
+/// TextButton — clickable text with background
 fn spawn_text_button_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
@@ -465,7 +457,7 @@ fn spawn_text_button_element(
         instance,
         Name::new(display_name.to_string()),
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props),
+        gui_display_from_props(gui, text_props, "textbutton"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -485,7 +477,7 @@ fn spawn_text_box_element(
         Name::new(display_name.to_string()),
         TextBoxMarker,
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props),
+        gui_display_from_props(gui, text_props, "textbox"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity

@@ -1875,6 +1875,23 @@ fn sync_gui_elements_to_slint(
 
     let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
         let (ox, oy) = compute_offset(*entity, &gui_query, &mut offset_cache);
+
+        // Load image for ImageLabel/ImageButton if path is set
+        let (has_image, image_source) = if !e.image_path.is_empty() {
+            // Try to load image from the asset path
+            let img_path = std::path::PathBuf::from(&e.image_path);
+            if img_path.exists() {
+                match slint::Image::load_from_path(&img_path) {
+                    Ok(img) => (true, img),
+                    Err(_) => (false, slint::Image::default()),
+                }
+            } else {
+                (false, slint::Image::default())
+            }
+        } else {
+            (false, slint::Image::default())
+        };
+
         GuiElementData {
             x: e.x + ox,
             y: e.y + oy,
@@ -1882,6 +1899,9 @@ fn sync_gui_elements_to_slint(
             height: e.height,
             z_order: e.z_order,
             visible: e.visible,
+            clip_children: e.clip_children,
+            scroll_x: e.scroll_x,
+            scroll_y: e.scroll_y,
             bg_r: e.bg_color[0],
             bg_g: e.bg_color[1],
             bg_b: e.bg_color[2],
@@ -1899,6 +1919,9 @@ fn sync_gui_elements_to_slint(
             text_a: e.text_color[3],
             font_size: e.font_size,
             text_align: e.text_align.as_str().into(),
+            image_source,
+            has_image,
+            class_type: e.class_type.as_str().into(),
         }
     }).collect();
 
