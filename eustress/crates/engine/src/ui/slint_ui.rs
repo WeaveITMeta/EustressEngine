@@ -1645,18 +1645,21 @@ fn setup_slint_overlay(world: &mut World) {
         Name::new("Slint Overlay Quad"),
     ));
 
-    // Spawn a dedicated Bevy UI camera at order 200 so ScreenGui elements
-    // render ABOVE the Slint overlay (order 100). Without this, Bevy UI
-    // renders at order 0 and gets painted over by the Slint quad.
+    // ScreenGui camera at order 200: renders Bevy UI elements ABOVE the Slint overlay.
+    // Uses Camera3d (not Camera2d) so it shares the same rendering pipeline as the
+    // main scene camera. IsDefaultUiCamera directs all Bevy UI nodes to this camera.
     world.spawn((
-        Camera2d,
+        Camera3d::default(),
         Camera {
             order: 200,
             clear_color: ClearColorConfig::None,
             ..default()
         },
         bevy::ui::IsDefaultUiCamera,
-        Name::new("Bevy UI Camera"),
+        // Render only layer 30 (nothing) so this camera doesn't re-render 3D objects.
+        // It exists solely to host Bevy UI rendering at order 200.
+        RenderLayers::layer(30),
+        Name::new("ScreenGui Camera"),
     ));
     
     // Store Slint state as NonSend resource (requires World access)
@@ -7608,7 +7611,24 @@ fn sync_center_tabs_to_slint(
         // (when tabs changed, the model was just set — wait for next frame)
         let current_tab_type: String = ui.get_active_tab_type().into();
         if current_tab_type != tab_type {
-            ui.set_active_tab_type(tab_type.into());
+            // Guard: ensure the tab index is valid before switching view type
+            // This prevents Slint from creating ScriptEditor with an out-of-bounds active-tab
+            let idx_valid = if tab_type == "script" || tab_type == "code" {
+                let idx = (state.active_center_tab - 1) as usize;
+                idx < state.center_tabs.len()
+            } else {
+                true
+            };
+            if idx_valid {
+                let tab_type_shared: slint::SharedString = tab_type.into();
+                // Catch any Slint panic during view type switch to prevent engine crash
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ui.set_active_tab_type(tab_type_shared);
+                }));
+                if let Err(e) = result {
+                    error!("⚠ Slint panicked during tab type switch: {:?}", e);
+                }
+            }
         }
     }
     
@@ -7677,11 +7697,19 @@ fn sync_center_tabs_to_slint(
             })
             .collect();
 
-        ui.set_script_editor_content(state.script_editor_content.as_str().into());
-        let nums = build_line_numbers_text(&state.script_editor_content);
-        ui.set_script_line_numbers(nums.into());
+        let content_str: slint::SharedString = state.script_editor_content.as_str().into();
+        let nums: slint::SharedString = build_line_numbers_text(&state.script_editor_content).into();
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
-        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+        let hl_rc = slint::ModelRc::from(highlight_model);
+        // Catch any Slint panic during content sync to prevent engine crash
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ui.set_script_editor_content(content_str);
+            ui.set_script_line_numbers(nums);
+            ui.set_script_highlight_lines(hl_rc);
+        }));
+        if let Err(e) = result {
+            error!("⚠ Slint panicked during script content sync: {:?}", e);
+        }
         // On tab switch (not on every keystroke): reset editor scroll to line 1
         if tabs_changed {
             ui.set_script_scroll_to_top(true);
