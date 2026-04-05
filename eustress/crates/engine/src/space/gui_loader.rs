@@ -303,7 +303,20 @@ pub fn spawn_gui_element(
         "Frame" => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
         "ScrollingFrame" => spawn_scrolling_frame_element(commands, instance, loaded_from, &display_name, gui),
         "TextBox" => spawn_text_box_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
-        // ImageLabel, ImageButton, ViewportFrame — spawn as frames for now (need asset loading)
+        // Media classes — render as placeholder frames with class label until
+        // full media rendering is implemented (PDF, video, web, viewport)
+        "ImageLabel" | "ImageButton" | "DocumentFrame" | "VideoFrame" | "WebFrame" | "ViewportFrame" => {
+            // Use placeholder text showing the class type
+            let placeholder_text = Some(GuiTomlText {
+                text: format!("[{}]", gui_type),
+                text_color: [0.5, 0.5, 0.5, 0.8],
+                font_size: 12.0,
+                text_x_alignment: "center".to_string(),
+                text_y_alignment: "center".to_string(),
+                ..Default::default()
+            });
+            spawn_frame_element_with_text(commands, instance, loaded_from, &display_name, gui, placeholder_text.as_ref())
+        }
         _ => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
     }
 }
@@ -377,6 +390,25 @@ fn spawn_frame_element(
         // Minimal Node for Bevy hierarchy — actual rendering is done by Slint overlay
         Node { display: Display::None, ..default() },
         gui_display_from_props(gui, None),
+    )).id();
+    commands.entity(entity).insert(loaded_from);
+    entity
+}
+
+/// Frame with optional text overlay (used for media class placeholders)
+fn spawn_frame_element_with_text(
+    commands: &mut Commands,
+    instance: eustress_common::classes::Instance,
+    loaded_from: super::file_loader::LoadedFromFile,
+    display_name: &str,
+    gui: &GuiTomlProperties,
+    text_props: Option<&GuiTomlText>,
+) -> Entity {
+    let entity = commands.spawn((
+        instance,
+        Name::new(display_name.to_string()),
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, text_props),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
