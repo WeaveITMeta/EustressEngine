@@ -402,6 +402,27 @@ fn handle_file_modified(
             info!("🔄 Texture changed (Bevy will auto-reload): {:?}", event.path);
         }
         
+        FileType::GuiElement => {
+            // Hot-reload GUI element TOML (Frame, TextLabel, TextButton, etc.)
+            if let Some(entity) = registry.get_entity(&event.path) {
+                match super::gui_loader::load_gui_definition(&event.path) {
+                    Ok(gui_def) => {
+                        let gui_type = super::gui_loader::gui_class_from_extension(&event.path);
+                        let display = super::gui_loader::gui_display_from_props(
+                            &gui_def.gui,
+                            gui_def.text.as_ref(),
+                            gui_type,
+                        );
+                        commands.entity(entity).insert(display);
+                        info!("🔄 Hot-reloaded GUI element: {:?}", event.path);
+                    }
+                    Err(e) => {
+                        error!("Failed to reload GUI element {:?}: {}", event.path, e);
+                    }
+                }
+            }
+        }
+
         _ => {
             debug!("File modified but no hot-reload handler: {:?}", event.path);
         }

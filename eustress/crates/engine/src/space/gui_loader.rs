@@ -332,7 +332,7 @@ fn spawn_screen_gui_element(
 
 /// Frame — container with background color and optional border
 /// Build a GuiElementDisplay from TOML properties + optional text
-fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
+pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
     let (text, text_color, font_size, text_align) = if let Some(tp) = text_props {
         (
             tp.text.clone(),

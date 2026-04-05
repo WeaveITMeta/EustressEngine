@@ -1826,13 +1826,22 @@ static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// rows. This avoids marking the ~8MB texture asset as modified every frame, which
 /// previously forced a full GPU re-upload even when nothing changed.
 /// Push ScreenGui elements (GuiElementDisplay components) to Slint's gui-elements model.
-/// Handles parent-child hierarchy: child positions are offset by their parent's position.
-/// Runs every frame to keep the Slint overlay in sync with ECS GUI entities.
+/// Only syncs when elements are added, removed, or changed (Bevy change detection).
 fn sync_gui_elements_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
-    gui_query: Query<(Entity, &crate::space::gui_loader::GuiElementDisplay, Option<&ChildOf>)>,
+    gui_query: Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
+    changed: Query<(), Changed<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
+    added: Query<(), Added<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
+    mut last_count: Local<usize>,
 ) {
     let Some(slint_context) = slint_context else { return };
+
+    // Skip sync if nothing changed — major FPS optimization
+    let current_count = gui_query.iter().count();
+    let has_changes = !changed.is_empty() || !added.is_empty() || current_count != *last_count;
+    if !has_changes { return; }
+    *last_count = current_count;
+
     let ui = &slint_context.window;
 
     // Build parent offset map: walk up ChildOf chain to accumulate x/y offsets
@@ -1841,7 +1850,7 @@ fn sync_gui_elements_to_slint(
 
     fn compute_offset(
         entity: Entity,
-        gui_query: &Query<(Entity, &crate::space::gui_loader::GuiElementDisplay, Option<&ChildOf>)>,
+        gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
         cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
     ) -> (f32, f32) {
         if let Some(&cached) = cache.get(&entity) {
@@ -1869,7 +1878,7 @@ fn sync_gui_elements_to_slint(
     }
 
     // Collect and sort by z_order
-    let mut elements: Vec<(Entity, &crate::space::gui_loader::GuiElementDisplay)> =
+    let mut elements: Vec<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)> =
         gui_query.iter().map(|(e, d, _)| (e, d)).collect();
     elements.sort_by_key(|(_, e)| e.z_order);
 
