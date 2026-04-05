@@ -128,10 +128,11 @@ fn main() {
     
     let mut app = App::new();
     
-    // Silently ignore missing-resource errors instead of spamming WARN logs every frame.
-    // Systems that access Res<T> without Option wrappers will simply skip execution.
-    // The default `warn` handler was emitting hundreds of log lines per frame, tanking FPS.
-    app.set_error_handler(bevy::ecs::error::ignore);
+    // Rate-limited error handler: logs each unique error source once, then suppresses repeats.
+    // The default `warn` handler spams hundreds of lines per frame. `ignore` hides everything
+    // and makes debugging impossible. This handler shows each error once so you know what's
+    // broken without drowning in log output.
+    app.set_error_handler(rate_limited_error_handler);
     
     // Register the Space asset source BEFORE DefaultPlugins
     // This must happen before AssetPlugin is initialized
@@ -407,5 +408,26 @@ fn setup_sim_stream_writer(mut commands: Commands, config: Option<Res<ChangeQueu
             );
         }
     }
+}
+
+/// Rate-limited error handler: logs each unique error source ONCE, then suppresses.
+/// This replaces both `ignore` (hides everything) and `warn` (spams every frame).
+/// Uses a static HashSet to track which system/command names have already been reported.
+fn rate_limited_error_handler(error: bevy::ecs::error::BevyError, ctx: bevy::ecs::error::ErrorContext) {
+    use std::sync::Mutex;
+    use std::collections::HashSet;
+
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+    let key = format!("{}", ctx);
+
+    let mut guard = SEEN.lock().unwrap();
+    let seen = guard.get_or_insert_with(HashSet::new);
+
+    if seen.insert(key.clone()) {
+        // First time seeing this error source — log it
+        warn!("⚠ {} : {}", ctx, error);
+    }
+    // Subsequent occurrences are silently ignored
 }
 

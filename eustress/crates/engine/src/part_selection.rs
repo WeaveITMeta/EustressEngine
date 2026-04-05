@@ -31,17 +31,19 @@ pub fn part_selection_system(
     // Query to check if a parent entity is a Model
     parent_query: Query<&Instance>,
     selection_manager: Option<Res<BevySelectionManager>>,
-    move_state: Res<crate::move_tool::MoveToolState>,
-    scale_state: Res<crate::scale_tool::ScaleToolState>,
-    rotate_state: Res<crate::rotate_tool::RotateToolState>,
-    _studio_state: Res<crate::ui::StudioState>,
+    move_state: Option<Res<crate::move_tool::MoveToolState>>,
+    scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
+    rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
-    let Some(selection_manager) = selection_manager else {
-        // Log once per second to avoid spam
-        return;
-    };
+    let Some(selection_manager) = selection_manager else { return };
+    let move_active = move_state.as_ref().map(|s| s.active).unwrap_or(false);
+    let scale_active = scale_state.as_ref().map(|s| s.active).unwrap_or(false);
+    let rotate_active = rotate_state.as_ref().map(|s| s.active).unwrap_or(false);
+    let move_dragging = move_state.as_ref().and_then(|s| s.dragged_axis).is_some();
+    let scale_dragging = scale_state.as_ref().and_then(|s| s.dragged_axis).is_some();
+    let rotate_dragging = rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
     // Only trigger on left click press
     if !mouse_button.just_pressed(MouseButton::Left) {
         return;
@@ -113,7 +115,7 @@ pub fn part_selection_system(
     // This ensures handles are always clickable even if a part is behind them
     
     // Check Move Tool handles
-    if move_state.active {
+    if move_active {
         if !selected_query.is_empty() {
             let mut bounds_min = Vec3::splat(f32::MAX);
             let mut bounds_max = Vec3::splat(f32::MIN);
@@ -168,7 +170,7 @@ pub fn part_selection_system(
     }
     
     // Check Rotate Tool handles
-    if rotate_state.active {
+    if rotate_active {
         // Compute combined bounding box of all selected entities (matching rotate_tool.rs)
         let mut rot_bmin = Vec3::splat(f32::MAX);
         let mut rot_bmax = Vec3::splat(f32::MIN);
@@ -207,7 +209,7 @@ pub fn part_selection_system(
     }
     
     // Check Scale Tool handles
-    if scale_state.active {
+    if scale_active {
         for (_entity, global_transform, basepart) in selected_query.iter() {
             let t = global_transform.compute_transform();
             
@@ -319,9 +321,9 @@ pub fn part_selection_system(
         // Hit a part - check if we should allow selection changes
         // Only block if a tool is ACTIVELY DRAGGING (not just active/visible)
         let tool_is_dragging = 
-            (move_state.active && move_state.dragged_axis.is_some()) ||
-            (scale_state.active && scale_state.dragged_axis.is_some()) ||
-            (rotate_state.active && rotate_state.dragged_axis.is_some());
+            (move_active && move_dragging) ||
+            (scale_active && scale_dragging) ||
+            (rotate_active && rotate_dragging);
         
         if tool_is_dragging {
             return; // Tool is being used right now, don't change selection
@@ -360,9 +362,9 @@ pub fn part_selection_system(
         // 1. Actively dragging a tool handle
         // 2. About to click a tool handle (prevent clearing before tool processes click)
         let tool_is_dragging = 
-            (move_state.active && move_state.dragged_axis.is_some()) ||
-            (scale_state.active && scale_state.dragged_axis.is_some()) ||
-            (rotate_state.active && rotate_state.dragged_axis.is_some());
+            (move_active && move_dragging) ||
+            (scale_active && scale_dragging) ||
+            (rotate_active && rotate_dragging);
         
         if tool_is_dragging {
             return; // Tool is being used, don't deselect
@@ -370,7 +372,7 @@ pub fn part_selection_system(
         
         // Check if we're about to click a tool handle
         // For move tool: check group center
-        if move_state.active {
+        if move_active {
             let sel = selection_manager.0.read();
             let selected = sel.get_selected();
             
@@ -410,7 +412,7 @@ pub fn part_selection_system(
         }
         
         // For scale tool: check each selected part
-        if scale_state.active {
+        if scale_active {
             let sel = selection_manager.0.read();
             let selected = sel.get_selected();
             

@@ -110,7 +110,6 @@ pub fn default_space_root() -> PathBuf {
                 if let Some(last) = settings.get("last_space_path").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(last);
                     if path.exists() {
-                        info!("📂 Restoring last space: {:?}", path);
                         return path;
                     }
                 }

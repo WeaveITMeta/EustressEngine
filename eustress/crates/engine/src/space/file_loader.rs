@@ -913,7 +913,21 @@ pub fn spawn_directory_entry(
     }
 }
 
-/// System to dynamically load all files in the Space
+/// Priority services loaded immediately at startup (the 3D scene).
+/// Everything else is deferred to avoid blocking the first frame.
+pub const PRIORITY_SERVICES: &[&str] = &["Workspace", "Lighting"];
+
+/// Resource tracking deferred service loading state
+#[derive(Resource, Default)]
+pub struct DeferredServiceLoader {
+    /// Services waiting to be loaded (one per frame)
+    pub pending: Vec<FileMetadata>,
+    /// Whether the initial priority load has completed
+    pub priority_done: bool,
+}
+
+/// Startup system: load only Workspace + Lighting immediately.
+/// Other services are queued for deferred loading (one service per frame).
 pub fn load_space_files_system(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -924,39 +938,92 @@ pub fn load_space_files_system(
     mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
+    mut deferred: ResMut<DeferredServiceLoader>,
 ) {
     let space_path = &space_root.0;
-    
+
     if !space_path.exists() {
         warn!("Space path does not exist: {:?}", space_path);
         return;
     }
-    
-    // Scan for files and directories
+
     let entries = scan_space_directory(space_path);
     info!("🔍 Discovered {} top-level entries in Space", entries.len());
-    
+
     let cd_ref = class_defaults.as_deref();
-    for entry in &entries {
-        match entry.file_type {
-            // Subdirectory → Folder entity + children parented to it
-            FileType::Directory => {
-                spawn_directory_entry(
-                    &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
-                    cd_ref,
-                );
+    let mut deferred_entries = Vec::new();
+
+    for entry in entries {
+        let is_priority = PRIORITY_SERVICES.iter().any(|s| entry.name == *s);
+
+        if is_priority {
+            // Load immediately — this is the 3D scene
+            match entry.file_type {
+                FileType::Directory => {
+                    spawn_directory_entry(
+                        &mut commands, &asset_server, &mut meshes, &mut materials,
+                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        cd_ref,
+                    );
+                }
+                _ => {
+                    spawn_file_entry(
+                        &mut commands, &asset_server, &mut meshes, &mut materials,
+                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        cd_ref,
+                    );
+                }
             }
-            // Regular file → entity at service root level (no parent)
-            _ => {
-                spawn_file_entry(
-                    &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
-                    cd_ref,
-                );
-            }
+            info!("⚡ Priority loaded: {}", entry.name);
+        } else {
+            deferred_entries.push(entry);
         }
     }
+
+    info!("📋 Deferred {} services for background loading", deferred_entries.len());
+    deferred.pending = deferred_entries;
+    deferred.priority_done = true;
+}
+
+/// Update system: loads one deferred service per frame to keep the viewport responsive.
+pub fn load_deferred_services(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut registry: ResMut<SpaceFileRegistry>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    space_root: Res<super::SpaceRoot>,
+    class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
+    mut deferred: ResMut<DeferredServiceLoader>,
+) {
+    if deferred.pending.is_empty() { return; }
+
+    // Load one service per frame
+    let entry = deferred.pending.remove(0);
+    let space_path = &space_root.0;
+    let cd_ref = class_defaults.as_deref();
+    let remaining = deferred.pending.len();
+
+    match entry.file_type {
+        FileType::Directory => {
+            spawn_directory_entry(
+                &mut commands, &asset_server, &mut meshes, &mut materials,
+                &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                cd_ref,
+            );
+        }
+        _ => {
+            spawn_file_entry(
+                &mut commands, &asset_server, &mut meshes, &mut materials,
+                &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                cd_ref,
+            );
+        }
+    }
+
+    info!("📦 Loaded service: {} ({} remaining)", entry.name, remaining);
 }
 
 /// Plugin for dynamic file loading
@@ -973,12 +1040,14 @@ impl Plugin for SpaceFileLoaderPlugin {
             .init_resource::<super::instance_loader::PrimitiveMeshCache>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
+            .init_resource::<DeferredServiceLoader>()
             .add_systems(Startup, (
                 super::class_defaults::startup_load_class_defaults,
                 load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,
             ))
             .add_systems(Update, (
+                load_deferred_services,
                 super::file_watcher::process_file_changes,
                 super::instance_loader::write_instance_changes_system,
                 super::space_ops::apply_space_rescan,

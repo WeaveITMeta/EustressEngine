@@ -88,7 +88,7 @@ pub struct FrameDiagnosticsPlugin;
 
 impl Plugin for FrameDiagnosticsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(FrameTimeTracker::new(100)) // 100ms threshold
+        app.insert_resource(FrameTimeTracker::new(2000)) // 2 second threshold — only log severe stutters
             .add_systems(Last, track_frame_time);
     }
 }

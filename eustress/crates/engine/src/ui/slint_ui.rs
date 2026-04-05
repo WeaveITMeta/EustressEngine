@@ -5271,10 +5271,11 @@ fn update_ui_performance(
 /// Runs every frame (no throttle) so selection feels instant.
 fn sync_viewport_selection_to_explorer(
     selection_manager: Option<Res<BevySelectionManager>>,
-    mut explorer_state: ResMut<UnifiedExplorerState>,
+    explorer_state: Option<ResMut<UnifiedExplorerState>>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
 ) {
     let Some(sel_mgr) = selection_manager else { return };
+    let Some(mut explorer_state) = explorer_state else { return };
     let selected_ids = sel_mgr.0.read().get_selected();
 
     // Compute the new SelectedItem from the SelectionManager state
@@ -5315,7 +5316,7 @@ fn sync_viewport_selection_to_explorer(
 fn sync_unified_explorer_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     perf: Option<Res<UIPerformance>>,
-    mut explorer_state: ResMut<UnifiedExplorerState>,
+    explorer_state: Option<ResMut<UnifiedExplorerState>>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
@@ -5327,6 +5328,8 @@ fn sync_unified_explorer_to_slint(
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
 ) {
+    let Some(mut explorer_state) = explorer_state else { return };
+
     // EustressStream change-detection: if any entity was added/removed/renamed/reparented,
     // bypass throttling and rebuild the tree immediately.
     if let Some(ref mut d) = panel_dirty {
@@ -6338,8 +6341,8 @@ fn build_file_tree_nodes(
 fn sync_properties_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     perf: Option<Res<UIPerformance>>,
-    mut studio_state: ResMut<StudioState>,
-    explorer_state: Res<UnifiedExplorerState>,
+    mut studio_state: Option<ResMut<StudioState>>,
+    explorer_state: Option<Res<UnifiedExplorerState>>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
     transforms: Query<&Transform>,
     base_parts: Query<&eustress_common::classes::BasePart>,
@@ -6363,6 +6366,8 @@ fn sync_properties_to_slint(
     material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
 ) {
     let Some(slint_context) = slint_context else { return };
+    let Some(ref mut studio_state) = studio_state else { return };
+    let Some(ref explorer_state) = explorer_state else { return };
     let ui = &slint_context.window;
 
     // Skip sync entirely if user is actively editing an input field

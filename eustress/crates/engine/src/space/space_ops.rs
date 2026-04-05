@@ -551,6 +551,7 @@ pub fn apply_space_rescan(
     mut mesh_cache: ResMut<crate::space::instance_loader::PrimitiveMeshCache>,
     space_root: Res<crate::space::SpaceRoot>,
     class_defaults: Option<Res<crate::space::class_defaults::ClassDefaultsRegistry>>,
+    mut deferred: ResMut<crate::space::file_loader::DeferredServiceLoader>,
 ) {
     if !rescan.0 { return; }
     rescan.0 = false;
@@ -563,29 +564,41 @@ pub fn apply_space_rescan(
 
     info!("🔄 Re-scanning Space at {:?}", space_path);
 
-    use crate::space::file_loader::{scan_space_directory, FileType};
+    use crate::space::file_loader::{scan_space_directory, FileType, PRIORITY_SERVICES};
     let entries = scan_space_directory(space_path);
     info!("🔍 Discovered {} top-level entries", entries.len());
 
     let cd_ref = class_defaults.as_deref();
-    for entry in &entries {
-        match entry.file_type {
-            FileType::Directory => {
-                crate::space::file_loader::spawn_directory_entry(
-                    &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
-                    cd_ref,
-                );
+
+    // Load priority services immediately, defer the rest
+    let mut deferred_entries = Vec::new();
+    for entry in entries {
+        let is_priority = PRIORITY_SERVICES.iter().any(|s| entry.name == *s);
+        if is_priority {
+            match entry.file_type {
+                FileType::Directory => {
+                    crate::space::file_loader::spawn_directory_entry(
+                        &mut commands, &asset_server, &mut meshes, &mut materials,
+                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        cd_ref,
+                    );
+                }
+                _ => {
+                    crate::space::file_loader::spawn_file_entry(
+                        &mut commands, &asset_server, &mut meshes, &mut materials,
+                        &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
+                        cd_ref,
+                    );
+                }
             }
-            _ => {
-                crate::space::file_loader::spawn_file_entry(
-                    &mut commands, &asset_server, &mut meshes, &mut materials,
-                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, entry, None,
-                    cd_ref,
-                );
-            }
+        } else {
+            deferred_entries.push(entry);
         }
     }
+
+    deferred.pending = deferred_entries;
+    deferred.priority_done = true;
+    info!("📋 Deferred {} services for background loading", deferred.pending.len());
 }
 
 // ============================================================================

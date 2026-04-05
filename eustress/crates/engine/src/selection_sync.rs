@@ -66,12 +66,13 @@ fn is_abstract_celestial(instance: Option<&Instance>) -> bool {
 /// Uses generation tracking to skip the O(n) entity scan when selection hasn't changed.
 fn sync_selection_boxes(
     mut commands: Commands,
-    selection_manager: Res<SelectionSyncManager>,
+    selection_manager: Option<Res<SelectionSyncManager>>,
     mut last_gen: ResMut<SelectionGeneration>,
     // Query entities that could be selected (have PartEntity OR Instance)
     unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<PartEntity>, With<Instance>)>)>,
     selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<SelectionBox>>,
 ) {
+    let Some(selection_manager) = selection_manager else { return };
     let mgr = selection_manager.0.read();
     let current_gen = mgr.generation();
 
