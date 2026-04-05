@@ -164,6 +164,8 @@ pub struct CenterTabManager {
     next_id: u32,
     /// Whether the tab state has changed and needs Slint sync
     pub dirty: bool,
+    /// True when only the active tab changed (refocus), not the tab list itself
+    pub focus_only: bool,
 }
 
 impl Default for CenterTabManager {
@@ -186,6 +188,7 @@ impl Default for CenterTabManager {
             active_tab: 0,
             next_id: 1,
             dirty: true,
+            focus_only: false,
         }
     }
 }
@@ -200,6 +203,7 @@ impl CenterTabManager {
         let soul_type = CenterTabType::SoulScript { mode: SoulScriptMode::Code };
         if let Some(idx) = self.find_tab_by_entity(entity, &soul_type) {
             self.active_tab = idx;
+            self.focus_only = true;
             self.dirty = true;
             return idx;
         }
@@ -252,9 +256,10 @@ impl CenterTabManager {
 
     /// Open a file in the appropriate tab type based on extension
     pub fn open_file(&mut self, path: &Path) -> usize {
-        // Check if already open
+        // Check if already open — just focus it, don't rebuild model
         if let Some(idx) = self.find_tab_by_path(path) {
             self.active_tab = idx;
+            self.focus_only = true; // Signal: only update active index, don't re-push model
             self.dirty = true;
             return idx;
         }

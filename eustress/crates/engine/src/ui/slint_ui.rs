@@ -574,6 +574,7 @@ pub struct StudioState {
     pub center_tabs: Vec<CenterTabData>,
     pub active_center_tab: i32,          // 0 = Space1, 1+ = tab index
     pub tabs_dirty: bool,                // Set when CenterTabManager updates tabs
+    pub tabs_deferred_frames: u8,        // Counts down deferred frames after tab change
     pub pending_open_script: Option<(i32, String)>,
     pub pending_open_web: Option<String>, // URL to open in new web tab
     pub pending_close_tab: Option<i32>,
@@ -673,6 +674,7 @@ impl Default for StudioState {
             center_tabs: Vec::new(),
             active_center_tab: 0,
             tabs_dirty: false,
+            tabs_deferred_frames: 0,
             pending_open_script: None,
             pending_open_web: None,
             pending_build_entity: None,
@@ -1612,6 +1614,29 @@ fn setup_slint_overlay(world: &mut World) {
     // Camera3d with orthographic projection renders on top of the main scene.
     // SkyboxAttached prevents SharedLightingPlugin from attaching a skybox to this camera,
     // which would paint over the entire 3D scene since this camera renders at order=100.
+    // ── Camera stack (order matters!) ──────────────────────────────────────
+    // Order 0:   Main Camera3d — 3D scene + sky (spawned by DefaultScenePlugin)
+    // Order 100: ScreenGui Camera2d — Bevy UI nodes (ScreenGui/Frame/TextLabel)
+    // Order 200: Slint Camera3d — Slint software-rendered overlay (editor chrome)
+    //
+    // ScreenGui renders BELOW Slint so editor panels don't bleed through.
+    // Both overlay cameras use ClearColorConfig::None to composite on top.
+
+    // ScreenGui camera (order 100): renders Bevy UI nodes for in-game GUI.
+    // Camera2d has no 3D pipeline — no skybox, no mesh rendering, just UI.
+    world.spawn((
+        Camera2d,
+        Camera {
+            order: 100,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        bevy::ui::IsDefaultUiCamera,
+        Name::new("ScreenGui Camera"),
+    ));
+
+    // Slint overlay camera (order 200): renders the Slint editor chrome texture.
+    // Must be ABOVE ScreenGui so editor panels cover in-game UI.
     world.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -1624,7 +1649,7 @@ fn setup_slint_overlay(world: &mut World) {
             ..OrthographicProjection::default_3d()
         }),
         Camera {
-            order: 100,
+            order: 200,
             clear_color: ClearColorConfig::None,
             ..default()
         },
@@ -1634,7 +1659,7 @@ fn setup_slint_overlay(world: &mut World) {
         eustress_common::plugins::lighting_plugin::SkyboxAttached,
         Name::new("Slint Overlay Camera"),
     ));
-    
+
     // Spawn fullscreen quad with the Slint texture material
     world.spawn((
         Mesh3d(quad_mesh),
@@ -1643,23 +1668,6 @@ fn setup_slint_overlay(world: &mut World) {
         overlay_layer,
         SlintOverlaySprite,
         Name::new("Slint Overlay Quad"),
-    ));
-
-    // ScreenGui camera at order 200: renders Bevy UI elements ABOVE the Slint overlay.
-    // Uses Camera3d (not Camera2d) so it shares the same rendering pipeline as the
-    // main scene camera. IsDefaultUiCamera directs all Bevy UI nodes to this camera.
-    world.spawn((
-        Camera3d::default(),
-        Camera {
-            order: 200,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        bevy::ui::IsDefaultUiCamera,
-        // Render only layer 30 (nothing) so this camera doesn't re-render 3D objects.
-        // It exists solely to host Bevy UI rendering at order 200.
-        RenderLayers::layer(30),
-        Name::new("ScreenGui Camera"),
     ));
     
     // Store Slint state as NonSend resource (requires World access)
@@ -2866,12 +2874,15 @@ fn drain_slint_actions(
             }
             SlintAction::SelectCenterTab(idx) => {
                 // idx from Slint: 0 = Scene, 1+ = other tabs
-                // CenterTabManager uses the same indexing.
                 if let Some(ref mut mgr) = res.tab_manager {
                     mgr.select_tab(idx as usize);
+                    mgr.focus_only = true;
+                    mgr.dirty = true;
                 }
                 if let Some(ref mut s) = res.state {
                     s.active_center_tab = idx;
+                    // Reset deferred counter so tab type updates immediately
+                    s.tabs_deferred_frames = 0;
                 }
             }
             SlintAction::ScriptContentChanged(text) => {
@@ -3254,13 +3265,14 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::OpenNode(id, node_type) => {
+                info!("📂 OpenNode id={} type={}", id, node_type);
                 if node_type == "entity" {
-                    // Double-click entity — open script if SoulScript.
-                    // Look up Entity from the stable sequential ID cache.
                     let entity_opt = res.explorer_state.as_ref()
                         .and_then(|es| es.entity_id_cache.get(&id).copied());
+                    info!("📂 OpenNode entity lookup: {:?}", entity_opt);
                     if let Some(entity) = entity_opt {
                         if let Ok((_, inst)) = queries.instances.get(entity) {
+                            info!("📂 OpenNode class: {:?}", inst.class_name);
                             if inst.class_name == eustress_common::classes::ClassName::SoulScript {
                                 // Open SoulScript in tabbed viewer
                                 // Get the file path from LoadedFromFile component if available
@@ -7470,8 +7482,28 @@ fn sync_tab_manager_to_studio_state(
     let Some(ref mut mgr) = tab_manager else { return };
     if !mgr.dirty { return; }
     let Some(ref mut state) = state else { return };
-    
-    // Rebuild StudioState.center_tabs from CenterTabManager (skip Scene tab at index 0)
+
+    let focus_only = mgr.focus_only;
+    mgr.focus_only = false;
+
+    if focus_only {
+        // Only the active tab changed — don't rebuild the model, just update the index.
+        // This avoids the Slint recursion crash when refocusing an existing tab.
+        state.active_center_tab = mgr.active_tab as i32;
+
+        // Sync content for the newly focused tab
+        if let Some(active_tab) = mgr.active() {
+            let tab_type_str = active_tab.tab_type.type_string();
+            if tab_type_str == "script" || tab_type_str == "code" {
+                state.script_editor_content = active_tab.content.clone();
+                state.script_content_dirty = true;
+            }
+        }
+        mgr.dirty = false;
+        return;
+    }
+
+    // Full rebuild: tab list changed (new tab added, tab closed, etc.)
     state.center_tabs = mgr.tabs.iter().skip(1).map(|tab| {
         CenterTabData {
             entity_id: tab.entity.map(|e| e.index().index() as i32).unwrap_or(-1),
@@ -7483,23 +7515,17 @@ fn sync_tab_manager_to_studio_state(
             loading: tab.loading,
         }
     }).collect();
-    
-    // Sync active tab index (CenterTabManager is 0-indexed with Scene at 0,
-    // StudioState uses 0 for Scene and 1+ for other tabs)
+
     state.active_center_tab = mgr.active_tab as i32;
-    
-    // Sync active tab's content to script_editor_content for TextEdit display.
-    // This covers both "script" and "code" tab types (Soul scripts + .md/.rs/.toml etc.)
+
     if let Some(active_tab) = mgr.active() {
         let tab_type_str = active_tab.tab_type.type_string();
         if tab_type_str == "script" || tab_type_str == "code" {
             state.script_editor_content = active_tab.content.clone();
         }
     }
-    
-    // Mark tabs as dirty so sync_center_tabs_to_slint will push to Slint
+
     state.tabs_dirty = true;
-    
     mgr.dirty = false;
 }
 
@@ -7597,43 +7623,36 @@ fn sync_center_tabs_to_slint(
         }
     }
     
-    // Update active-tab-type property — deferred by one frame when tabs change
-    // to avoid Slint property recursion (setting tab model + active-tab-type in the
-    // same frame causes conditional view creation/destruction during property evaluation)
-    let tab_type = if state.active_center_tab <= 0 {
-        "scene"
+    // ── 3-frame deferred tab switch to prevent Slint recursion ──────────
+    //
+    // Slint panics with "Recursion detected" if set_center_tabs,
+    // set_center_active_tab, and set_active_tab_type happen in the same
+    // or adjacent frames because ScriptEditor creation reads center-tabs
+    // while Slint is still processing the reactive dependency graph.
+    //
+    // Frame N:   push tab model only (set_center_tabs)
+    // Frame N+1: set active tab index (set_center_active_tab)
+    // Frame N+2: set tab type (set_active_tab_type → creates ScriptEditor)
+    //
+    let tab_type: String = if state.active_center_tab <= 0 {
+        "scene".to_string()
     } else {
         let idx = (state.active_center_tab - 1) as usize;
-        state.center_tabs.get(idx).map(|t| t.tab_type.as_str()).unwrap_or("scene")
+        state.center_tabs.get(idx).map(|t| t.tab_type.clone()).unwrap_or_else(|| "scene".to_string())
     };
-    if !tabs_changed {
-        // Only update tab type when tabs did NOT change this frame
-        // (when tabs changed, the model was just set — wait for next frame)
-        let current_tab_type: String = ui.get_active_tab_type().into();
-        if current_tab_type != tab_type {
-            // Guard: ensure the tab index is valid before switching view type
-            // This prevents Slint from creating ScriptEditor with an out-of-bounds active-tab
-            let idx_valid = if tab_type == "script" || tab_type == "code" {
-                let idx = (state.active_center_tab - 1) as usize;
-                idx < state.center_tabs.len()
-            } else {
-                true
-            };
-            if idx_valid {
-                let tab_type_shared: slint::SharedString = tab_type.into();
-                // Catch any Slint panic during view type switch to prevent engine crash
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ui.set_active_tab_type(tab_type_shared);
-                }));
-                if let Err(e) = result {
-                    error!("⚠ Slint panicked during tab type switch: {:?}", e);
-                }
-            }
-        }
-    }
-    
-    // Push tab data to Slint when changed — guard against re-entrant property updates
+
+    // ── 3-frame deferred tab switch ──────────────────────────────────────
+    // Slint panics with "Recursion detected" if set_center_tabs,
+    // set_center_active_tab, and set_active_tab_type happen in the same
+    // or adjacent frames. Each must be on a SEPARATE frame.
+    //
+    // Frame N:   set_center_tabs only, set deferred_frames = 3
+    // Frame N+1: deferred_frames 3→2, do nothing (let Slint settle)
+    // Frame N+2: deferred_frames 2→1, set_center_active_tab
+    // Frame N+3: deferred_frames 1→0, set_active_tab_type + content
+    //
     if tabs_changed {
+        // Frame N: push tab model ONLY. Nothing else touches Slint this frame.
         let slint_tabs: Vec<CenterTab> = state.center_tabs.iter().map(|t| {
             CenterTab {
                 entity_id: t.entity_id,
@@ -7650,24 +7669,47 @@ fn sync_center_tabs_to_slint(
             }
         }).collect();
 
-        // Set active tab BEFORE setting the model to avoid Slint re-evaluating
-        // conditional views (active-tab-type) while the model is being swapped.
+        let model_rc = std::rc::Rc::new(slint::VecModel::from(slint_tabs));
+        ui.set_center_tabs(slint::ModelRc::from(model_rc));
+        state.tabs_deferred_frames = 3;
+    } else if state.tabs_deferred_frames == 3 {
+        // Frame N+1: skip — let Slint finish processing the model change
+        state.tabs_deferred_frames = 2;
+    } else if state.tabs_deferred_frames == 2 {
+        // Frame N+2: set active tab index
+        state.tabs_deferred_frames = 1;
+        ui.set_center_active_tab(state.active_center_tab);
+    } else if state.tabs_deferred_frames == 1 {
+        // Frame N+3: set tab type (creates ScriptEditor) + push content
+        state.tabs_deferred_frames = 0;
+        let current_tab_type: String = ui.get_active_tab_type().into();
+        if current_tab_type != tab_type {
+            ui.set_active_tab_type(tab_type.as_str().into());
+        }
+        // Also push editor content now that ScriptEditor exists
+        if tab_type == "script" || tab_type == "code" {
+            ui.set_script_editor_content(state.script_editor_content.as_str().into());
+            let nums = build_line_numbers_text(&state.script_editor_content);
+            ui.set_script_line_numbers(nums.into());
+        }
+    } else {
+        // Steady state: no deferred updates pending — sync normally
         let current_active = ui.get_center_active_tab();
         if current_active != state.active_center_tab {
             ui.set_center_active_tab(state.active_center_tab);
         }
-
-        let model_rc = std::rc::Rc::new(slint::VecModel::from(slint_tabs));
-        ui.set_center_tabs(slint::ModelRc::from(model_rc));
+        let current_tab_type: String = ui.get_active_tab_type().into();
+        if current_tab_type != tab_type {
+            ui.set_active_tab_type(tab_type.as_str().into());
+        }
     }
 
     // Sync editor content + line numbers to Slint when a script or code tab is active.
-    // Triggers on tab switch (tabs_changed) OR on every keystroke (script_content_dirty).
+    // Skip during deferred tab switch — content is pushed in Frame N+3 instead.
     let script_dirty = state.script_content_dirty;
-    // Copy tab_type to an owned String before the mutable borrow of state below
-    let tab_type: String = tab_type.to_owned();
     if script_dirty { state.script_content_dirty = false; }
-    if (tab_type == "script" || tab_type == "code") && (tabs_changed || script_dirty) {
+    let in_deferred = state.tabs_deferred_frames > 0;
+    if !in_deferred && (tab_type == "script" || tab_type == "code") && script_dirty {
         let language = if state.active_center_tab > 0 {
             let idx = (state.active_center_tab - 1) as usize;
             if let Some(tab) = state.center_tabs.get(idx) {
@@ -7697,19 +7739,11 @@ fn sync_center_tabs_to_slint(
             })
             .collect();
 
-        let content_str: slint::SharedString = state.script_editor_content.as_str().into();
-        let nums: slint::SharedString = build_line_numbers_text(&state.script_editor_content).into();
+        ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        let nums = build_line_numbers_text(&state.script_editor_content);
+        ui.set_script_line_numbers(nums.into());
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
-        let hl_rc = slint::ModelRc::from(highlight_model);
-        // Catch any Slint panic during content sync to prevent engine crash
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ui.set_script_editor_content(content_str);
-            ui.set_script_line_numbers(nums);
-            ui.set_script_highlight_lines(hl_rc);
-        }));
-        if let Err(e) = result {
-            error!("⚠ Slint panicked during script content sync: {:?}", e);
-        }
+        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
         // On tab switch (not on every keystroke): reset editor scroll to line 1
         if tabs_changed {
             ui.set_script_scroll_to_top(true);

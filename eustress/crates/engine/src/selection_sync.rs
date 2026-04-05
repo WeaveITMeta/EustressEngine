@@ -39,15 +39,9 @@ impl Plugin for SelectionSyncPlugin {
 }
 
 /// Get the part_id for an entity (from PartEntity or Instance)
-fn get_part_id(entity: Entity, part_entity: Option<&PartEntity>, instance: Option<&Instance>) -> Option<String> {
-    // Prefer PartEntity.part_id if available and non-empty
-    if let Some(pe) = part_entity {
-        if !pe.part_id.is_empty() {
-            return Some(pe.part_id.clone());
-        }
-    }
-    // Fall back to entity ID format if Instance exists
-    if instance.is_some() {
+fn get_part_id(entity: Entity, _part_entity: Option<&PartEntity>, instance: Option<&Instance>) -> Option<String> {
+    // Always use entity ID format — must match part_selection_system's entity_to_id_string()
+    if _part_entity.is_some() || instance.is_some() {
         return Some(format!("{}v{}", entity.index(), entity.generation()));
     }
     None
@@ -68,11 +62,14 @@ fn sync_selection_boxes(
     mut commands: Commands,
     selection_manager: Option<Res<SelectionSyncManager>>,
     mut last_gen: ResMut<SelectionGeneration>,
-    // Query entities that could be selected (have PartEntity OR Instance)
+    // Query entities that could be selected — matches part_selection_system's filter
     unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<PartEntity>, With<Instance>)>)>,
     selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<SelectionBox>>,
 ) {
-    let Some(selection_manager) = selection_manager else { return };
+    let Some(selection_manager) = selection_manager else {
+        warn!("SelectionSyncManager missing — selection outlines disabled");
+        return;
+    };
     let mgr = selection_manager.0.read();
     let current_gen = mgr.generation();
 
@@ -86,6 +83,9 @@ fn sync_selection_boxes(
     drop(mgr);
     let selected_set: std::collections::HashSet<String> = selected_ids.into_iter().collect();
 
+    info!("[sel-sync] gen={} selected={:?} unselected_count={}", current_gen, selected_set, unselected_query.iter().count());
+
+    let mut matched = 0;
     // Add SelectionBox to newly selected entities
     for (entity, part_entity, instance) in &unselected_query {
         // Skip abstract celestial services - they don't get selection boxes
@@ -96,8 +96,17 @@ fn sync_selection_boxes(
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {
             if selected_set.contains(&part_id) {
                 commands.entity(entity).insert(SelectionBox);
+                matched += 1;
+                info!("[sel-sync] matched entity {:?} with id '{}'", entity, part_id);
             }
         }
+    }
+    if matched == 0 && !selected_set.is_empty() {
+        // Log first 10 entity IDs to see what format they actually have
+        let sample_ids: Vec<String> = unselected_query.iter().take(10)
+            .filter_map(|(e, pe, inst)| get_part_id(e, pe, inst))
+            .collect();
+        warn!("[sel-sync] no entities matched selected IDs! wanted={:?} available_sample={:?}", selected_set, sample_ids);
     }
 
     // Remove SelectionBox from deselected entities

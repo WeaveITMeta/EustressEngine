@@ -49,12 +49,12 @@ pub fn part_selection_system(
         return;
     }
 
-    info!("[select] LEFT CLICK detected — processing selection");
+    debug!("[select] LEFT CLICK detected — processing selection");
 
     // Block selection when Slint UI has focus (mouse over panels)
     if let Some(ref focus) = ui_focus {
         if focus.has_focus {
-            info!("[select] blocked — SlintUIFocus.has_focus=true");
+            debug!("[select] blocked — SlintUIFocus.has_focus=true");
             return;
         }
     }
@@ -78,15 +78,14 @@ pub fn part_selection_system(
                 && cursor_position.y >= vb.y
                 && cursor_position.y <= vb.y + vb.height;
             if !in_viewport {
-                debug!("[select] blocked — cursor ({:.0},{:.0}) outside viewport ({:.0},{:.0} {}x{})",
-                    cursor_position.x, cursor_position.y, vb.x, vb.y, vb.width, vb.height);
+                trace!("[select] blocked — cursor outside viewport");
                 return;
             }
         } else {
-            debug!("[select] viewport bounds zero — allowing click");
+            trace!("[select] viewport bounds zero");
         }
     } else {
-        debug!("[select] no ViewportBounds resource — allowing click");
+        trace!("[select] no ViewportBounds");
     }
     
     // Check if Shift or Ctrl is pressed for multi-select

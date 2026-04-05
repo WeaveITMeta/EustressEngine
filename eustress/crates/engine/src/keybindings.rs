@@ -309,11 +309,12 @@ impl Plugin for KeyBindingsPlugin {
 /// Uses Option<ResMut> to avoid silent skip from error handler when resources are missing.
 fn dispatch_keyboard_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
-    bindings: Res<KeyBindings>,
+    bindings: Option<Res<KeyBindings>>,
     studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
 ) {
     let Some(mut studio_state) = studio_state else { return };
+    let Some(bindings) = bindings else { return };
 
     // Tool switching — directly update StudioState for instant response
     if bindings.check(Action::SelectTool, &keys) {
@@ -337,12 +338,14 @@ fn dispatch_keyboard_shortcuts(
         return;
     }
 
-    // Backspace also triggers Delete (secondary binding not in HashMap)
-    if keys.just_pressed(KeyCode::Backspace) {
+    // Backspace or Delete — direct check (bypass bindings for reliability)
+    if keys.just_pressed(KeyCode::Backspace) || keys.just_pressed(KeyCode::Delete) {
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         if !ctrl && !alt {
+            info!("⌨️ Delete/Backspace key detected directly");
             menu_events.write(crate::ui::MenuActionEvent::new(Action::Delete));
+            return;
         }
     }
 
@@ -475,10 +478,13 @@ fn handle_menu_action_events(
 
             // Delete selected entities; respawn default camera at origin if Camera class deleted
             Action::Delete => {
+                let sm_exists = selection_manager.is_some();
                 let selected_ids: std::collections::HashSet<String> = selection_manager
                     .as_ref()
                     .map(|sm| sm.0.read().get_selected().into_iter().collect())
                     .unwrap_or_default();
+
+                info!("🗑️ Delete action: sm_exists={}, selected_ids={:?}", sm_exists, selected_ids);
 
                 if selected_ids.is_empty() {
                     info!("🗑️ Delete: nothing selected");

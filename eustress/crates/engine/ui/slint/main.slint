@@ -1948,9 +1948,9 @@ export component StudioWindow inherits Window {
         
         ctx-menu := ContextMenu {
             x: min(root.context-menu-x, root.width - 224px);
-            y: min(root.context-menu-y, root.height - self.height);
+            y: min(root.context-menu-y, root.height - self.computed-height);
             width: 220px;
-            height: self.preferred-height;
+            height: self.computed-height;
             items: root.context-menu-items;
             on-action(action) => {
                 root.context-action(action);

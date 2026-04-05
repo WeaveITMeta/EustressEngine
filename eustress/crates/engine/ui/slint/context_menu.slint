@@ -137,13 +137,11 @@ export component ContextMenu inherits Rectangle {
     // size before layout — prevents the menu from being clipped by panel bounds.
     // Default (entity) menu: 10 items × 28px + 3 separators × 1px + 8px padding = 291px
     // Dynamic items menu: items.length × 28px + separator rows + 8px padding
-    property <length> items-height: root.items.length == 0
+    out property <length> computed-height: root.items.length == 0
         ? (root.show-insert-submenu ? 600px : 291px)
         : (root.items.length * 28px + 8px);
-    
+
     width: 220px;
-    height: root.items-height;
-    preferred-height: root.items-height;
     clip: false;
     background: Theme.dialog-background;
     border-radius: 4px;

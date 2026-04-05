@@ -110,10 +110,15 @@ impl SpaceFileWatcher {
             return None;
         }
         
-        // Determine file type — use from_path() for compound extensions
-        // (.glb.toml, .screengui.toml, .textlabel.toml, etc.)
-        let file_type = FileType::from_path(&path)
-            .or_else(|| path.extension().and_then(|e| e.to_str()).and_then(FileType::from_extension))?;
+        // For Remove events, file type is irrelevant — we just need the path
+        // to look up the entity in the registry and despawn it.
+        // For other events, determine file type from path/extension.
+        let file_type = if change_type == FileChangeType::Removed {
+            FileType::Toml // placeholder — not used for removal, just needs a value
+        } else {
+            FileType::from_path(&path)
+                .or_else(|| path.extension().and_then(|e| e.to_str()).and_then(FileType::from_extension))?
+        };
         
         // Determine service from path
         let service = self.extract_service_from_path(&path)?;
@@ -211,6 +216,26 @@ pub fn process_file_changes(
     
     // Clean up old entries from recently written files
     recently_written.cleanup();
+
+    // Periodic stale entity cleanup: every ~300 frames (~5s at 60fps), check if
+    // any file-loaded entities reference files that no longer exist on disk.
+    // This catches deletions the watcher might have missed (e.g. bulk delete,
+    // deletion before watcher was initialized, or directory removal).
+    static CLEANUP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let counter = CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if counter % 300 == 0 {
+        let mut stale: Vec<(Entity, std::path::PathBuf)> = Vec::new();
+        for (entity, loaded) in file_entities.iter() {
+            if !loaded.path.exists() {
+                stale.push((entity, loaded.path.clone()));
+            }
+        }
+        for (entity, path) in stale {
+            info!("🧹 Stale entity cleanup: despawning {:?} (file deleted: {:?})", entity, path);
+            commands.entity(entity).despawn();
+            registry.unregister_file(&path);
+        }
+    }
     
     let events = watcher.poll_events();
     
