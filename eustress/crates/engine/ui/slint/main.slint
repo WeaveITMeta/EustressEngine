@@ -43,6 +43,39 @@ import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.sli
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
 // ============================================================================
+// ScreenGui Element Data — pushed from Rust, rendered by Slint
+// ============================================================================
+
+export struct GuiElementData {
+    // Layout
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    z-order: int,
+    visible: bool,
+    // Appearance
+    bg-r: float,
+    bg-g: float,
+    bg-b: float,
+    bg-a: float,
+    border-size: float,
+    border-r: float,
+    border-g: float,
+    border-b: float,
+    border-a: float,
+    corner-radius: float,
+    // Text (empty string = no text)
+    text: string,
+    text-r: float,
+    text-g: float,
+    text-b: float,
+    text-a: float,
+    font-size: float,
+    text-align: string, // "left", "center", "right"
+}
+
+// ============================================================================
 // Main Studio Window Component
 // ============================================================================
 
@@ -144,6 +177,9 @@ export component StudioWindow inherits Window {
     in-out property <int> stress-errors: 0;
     callback start-stress-test(int, int, int, bool, bool); // clients, rate, duration, movement, interactions
     callback stop-stress-test();
+    // ScreenGui elements — pushed from Rust, rendered by Slint overlay
+    in property <[GuiElementData]> gui-elements: [];
+
     in-out property <bool> show-sync-domain-dialog: false;
     in-out property <bool> show-simulation-settings-dialog: false;
 
@@ -1676,6 +1712,31 @@ export component StudioWindow inherits Window {
                         }
                     }
                 }
+                // ── ScreenGui overlay ─────────────────────────────────────
+                // Renders GUI elements from TOML definitions (Frame, TextLabel, TextButton)
+                // positioned absolutely within the viewport area.
+                for elem[i] in root.gui-elements: Rectangle {
+                    x: elem.x * 1px;
+                    y: elem.y * 1px;
+                    width: elem.width * 1px;
+                    height: elem.height * 1px;
+                    visible: elem.visible;
+                    background: rgba(elem.bg-r * 255, elem.bg-g * 255, elem.bg-b * 255, elem.bg-a);
+                    border-width: elem.border-size * 1px;
+                    border-color: rgba(elem.border-r * 255, elem.border-g * 255, elem.border-b * 255, elem.border-a);
+                    border-radius: elem.corner-radius * 1px;
+
+                    if elem.text != "": Text {
+                        text: elem.text;
+                        color: rgba(elem.text-r * 255, elem.text-g * 255, elem.text-b * 255, elem.text-a);
+                        font-size: max(elem.font-size * 1px, 8px);
+                        horizontal-alignment: elem.text-align == "left" ? left :
+                                              elem.text-align == "right" ? right : center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
                 } // close viewport-sizer
                 }
             }

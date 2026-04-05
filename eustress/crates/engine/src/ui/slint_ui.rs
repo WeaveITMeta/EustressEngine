@@ -1143,6 +1143,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
+            .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
             // Window resize handling
             .add_systems(Update, handle_window_resize)
@@ -1614,29 +1615,14 @@ fn setup_slint_overlay(world: &mut World) {
     // Camera3d with orthographic projection renders on top of the main scene.
     // SkyboxAttached prevents SharedLightingPlugin from attaching a skybox to this camera,
     // which would paint over the entire 3D scene since this camera renders at order=100.
-    // ── Camera stack (order matters!) ──────────────────────────────────────
-    // Order 0:   Main Camera3d — 3D scene + sky (spawned by DefaultScenePlugin)
-    // Order 100: ScreenGui Camera2d — Bevy UI nodes (ScreenGui/Frame/TextLabel)
-    // Order 200: Slint Camera3d — Slint software-rendered overlay (editor chrome)
+    // ── Camera stack ──────────────────────────────────────────────────────
+    // Order 0:   Main Camera3d — 3D scene + sky + gizmos (selection outlines)
+    // Order 300: Slint Camera3d — Slint editor chrome + ScreenGui overlay
     //
-    // ScreenGui renders BELOW Slint so editor panels don't bleed through.
-    // Both overlay cameras use ClearColorConfig::None to composite on top.
+    // ScreenGui elements are rendered INTO the Slint texture via gui-elements
+    // model — no separate Camera2d needed. One compositor, one z-order.
 
-    // ScreenGui camera (order 100): renders Bevy UI nodes for in-game GUI.
-    // Camera2d has no 3D pipeline — no skybox, no mesh rendering, just UI.
-    world.spawn((
-        Camera2d,
-        Camera {
-            order: 100,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        bevy::ui::IsDefaultUiCamera,
-        Name::new("ScreenGui Camera"),
-    ));
-
-    // Slint overlay camera (order 200): renders the Slint editor chrome texture.
-    // Must be ABOVE ScreenGui so editor panels cover in-game UI.
+    // Slint overlay camera (order 300): renders the Slint editor chrome texture.
     world.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -1649,7 +1635,7 @@ fn setup_slint_overlay(world: &mut World) {
             ..OrthographicProjection::default_3d()
         }),
         Camera {
-            order: 200,
+            order: 300,
             clear_color: ClearColorConfig::None,
             ..default()
         },
@@ -1839,6 +1825,87 @@ static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// Only when dirty pixels exist do we call `images.get_mut()` and copy the affected
 /// rows. This avoids marking the ~8MB texture asset as modified every frame, which
 /// previously forced a full GPU re-upload even when nothing changed.
+/// Push ScreenGui elements (GuiElementDisplay components) to Slint's gui-elements model.
+/// Handles parent-child hierarchy: child positions are offset by their parent's position.
+/// Runs every frame to keep the Slint overlay in sync with ECS GUI entities.
+fn sync_gui_elements_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    gui_query: Query<(Entity, &crate::space::gui_loader::GuiElementDisplay, Option<&ChildOf>)>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    // Build parent offset map: walk up ChildOf chain to accumulate x/y offsets
+    // This handles nested Frames where child positions are relative to parent
+    let mut offset_cache: std::collections::HashMap<Entity, (f32, f32)> = std::collections::HashMap::new();
+
+    fn compute_offset(
+        entity: Entity,
+        gui_query: &Query<(Entity, &crate::space::gui_loader::GuiElementDisplay, Option<&ChildOf>)>,
+        cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
+    ) -> (f32, f32) {
+        if let Some(&cached) = cache.get(&entity) {
+            return cached;
+        }
+        let Ok((_, display, parent)) = gui_query.get(entity) else {
+            return (0.0, 0.0);
+        };
+        let parent_offset = if let Some(child_of) = parent {
+            compute_offset(child_of.parent(), gui_query, cache)
+        } else {
+            (0.0, 0.0)
+        };
+        // Check if parent itself has a GuiElementDisplay (is a Frame/ScreenGui)
+        let parent_pos = if let Some(child_of) = parent {
+            gui_query.get(child_of.parent())
+                .map(|(_, pd, _)| (pd.x, pd.y))
+                .unwrap_or((0.0, 0.0))
+        } else {
+            (0.0, 0.0)
+        };
+        let offset = (parent_offset.0 + parent_pos.0, parent_offset.1 + parent_pos.1);
+        cache.insert(entity, offset);
+        offset
+    }
+
+    // Collect and sort by z_order
+    let mut elements: Vec<(Entity, &crate::space::gui_loader::GuiElementDisplay)> =
+        gui_query.iter().map(|(e, d, _)| (e, d)).collect();
+    elements.sort_by_key(|(_, e)| e.z_order);
+
+    let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
+        let (ox, oy) = compute_offset(*entity, &gui_query, &mut offset_cache);
+        GuiElementData {
+            x: e.x + ox,
+            y: e.y + oy,
+            width: e.width,
+            height: e.height,
+            z_order: e.z_order,
+            visible: e.visible,
+            bg_r: e.bg_color[0],
+            bg_g: e.bg_color[1],
+            bg_b: e.bg_color[2],
+            bg_a: e.bg_color[3],
+            border_size: e.border_size,
+            border_r: e.border_color[0],
+            border_g: e.border_color[1],
+            border_b: e.border_color[2],
+            border_a: e.border_color[3],
+            corner_radius: e.corner_radius,
+            text: e.text.as_str().into(),
+            text_r: e.text_color[0],
+            text_g: e.text_color[1],
+            text_b: e.text_color[2],
+            text_a: e.text_color[3],
+            font_size: e.font_size,
+            text_align: e.text_align.as_str().into(),
+        }
+    }).collect();
+
+    let model = std::rc::Rc::new(slint::VecModel::from(slint_elements));
+    ui.set_gui_elements(slint::ModelRc::from(model));
+}
+
 fn render_slint_to_texture(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,

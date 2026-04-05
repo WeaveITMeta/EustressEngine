@@ -25,6 +25,26 @@ use std::path::Path;
 
 use crate::spawn::{TextLabelMarker, TextBoxMarker};
 
+/// Component storing GUI element display data for Slint rendering.
+/// Attached to every GUI entity so sync_gui_to_slint can push them to the Slint overlay.
+#[derive(Component, Debug, Clone)]
+pub struct GuiElementDisplay {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub z_order: i32,
+    pub visible: bool,
+    pub bg_color: [f32; 4],
+    pub border_size: f32,
+    pub border_color: [f32; 4],
+    pub corner_radius: f32,
+    pub text: String,
+    pub text_color: [f32; 4],
+    pub font_size: f32,
+    pub text_align: String,
+}
+
 // ============================================================================
 // 1. TOML deserialization structs
 // ============================================================================
@@ -313,6 +333,37 @@ fn spawn_screen_gui_element(
 }
 
 /// Frame — container with background color and optional border
+/// Build a GuiElementDisplay from TOML properties + optional text
+fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>) -> GuiElementDisplay {
+    let (text, text_color, font_size, text_align) = if let Some(tp) = text_props {
+        (
+            tp.text.clone(),
+            tp.text_color,
+            tp.font_size,
+            tp.text_x_alignment.clone(),
+        )
+    } else {
+        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "center".to_string())
+    };
+
+    GuiElementDisplay {
+        x: gui.position[0],
+        y: gui.position[1],
+        width: gui.size[0],
+        height: gui.size[1],
+        z_order: gui.z_index,
+        visible: gui.visible,
+        bg_color: gui.background_color,
+        border_size: gui.border_size,
+        border_color: gui.border_color,
+        corner_radius: gui.corner_radius,
+        text,
+        text_color,
+        font_size,
+        text_align,
+    }
+}
+
 fn spawn_frame_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
@@ -320,24 +371,12 @@ fn spawn_frame_element(
     display_name: &str,
     gui: &GuiTomlProperties,
 ) -> Entity {
-    let bg = to_color(&gui.background_color);
-    let border = to_color(&gui.border_color);
-
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(gui.position[0]),
-            top: Val::Px(gui.position[1]),
-            width: Val::Px(gui.size[0]),
-            height: Val::Px(gui.size[1]),
-            border: UiRect::all(Val::Px(gui.border_size)),
-            ..default()
-        },
-        BackgroundColor(bg),
-        ui::BorderColor::from(border),
-        ZIndex(gui.z_index),
+        // Minimal Node for Bevy hierarchy — actual rendering is done by Slint overlay
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, None),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -351,28 +390,13 @@ fn spawn_scrolling_frame_element(
     display_name: &str,
     gui: &GuiTomlProperties,
 ) -> Entity {
-    let bg = to_color(&gui.background_color);
-    let border = to_color(&gui.border_color);
-
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(gui.position[0]),
-            top: Val::Px(gui.position[1]),
-            width: Val::Px(gui.size[0]),
-            height: Val::Px(gui.size[1]),
-            border: UiRect::all(Val::Px(gui.border_size)),
-            overflow: Overflow::scroll(),
-            ..default()
-        },
-        BackgroundColor(bg),
-        ui::BorderColor::from(border),
-        ZIndex(gui.z_index),
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, None),
     )).id();
     commands.entity(entity).insert(loaded_from);
-    commands.entity(entity).insert(ScrollPosition::default());
     entity
 }
 
@@ -385,32 +409,14 @@ fn spawn_text_label_element(
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
-    let bg = to_color(&gui.background_color);
-    let (text_str, text_color, font_size, justify, align_items) = resolve_text_props(text_props);
-
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         TextLabelMarker,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(gui.position[0]),
-            top: Val::Px(gui.position[1]),
-            width: Val::Px(gui.size[0]),
-            height: Val::Px(gui.size[1]),
-            justify_content: justify,
-            align_items,
-            ..default()
-        },
-        BackgroundColor(bg),
-        ZIndex(gui.z_index),
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, text_props),
     )).id();
     commands.entity(entity).insert(loaded_from);
-    commands.entity(entity).insert((Text::new(text_str),
-        TextColor(text_color),
-        TextFont { font_size, ..default() },
-        bevy::ui::widget::Label,
-    ));
     entity
 }
 
@@ -423,36 +429,13 @@ fn spawn_text_button_element(
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
-    let bg = to_color(&gui.background_color);
-    let border = to_color(&gui.border_color);
-    let (text_str, text_color, font_size, _justify, _align) = resolve_text_props(text_props);
-
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(gui.position[0]),
-            top: Val::Px(gui.position[1]),
-            width: Val::Px(gui.size[0]),
-            height: Val::Px(gui.size[1]),
-            border: UiRect::all(Val::Px(gui.border_size)),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        BackgroundColor(bg),
-        ui::BorderColor::from(border),
-        ZIndex(gui.z_index),
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, text_props),
     )).id();
     commands.entity(entity).insert(loaded_from);
-    commands.entity(entity).insert((
-        bevy::ui::widget::Button,
-        Interaction::default(),
-        Text::new(text_str),
-        TextColor(text_color),
-        TextFont { font_size, ..default() },
-    ));
     entity
 }
 
@@ -465,35 +448,14 @@ fn spawn_text_box_element(
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
-    let bg = to_color(&gui.background_color);
-    let border = to_color(&gui.border_color);
-    let (text_str, text_color, font_size, _justify, _align) = resolve_text_props(text_props);
-
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         TextBoxMarker,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(gui.position[0]),
-            top: Val::Px(gui.position[1]),
-            width: Val::Px(gui.size[0]),
-            height: Val::Px(gui.size[1]),
-            border: UiRect::all(Val::Px(gui.border_size)),
-            padding: UiRect::all(Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(bg),
-        ui::BorderColor::from(border),
-        ZIndex(gui.z_index),
+        Node { display: Display::None, ..default() },
+        gui_display_from_props(gui, text_props),
     )).id();
     commands.entity(entity).insert(loaded_from);
-    commands.entity(entity).insert((
-        Interaction::default(),
-        Text::new(text_str),
-        TextColor(text_color),
-        TextFont { font_size, ..default() },
-    ));
     entity
 }
 

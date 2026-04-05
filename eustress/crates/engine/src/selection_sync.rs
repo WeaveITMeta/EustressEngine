@@ -62,8 +62,9 @@ fn sync_selection_boxes(
     mut commands: Commands,
     selection_manager: Option<Res<SelectionSyncManager>>,
     mut last_gen: ResMut<SelectionGeneration>,
-    // Query entities that could be selected — matches part_selection_system's filter
-    unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<PartEntity>, With<Instance>)>)>,
+    // Query entities that could be selected — must match part_selection_system's filter:
+    // PartEntityMarker OR PartEntity OR (BasePart + Instance)
+    unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<eustress_common::default_scene::PartEntityMarker>, With<PartEntity>, With<Instance>)>)>,
     selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<SelectionBox>>,
 ) {
     let Some(selection_manager) = selection_manager else {
