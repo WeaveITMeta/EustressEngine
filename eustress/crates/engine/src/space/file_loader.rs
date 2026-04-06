@@ -817,13 +817,15 @@ pub fn spawn_directory_entry(
         eustress_common::classes::ClassName::Folder
     };
 
-    // Spawn the Folder / ScreenGui / Model entity
-    // ScreenGui directories need Bevy UI components (Node, GlobalZIndex) instead
-    // of 3D components (Transform, Visibility) so child UI elements render correctly.
+    // Spawn the Folder / ScreenGui / Frame / Model entity
     let is_screen_gui = matches!(class_name, eustress_common::classes::ClassName::ScreenGui);
+    let is_gui_container = matches!(class_name,
+        eustress_common::classes::ClassName::Frame
+        | eustress_common::classes::ClassName::ScrollingFrame
+    );
 
     let folder_entity = if is_screen_gui {
-        // ScreenGui: fullscreen UI root — uses Node layout so children render as Bevy UI
+        // ScreenGui: fullscreen UI root
         commands.spawn((
             eustress_common::classes::Instance {
                 name: dir_meta.name.clone(),
@@ -838,14 +840,46 @@ pub fn spawn_directory_entry(
                 service: dir_meta.service.clone(),
             },
             Name::new(dir_meta.name.clone()),
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                ..default()
+            Node { display: Display::None, ..default() },
+        )).id()
+    } else if is_gui_container {
+        // Frame/ScrollingFrame directory — load GUI properties from _instance.toml
+        // and attach GuiElementDisplay so it renders through Slint overlay
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let gui_display = if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+            let class_str = format!("{:?}", class_name).to_lowercase();
+            super::gui_loader::gui_display_from_props(&gui_def.gui, gui_def.text.as_ref(), &class_str)
+        } else {
+            // Fallback: invisible container
+            eustress_common::gui::billboard_renderer::GuiElementDisplay {
+                x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+                z_order: 1, visible: true, clip_children: false,
+                scroll_x: 0.0, scroll_y: 0.0,
+                bg_color: [0.0, 0.0, 0.0, 0.0],
+                border_size: 0.0, border_color: [0.0; 4],
+                corner_radius: 0.0,
+                text: String::new(), text_color: [1.0; 4],
+                font_size: 14.0, text_align: "center".to_string(),
+                image_path: String::new(),
+                class_type: "frame".to_string(),
+            }
+        };
+        commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
             },
-            GlobalZIndex(100), // Above 3D scene, below Slint overlay
-            BackgroundColor(Color::NONE),
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Node { display: Display::None, ..default() },
+            gui_display,
         )).id()
     } else {
         // Regular Folder / Model — 3D entity
@@ -871,7 +905,7 @@ pub fn spawn_directory_entry(
     // Non-GUI directories (e.g. "scripts/") inside StarterGui need UI-compatible
     // components so Bevy doesn't panic from mixing UI and 3D hierarchies.
     // Replace Transform+Visibility with a hidden Node.
-    let is_non_gui_dir = dir_meta.service == "StarterGui" && !is_screen_gui
+    let is_non_gui_dir = dir_meta.service == "StarterGui" && !is_screen_gui && !is_gui_container
         && !matches!(class_name,
             eustress_common::classes::ClassName::Frame
             | eustress_common::classes::ClassName::ScrollingFrame
