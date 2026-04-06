@@ -4912,6 +4912,7 @@ fn sync_bevy_to_slint(
     terrain_chunks: Query<Entity, With<eustress_common::terrain::Chunk>>,
     terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
     terrain_brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
+    sim_clock: Option<Res<eustress_common::simulation::SimulationClock>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -4958,6 +4959,26 @@ fn sync_bevy_to_slint(
         if current_play_state != play_state_str {
             ui.set_play_state(play_state_str.into());
         }
+    }
+
+    // ── Per-frame: simulation clock display ──
+    if let Some(ref clock) = sim_clock {
+        let display = if clock.tick_count == 0 {
+            "0.0s | Tick 0".to_string()
+        } else {
+            let time = clock.simulation_time_s;
+            let (time_str, unit) = if time < 60.0 {
+                (format!("{:.1}", time), "s")
+            } else if time < 3600.0 {
+                (format!("{:.1}", time / 60.0), "m")
+            } else if time < 86400.0 {
+                (format!("{:.1}", time / 3600.0), "h")
+            } else {
+                (format!("{:.1}", time / 86400.0), "d")
+            };
+            format!("{}{} | Tick {} | {:.0}x", time_str, unit, clock.tick_count, clock.time_scale)
+        };
+        ui.set_sim_clock_display(display.into());
     }
 
     // ── Pre-throttle: tool and transform mode must sync every frame for responsiveness ──

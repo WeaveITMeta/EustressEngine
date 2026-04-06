@@ -18,7 +18,7 @@
 #[cfg(feature = "realism-scripting")]
 use rune::{Module, ContextError};
 
-use crate::gui::{push_gui_command, gui_snapshot_get, GuiCommand};
+use crate::gui::{push_gui_command, gui_snapshot_get, GuiCommand, push_script_log, ScriptLogLevel};
 
 /// Create a Rune module with GUI + logging functions.
 /// Install this alongside any engine/client-specific modules.
@@ -131,16 +131,19 @@ fn gui_set_font_size(name: &str, size: f64) {
 #[rune::function]
 fn log_info(msg: &str) {
     tracing::info!("[Rune] {}", msg);
+    push_script_log(ScriptLogLevel::Info, format!("[Rune] {}", msg));
 }
 
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn log_warn(msg: &str) {
     tracing::warn!("[Rune] {}", msg);
+    push_script_log(ScriptLogLevel::Warn, format!("[Rune] {}", msg));
 }
 
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn log_error(msg: &str) {
     tracing::error!("[Rune] {}", msg);
+    push_script_log(ScriptLogLevel::Error, format!("[Rune] {}", msg));
 }

@@ -1525,6 +1525,8 @@ impl Plugin for PlayModePlugin {
                     .after(crate::soul::rune_api::run_script_init),
                 crate::soul::rune_api::cleanup_script_bindings
                     .after(crate::soul::rune_api::run_script_update),
+                crate::soul::rune_api::drain_script_logs_to_output
+                    .after(crate::soul::rune_api::run_script_update),
             ).run_if(in_state(PlayModeState::Playing)))
 
             // Real-time anchored state sync during play mode

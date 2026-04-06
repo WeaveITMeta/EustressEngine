@@ -65,6 +65,7 @@ fn on_play_stop(
     mut watchpoints: ResMut<WatchPointRegistry>,
     mut breakpoints: ResMut<BreakPointRegistry>,
     mut recording: ResMut<ActiveRecording>,
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
 ) {
     sim_clock.reset();
     sim_state.reset();
@@ -89,11 +90,27 @@ fn on_play_stop(
                     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
                     let json_path = recordings_dir.join(format!("sim_{}.json", timestamp));
                     match rec.export_json(&json_path) {
-                        Ok(_) => info!("💾 Recording exported to {:?}", json_path),
-                        Err(e) => warn!("Failed to export recording: {}", e),
+                        Ok(_) => {
+                            let msg = format!("Recording exported to {}", json_path.display());
+                            info!("💾 {}", msg);
+                            if let Some(ref mut out) = output {
+                                out.info(msg);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to export recording: {}", e);
+                            if let Some(ref mut out) = output {
+                                out.error(format!("Failed to export recording: {}", e));
+                            }
+                        }
                     }
-                    // Also print summary to output
-                    info!("{}", rec.summary());
+                    // Print summary to output panel
+                    let summary = rec.summary();
+                    info!("{}", summary);
+                    if let Some(ref mut out) = output {
+                        out.info(format!("Simulation: {} ticks, {:.2}s, {} watchpoints",
+                            ticks, sim_duration, series_count));
+                    }
                 }
             }
         }

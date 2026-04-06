@@ -180,6 +180,22 @@ pub fn cleanup_script_bindings() {
     }
 }
 
+/// System: drain script log buffer into OutputConsole (runs every frame during play).
+pub fn drain_script_logs_to_output(
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+) {
+    let logs = eustress_common::gui::drain_script_logs();
+    if logs.is_empty() { return; }
+    let Some(ref mut out) = output else { return; };
+    for entry in logs {
+        match entry.level {
+            eustress_common::gui::ScriptLogLevel::Info => out.info(entry.message),
+            eustress_common::gui::ScriptLogLevel::Warn => out.warn(entry.message),
+            eustress_common::gui::ScriptLogLevel::Error => out.error(entry.message),
+        }
+    }
+}
+
 // Legacy stubs for compatibility
 pub fn execute_rune_script(_source: &str, _context: &mut super::soul_context::SoulContext) -> Result<(), String> {
     Ok(())

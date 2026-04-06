@@ -36,10 +36,15 @@ pub mod billboard_renderer;
 pub use billboard_renderer::BillboardRendererPlugin;
 
 pub mod gui_commands;
-pub use gui_commands::{GuiCommand, push_gui_command, drain_gui_commands, set_gui_snapshot, gui_snapshot_get, clear_gui_snapshot};
+pub use gui_commands::{GuiCommand, push_gui_command, drain_gui_commands, set_gui_snapshot, gui_snapshot_get, clear_gui_snapshot,
+    ScriptLogLevel, ScriptLogEntry, push_script_log, drain_script_logs};
 
 #[cfg(feature = "gui")]
 pub mod gui_bridge;
 
 #[cfg(feature = "gui")]
 pub use gui_bridge::GuiBridgePlugin;
+
+pub mod physics_commands;
+pub use physics_commands::{PhysicsCommand, PhysicsSnapshot, push_physics_command, drain_physics_commands,
+    set_physics_state, get_physics_snapshot, set_workspace_gravity, get_workspace_gravity};

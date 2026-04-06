@@ -199,6 +199,7 @@ export component StudioWindow inherits Window {
     in-out property <string> sim-max-ticks-per-frame: "10";
     in-out property <bool> sim-auto-start: false;
     in-out property <bool> sim-recording-enabled: true;
+    in-out property <string> sim-clock-display: "0.0s | Tick 0";
     in-out property <string> sim-output-dir: "recordings";
     in-out property <bool> sim-auto-export: true;
     in-out property <[WatchpointData]> sim-watchpoints: [];
@@ -1606,24 +1607,30 @@ export component StudioWindow inherits Window {
                         
                         // Snap status — hidden (accessible via keybinds 1/2/3)
                         
-                        // Play mode indicator
+                        // Play mode indicator with simulation clock
                         if root.play-state != "stopped": Rectangle {
                             x: (parent.width - self.width) / 2;
                             y: 8px;
-                            width: 140px;
+                            width: 320px;
                             height: 32px;
                             background: root.play-state == "playing" ? #2d7d46 : #7d6d2d;
                             border-radius: 4px;
-                            
+
                             HorizontalBox {
                                 padding: 8px;
+                                spacing: 12px;
                                 alignment: center;
                                 Text {
                                     text: root.play-state == "playing" ? "▶ Playing" : "⏸ Paused";
                                     color: white;
                                     font-weight: 600;
                                     vertical-alignment: center;
-                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: root.sim-clock-display;
+                                    color: #ffffffcc;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
                                 }
                             }
                         }

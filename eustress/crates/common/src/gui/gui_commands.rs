@@ -56,3 +56,37 @@ pub fn gui_snapshot_get(name: &str) -> String {
 pub fn clear_gui_snapshot() {
     GUI_SNAPSHOT.with(|s| s.borrow_mut().clear());
 }
+
+// ============================================================================
+// Script Log Buffer — routes script print/log calls to the Output panel
+// ============================================================================
+
+/// Log level for script messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptLogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// A log message from a script
+#[derive(Debug, Clone)]
+pub struct ScriptLogEntry {
+    pub level: ScriptLogLevel,
+    pub message: String,
+}
+
+thread_local! {
+    /// Pending script log entries (drained each frame by Bevy system → OutputConsole)
+    pub static SCRIPT_LOGS: RefCell<Vec<ScriptLogEntry>> = RefCell::new(Vec::new());
+}
+
+/// Push a script log message
+pub fn push_script_log(level: ScriptLogLevel, message: String) {
+    SCRIPT_LOGS.with(|logs| logs.borrow_mut().push(ScriptLogEntry { level, message }));
+}
+
+/// Drain all pending script log entries
+pub fn drain_script_logs() -> Vec<ScriptLogEntry> {
+    SCRIPT_LOGS.with(|logs| std::mem::take(&mut *logs.borrow_mut()))
+}

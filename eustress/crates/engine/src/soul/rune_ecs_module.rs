@@ -476,6 +476,10 @@ fn query_material_properties(material_name: &str) -> (f32, f32, f32) {
 #[rune::function]
 fn log_info(message: &str) {
     info!("[Rune Script] {}", message);
+    eustress_common::gui::push_script_log(
+        eustress_common::gui::ScriptLogLevel::Info,
+        format!("[Rune] {}", message),
+    );
 }
 
 /// Log warning from script
@@ -483,6 +487,10 @@ fn log_info(message: &str) {
 #[rune::function]
 fn log_warn(message: &str) {
     warn!("[Rune Script] {}", message);
+    eustress_common::gui::push_script_log(
+        eustress_common::gui::ScriptLogLevel::Warn,
+        format!("[Rune] {}", message),
+    );
 }
 
 /// Log error from script
@@ -490,6 +498,10 @@ fn log_warn(message: &str) {
 #[rune::function]
 fn log_error(message: &str) {
     error!("[Rune Script] {}", message);
+    eustress_common::gui::push_script_log(
+        eustress_common::gui::ScriptLogLevel::Error,
+        format!("[Rune] {}", message),
+    );
 }
 
 // ============================================================================
