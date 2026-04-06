@@ -2069,6 +2069,96 @@ impl LuauRuntime {
         globals.set("WorkspaceQuery", workspace_query)
             .map_err(|e| format!("Failed to set WorkspaceQuery: {}", e))?;
 
+        // ====================================================================
+        // GUI Scripting API — Roblox-compatible UI manipulation
+        // ====================================================================
+        // Mirrors the Rune GUI API. Both runtimes push to the same
+        // GUI_COMMANDS thread-local queue in eustress_common::gui.
+
+        let gui_table = lua.create_table()
+            .map_err(|e| format!("Failed to create gui table: {}", e))?;
+
+        // gui.set_text(name, text)
+        gui_table.set("set_text", lua.create_function(|_, (name, text): (String, String)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetText {
+                name, text,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_text: {}", e))?)
+            .map_err(|e| format!("set gui.set_text: {}", e))?;
+
+        // gui.get_text(name) -> string
+        gui_table.set("get_text", lua.create_function(|_, name: String| {
+            Ok(crate::gui::gui_snapshot_get(&name))
+        }).map_err(|e| format!("gui.get_text: {}", e))?)
+            .map_err(|e| format!("set gui.get_text: {}", e))?;
+
+        // gui.set_visible(name, visible)
+        gui_table.set("set_visible", lua.create_function(|_, (name, visible): (String, bool)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetVisible {
+                name, visible,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_visible: {}", e))?)
+            .map_err(|e| format!("set gui.set_visible: {}", e))?;
+
+        // gui.set_bg_color(name, r, g, b, a)
+        gui_table.set("set_bg_color", lua.create_function(|_, (name, r, g, b, a): (String, f64, f64, f64, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetBgColor {
+                name, r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_bg_color: {}", e))?)
+            .map_err(|e| format!("set gui.set_bg_color: {}", e))?;
+
+        // gui.set_text_color(name, r, g, b, a)
+        gui_table.set("set_text_color", lua.create_function(|_, (name, r, g, b, a): (String, f64, f64, f64, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetTextColor {
+                name, r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_text_color: {}", e))?)
+            .map_err(|e| format!("set gui.set_text_color: {}", e))?;
+
+        // gui.set_border_color(name, r, g, b, a)
+        gui_table.set("set_border_color", lua.create_function(|_, (name, r, g, b, a): (String, f64, f64, f64, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetBorderColor {
+                name, r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_border_color: {}", e))?)
+            .map_err(|e| format!("set gui.set_border_color: {}", e))?;
+
+        // gui.set_position(name, x, y)
+        gui_table.set("set_position", lua.create_function(|_, (name, x, y): (String, f64, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetPosition {
+                name, x: x as f32, y: y as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_position: {}", e))?)
+            .map_err(|e| format!("set gui.set_position: {}", e))?;
+
+        // gui.set_size(name, w, h)
+        gui_table.set("set_size", lua.create_function(|_, (name, w, h): (String, f64, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetSize {
+                name, w: w as f32, h: h as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_size: {}", e))?)
+            .map_err(|e| format!("set gui.set_size: {}", e))?;
+
+        // gui.set_font_size(name, size)
+        gui_table.set("set_font_size", lua.create_function(|_, (name, size): (String, f64)| {
+            crate::gui::push_gui_command(crate::gui::GuiCommand::SetFontSize {
+                name, size: size as f32,
+            });
+            Ok(())
+        }).map_err(|e| format!("gui.set_font_size: {}", e))?)
+            .map_err(|e| format!("set gui.set_font_size: {}", e))?;
+
+        globals.set("gui", gui_table)
+            .map_err(|e| format!("Failed to set gui: {}", e))?;
+
         Ok(())
     }
 }

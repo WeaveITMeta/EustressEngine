@@ -265,6 +265,17 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(part_get_velocity)?;
     module.function_meta(part_set_velocity)?;
 
+    // GUI scripting API — Roblox-compatible UI manipulation
+    module.function_meta(gui_set_text)?;
+    module.function_meta(gui_get_text)?;
+    module.function_meta(gui_set_visible)?;
+    module.function_meta(gui_set_bg_color)?;
+    module.function_meta(gui_set_text_color)?;
+    module.function_meta(gui_set_border_color)?;
+    module.function_meta(gui_set_position)?;
+    module.function_meta(gui_set_size)?;
+    module.function_meta(gui_set_font_size)?;
+
     Ok(module)
 }
 
@@ -3206,6 +3217,95 @@ fn update_part_toml(entity_name: &str, mutate: impl FnOnce(&mut toml::Value)) {
             }
             return;
         }
+    });
+}
+
+// ============================================================================
+// GUI Scripting Bridge — Roblox-compatible UI API
+// ============================================================================
+// Uses shared GuiCommand / GUI_COMMANDS / GUI_SNAPSHOT from eustress_common::gui
+// so both Rune and Luau push to the same command queue.
+//
+// Re-export for gui_bridge.rs compatibility:
+pub use eustress_common::gui::{GuiCommand, push_gui_command, drain_gui_commands, set_gui_snapshot, gui_snapshot_get, clear_gui_snapshot};
+
+// ── Rune API functions ─────────────────────────────────────────────────────
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_text(name: &str, text: &str) {
+    push_gui_command(GuiCommand::SetText {
+        name: name.to_string(),
+        text: text.to_string(),
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_get_text(name: &str) -> String {
+    gui_snapshot_get(name)
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_visible(name: &str, visible: bool) {
+    push_gui_command(GuiCommand::SetVisible {
+        name: name.to_string(),
+        visible,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_bg_color(name: &str, r: f64, g: f64, b: f64, a: f64) {
+    push_gui_command(GuiCommand::SetBgColor {
+        name: name.to_string(),
+        r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_text_color(name: &str, r: f64, g: f64, b: f64, a: f64) {
+    push_gui_command(GuiCommand::SetTextColor {
+        name: name.to_string(),
+        r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_border_color(name: &str, r: f64, g: f64, b: f64, a: f64) {
+    push_gui_command(GuiCommand::SetBorderColor {
+        name: name.to_string(),
+        r: r as f32, g: g as f32, b: b as f32, a: a as f32,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_position(name: &str, x: f64, y: f64) {
+    push_gui_command(GuiCommand::SetPosition {
+        name: name.to_string(),
+        x: x as f32, y: y as f32,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_size(name: &str, w: f64, h: f64) {
+    push_gui_command(GuiCommand::SetSize {
+        name: name.to_string(),
+        w: w as f32, h: h as f32,
+    });
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn gui_set_font_size(name: &str, size: f64) {
+    push_gui_command(GuiCommand::SetFontSize {
+        name: name.to_string(),
+        size: size as f32,
     });
 }
 

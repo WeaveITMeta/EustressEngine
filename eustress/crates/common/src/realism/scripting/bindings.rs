@@ -22,7 +22,7 @@ impl From<Entity> for ScriptEntity {
 
 impl From<ScriptEntity> for Entity {
     fn from(script_entity: ScriptEntity) -> Self {
-        Entity::from_bits(script_entity.0).unwrap_or(Entity::PLACEHOLDER)
+        Entity::from_bits(script_entity.0)
     }
 }
 
@@ -213,10 +213,6 @@ pub fn apply_script_updates(
     // Apply property updates
     for update in updates {
         let entity = Entity::from_bits(update.entity_id);
-        if entity.is_none() {
-            continue;
-        }
-        let entity = entity.unwrap();
         
         match update.property.as_str() {
             "temperature" => {
@@ -240,22 +236,21 @@ pub fn apply_script_updates(
     // Apply forces
     for force_app in forces {
         let entity = Entity::from_bits(force_app.entity_id);
-        if entity.is_none() {
-            continue;
-        }
-        let entity = entity.unwrap();
         
+        let force = Vec3::new(
+            force_app.force[0] as f32,
+            force_app.force[1] as f32,
+            force_app.force[2] as f32,
+        );
+
+        // Read mass before taking mutable borrow on KineticState
+        let mass = world.get::<crate::realism::particles::components::Particle>(entity)
+            .map(|p| p.mass);
+
         if let Some(mut kinetic) = world.get_mut::<KineticState>(entity) {
-            let force = Vec3::new(
-                force_app.force[0] as f32,
-                force_app.force[1] as f32,
-                force_app.force[2] as f32,
-            );
-            
             if force_app.is_impulse {
-                // Get mass for impulse calculation
-                if let Some(particle) = world.get::<crate::realism::particles::components::Particle>(entity) {
-                    kinetic.apply_impulse(force, particle.mass);
+                if let Some(m) = mass {
+                    kinetic.apply_impulse(force, m);
                 }
             } else {
                 kinetic.apply_force(force);

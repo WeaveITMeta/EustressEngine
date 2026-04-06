@@ -2,7 +2,7 @@
 //! Uses local LLM to generate dynamic narrative from connection graph
 
 use bevy::prelude::*;
-use eustress_common::{Connection, ConnectionType};
+use eustress_common::{SceneConnection as Connection, ConnectionType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

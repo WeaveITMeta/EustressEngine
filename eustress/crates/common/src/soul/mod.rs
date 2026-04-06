@@ -44,6 +44,9 @@ pub mod types;
 pub mod parser;
 pub mod config;
 pub mod toon;
+pub mod rune_runtime;
+pub mod vm_pool;
+pub mod rune_gui_module;
 
 pub use ast::*;
 pub use context::*;

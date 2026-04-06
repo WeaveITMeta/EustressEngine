@@ -402,27 +402,27 @@ pub fn event_bus_rune_module() -> Result<rune::Module, rune::ContextError> {
         with_event_bus((), |bus| {
             bus.fire(&name, vec![SignalArg::String(msg)]);
         });
-    })?;
+    }).build()?;
 
     m.function("fire_number", |name: String, value: f64| {
         with_event_bus((), |bus| {
             bus.fire(&name, vec![SignalArg::Number(value)]);
         });
-    })?;
+    }).build()?;
 
     m.function("fire_bool", |name: String, value: bool| {
         with_event_bus((), |bus| {
             bus.fire(&name, vec![SignalArg::Bool(value)]);
         });
-    })?;
+    }).build()?;
 
     m.function("event_names", || -> Vec<String> {
         with_event_bus(vec![], |bus| bus.event_names())
-    })?;
+    }).build()?;
 
     m.function("connection_count", |name: String| -> i64 {
         with_event_bus(0i64, |bus| bus.connection_count(&name) as i64)
-    })?;
+    }).build()?;
 
     Ok(m)
 }

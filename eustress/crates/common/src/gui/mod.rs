@@ -34,3 +34,12 @@ pub mod billboard_renderer;
 
 #[cfg(feature = "gui")]
 pub use billboard_renderer::BillboardRendererPlugin;
+
+pub mod gui_commands;
+pub use gui_commands::{GuiCommand, push_gui_command, drain_gui_commands, set_gui_snapshot, gui_snapshot_get, clear_gui_snapshot};
+
+#[cfg(feature = "gui")]
+pub mod gui_bridge;
+
+#[cfg(feature = "gui")]
+pub use gui_bridge::GuiBridgePlugin;

@@ -27,6 +27,7 @@ pub mod error_tracker;
 pub mod vm_pool;
 pub mod rune_ecs_module;
 pub mod physics_bridge;
+pub mod gui_bridge;
 pub mod parallel_execution;
 
 pub use builder::*;

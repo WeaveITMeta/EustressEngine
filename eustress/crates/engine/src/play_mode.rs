@@ -1477,6 +1477,11 @@ impl Plugin for PlayModePlugin {
             
             // Startup: Pause physics in Edit mode (eliminates 500-750ms stutter from Avian3D)
             .add_systems(Startup, pause_physics_on_startup)
+
+            // Rune runtime: register engine modules + init resources
+            .init_resource::<crate::soul::rune_api::RuneRuntimeState>()
+            .init_resource::<crate::soul::rune_api::RuneModuleRegistry>()
+            .add_systems(Startup, crate::soul::rune_api::register_engine_rune_modules)
             
             // Systems (always run) - split into groups to avoid tuple size limits
             // handle_play_mode_ui_buttons must run after drain_slint_actions sets
@@ -1500,9 +1505,18 @@ impl Plugin for PlayModePlugin {
             // Systems that run when entering/exiting play mode
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
             .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
+            .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
-            
+            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop)
+
+            // Rune script execution during play mode
+            .add_systems(Update, (
+                crate::soul::rune_api::run_script_init,
+                crate::soul::rune_api::run_script_update
+                    .after(crate::soul::rune_api::run_script_init),
+            ).run_if(in_state(PlayModeState::Playing)))
+
             // Real-time anchored state sync during play mode
             .add_systems(Update, sync_anchored_to_rigidbody.run_if(in_state(PlayModeState::Playing)));
         

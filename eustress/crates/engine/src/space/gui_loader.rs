@@ -224,6 +224,21 @@ pub fn gui_class_from_extension(path: &Path) -> &'static str {
     "Frame" // default
 }
 
+/// Map GUI type string to ClassName enum
+pub fn gui_class_name_from_type(gui_type: &str) -> eustress_common::classes::ClassName {
+    use eustress_common::classes::ClassName;
+    match gui_type {
+        "ScreenGui" => ClassName::ScreenGui,
+        "Frame" => ClassName::Frame,
+        "TextLabel" => ClassName::TextLabel,
+        "TextButton" => ClassName::TextButton,
+        "ImageLabel" => ClassName::ImageLabel,
+        "ScrollingFrame" => ClassName::ScrollingFrame,
+        "TextBox" => ClassName::TextBox,
+        _ => ClassName::Frame,
+    }
+}
+
 /// Extract display name from filename (everything before first dot)
 pub fn gui_display_name(path: &Path) -> String {
     path.file_name()

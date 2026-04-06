@@ -16,6 +16,7 @@
 mod components;
 mod systems;
 mod plugins;
+mod soul;
 
 use bevy::prelude::*;
 use avian3d::prelude::*;
@@ -23,7 +24,7 @@ use eustress_common::{spawn_baseplate, spawn_welcome_cube};
 use eustress_common::services::TeamServicePlugin;
 use eustress_networking::p2p::DistributedWorldPlugin;
 use plugins::{
-    EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin, 
+    EnhancementPlugin, PlayerServicePlugin, LightingServicePlugin,
     PauseMenuPlugin, ClientTerrainPlugin, CharacterAnimationPlugin,
 };
 use eustress_common::plugins::SkinnedCharacterPlugin;
@@ -78,6 +79,10 @@ fn main() {
         // Enhancement pipeline
         .add_plugins(EnhancementPlugin)
         
+        // Soul scripting — Rune + Luau + GUI bridge
+        .add_plugins(soul::ClientSoulPlugin)
+        .add_plugins(soul::ClientPhysicsBridgePlugin)
+
         // P2P Distributed World (CRDT-based chunk sync)
         .add_plugins(DistributedWorldPlugin)
         

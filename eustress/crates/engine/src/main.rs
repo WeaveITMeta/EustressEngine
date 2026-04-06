@@ -287,6 +287,7 @@ fn main() {
         // Soul scripting + physics bridge
         .add_plugins(EngineSoulPlugin)
         .add_plugins(soul::physics_bridge::RunePhysicsBridgePlugin)
+        .add_plugins(soul::gui_bridge::GuiBridgePlugin)
         // Workshop (System 0: Ideation — conversational product creation)
         .add_plugins(WorkshopPlugin)
         // Generative pipeline

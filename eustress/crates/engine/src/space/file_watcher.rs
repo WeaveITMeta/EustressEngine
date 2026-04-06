@@ -601,6 +601,80 @@ fn handle_file_created(
             }
         }
         
+        FileType::GuiElement => {
+            // Hot-load new GUI element TOML (TextLabel, TextButton, Frame, etc.)
+            match super::gui_loader::load_gui_definition(&event.path) {
+                Ok(gui_def) => {
+                    let gui_type = super::gui_loader::gui_class_from_extension(&event.path);
+                    let display = super::gui_loader::gui_display_from_props(
+                        &gui_def.gui,
+                        gui_def.text.as_ref(),
+                        gui_type,
+                    );
+                    let name = if !gui_def.instance.name.is_empty() {
+                        gui_def.instance.name.clone()
+                    } else {
+                        event.path.file_stem()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    };
+
+                    let class_name = super::gui_loader::gui_class_name_from_type(gui_type);
+
+                    let entity = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: name.clone(),
+                            class_name,
+                            archivable: true,
+                            id: 0,
+                            ai: false,
+                        },
+                        display,
+                        Node { display: Display::None, ..default() },
+                        super::file_loader::LoadedFromFile {
+                            path: event.path.clone(),
+                            file_type: event.file_type,
+                            service: event.service.clone(),
+                        },
+                        Name::new(name.clone()),
+                    )).id();
+
+                    // Parent to containing directory entity if it exists
+                    if let Some(parent_dir) = event.path.parent() {
+                        let parent_instance = parent_dir.join("_instance.toml");
+                        if let Some(parent_entity) = registry.get_entity(&parent_instance) {
+                            commands.entity(entity).insert(ChildOf(parent_entity));
+                        } else {
+                            // Try parent service
+                            let service_toml = space_root.join(&event.service).join("_service.toml");
+                            if let Some(service_entity) = registry.get_entity(&service_toml) {
+                                commands.entity(entity).insert(ChildOf(service_entity));
+                            }
+                        }
+                    }
+
+                    registry.register(
+                        event.path.clone(),
+                        entity,
+                        super::file_loader::FileMetadata {
+                            path: event.path.clone(),
+                            file_type: event.file_type,
+                            service: event.service.clone(),
+                            name,
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        },
+                    );
+                    info!("➕ Loaded new GUI element: {:?}", event.path);
+                }
+                Err(e) => {
+                    error!("Failed to load new GUI element {:?}: {}", event.path, e);
+                }
+            }
+        }
+
         FileType::Material => {
             // Hot-load new .mat.toml files into MaterialRegistry
             match super::material_loader::load_material_definition(&event.path) {

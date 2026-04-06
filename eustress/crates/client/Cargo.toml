@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Workspace members
-eustress-common = { path = "../common", features = ["gui"] }
+eustress-common = { path = "../common", features = ["gui", "realism-scripting", "luau", "physics", "realism"] }
 eustress-networking = { path = "../common/eustress-networking", features = ["p2p"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 
@@ -51,6 +51,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 rand = "0.8"
 gltf = "1.4.1"
+rune = "0.14"
 
 # AI/ML (uncomment when ready)
 # candle-core = { git = "https://github.com/huggingface/candle.git", rev = "candle-v0.6.0" }
