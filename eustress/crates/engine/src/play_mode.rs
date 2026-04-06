@@ -1510,11 +1510,19 @@ impl Plugin for PlayModePlugin {
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop)
 
-            // Rune script execution during play mode
+            // Rune script execution during play mode:
+            // 1. Populate thread-locals from ECS (sim values, entity snapshots)
+            // 2. Run on_init() for newly compiled scripts
+            // 3. Run on_update(dt) each frame
+            // 4. Clear thread-locals
             .add_systems(Update, (
-                crate::soul::rune_api::run_script_init,
+                crate::soul::rune_api::prepare_script_bindings,
+                crate::soul::rune_api::run_script_init
+                    .after(crate::soul::rune_api::prepare_script_bindings),
                 crate::soul::rune_api::run_script_update
                     .after(crate::soul::rune_api::run_script_init),
+                crate::soul::rune_api::cleanup_script_bindings
+                    .after(crate::soul::rune_api::run_script_update),
             ).run_if(in_state(PlayModeState::Playing)))
 
             // Real-time anchored state sync during play mode

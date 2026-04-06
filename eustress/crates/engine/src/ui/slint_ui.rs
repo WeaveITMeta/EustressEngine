@@ -2400,6 +2400,7 @@ struct DrainActionQueries<'w, 's> {
     terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
     terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+    gui_displays: Query<'w, 's, &'static mut eustress_common::gui::billboard_renderer::GuiElementDisplay>,
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
@@ -3582,10 +3583,120 @@ fn drain_slint_actions(
                                 bp.locked = val == "true";
                             }
                         }
+                        // GUI element properties — live-update GuiElementDisplay component
+                        "FontSize" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.font_size = v.max(1.0);
+                                }
+                            }
+                        }
+                        "BackgroundColor" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                if parts.len() >= 3 {
+                                    // Input is 0-255 scale
+                                    gui.bg_color = [
+                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.bg_color[3]),
+                                    ];
+                                }
+                            }
+                        }
+                        "TextColor" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                if parts.len() >= 3 {
+                                    gui.text_color = [
+                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.text_color[3]),
+                                    ];
+                                }
+                            }
+                        }
+                        "BorderColor" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                if parts.len() >= 3 {
+                                    gui.border_color = [
+                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.border_color[3]),
+                                    ];
+                                }
+                            }
+                        }
+                        "BackgroundAlpha" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.bg_color[3] = v.clamp(0.0, 1.0);
+                                }
+                            }
+                        }
+                        "BorderAlpha" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.border_color[3] = v.clamp(0.0, 1.0);
+                                }
+                            }
+                        }
+                        "TextAlpha" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.text_color[3] = v.clamp(0.0, 1.0);
+                                }
+                            }
+                        }
+                        "Visible" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                gui.visible = val == "true";
+                            }
+                        }
+                        "ZOrder" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<i32>() {
+                                    gui.z_order = v;
+                                }
+                            }
+                        }
+                        "BorderSize" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.border_size = v;
+                                }
+                            }
+                        }
+                        "CornerRadius" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    gui.corner_radius = v;
+                                }
+                            }
+                        }
+                        "Text" => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                gui.text = val.clone();
+                            }
+                        }
+                        "Position" if queries.gui_displays.get(entity).is_ok() => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                if parts.len() >= 2 {
+                                    gui.x = parts[0];
+                                    gui.y = parts[1];
+                                }
+                            }
+                        }
+                        "Size" if queries.gui_displays.get(entity).is_ok() => {
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                if parts.len() >= 2 {
+                                    gui.width = parts[0];
+                                    gui.height = parts[1];
+                                }
+                            }
+                        }
                         _ => {
-                            // TODO: UI class ECS component live mutation via PropertyAccess
-                            // This requires ui_queries ParamSet which is not available in drain_slint_actions
-                            // For now, just log unhandled properties
+                            // Unhandled property
                             if let Some(ref mut out) = res.output {
                                 out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
                             }
@@ -6802,17 +6913,20 @@ fn sync_properties_to_slint(
         add_prop("Layout", "Visible", gui.visible.to_string(), "bool", true);
         add_prop("Layout", "ClipChildren", gui.clip_children.to_string(), "bool", true);
 
-        add_prop("Appearance", "BackgroundColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
-            gui.bg_color[0], gui.bg_color[1], gui.bg_color[2], gui.bg_color[3]), "string", true);
+        add_prop("Appearance", "BackgroundColor", format!("{:.0}, {:.0}, {:.0}",
+            gui.bg_color[0] * 255.0, gui.bg_color[1] * 255.0, gui.bg_color[2] * 255.0), "string", true);
+        add_prop("Appearance", "BackgroundAlpha", format!("{:.2}", gui.bg_color[3]), "float", true);
         add_prop("Appearance", "BorderSize", format!("{:.1}", gui.border_size), "float", true);
-        add_prop("Appearance", "BorderColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
-            gui.border_color[0], gui.border_color[1], gui.border_color[2], gui.border_color[3]), "string", true);
+        add_prop("Appearance", "BorderColor", format!("{:.0}, {:.0}, {:.0}",
+            gui.border_color[0] * 255.0, gui.border_color[1] * 255.0, gui.border_color[2] * 255.0), "string", true);
+        add_prop("Appearance", "BorderAlpha", format!("{:.2}", gui.border_color[3]), "float", true);
         add_prop("Appearance", "CornerRadius", format!("{:.1}", gui.corner_radius), "float", true);
 
         if !gui.text.is_empty() {
             add_prop("Text", "Text", gui.text.clone(), "string", true);
-            add_prop("Text", "TextColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
-                gui.text_color[0], gui.text_color[1], gui.text_color[2], gui.text_color[3]), "string", true);
+            add_prop("Text", "TextColor", format!("{:.0}, {:.0}, {:.0}",
+                gui.text_color[0] * 255.0, gui.text_color[1] * 255.0, gui.text_color[2] * 255.0), "string", true);
+            add_prop("Text", "TextAlpha", format!("{:.2}", gui.text_color[3]), "float", true);
             add_prop("Text", "FontSize", format!("{:.0}", gui.font_size), "float", true);
             add_prop("Text", "TextAlign", gui.text_align.clone(), "string", true);
         }

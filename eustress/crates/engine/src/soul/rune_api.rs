@@ -99,7 +99,7 @@ pub fn compile_scripts_on_play(
     let sources: Vec<ScriptSource> = scripts.iter()
         .filter(|(_, _, data)| !data.source.is_empty() && data.run_context == super::SoulRunContext::Rune)
         .map(|(entity, name, data)| ScriptSource {
-            entity_index: u32::from(entity.index()),
+            entity_index: entity.index().index(),
             name: name.as_str().to_string(),
             source: data.source.clone(),
         })
@@ -115,6 +115,44 @@ pub fn compile_scripts_on_play(
     }
 
     let _ = sources; // suppress warning when feature disabled
+}
+
+// ============================================================================
+// Engine wrapper systems — populate thread-locals before script execution
+// ============================================================================
+
+/// System: populate ECS bindings + SIM_VALUES thread-locals before Rune scripts run.
+/// Must run BEFORE run_script_init / run_script_update each frame.
+pub fn prepare_script_bindings(
+    ecs_bindings: Option<Res<crate::ui::rune_ecs_bindings::ECSBindings>>,
+) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        // Copy ECSBindings into the thread-local for Rune function access
+        if let Some(bindings) = ecs_bindings {
+            super::rune_ecs_module::set_ecs_bindings(bindings.clone());
+
+            // Also copy simulation values into SIM_VALUES thread-local
+            // so get_sim_value("battery.voltage") etc. return real data
+            if let Ok(sim) = bindings.simulation.read() {
+                super::rune_ecs_module::SIM_VALUES.with(|sv| {
+                    let mut sv = sv.borrow_mut();
+                    for (k, v) in sim.iter() {
+                        sv.insert(k.clone(), *v);
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// System: clear thread-local bindings after Rune scripts have run.
+/// Must run AFTER run_script_update each frame.
+pub fn cleanup_script_bindings() {
+    #[cfg(feature = "realism-scripting")]
+    {
+        super::rune_ecs_module::clear_ecs_bindings();
+    }
 }
 
 // Legacy stubs for compatibility
