@@ -99,7 +99,7 @@ pub fn compile_scripts_on_play(
     let sources: Vec<ScriptSource> = scripts.iter()
         .filter(|(_, _, data)| !data.source.is_empty() && data.run_context == super::SoulRunContext::Rune)
         .map(|(entity, name, data)| ScriptSource {
-            entity_index: entity.index(),
+            entity_index: u32::from(entity.index()),
             name: name.as_str().to_string(),
             source: data.source.clone(),
         })
