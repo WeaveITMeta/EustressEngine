@@ -4,12 +4,12 @@
 //! Integrates with PlayModeState for proper play/pause/stop behavior.
 
 use bevy::prelude::*;
+use tracing::warn;
 use eustress_common::simulation::{
     SimulationClock, SimulationState, SimulationMode,
     WatchPointRegistry, BreakPointRegistry,
     SimulationRecording, TimeSeries, WatchPoint, BreakPoint, Comparison,
 };
-use std::collections::HashMap;
 
 use crate::play_mode::PlayModeState;
 
@@ -28,12 +28,18 @@ impl Plugin for SimulationPlugin {
             .register_type::<SimulationState>()
             // Sync simulation state with play mode transitions
             .add_systems(OnEnter(PlayModeState::Playing), on_play_start)
+            .add_systems(OnEnter(PlayModeState::Playing), register_battery_watchpoints)
             .add_systems(OnEnter(PlayModeState::Paused), on_play_pause)
             .add_systems(OnEnter(PlayModeState::Editing), on_play_stop)
             // Advance simulation clock when playing
             .add_systems(
                 PreUpdate,
                 advance_simulation_clock.run_if(in_state(PlayModeState::Playing)),
+            )
+            // Record watchpoint values + publish to stream each frame
+            .add_systems(
+                PostUpdate,
+                record_and_stream_watchpoints.run_if(in_state(PlayModeState::Playing)),
             );
     }
 }
@@ -65,15 +71,35 @@ fn on_play_stop(
     watchpoints.reset_all();
     breakpoints.reset_all();
     
-    // Stop and export recording if active
+    // Stop and auto-export recording if active
     if recording.enabled {
         if let Some(rec) = recording.stop() {
-            info!("📊 Simulation recording stopped: {} ticks, {:.2}s simulated", 
-                rec.metadata.total_ticks, rec.metadata.simulation_duration_s);
+            let ticks = rec.metadata.total_ticks;
+            let sim_duration = rec.metadata.simulation_duration_s;
+            let series_count = rec.series.len();
+            info!("📊 Simulation recording stopped: {} ticks, {:.2}s simulated, {} watchpoints",
+                ticks, sim_duration, series_count);
+
+            // Auto-export to space recordings directory
+            if let Some(home) = dirs::home_dir() {
+                let recordings_dir = home.join(".eustress_engine").join("recordings");
+                if let Err(e) = std::fs::create_dir_all(&recordings_dir) {
+                    warn!("Failed to create recordings dir: {}", e);
+                } else {
+                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                    let json_path = recordings_dir.join(format!("sim_{}.json", timestamp));
+                    match rec.export_json(&json_path) {
+                        Ok(_) => info!("💾 Recording exported to {:?}", json_path),
+                        Err(e) => warn!("Failed to export recording: {}", e),
+                    }
+                    // Also print summary to output
+                    info!("{}", rec.summary());
+                }
+            }
         }
     }
-    
-    info!("⏹️ Simulation stopped and reset");
+
+    info!("⏹ Simulation stopped and reset");
 }
 
 /// System to advance simulation clock each frame
@@ -170,5 +196,149 @@ pub fn register_breakpoint(
 ) {
     if let Some(comp) = Comparison::from_str(comparison) {
         registry.register(BreakPoint::new(name, variable, comp, threshold));
+    }
+}
+
+// ============================================================================
+// Battery Watchpoint Registration — auto-register for V-Cell demo
+// ============================================================================
+
+/// Register default watchpoints for the battery simulation demo.
+/// Called on OnEnter(PlayModeState::Playing).
+fn register_battery_watchpoints(
+    mut watchpoints: ResMut<WatchPointRegistry>,
+    mut recording: ResMut<ActiveRecording>,
+) {
+    // Register standard battery watchpoints if not already present
+    let battery_watchpoints = [
+        ("battery.voltage", "Cell Voltage", "V"),
+        ("battery.current", "Current", "A"),
+        ("battery.soc", "State of Charge", "%"),
+        ("battery.temperature_c", "Temperature", "°C"),
+        ("battery.power", "Power", "W"),
+        ("battery.c_rate", "C-Rate", "C"),
+        ("battery.dendrite_risk", "Dendrite Risk", "%"),
+        ("battery.capacity_retention", "Capacity Retention", "%"),
+        ("battery.cycle_count", "Cycle Count", ""),
+    ];
+
+    for (name, label, unit) in &battery_watchpoints {
+        if watchpoints.get(name).is_none() {
+            watchpoints.register(WatchPoint::new(name, label, unit));
+        }
+    }
+
+    // Start recording automatically
+    recording.start("simulation_run");
+    info!("📊 Registered {} battery watchpoints, recording started", battery_watchpoints.len());
+}
+
+// ============================================================================
+// Watchpoint Recording + Stream Publishing — runs each frame during play
+// ============================================================================
+
+/// System: read SIM_VALUES, record to watchpoints, publish to EustressStream.
+/// Runs in PostUpdate so it captures values AFTER script execution.
+fn record_and_stream_watchpoints(
+    clock: Res<SimulationClock>,
+    mut watchpoints: ResMut<WatchPointRegistry>,
+    mut recording: ResMut<ActiveRecording>,
+    mut breakpoints: ResMut<BreakPointRegistry>,
+    mut sim_state: ResMut<SimulationState>,
+    #[cfg(feature = "streaming")]
+    change_queue: Option<Res<eustress_common::change_queue::ChangeQueue>>,
+) {
+    let sim_time = clock.simulation_time_s;
+    let tick = clock.tick_count;
+
+    // Read current sim values from the thread-local (populated by prepare_script_bindings)
+    let sim_values: std::collections::HashMap<String, f64> =
+        crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| sv.borrow().clone());
+
+    if sim_values.is_empty() {
+        return;
+    }
+
+    // Record each value into its watchpoint
+    for (key, value) in &sim_values {
+        watchpoints.record(key, *value, sim_time, tick);
+
+        // Also feed into active recording time series
+        if recording.enabled {
+            if let Some(ref mut rec) = recording.recording {
+                if !rec.series.contains_key(key) {
+                    let wp = watchpoints.get(key);
+                    let label = wp.map(|w| w.label.as_str()).unwrap_or(key);
+                    let unit = wp.map(|w| w.unit.as_str()).unwrap_or("");
+                    rec.add_series(eustress_common::simulation::TimeSeries::new(key, label, unit));
+                }
+                if let Some(series) = rec.series.get_mut(key) {
+                    series.push(sim_time, *value);
+                }
+            }
+        }
+    }
+
+    // Check breakpoints
+    let triggered = breakpoints.check_all(&sim_values);
+    for bp_name in &triggered {
+        info!("🛑 Breakpoint '{}' triggered at tick {} (sim_time={:.2}s)", bp_name, tick, sim_time);
+        sim_state.hit_breakpoint(bp_name);
+
+        // Record breakpoint event in active recording
+        if recording.enabled {
+            if let Some(ref mut rec) = recording.recording {
+                let mut data = std::collections::HashMap::new();
+                // Snapshot all current values at breakpoint time
+                for (k, v) in &sim_values {
+                    data.insert(k.clone(), *v);
+                }
+                rec.add_event(eustress_common::simulation::SimulationEvent {
+                    time_s: sim_time,
+                    tick,
+                    event_type: "breakpoint".to_string(),
+                    description: format!("Breakpoint '{}' triggered", bp_name),
+                    data,
+                });
+            }
+        }
+
+        // Publish breakpoint event to stream
+        #[cfg(feature = "streaming")]
+        {
+            if let Some(ref cq) = change_queue {
+                let payload = serde_json::json!({
+                    "event": "breakpoint",
+                    "breakpoint": bp_name,
+                    "tick": tick,
+                    "sim_time_s": sim_time,
+                    "values": sim_values,
+                });
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    cq.stream.producer(eustress_common::scene_delta::TOPIC_SIM_WATCHPOINTS)
+                        .send_bytes(bytes::Bytes::from(bytes));
+                }
+            }
+        }
+    }
+
+    // Publish watchpoint values to EustressStream (if streaming feature enabled)
+    #[cfg(feature = "streaming")]
+    {
+        // Publish every 10th tick to avoid flooding the stream
+        if tick % 10 == 0 {
+            if let Some(ref cq) = change_queue {
+                let payload = serde_json::json!({
+                    "event": "tick",
+                    "tick": tick,
+                    "sim_time_s": sim_time,
+                    "values": sim_values,
+                });
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    cq.stream.producer(eustress_common::scene_delta::TOPIC_SIM_WATCHPOINTS)
+                        .send_bytes(bytes::Bytes::from(bytes));
+                }
+            }
+        }
     }
 }

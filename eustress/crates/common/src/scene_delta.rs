@@ -285,6 +285,10 @@ pub const TOPIC_WORKSHOP_ITERATIONS: &str = "workshop_iterations";
 /// One message per completed episode — carries step history, final score, and efficiency ratio.
 pub const TOPIC_ARC_EPISODES: &str = "arc_episodes";
 
+/// Simulation watchpoint time-series snapshots (voltage, SOC, temperature, etc.)
+/// One message per tick containing all watchpoint values for that tick.
+pub const TOPIC_SIM_WATCHPOINTS: &str = "sim_watchpoints";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent command / observation types (for CLI agent-in-the-loop)
 // ─────────────────────────────────────────────────────────────────────────────
