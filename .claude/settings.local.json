@@ -27,7 +27,8 @@
       "Bash(stripe --version)",
       "Bash(stripe products:*)",
       "Bash(stripe prices:*)",
-      "Bash(npx wrangler:*)"
+      "Bash(npx wrangler:*)",
+      "Read(//c/Users/miksu/Documents/Eustress/Universe1/spaces/Space1/StarterGui/BatteryHUD/**)"
     ]
   }
 }
