@@ -44,12 +44,12 @@ impl Plugin for SimulationPlugin {
     }
 }
 
-/// Called when entering Playing state - resume simulation
+/// Called when entering Playing state - ensure simulation is running
 fn on_play_start(mut sim_state: ResMut<SimulationState>) {
-    if sim_state.mode == SimulationMode::Paused {
-        sim_state.resume();
-    }
-    info!("🎮 Simulation started/resumed");
+    // Always ensure Running mode when entering play
+    sim_state.mode = SimulationMode::Running;
+    sim_state.completed = false;
+    info!("🎮 Simulation started (mode=Running)");
 }
 
 /// Called when entering Paused state - pause simulation

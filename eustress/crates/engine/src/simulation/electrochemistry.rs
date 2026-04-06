@@ -30,9 +30,72 @@ impl Plugin for ElectrochemistryPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            electrochemical_tick
-                .run_if(in_state(PlayModeState::Playing)),
-        );
+            (
+                apply_sim_values_to_ecs,
+                electrochemical_tick.after(apply_sim_values_to_ecs),
+            ).run_if(in_state(PlayModeState::Playing)),
+        )
+        .add_systems(OnEnter(PlayModeState::Playing), set_default_discharge);
+    }
+}
+
+/// Set a default 0.5C discharge current on play start so the demo shows
+/// voltage/SOC changing immediately. Scripts can override via set_sim_value.
+fn set_default_discharge(
+    mut query: Query<&mut ElectrochemicalState>,
+) {
+    for mut echem in &mut query {
+        if echem.capacity_ah > 0.0 {
+            // Default: 0.5C discharge (positive current = discharge)
+            echem.current = echem.capacity_ah * 0.5;
+            info!("⚡ Default discharge set: {:.1}A (0.5C) for {:.1}Ah cell",
+                echem.current, echem.capacity_ah);
+        }
+    }
+    // Also set the mode in SIM_VALUES so scripts know we're discharging
+    crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
+        let mut sv = sv.borrow_mut();
+        sv.insert("battery.mode".to_string(), 2.0); // 2 = discharging
+    });
+}
+
+/// Read script-set values from SIM_VALUES and apply to ECS components.
+///
+/// Scripts call set_sim_value("battery.mode", 1.0) etc. to control the
+/// simulation. This system reads those values and maps them to ECS fields.
+///
+/// Modes: 0 = idle, 1 = charging, 2 = discharging
+fn apply_sim_values_to_ecs(
+    mut query: Query<&mut ElectrochemicalState>,
+) {
+    let (mode, target_current) = crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
+        let sv = sv.borrow();
+        (
+            sv.get("battery.mode").copied().unwrap_or(2.0), // default discharge
+            sv.get("battery.target_current").copied(),
+        )
+    });
+
+    for mut echem in &mut query {
+        if echem.capacity_ah <= 0.0 { continue; }
+
+        match mode as i32 {
+            0 => {
+                // Idle — no current
+                echem.current = 0.0;
+            }
+            1 => {
+                // Charging — negative current (convention: positive = discharge)
+                let rate = target_current.unwrap_or((echem.capacity_ah * 1.0) as f64);
+                echem.current = -(rate as f32);
+            }
+            2 => {
+                // Discharging — positive current
+                let rate = target_current.unwrap_or((echem.capacity_ah * 0.5) as f64);
+                echem.current = rate as f32;
+            }
+            _ => {}
+        }
     }
 }
 
