@@ -6465,6 +6465,7 @@ fn sync_properties_to_slint(
     material_props: Query<&eustress_common::realism::materials::properties::MaterialProperties>,
     thermo_states: Query<&eustress_common::realism::particles::components::ThermodynamicState>,
     echem_states: Query<&eustress_common::realism::particles::components::ElectrochemicalState>,
+    gui_display_query: Query<&eustress_common::gui::billboard_renderer::GuiElementDisplay>,
     // UI class components collapsed into a ParamSet to stay within Bevy's 16-param system limit
     mut ui_queries: ParamSet<(
         Query<&eustress_common::classes::TextLabel>,
@@ -6789,8 +6790,38 @@ fn sync_properties_to_slint(
                 );
             }
         }
+    } else if let Ok(gui) = gui_display_query.get(selected_entity) {
+        // GUI element with GuiElementDisplay — show gui properties for live editing
+        add_prop("Data", "Name", instance.name.clone(), "string", true);
+        add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
+        add_prop("Data", "ClassType", gui.class_type.clone(), "string", false);
+
+        add_prop("Layout", "Position", format!("{:.0}, {:.0}", gui.x, gui.y), "vec3", true);
+        add_prop("Layout", "Size", format!("{:.0}, {:.0}", gui.width, gui.height), "vec3", true);
+        add_prop("Layout", "ZOrder", gui.z_order.to_string(), "int", true);
+        add_prop("Layout", "Visible", gui.visible.to_string(), "bool", true);
+        add_prop("Layout", "ClipChildren", gui.clip_children.to_string(), "bool", true);
+
+        add_prop("Appearance", "BackgroundColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
+            gui.bg_color[0], gui.bg_color[1], gui.bg_color[2], gui.bg_color[3]), "string", true);
+        add_prop("Appearance", "BorderSize", format!("{:.1}", gui.border_size), "float", true);
+        add_prop("Appearance", "BorderColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
+            gui.border_color[0], gui.border_color[1], gui.border_color[2], gui.border_color[3]), "string", true);
+        add_prop("Appearance", "CornerRadius", format!("{:.1}", gui.corner_radius), "float", true);
+
+        if !gui.text.is_empty() {
+            add_prop("Text", "Text", gui.text.clone(), "string", true);
+            add_prop("Text", "TextColor", format!("{:.2}, {:.2}, {:.2}, {:.2}",
+                gui.text_color[0], gui.text_color[1], gui.text_color[2], gui.text_color[3]), "string", true);
+            add_prop("Text", "FontSize", format!("{:.0}", gui.font_size), "float", true);
+            add_prop("Text", "TextAlign", gui.text_align.clone(), "string", true);
+        }
+
+        if !gui.image_path.is_empty() {
+            add_prop("Image", "ImagePath", gui.image_path.clone(), "string", true);
+        }
     } else {
-        // No InstanceFile or ServiceComponent — show ECS-based properties (legacy/programmatic entities)
+        // No InstanceFile, ServiceComponent, or GuiElementDisplay — show ECS-based properties
         add_prop("Data", "Name", instance.name.clone(), "string", true);
         add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
         add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
