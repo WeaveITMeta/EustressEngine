@@ -1506,9 +1506,11 @@ impl Plugin for PlayModePlugin {
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
             .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
+            .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop)
+            .add_systems(OnEnter(PlayModeState::Editing), restore_gui_on_stop)
 
             // Rune script execution during play mode:
             // 1. Populate thread-locals from ECS (sim values, entity snapshots)
@@ -1931,6 +1933,47 @@ fn sync_anchored_to_rigidbody(
             }
         }
     }
+}
+
+// ============================================================================
+// GUI Snapshot / Restore — preserve UI state across play mode
+// ============================================================================
+
+/// Resource holding snapshots of GuiElementDisplay components before play mode
+#[derive(Resource, Default)]
+struct GuiPlaySnapshot {
+    snapshots: HashMap<Entity, eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+}
+
+/// Snapshot all GuiElementDisplay components when entering play mode
+fn snapshot_gui_on_play(
+    mut commands: Commands,
+    gui_query: Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)>,
+) {
+    let mut snapshot = GuiPlaySnapshot::default();
+    for (entity, display) in &gui_query {
+        snapshot.snapshots.insert(entity, display.clone());
+    }
+    info!("📸 Snapshot {} GUI elements for play mode restore", snapshot.snapshots.len());
+    commands.insert_resource(snapshot);
+}
+
+/// Restore GuiElementDisplay components when exiting play mode
+fn restore_gui_on_stop(
+    mut commands: Commands,
+    snapshot: Option<Res<GuiPlaySnapshot>>,
+    mut gui_query: Query<(Entity, &mut eustress_common::gui::billboard_renderer::GuiElementDisplay)>,
+) {
+    let Some(snapshot) = snapshot else { return };
+    let mut restored = 0;
+    for (entity, mut display) in &mut gui_query {
+        if let Some(saved) = snapshot.snapshots.get(&entity) {
+            *display = saved.clone();
+            restored += 1;
+        }
+    }
+    info!("🔄 Restored {} GUI elements to pre-play state", restored);
+    commands.remove_resource::<GuiPlaySnapshot>();
 }
 
 // ============================================================================

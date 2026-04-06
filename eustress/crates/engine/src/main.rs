@@ -288,6 +288,7 @@ fn main() {
         .add_plugins(EngineSoulPlugin)
         .add_plugins(soul::physics_bridge::RunePhysicsBridgePlugin)
         .add_plugins(soul::gui_bridge::GuiBridgePlugin)
+        .add_plugins(ui::rune_ecs_bindings::RuneECSBindingsPlugin)
         // Workshop (System 0: Ideation — conversational product creation)
         .add_plugins(WorkshopPlugin)
         // Generative pipeline

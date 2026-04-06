@@ -96,6 +96,7 @@ pub fn compile_scripts_on_play(
     mut runtime: ResMut<RuneRuntimeState>,
     module_registry: Res<RuneModuleRegistry>,
 ) {
+    let total_scripts = scripts.iter().count();
     let sources: Vec<ScriptSource> = scripts.iter()
         .filter(|(_, _, data)| !data.source.is_empty() && data.run_context == super::SoulRunContext::Rune)
         .map(|(entity, name, data)| ScriptSource {
@@ -105,6 +106,12 @@ pub fn compile_scripts_on_play(
         })
         .collect();
 
+    info!("🎮 compile_scripts_on_play: {} total SoulScriptData entities, {} Rune scripts to compile",
+        total_scripts, sources.len());
+    for s in &sources {
+        info!("  📜 Script '{}' ({} bytes)", s.name, s.source.len());
+    }
+
     #[cfg(feature = "realism-scripting")]
     {
         eustress_common::soul::rune_runtime::compile_scripts(
@@ -112,9 +119,15 @@ pub fn compile_scripts_on_play(
             &module_registry,
             &sources,
         );
+
+        if !runtime.last_errors.is_empty() {
+            for (name, err) in &runtime.last_errors {
+                error!("❌ Script '{}' compile error: {}", name, err);
+            }
+        }
     }
 
-    let _ = sources; // suppress warning when feature disabled
+    let _ = sources;
 }
 
 // ============================================================================
@@ -123,27 +136,39 @@ pub fn compile_scripts_on_play(
 
 /// System: populate ECS bindings + SIM_VALUES thread-locals before Rune scripts run.
 /// Must run BEFORE run_script_init / run_script_update each frame.
+/// Frame counter for periodic debug logging (every 60 frames = ~1s)
+static SCRIPT_LOG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub fn prepare_script_bindings(
     ecs_bindings: Option<Res<crate::ui::rune_ecs_bindings::ECSBindings>>,
 ) {
+    let frame = SCRIPT_LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     #[cfg(feature = "realism-scripting")]
     {
-        // Copy ECSBindings into the thread-local for Rune function access
         if let Some(bindings) = ecs_bindings {
             super::rune_ecs_module::set_ecs_bindings(bindings.clone());
 
-            // Also copy simulation values into SIM_VALUES thread-local
-            // so get_sim_value("battery.voltage") etc. return real data
             if let Ok(sim) = bindings.simulation.read() {
+                let count = sim.len();
                 super::rune_ecs_module::SIM_VALUES.with(|sv| {
                     let mut sv = sv.borrow_mut();
                     for (k, v) in sim.iter() {
                         sv.insert(k.clone(), *v);
                     }
                 });
+
+                // Log every ~1 second
+                if frame % 60 == 0 && count > 0 {
+                    info!("🔗 Script bindings: {} sim values (frame {})", count, frame);
+                }
             }
+        } else if frame % 300 == 0 {
+            warn!("⚠ ECSBindings resource not found — scripts will read 0.0 for sim values");
         }
     }
+
+    let _ = frame;
 }
 
 /// System: clear thread-local bindings after Rune scripts have run.
