@@ -1149,6 +1149,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, handle_window_resize)
             // Performance tracking
             .add_systems(Update, update_ui_performance)
+            // Simulation clock display in ribbon
+            .add_systems(Update, sync_sim_clock_to_slint)
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState (runs first)
             .add_systems(Update, sync_viewport_selection_to_explorer)
             // Unified explorer sync: entities + filesystem (throttled internally)
@@ -4912,7 +4914,6 @@ fn sync_bevy_to_slint(
     terrain_chunks: Query<Entity, With<eustress_common::terrain::Chunk>>,
     terrain_mode: Option<Res<eustress_common::terrain::TerrainMode>>,
     terrain_brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
-    sim_clock: Option<Res<eustress_common::simulation::SimulationClock>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
@@ -4959,26 +4960,6 @@ fn sync_bevy_to_slint(
         if current_play_state != play_state_str {
             ui.set_play_state(play_state_str.into());
         }
-    }
-
-    // ── Per-frame: simulation clock display ──
-    if let Some(ref clock) = sim_clock {
-        let display = if clock.tick_count == 0 {
-            "0.0s | Tick 0".to_string()
-        } else {
-            let time = clock.simulation_time_s;
-            let (time_str, unit) = if time < 60.0 {
-                (format!("{:.1}", time), "s")
-            } else if time < 3600.0 {
-                (format!("{:.1}", time / 60.0), "m")
-            } else if time < 86400.0 {
-                (format!("{:.1}", time / 3600.0), "h")
-            } else {
-                (format!("{:.1}", time / 86400.0), "d")
-            };
-            format!("{}{} | Tick {} | {:.0}x", time_str, unit, clock.tick_count, clock.time_scale)
-        };
-        ui.set_sim_clock_display(display.into());
     }
 
     // ── Pre-throttle: tool and transform mode must sync every frame for responsiveness ──
@@ -5504,6 +5485,33 @@ fn update_ui_performance(
     time: Res<Time>,
 ) {
     perf.update(time.delta_secs());
+}
+
+/// Sync simulation clock display to the Slint ribbon.
+fn sync_sim_clock_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    sim_clock: Option<Res<eustress_common::simulation::SimulationClock>>,
+) {
+    let Some(ref context) = slint_context else { return };
+    let ui = &context.window;
+    if let Some(ref clock) = sim_clock {
+        let display = if clock.tick_count == 0 {
+            "0.0s | Tick 0".to_string()
+        } else {
+            let time = clock.simulation_time_s;
+            let (time_str, unit) = if time < 60.0 {
+                (format!("{:.1}", time), "s")
+            } else if time < 3600.0 {
+                (format!("{:.1}", time / 60.0), "m")
+            } else if time < 86400.0 {
+                (format!("{:.1}", time / 3600.0), "h")
+            } else {
+                (format!("{:.1}", time / 86400.0), "d")
+            };
+            format!("{}{} | Tick {} | {:.0}x", time_str, unit, clock.tick_count, clock.time_scale)
+        };
+        ui.set_sim_clock_display(display.into());
+    }
 }
 
 /// Bridges viewport click selection → UnifiedExplorerState.

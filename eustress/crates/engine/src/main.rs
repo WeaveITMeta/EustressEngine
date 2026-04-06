@@ -270,6 +270,7 @@ fn main() {
         .add_plugins(eustress_common::realism::RealismPlugin)
         // Tick-based simulation with time compression (integrates with PlayModeState)
         .add_plugins(simulation::SimulationPlugin::default())
+        .add_plugins(simulation::ElectrochemistryPlugin)
         // Gamepad
         .add_plugins(eustress_common::services::GamepadServicePlugin)
         // Notifications UI
