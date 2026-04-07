@@ -10,9 +10,9 @@
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{DistanceFog, FogFalloff, Atmosphere, AtmosphereSettings};
 use bevy::core_pipeline::Skybox;
-use bevy::light::GlobalAmbientLight;
+use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
@@ -127,19 +127,30 @@ fn setup_lighting(
     mut skybox_handle: ResMut<SkyboxHandle>,
     lighting: Res<LightingService>,
 ) {
-    info!("💡 SharedLightingPlugin: Setting up scene lighting...");
-    
-    // Create procedural skybox
+    info!("💡 SharedLightingPlugin: Setting up Bevy Atmosphere lighting...");
+
+    // Keep procedural skybox as fallback / for editor preview
     let handle = create_procedural_skybox(&mut images, &lighting);
     skybox_handle.handle = Some(handle);
-    
-    // Sun (main directional light) with shadow cascades
+
+    // Shadow cascade configuration
+    let cascade_shadow_config = CascadeShadowConfigBuilder {
+        num_cascades: 4,
+        minimum_distance: 0.1,
+        maximum_distance: 2048.0,
+        first_cascade_far_bound: 16.0,
+        overlap_proportion: 0.3,
+        ..default()
+    }
+    .build();
+
+    // Sun — uses RAW_SUNLIGHT illuminance for physically correct atmosphere scattering
     let sun_dir = lighting.sun_direction();
     let sun_class = SunClass::default();
     commands.spawn((
         DirectionalLight {
             color: arr_to_color(lighting.sun_color),
-            illuminance: lighting.sun_intensity,
+            illuminance: lux::RAW_SUNLIGHT,
             shadows_enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
@@ -148,6 +159,8 @@ fn setup_lighting(
         Transform::from_translation(sun_dir * 100.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
         Visibility::default(),
+        VolumetricLight, // God rays from sun
+        cascade_shadow_config,
         SunMarker,
         sun_class,
         Instance {
@@ -159,12 +172,12 @@ fn setup_lighting(
         },
         Name::new("Sun"),
     ));
-    
-    // Moon (night directional light)
+
+    // Moon — dimmer directional light opposite sun
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 500.0, // Visible moonlight
+            illuminance: 500.0,
             shadows_enabled: false,
             ..default()
         },
@@ -182,62 +195,41 @@ fn setup_lighting(
         },
         Name::new("Moon"),
     ));
-    
-    // Fill light (softer, opposite direction for ambient occlusion fill)
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 5000.0,
-            ..default()
-        },
-        Transform::from_xyz(-30.0, 50.0, -30.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
-        FillLight,
-        Name::new("FillLight"),
-    ));
-    
-    // Secondary fill from below/front to reduce harsh shadows
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.8, 0.85, 1.0),
-            illuminance: 2000.0,
-            ..default()
-        },
-        Transform::from_xyz(0.0, -20.0, 50.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
-        Name::new("FillLight2"),
-    ));
-    
-    // GlobalAmbientLight is a Resource in Bevy 0.18
-    commands.insert_resource(GlobalAmbientLight {
-        color: arr_to_color(lighting.ambient),
-        brightness: lighting.brightness * 800.0,
-        affects_lightmapped_meshes: true,
-    });
-    
-    info!("✅ Lighting setup complete");
+
+    // No fill lights — Bevy's Atmosphere + Environment Map handles ambient
+    commands.insert_resource(GlobalAmbientLight::NONE);
+
+    info!("✅ Bevy Atmosphere lighting setup complete");
 }
 
 /// Update sun position and properties based on LightingService
 /// Includes real-time shadow softness control
 fn update_sun_position(
-    lighting: Res<LightingService>,
+    mut lighting: ResMut<LightingService>,
     mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
+    time: Res<Time>,
 ) {
-    if !lighting.is_changed() {
-        return;
+    // Advance time of day in real-time if enabled
+    // Default cycle: 1 full day = 24 real minutes (1 game-hour per real-minute)
+    if lighting.cycle_enabled {
+        let day_length_secs = lighting.day_length_minutes * 60.0;
+        if day_length_secs > 0.0 {
+            lighting.time_of_day += time.delta_secs() / day_length_secs;
+            if lighting.time_of_day > 1.0 { lighting.time_of_day -= 1.0; }
+        }
     }
-    
+
     if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
-        // Update light properties
         sun_light.color = arr_to_color(lighting.sun_color);
-        sun_light.illuminance = lighting.sun_intensity;
-        sun_light.shadows_enabled = lighting.shadows_enabled;
-        
-        // Calculate sun position based on time of day
+
+        // Sun intensity varies with elevation (dimmer at sunrise/sunset)
         let sun_dir = lighting.sun_direction();
+        let elevation = sun_dir.y;
+        let intensity_factor = elevation.max(0.0).powf(0.4); // Smooth falloff
+        sun_light.illuminance = lighting.sun_intensity * intensity_factor;
+        sun_light.shadows_enabled = elevation > 0.05; // No shadows when sun below horizon
+
         let sun_distance = 100.0;
-        
         sun_transform.translation = sun_dir * sun_distance;
         sun_transform.look_at(Vec3::ZERO, Vec3::Y);
     }
@@ -268,7 +260,7 @@ fn update_moon_position(
     mut moon_query: Query<(&mut DirectionalLight, &mut Transform, &MoonClass), With<MoonMarker>>,
     sun_query: Query<&SunClass, With<SunMarker>>,
 ) {
-    if !lighting.is_changed() {
+    if !lighting.is_changed() && !lighting.cycle_enabled {
         return;
     }
     

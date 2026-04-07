@@ -285,14 +285,20 @@ fn ensure_camera_exists(
         
         commands.spawn((
             Camera3d::default(),
-            // ACES tone mapping — cinematic color response, proper HDR highlight rolloff
+            // ACES tone mapping — cinematic color response
             bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
-            // Bloom — HDR glow on bright surfaces (sun, emissive, neon)
-            bevy::core_pipeline::bloom::Bloom {
-                intensity: 0.15,
-                low_frequency_boost: 0.6,
-                low_frequency_boost_curvature: 0.4,
-                high_pass_frequency: 0.8,
+            // Bloom — natural HDR glow on bright surfaces
+            bevy::post_process::bloom::Bloom::NATURAL,
+            // Exposure — tuned for atmosphere-filtered sunlight
+            bevy::camera::Exposure { ev100: 13.0 },
+            // Bevy Atmosphere — physically based sky rendering
+            bevy::pbr::Atmosphere::EARTH,
+            bevy::pbr::AtmosphereSettings::default(),
+            // Environment map lighting from atmosphere (reflections + ambient)
+            bevy::light::AtmosphereEnvironmentMapLight::default(),
+            // Volumetric fog for god rays
+            bevy::light::VolumetricFog {
+                ambient_intensity: 0.0,
                 ..default()
             },
             Transform::from_xyz(10.0, 10.0, 15.0)

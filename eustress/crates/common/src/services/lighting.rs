@@ -72,6 +72,12 @@ pub struct LightingService {
     pub environment_diffuse_scale: f32,
     /// Environment specular scale
     pub environment_specular_scale: f32,
+
+    // --- Day/Night Cycle ---
+    /// Enable automatic time-of-day progression
+    pub cycle_enabled: bool,
+    /// Length of one full day in real minutes (default 24 = 1 game-hour per real-minute)
+    pub day_length_minutes: f32,
 }
 
 impl Default for LightingService {
@@ -110,6 +116,10 @@ impl Default for LightingService {
             exposure_compensation: 0.0,
             environment_diffuse_scale: 1.0,
             environment_specular_scale: 1.0,
+
+            // Day/Night Cycle
+            cycle_enabled: false, // Off by default — manual time control
+            day_length_minutes: 24.0, // 1 game-hour per real-minute
         }
     }
 }
