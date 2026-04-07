@@ -5918,6 +5918,20 @@ fn sync_unified_explorer_to_slint(
     // Service: Workspace (depth 0) + children (depth 1+)
     let has_terrain = !terrain_roots.is_empty();
     let ws_has = !workspace_roots.is_empty() || has_terrain;
+    // Sort workspace children: Camera first, then alphabetical
+    workspace_roots.sort_by(|a, b| {
+        let a_class = instances.get(*a).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
+        let b_class = instances.get(*b).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
+        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+        match (a_class, b_class) {
+            (eustress_common::classes::ClassName::Camera, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Equal,
+            (eustress_common::classes::ClassName::Camera, _) => std::cmp::Ordering::Less,
+            (_, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Greater,
+            _ => a_name.cmp(b_name),
+        }
+    });
+
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state));
     if svc_expanded("Workspace") {
         tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
