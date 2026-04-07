@@ -834,6 +834,25 @@ fn ensure_space_integrity(space_root: &Path) {
         }
     }
 
+    // Ensure Lighting children (Sun, Moon, Sky, Atmosphere, Skybox)
+    let lighting_dir = space_root.join("Lighting");
+    if lighting_dir.exists() {
+        let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("lighting_templates");
+
+        for child in &["Atmosphere", "Moon", "Sky", "Sun", "Skybox"] {
+            let child_file = lighting_dir.join(format!("{}.instance.toml", child));
+            if !child_file.exists() {
+                let template = lighting_template_dir.join(format!("{}.instance.toml", child));
+                if let Ok(content) = std::fs::read_to_string(&template) {
+                    let _ = std::fs::write(&child_file, &content);
+                    repaired += 1;
+                }
+            }
+        }
+    }
+
     // Ensure simulation.toml exists
     let sim_path = space_root.join("simulation.toml");
     if !sim_path.exists() {
