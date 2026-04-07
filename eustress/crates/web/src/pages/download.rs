@@ -12,9 +12,11 @@ use crate::components::{CentralNav, Footer};
 // Main Component
 // -----------------------------------------------------------------------------
 
-/// Download page - fetches version info from releases.eustress.dev/latest.json.
+/// Download page - auth-gated, fetches version info from releases.eustress.dev/latest.json.
 #[component]
 pub fn DownloadPage() -> impl IntoView {
+    let app_state = expect_context::<crate::state::AppState>();
+    let is_authed = move || app_state.auth.get().is_authenticated();
     let detected_os = RwSignal::new("windows".to_string());
     let version = RwSignal::new("...".to_string());
     let release_date = RwSignal::new(String::new());
@@ -102,47 +104,63 @@ pub fn DownloadPage() -> impl IntoView {
                 </div>
             </section>
             
-            // Primary Download Section
+            // Primary Download Section — auth-gated
             <section class="primary-download">
-                <div class="download-card-main">
-                    <div class="download-icon-large">
-                        <img src="/assets/icons/eustress-gear.svg" alt="Eustress" />
-                    </div>
-                    
-                    <h2>"Download for Your Platform"</h2>
-                    <p class="download-desc">"Eustress Engine is available for Windows, macOS, and Linux"</p>
-                    
-                    // Platform Buttons
-                    <div class="platform-buttons">
-                        <a href=move || win_url.get() class="platform-btn windows">
-                            <img src="/assets/icons/windows.svg" alt="Windows" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"Windows"</span>
+                <Show
+                    when=is_authed
+                    fallback=move || view! {
+                        <div class="download-card-main download-auth-gate">
+                            <div class="download-icon-large">
+                                <img src="/assets/icons/eustress-gear.svg" alt="Eustress" />
                             </div>
-                            <span class="btn-size">{move || win_size.get()}</span>
-                        </a>
+                            <h2>"Sign In to Download"</h2>
+                            <p class="download-desc">"Create a free account to download Eustress Engine. Your identity is verified for platform safety."</p>
+                            <a href="/login" class="btn-primary-glow">"Sign In / Create Account"</a>
+                        </div>
+                    }
+                >
+                    <div class="download-card-main">
+                        <div class="download-icon-large">
+                            <img src="/assets/icons/eustress-gear.svg" alt="Eustress" />
+                        </div>
 
-                        <a href=move || mac_url.get() class="platform-btn macos">
-                            <img src="/assets/icons/macos.svg" alt="macOS" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"macOS (Apple Silicon)"</span>
-                            </div>
-                            <span class="btn-size">{move || mac_size.get()}</span>
-                        </a>
+                        <h2>"Download for Your Platform"</h2>
+                        <p class="download-desc">"Eustress Engine is available for Windows, macOS, and Linux"</p>
 
-                        <a href=move || linux_url.get() class="platform-btn linux">
-                            <img src="/assets/icons/linux.svg" alt="Linux" />
-                            <div class="btn-text">
-                                <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"Linux"</span>
-                            </div>
-                            <span class="btn-size">{move || linux_size.get()}</span>
-                        </a>
+                        // Platform Buttons — URLs go through auth proxy
+                        <div class="platform-buttons">
+                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=windows-x64&url={}", win_url.get())
+                               class="platform-btn windows">
+                                <img src="/assets/icons/windows.svg" alt="Windows" />
+                                <div class="btn-text">
+                                    <span class="btn-label">"Download for"</span>
+                                    <span class="btn-platform">"Windows"</span>
+                                </div>
+                                <span class="btn-size">{move || win_size.get()}</span>
+                            </a>
+
+                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=macos-arm64&url={}", mac_url.get())
+                               class="platform-btn macos">
+                                <img src="/assets/icons/macos.svg" alt="macOS" />
+                                <div class="btn-text">
+                                    <span class="btn-label">"Download for"</span>
+                                    <span class="btn-platform">"macOS (Apple Silicon)"</span>
+                                </div>
+                                <span class="btn-size">{move || mac_size.get()}</span>
+                            </a>
+
+                            <a href=move || format!("https://api.eustress.dev/api/releases/download?platform=linux-x64&url={}", linux_url.get())
+                               class="platform-btn linux">
+                                <img src="/assets/icons/linux.svg" alt="Linux" />
+                                <div class="btn-text">
+                                    <span class="btn-label">"Download for"</span>
+                                    <span class="btn-platform">"Linux"</span>
+                                </div>
+                                <span class="btn-size">{move || linux_size.get()}</span>
+                            </a>
+                        </div>
                     </div>
-                    
-                </div>
+                </Show>
             </section>
             
             // System Requirements
