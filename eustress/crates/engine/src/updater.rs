@@ -121,16 +121,20 @@ fn sync_update_state_to_slint(
 
     // Check async download progress
     if state.status == "downloading" {
-        if let Ok(async_s) = state.async_state.lock() {
-            state.progress = async_s.progress;
-            if !async_s.status.is_empty() {
-                state.status = async_s.status.clone();
+        let (progress, new_status, error) = {
+            if let Ok(async_s) = state.async_state.lock() {
+                (
+                    async_s.progress,
+                    if !async_s.status.is_empty() { Some(async_s.status.clone()) } else { None },
+                    async_s.error.clone(),
+                )
+            } else {
+                (state.progress, None, None)
             }
-            if let Some(ref err) = async_s.error {
-                state.error = Some(err.clone());
-                state.status = "error".to_string();
-            }
-        }
+        };
+        state.progress = progress;
+        if let Some(s) = new_status { state.status = s; }
+        if let Some(e) = error { state.error = Some(e); state.status = "error".to_string(); }
     }
 
     // Sync to Slint
