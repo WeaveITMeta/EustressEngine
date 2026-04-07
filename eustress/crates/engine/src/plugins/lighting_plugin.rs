@@ -57,7 +57,9 @@ impl Plugin for LightingPlugin {
             // Update directional light from Sun class (latitude-based positioning)
             .add_systems(Update, update_directional_light_from_sun_class.after(sync_sun_with_lighting_service))
             // Sync Atmosphere entity with SceneAtmosphere resource for rendering
-            .add_systems(Update, sync_atmosphere_to_rendering);
+            .add_systems(Update, sync_atmosphere_to_rendering)
+            // Sync Lighting ServiceComponent property edits → LightingService resource
+            .add_systems(Update, sync_service_properties_to_lighting);
     }
 }
 
@@ -249,5 +251,90 @@ fn sync_atmosphere_to_rendering(
     for eustress_atmo in eustress_atmo_query.iter() {
         scene_atmosphere.atmosphere = eustress_atmo.clone();
         info!("🌫️ Synced EustressAtmosphere to rendering");
+    }
+}
+
+/// Sync Lighting ServiceComponent property edits → LightingService resource.
+///
+/// When the user edits ClockTime, Brightness, etc. in the Properties panel,
+/// those changes go to ServiceComponent first. This system reads them and
+/// writes to the live LightingService resource so Bevy systems react immediately.
+fn sync_service_properties_to_lighting(
+    mut lighting: ResMut<LightingService>,
+    service_query: Query<&crate::space::service_loader::ServiceComponent, Changed<crate::space::service_loader::ServiceComponent>>,
+) {
+    use crate::space::service_loader::PropertyValue;
+
+    for service in service_query.iter() {
+        // Only sync the Lighting service
+        if service.class_name != "Lighting" { continue; }
+
+        let props = &service.properties;
+
+        if let Some(PropertyValue::Float(v)) = props.get("clock_time") {
+            let new_tod = (*v as f32) / 24.0; // ClockTime is hours (0-24), time_of_day is 0-1
+            if (lighting.time_of_day - new_tod).abs() > 0.001 {
+                lighting.time_of_day = new_tod.clamp(0.0, 1.0);
+                lighting.clock_time = lighting.clock_time_string();
+            }
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("brightness") {
+            lighting.brightness = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("shadow_softness") {
+            lighting.shadow_softness = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("exposure_compensation") {
+            lighting.exposure_compensation = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("geographic_latitude") {
+            lighting.geographic_latitude = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("fog_start") {
+            lighting.fog_start = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("fog_end") {
+            lighting.fog_end = *v as f32;
+        }
+        if let Some(PropertyValue::Bool(v)) = props.get("fog_enabled") {
+            lighting.fog_enabled = *v;
+        }
+        if let Some(PropertyValue::Bool(v)) = props.get("shadows_enabled") {
+            lighting.shadows_enabled = *v;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("sun_intensity") {
+            lighting.sun_intensity = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("environment_diffuse_scale") {
+            lighting.environment_diffuse_scale = *v as f32;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("environment_specular_scale") {
+            lighting.environment_specular_scale = *v as f32;
+        }
+        if let Some(PropertyValue::Bool(v)) = props.get("cycle_enabled") {
+            lighting.cycle_enabled = *v;
+        }
+        if let Some(PropertyValue::Float(v)) = props.get("day_length_minutes") {
+            lighting.day_length_minutes = *v as f32;
+        }
+        // Color arrays (stored as Vec4 in ServiceComponent)
+        if let Some(PropertyValue::Vec4(v)) = props.get("fog_color") {
+            lighting.fog_color = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
+        if let Some(PropertyValue::Vec4(v)) = props.get("ambient") {
+            lighting.ambient = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
+        if let Some(PropertyValue::Vec4(v)) = props.get("outdoor_ambient") {
+            lighting.outdoor_ambient = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
+        if let Some(PropertyValue::Vec4(v)) = props.get("sun_color") {
+            lighting.sun_color = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
+        if let Some(PropertyValue::Vec4(v)) = props.get("sky_color") {
+            lighting.sky_color = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
+        if let Some(PropertyValue::Vec4(v)) = props.get("horizon_color") {
+            lighting.horizon_color = [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32];
+        }
     }
 }
