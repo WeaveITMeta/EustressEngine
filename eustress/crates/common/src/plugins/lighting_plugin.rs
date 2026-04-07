@@ -133,15 +133,16 @@ fn setup_lighting(
     let handle = create_procedural_skybox(&mut images, &lighting);
     skybox_handle.handle = Some(handle);
     
-    // Sun (main directional light) - softer shadows via increased bias
-    // Includes both marker component (for queries) and class component (for properties)
+    // Sun (main directional light) with shadow cascades
     let sun_dir = lighting.sun_direction();
     let sun_class = SunClass::default();
     commands.spawn((
         DirectionalLight {
             color: arr_to_color(lighting.sun_color),
-            illuminance: lighting.sun_intensity * 0.7,
-            shadows_enabled: lighting.shadows_enabled,
+            illuminance: lighting.sun_intensity,
+            shadows_enabled: true,
+            shadow_depth_bias: 0.02,
+            shadow_normal_bias: 1.8,
             ..default()
         },
         Transform::from_translation(sun_dir * 100.0)
@@ -159,12 +160,12 @@ fn setup_lighting(
         Name::new("Sun"),
     ));
     
-    // Moon (night directional light) - spawned as default child of Lighting
-    // Includes both marker component (for queries) and class component (for properties)
+    // Moon (night directional light)
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 0.5,
+            illuminance: 500.0, // Visible moonlight
+            shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(50.0, 80.0, -30.0)

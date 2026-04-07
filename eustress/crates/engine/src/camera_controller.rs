@@ -285,7 +285,16 @@ fn ensure_camera_exists(
         
         commands.spawn((
             Camera3d::default(),
-            bevy::core_pipeline::tonemapping::Tonemapping::Reinhard,
+            // ACES tone mapping — cinematic color response, proper HDR highlight rolloff
+            bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
+            // Bloom — HDR glow on bright surfaces (sun, emissive, neon)
+            bevy::core_pipeline::bloom::Bloom {
+                intensity: 0.15,
+                low_frequency_boost: 0.6,
+                low_frequency_boost_curvature: 0.4,
+                high_pass_frequency: 0.8,
+                ..default()
+            },
             Transform::from_xyz(10.0, 10.0, 15.0)
                 .looking_at(Vec3::ZERO, Vec3::Y),
             Projection::Perspective(PerspectiveProjection {
@@ -293,7 +302,6 @@ fn ensure_camera_exists(
                 ..default()
             }),
             cam,
-            // Instance component so Camera appears in Explorer under Workspace
             crate::classes::Instance {
                 name: "Camera".to_string(),
                 class_name: crate::classes::ClassName::Camera,
