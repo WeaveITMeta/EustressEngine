@@ -7,6 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Speed up CI compilation
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+  CARGO_PROFILE_RELEASE_LTO: false
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
@@ -14,6 +18,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +59,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   build-macos-arm64:
     runs-on: macos-14
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,7 +116,8 @@ jobs:
   # Linux x64
   # ─────────────────────────────────────────────────────────────────────
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,7 +131,7 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
-            imagemagick
+            imagemagick mold clang
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -138,6 +145,9 @@ jobs:
       - name: Build
         working-directory: eustress
         run: cargo build --release --package eustress-engine
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
       - name: Generate icons
         run: bash eustress/crates/engine/assets/linux/generate-icons.sh
