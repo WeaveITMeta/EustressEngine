@@ -384,6 +384,7 @@ pub enum SlintAction {
     RemoveIdentity(String),
 
     // Bliss node
+    UpdateClicked,
     BlissSetLight,
     BlissSetFull,
     BlissToggleEnabled,
@@ -1463,6 +1464,10 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_login_with_identity(move || q.push(SlintAction::LoginWithIdentity));
 
+    // Update system
+    let q = queue.clone();
+    ui.on_update_clicked(move || q.push(SlintAction::UpdateClicked));
+
     // Bliss node mode
     let q = queue.clone();
     ui.on_bliss_set_light(move || q.push(SlintAction::BlissSetLight));
@@ -2281,6 +2286,7 @@ struct DrainResources<'w> {
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     bliss_state: Option<ResMut<'w, crate::auth::BlissNodeState>>,
+    update_state: Option<ResMut<'w, crate::updater::UpdateState>>,
     viewport_bounds: Option<ResMut<'w, super::ViewportBounds>>,
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
@@ -2848,6 +2854,23 @@ fn drain_slint_actions(
                                 ui.set_login_error(format!("Failed to read: {}", e).into());
                             }
                         }
+                    }
+                }
+            }
+
+            // Update system
+            SlintAction::UpdateClicked => {
+                if let Some(ref mut update) = res.update_state {
+                    match update.status.as_str() {
+                        "ready" => {
+                            info!("🔄 Applying update and restarting...");
+                            crate::updater::apply_update_and_restart(update);
+                        }
+                        "" | "available" => {
+                            info!("⬇ Starting update download...");
+                            crate::updater::start_download(update);
+                        }
+                        _ => {} // downloading or error — ignore click
                     }
                 }
             }

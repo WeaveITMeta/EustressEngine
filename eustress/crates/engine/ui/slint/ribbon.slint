@@ -307,6 +307,13 @@ export component Ribbon inherits Rectangle {
     callback on-switch-identity(string);    // username to switch to
     callback on-remove-identity(string);    // username to remove from saved list
 
+    // Update system
+    in property <bool> update-available: false;
+    in property <string> update-version: "";
+    in property <string> update-status: "";  // "", "downloading", "ready"
+    in property <int> update-progress: 0;    // 0-100 download progress
+    callback on-update-clicked();
+
     // Bliss node state
     in property <string> bliss-balance: "0.000000000000000000";
     in property <string> bliss-balance-short: "0.00";
@@ -1056,6 +1063,52 @@ export component Ribbon inherits Rectangle {
                         font-size: 10px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+                }
+
+                // Update badge (only visible when update available)
+                if root.update-available: Rectangle { width: 8px; }
+                if root.update-available: Rectangle {
+                    width: root.update-status == "downloading" ? 160px : (root.update-status == "ready" ? 150px : 120px);
+                    height: 20px;
+                    background: root.update-status == "ready" ? #1a3a1a : (root.update-status == "downloading" ? #2a2a3a : #1a2a3a);
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.update-status == "ready" ? #81c78480 : #4a9eff60;
+
+                    update-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-update-clicked(); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: center;
+
+                        // Icon
+                        Text {
+                            text: root.update-status == "ready" ? "✓" : (root.update-status == "downloading" ? "⬇" : "⬆");
+                            color: root.update-status == "ready" ? #81c784 : #4a9eff;
+                            font-size: 10px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+
+                        // Label
+                        Text {
+                            text: root.update-status == "ready"
+                                ? "Restart to update"
+                                : (root.update-status == "downloading"
+                                    ? "Downloading " + root.update-progress + "%"
+                                    : "Update to " + root.update-version);
+                            color: root.update-status == "ready" ? #81c784 : #4a9eff;
+                            font-size: 10px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
                     }
                 }
 

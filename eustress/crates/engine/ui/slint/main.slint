@@ -249,6 +249,13 @@ export component StudioWindow inherits Window {
     callback switch-identity(string);
     callback remove-identity(string);
 
+    // Update system
+    in-out property <bool> update-available: false;
+    in-out property <string> update-version: "";
+    in-out property <string> update-status: "";
+    in-out property <int> update-progress: 0;
+    callback update-clicked();
+
     // Bliss node state
     in-out property <string> bliss-balance: "0.000000000000000000";
     in-out property <string> bliss-balance-short: "0.00";
@@ -614,6 +621,13 @@ export component StudioWindow inherits Window {
             on-sign-out => { root.logout(); }
             on-switch-identity(username) => { root.switch-identity(username); }
             on-remove-identity(username) => { root.remove-identity(username); }
+
+            // Update system
+            update-available: root.update-available;
+            update-version: root.update-version;
+            update-status: root.update-status;
+            update-progress: root.update-progress;
+            on-update-clicked => { root.update-clicked(); }
 
             // Bliss
             bliss-balance: root.bliss-balance;

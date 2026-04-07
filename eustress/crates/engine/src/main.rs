@@ -69,6 +69,7 @@ mod workshop;           // Workshop Panel (System 0: Ideation)
 mod manufacturing;      // Manufacturing Program: investor + manufacturer registry + AI allocation
 mod frame_diagnostics;  // Frame time tracking to identify stutters
 mod network_benchmark;  // Stress test with sysinfo hardware detection
+mod updater;            // In-app self-update system
 
 mod plugins;
 mod shaders;
@@ -292,6 +293,8 @@ fn main() {
         .add_plugins(ui::rune_ecs_bindings::RuneECSBindingsPlugin)
         // Workshop (System 0: Ideation — conversational product creation)
         .add_plugins(WorkshopPlugin)
+        // In-app updater (checks releases.eustress.dev on startup)
+        .add_plugins(updater::UpdaterPlugin)
         // Generative pipeline
         .add_plugins(generative_pipeline::GenerativePipelinePlugin)
         // VIGA
