@@ -1295,10 +1295,7 @@ fn setup_slint_overlay(world: &mut World) {
     
     // Tool selection
     let q = queue.clone();
-    ui.on_select_tool(move |tool| {
-        println!(">>> SLINT CALLBACK: on_select_tool('{}') fired!", tool);
-        q.push(SlintAction::SelectTool(tool.to_string()));
-    });
+    ui.on_select_tool(move |tool| q.push(SlintAction::SelectTool(tool.to_string())));
     
     // Transform mode
     let q = queue.clone();
@@ -1961,6 +1958,8 @@ fn render_slint_to_texture(
     
     // Update Slint timers and animations every frame (needed for animations/transitions)
     slint::platform::update_timers_and_animations();
+    // Process queued events — WITHOUT THIS, Slint callbacks NEVER fire
+    slint::platform::process_events(Default::default());
     
     let adapter = &slint_context.adapter;
     
