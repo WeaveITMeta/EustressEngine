@@ -44,7 +44,7 @@ export default {
 // ── Latest manifest (public) ────────────────────────────────────────────────
 
 async function handleLatest(env, cors) {
-  const object = await env.RELEASES.get('latest.json');
+  const object = await env.DOWNLOADS.get('latest.json');
   if (!object) {
     return jsonResponse({ error: 'No releases available' }, 404, cors);
   }
@@ -84,7 +84,7 @@ async function handleDownload(request, env, ctx, cors) {
   }
 
   // Look up the latest version manifest
-  const manifestObj = await env.RELEASES.get('latest.json');
+  const manifestObj = await env.DOWNLOADS.get('latest.json');
   if (!manifestObj) {
     return jsonResponse({ error: 'No releases available' }, 404, cors);
   }
@@ -104,7 +104,7 @@ async function handleDownload(request, env, ctx, cors) {
   const r2Key = downloadUrl.pathname.replace(/^\//, ''); // Remove leading slash
 
   // Fetch from R2
-  const object = await env.RELEASES.get(r2Key);
+  const object = await env.DOWNLOADS.get(r2Key);
   if (!object) {
     return jsonResponse({ error: 'Release artifact not found in storage' }, 404, cors);
   }
