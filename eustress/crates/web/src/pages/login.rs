@@ -610,44 +610,38 @@ pub fn LoginPage() -> impl IntoView {
                                     </p>
 
                                     // ── Verification Status Feedback ──
-                                    {move || {
-                                        let status = kyc_status_text.get();
-                                        let verified = kyc_verified.get();
-                                        let rejected = kyc_rejected.get();
-                                        let name = kyc_verified_name.get();
-                                        let reason = kyc_reject_reason.get();
-
-                                        if status.is_empty() {
-                                            None
-                                        } else if verified {
-                                            Some(view! {
-                                                <div class="kyc-status kyc-verified">
-                                                    <span class="kyc-icon">"✓"</span>
-                                                    <div>
-                                                        <strong>"Identity Verified"</strong>
-                                                        <p>{format!("Verified as {}", if name.is_empty() { "you".to_string() } else { name })}</p>
-                                                    </div>
+                                    <div class="kyc-feedback-area">
+                                        <Show when=move || kyc_verified.get()>
+                                            <div class="kyc-status kyc-verified">
+                                                <span class="kyc-icon">"✓"</span>
+                                                <div>
+                                                    <strong>"Identity Verified"</strong>
+                                                    <p>{move || {
+                                                        let name = kyc_verified_name.get();
+                                                        format!("Verified as {}", if name.is_empty() { "you".to_string() } else { name })
+                                                    }}</p>
                                                 </div>
-                                            })
-                                        } else if rejected {
-                                            Some(view! {
-                                                <div class="kyc-status kyc-rejected">
-                                                    <span class="kyc-icon">"✗"</span>
-                                                    <div>
-                                                        <strong>"Verification Failed"</strong>
-                                                        <p>{if reason.is_empty() { "Please try again with a clearer photo".to_string() } else { reason }}</p>
-                                                    </div>
+                                            </div>
+                                        </Show>
+                                        <Show when=move || kyc_rejected.get()>
+                                            <div class="kyc-status kyc-rejected">
+                                                <span class="kyc-icon">"✗"</span>
+                                                <div>
+                                                    <strong>"Verification Failed"</strong>
+                                                    <p>{move || {
+                                                        let reason = kyc_reject_reason.get();
+                                                        if reason.is_empty() { "Please try again with a clearer photo".to_string() } else { reason }
+                                                    }}</p>
                                                 </div>
-                                            })
-                                        } else {
-                                            Some(view! {
-                                                <div class="kyc-status kyc-processing">
-                                                    <span class="kyc-spinner"></span>
-                                                    <span>{status}</span>
-                                                </div>
-                                            })
-                                        }
-                                    }}
+                                            </div>
+                                        </Show>
+                                        <Show when=move || !kyc_status_text.get().is_empty() && !kyc_verified.get() && !kyc_rejected.get()>
+                                            <div class="kyc-status kyc-processing">
+                                                <span class="kyc-spinner"></span>
+                                                <span>{move || kyc_status_text.get()}</span>
+                                            </div>
+                                        </Show>
+                                    </div>
 
                                     <div class="register-nav-buttons">
                                         <button
