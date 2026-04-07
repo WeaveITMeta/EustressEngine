@@ -2800,6 +2800,108 @@ p {
    POWER FEATURES SECTION
    ───────────────────────────────────────────────────────────────────────────── */
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   SYSTEMS THAT MATTER - Real-world simulation platform
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.systems-section {
+    position: relative;
+    padding: var(--space-2xl) var(--space-xl);
+    background: linear-gradient(180deg, #0a0d12 0%, #111820 50%, #0a0d12 100%);
+    overflow: hidden;
+}
+
+.systems-bg {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.systems-grid-overlay {
+    position: absolute;
+    inset: 0;
+    background-image:
+        linear-gradient(rgba(128, 144, 160, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(128, 144, 160, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+}
+
+.systems-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: var(--space-lg);
+    max-width: 1200px;
+    margin: var(--space-xl) auto 0;
+}
+
+.systems-card {
+    position: relative;
+    padding: var(--space-xl);
+    background: rgba(16, 20, 28, 0.8);
+    border: 1px solid rgba(128, 144, 160, 0.15);
+    border-radius: var(--radius-lg);
+    transition: all 0.3s ease;
+    backdrop-filter: blur(8px);
+}
+
+.systems-card:hover {
+    border-color: rgba(128, 180, 220, 0.4);
+    transform: translateY(-4px);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4), 0 0 30px rgba(100, 160, 220, 0.05);
+}
+
+.systems-icon {
+    font-size: 40px;
+    margin-bottom: var(--space-md);
+}
+
+.systems-card h3 {
+    font-size: var(--text-xl);
+    font-weight: 700;
+    margin-bottom: var(--space-sm);
+    color: var(--color-text-primary);
+}
+
+.systems-card p {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.7;
+}
+
+.systems-cta {
+    text-align: center;
+    margin-top: var(--space-xl);
+    max-width: 800px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.systems-urgency {
+    font-size: var(--text-md);
+    color: var(--color-text-secondary);
+    font-style: italic;
+    margin-bottom: var(--space-lg);
+    line-height: 1.6;
+}
+
+.btn-primary-glow {
+    display: inline-block;
+    padding: 14px 36px;
+    background: linear-gradient(135deg, #34d058, #28a745);
+    color: white;
+    font-weight: 600;
+    font-size: var(--text-md);
+    border-radius: var(--radius-md);
+    text-decoration: none;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 20px rgba(52, 208, 88, 0.25);
+}
+
+.btn-primary-glow:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 30px rgba(52, 208, 88, 0.4);
+}
+
 .power-section {
     padding: var(--space-2xl);
     background: var(--color-bg-primary);

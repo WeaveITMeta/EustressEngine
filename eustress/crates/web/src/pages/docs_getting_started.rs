@@ -558,7 +558,7 @@ eustress space new playground
                                 <div class="code-header">
                                     <span class="code-lang">"entities.toml"</span>
                                 </div>
-                                <pre><code class="language-toml">{r#"# This is what gets written to disk — human-readable entity definitions
+                                <pre><code class="language-toml">{r##"# This is what gets written to disk — human-readable entity definitions
 
 [[entity]]
 name = "MyCube"
@@ -576,7 +576,7 @@ shape = "Sphere"
 position = [0.0, 5.0, 0.0]
 scale = [1.0, 1.0, 1.0]
 color = "#ff6b6b"
-anchored = false"#}</code></pre>
+anchored = false"##}</code></pre>
                             </div>
 
                             <div class="callout callout-info">

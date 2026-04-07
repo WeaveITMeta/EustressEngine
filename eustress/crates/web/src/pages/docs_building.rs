@@ -1791,7 +1791,7 @@ app.insert_resource(MeshStreamingConfig {
                                 <div>
                                     <strong>"Worlds of Any Size"</strong>
                                     <p>"With mesh streaming enabled, world size is limited only by disk
-                                    space, not GPU memory. A 100 km\u00B2 world with billions of triangles
+                                    space, not GPU memory. A 100 km\u{00B2} world with billions of triangles
                                     runs smoothly on 8 GB GPUs."</p>
                                 </div>
                             </div>

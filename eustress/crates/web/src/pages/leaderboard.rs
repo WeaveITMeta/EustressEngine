@@ -116,7 +116,26 @@ pub fn LeaderboardPage() -> impl IntoView {
         });
     });
 
+    // Tab state for play/work leaderboard views
+    let active_tab = RwSignal::new("play".to_string());
+    let play_leaderboard: RwSignal<Vec<LeaderboardEntry>> = RwSignal::new(Vec::new());
+    let work_leaderboard: RwSignal<Vec<LeaderboardEntry>> = RwSignal::new(Vec::new());
+
+    // Sync entries into play_leaderboard (all entries default to "play" for now)
+    Effect::new(move |_| {
+        play_leaderboard.set(entries.get());
+        work_leaderboard.set(entries.get());
+    });
+
     // Filter entries by search
+    fn filter_entries(entries: &[LeaderboardEntry], query: &str) -> Vec<LeaderboardEntry> {
+        if query.is_empty() {
+            entries.to_vec()
+        } else {
+            entries.iter().filter(|e| e.username.to_lowercase().contains(query)).cloned().collect()
+        }
+    }
+
     let filtered_entries = move || {
         let query = search_query.get().to_lowercase();
         let all = entries.get();
@@ -201,7 +220,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                     <div class="full-leaderboard">
                         // Top 3 Podium
                         <div class="podium">
-                            {play_leaderboard.get(1).map(|e| view! {
+                            {move || play_leaderboard.get().get(1).map(|e| e.clone()).map(|e| view! {
                                 <div class="podium-place second">
                                     <div class="podium-avatar">
                                         <img src="/assets/icons/user.svg" alt="Avatar" />
@@ -211,7 +230,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                     <span class="podium-hours">{format!("{:.0}h", e.hours)}</span>
                                 </div>
                             })}
-                            {play_leaderboard.first().map(|e| view! {
+                            {move || play_leaderboard.get().first().cloned().map(|e| view! {
                                 <div class="podium-place first">
                                     <div class="podium-crown">
                                         <img src="/assets/icons/trophy.svg" alt="Crown" />
@@ -224,7 +243,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                     <span class="podium-hours">{format!("{:.0}h", e.hours)}</span>
                                 </div>
                             })}
-                            {play_leaderboard.get(2).map(|e| view! {
+                            {move || play_leaderboard.get().get(2).map(|e| e.clone()).map(|e| view! {
                                 <div class="podium-place third">
                                     <div class="podium-avatar">
                                         <img src="/assets/icons/user.svg" alt="Avatar" />
@@ -245,7 +264,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                 <span class="col-streak">"Streak"</span>
                                 <span class="col-hours">"Hours"</span>
                             </div>
-                            {filter_entries(play_leaderboard.clone()).into_iter().map(|entry| {
+                            {filter_entries(&play_leaderboard.get(), &search_query.get().to_lowercase()).into_iter().map(|entry| {
                                 let profile_url = format!("/profile/{}", entry.username);
                                 let rank_class = match entry.rank {
                                     1 => "rank-cell gold",
@@ -282,7 +301,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                     <div class="full-leaderboard">
                         // Top 3 Podium
                         <div class="podium">
-                            {work_leaderboard.get(1).map(|e| view! {
+                            {move || work_leaderboard.get().get(1).cloned().map(|e| view! {
                                 <div class="podium-place second">
                                     <div class="podium-avatar">
                                         <img src="/assets/icons/user.svg" alt="Avatar" />
@@ -292,7 +311,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                     <span class="podium-hours">{format!("{:.0}h", e.hours)}</span>
                                 </div>
                             })}
-                            {work_leaderboard.first().map(|e| view! {
+                            {move || work_leaderboard.get().first().cloned().map(|e| view! {
                                 <div class="podium-place first">
                                     <div class="podium-crown">
                                         <img src="/assets/icons/trophy.svg" alt="Crown" />
@@ -305,7 +324,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                     <span class="podium-hours">{format!("{:.0}h", e.hours)}</span>
                                 </div>
                             })}
-                            {work_leaderboard.get(2).map(|e| view! {
+                            {move || work_leaderboard.get().get(2).cloned().map(|e| view! {
                                 <div class="podium-place third">
                                     <div class="podium-avatar">
                                         <img src="/assets/icons/user.svg" alt="Avatar" />
@@ -326,7 +345,7 @@ pub fn LeaderboardPage() -> impl IntoView {
                                 <span class="col-visits">"Visits"</span>
                                 <span class="col-hours">"Hours"</span>
                             </div>
-                            {filter_entries(work_leaderboard.clone()).into_iter().map(|entry| {
+                            {filter_entries(&work_leaderboard.get(), &search_query.get().to_lowercase()).into_iter().map(|entry| {
                                 let profile_url = format!("/profile/{}", entry.username);
                                 let rank_class = match entry.rank {
                                     1 => "rank-cell gold",

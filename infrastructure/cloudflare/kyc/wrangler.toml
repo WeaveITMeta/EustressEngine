@@ -12,6 +12,9 @@ bucket_name = "eustress-kyc-documents"
 binding = "KYC_STATUS"
 id = ""  # Fill after: wrangler kv:namespace create KYC_STATUS
 
+# Secrets (set via: wrangler secret put XAI_API_KEY)
+# XAI_API_KEY — xAI API key for Grok 4.2 document verification
+
 [rules]
   [[rules.include]]
   type = "Data"

@@ -688,14 +688,14 @@ pub fn LoginPage() -> impl IntoView {
                                                                         let email_toml = toml_for_email.clone();
                                                                         let email_user = uname_clone.clone();
                                                                         spawn_local(async move {
-                                                                            let _ = email_client.post("/api/identity/email-backup")
-                                                                                .json(&serde_json::json!({
+                                                                            let _: Result<serde_json::Value, _> = email_client.post(
+                                                                                "/api/identity/email-backup",
+                                                                                &serde_json::json!({
                                                                                     "email": email_to,
                                                                                     "username": email_user,
                                                                                     "toml_content": email_toml,
-                                                                                }))
-                                                                                .send()
-                                                                                .await;
+                                                                                }),
+                                                                            ).await;
                                                                         });
                                                                     }
 

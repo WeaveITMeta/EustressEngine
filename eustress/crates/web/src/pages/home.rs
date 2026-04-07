@@ -118,6 +118,46 @@ pub fn HomePage() -> impl IntoView {
             </section>
             
             // ═══════════════════════════════════════════════════════════════
+            // SYSTEMS THAT MATTER - Real-world simulation platform
+            // ═══════════════════════════════════════════════════════════════
+            <section class="systems-section">
+                <div class="systems-bg">
+                    <div class="systems-grid-overlay"></div>
+                </div>
+
+                <div class="section-header">
+                    <span class="section-tag">"SYSTEMS THAT MATTER"</span>
+                    <h2 class="section-title-epic">"From Mental Models to Working Simulations"</h2>
+                    <p class="section-desc">"The world has problems that need simulation to solve. The tools to build those simulations should be free, open, and accessible to everyone."</p>
+                </div>
+
+                <div class="systems-grid">
+                    <div class="systems-card">
+                        <div class="systems-icon">"⚛️"</div>
+                        <h3>"Simulate Reality"</h3>
+                        <p>"Every material has real properties. Every force follows real physics. Model anything from a single battery cell to an entire city's infrastructure — energy grids, emergency response networks, economic systems, supply chains. Realism isn't optional. It's the foundation."</p>
+                    </div>
+
+                    <div class="systems-card">
+                        <div class="systems-icon">"🛡️"</div>
+                        <h3>"Verify Identity, Build Trust"</h3>
+                        <p>"KYC-compliant identity verification across 72 jurisdictions. Every creator is verified. Every transaction is accountable. Eustress is a system of identification — trust isn't assumed, it's proven. Built for the real world, where accountability matters."</p>
+                    </div>
+
+                    <div class="systems-card">
+                        <div class="systems-icon">"🌍"</div>
+                        <h3>"Open Source, Free Forever"</h3>
+                        <p>"The most powerful simulation platform on Earth shouldn't be locked behind a paywall. Eustress is open source because the problems worth solving belong to everyone. Societal dynamics, climate modeling, public safety — these tools belong to the people who need them."</p>
+                    </div>
+                </div>
+
+                <div class="systems-cta">
+                    <p class="systems-urgency">"Every day without accurate simulation is a day of decisions made on assumptions. Build the model. Test the theory. Ship the solution."</p>
+                    <a href="/download" class="btn-primary-glow">"Start Building Solutions →"</a>
+                </div>
+            </section>
+
+            // ═══════════════════════════════════════════════════════════════
             // POWER FEATURES - What Makes Us Different
             // ═══════════════════════════════════════════════════════════════
             <section class="power-section">
