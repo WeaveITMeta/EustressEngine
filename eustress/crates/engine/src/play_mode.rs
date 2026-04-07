@@ -607,7 +607,7 @@ pub struct CharacterInput {
 /// Handle start play event - captures full world snapshot and spawns client-like character
 fn handle_start_play(
     mut commands: Commands,
-    mut events: MessageReader<StartPlayEvent>,
+    mut studio_state: ResMut<crate::ui::StudioState>,
     mut play_mode: ResMut<PlayMode>,
     mut runtime: ResMut<PlayModeRuntime>,
     mut snapshot_stack: ResMut<SnapshotStack>,
@@ -631,7 +631,24 @@ fn handle_start_play(
         Option<&Model>,
     ), Without<PlayModeCharacter>>,
 ) {
-    for event in events.read() {
+    // Read play requests directly from StudioState flags (set by drain_slint_actions)
+    let play_type = if studio_state.play_solo_requested {
+        studio_state.play_solo_requested = false;
+        Some(PlayModeType::Solo)
+    } else if studio_state.play_with_character_requested {
+        studio_state.play_with_character_requested = false;
+        Some(PlayModeType::WithCharacter)
+    } else {
+        None
+    };
+
+    let Some(play_type) = play_type else { return };
+    // Only start from Editing (check via play_mode — already started means skip)
+    if play_mode.started_at.is_some() { return; }
+
+    // --- Original handle_start_play logic below ---
+    {
+        let event = StartPlayEvent { play_type };
         info!("🎮 Starting play mode: {:?}", event.play_type);
         
         // Store editor camera transform for restoration
@@ -825,14 +842,14 @@ fn handle_start_play(
 /// Handle stop play event - restores world from snapshot and cleans up play mode entities
 fn handle_stop_play(
     mut commands: Commands,
-    mut events: MessageReader<StopPlayEvent>,
+    mut studio_state: ResMut<crate::ui::StudioState>,
+    current_state: Res<State<PlayModeState>>,
     mut play_mode: ResMut<PlayMode>,
     mut runtime: ResMut<PlayModeRuntime>,
     mut snapshot_stack: ResMut<SnapshotStack>,
     mut next_state: ResMut<NextState<PlayModeState>>,
     mut cursor_options: Query<&mut CursorOptions, With<Window>>,
     mut physics_time: ResMut<Time<Physics>>,
-    // Query ALL entities with Instance (not just Parts) for proper restoration
     mut restore_query: Query<(
         Entity,
         Option<&mut Transform>,
@@ -841,12 +858,15 @@ fn handle_stop_play(
         Option<&mut Humanoid>,
     ), (With<Instance>, Without<PlayModeCharacter>, Without<SpawnedDuringPlayMode>)>,
     spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
-    // Track all existing entities to find deleted ones
     all_entities: Query<Entity, With<Instance>>,
-    // Query for play mode entities to ensure they're despawned
     play_mode_entities: Query<Entity, Or<(With<PlayModeCharacter>, With<PlayModeCamera>)>>,
 ) {
-    for _ in events.read() {
+    if !studio_state.stop_requested { return; }
+    studio_state.stop_requested = false;
+
+    if !matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) { return; }
+
+    {
         info!("🛑 Stopping play mode");
         
         // Pause physics during editor mode
@@ -1202,25 +1222,26 @@ fn handle_restore_save_point(
 
 /// Handle pause toggle
 fn handle_pause_toggle(
-    mut events: MessageReader<TogglePauseEvent>,
+    mut studio_state: ResMut<crate::ui::StudioState>,
     current_state: Res<State<PlayModeState>>,
     mut next_state: ResMut<NextState<PlayModeState>>,
     mut physics_time: ResMut<Time<Physics>>,
 ) {
-    for _ in events.read() {
-        match current_state.get() {
-            PlayModeState::Playing => {
-                info!("⏸️ Pausing play mode - physics frozen");
-                physics_time.pause();
-                next_state.set(PlayModeState::Paused);
-            }
-            PlayModeState::Paused => {
-                info!("▶️ Resuming play mode - physics resumed");
-                physics_time.unpause();
-                next_state.set(PlayModeState::Playing);
-            }
-            _ => {}
+    if !studio_state.pause_requested { return; }
+    studio_state.pause_requested = false;
+
+    match current_state.get() {
+        PlayModeState::Playing => {
+            info!("⏸️ Pausing play mode - physics frozen");
+            physics_time.pause();
+            next_state.set(PlayModeState::Paused);
         }
+        PlayModeState::Paused => {
+            info!("▶️ Resuming play mode - physics resumed");
+            physics_time.unpause();
+            next_state.set(PlayModeState::Playing);
+        }
+        _ => {}
     }
 }
 
@@ -1486,21 +1507,14 @@ impl Plugin for PlayModePlugin {
             // Systems (always run) - split into groups to avoid tuple size limits
             // handle_play_mode_ui_buttons must run after drain_slint_actions sets
             // the play_solo_requested / pause_requested / stop_requested flags.
-            .add_systems(Update, (
-                handle_play_mode_ui_buttons  // Handle ribbon button clicks
-                    .after(crate::ui::slint_ui::SlintSystems::Drain),
-                play_mode_shortcuts
-                    .after(crate::ui::slint_ui::SlintSystems::Drain),
-                handle_start_play
-                    .after(handle_play_mode_ui_buttons)
-                    .after(play_mode_shortcuts),
-                handle_stop_play
-                    .after(handle_play_mode_ui_buttons)
-                    .after(play_mode_shortcuts),
-                handle_pause_toggle
-                    .after(handle_play_mode_ui_buttons)
-                    .after(play_mode_shortcuts),
-            ))
+            // Play mode handlers read StudioState flags directly
+            // (set by drain_slint_actions in the same frame — no message hop)
+            .add_systems(Update, handle_start_play)
+            .add_systems(Update, handle_stop_play
+                .after(crate::ui::slint_ui::SlintSystems::Drain))
+            .add_systems(Update, handle_pause_toggle
+                .after(crate::ui::slint_ui::SlintSystems::Drain))
+            .add_systems(Update, play_mode_shortcuts)
             .add_systems(Update, (
                 handle_create_save_point,
                 handle_restore_save_point,
