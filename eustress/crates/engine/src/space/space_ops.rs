@@ -645,8 +645,27 @@ pub fn new_universe(world: &mut World) {
             let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("assets").join("meshes"));
             copy_engine_default_parts(&requested_universe_root.join(".eustress").join("assets").join("parts"));
 
-            if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
-                notifs.success(format!("Universe created: {}", universe_name));
+            // Scaffold default Space with full service structure
+            let spaces_dir = requested_universe_root.join("spaces");
+            let author = world.get_resource::<crate::auth::AuthState>()
+                .and_then(|a| a.user.as_ref())
+                .map(|u| u.username.clone())
+                .unwrap_or_else(|| "Eustress User".to_string());
+
+            match scaffold_new_space(&spaces_dir, "Space1", &author) {
+                Ok(result) => {
+                    if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                        notifs.success(format!("Universe '{}' created with Space1", universe_name));
+                    }
+                    info!("🪐 Opening new Universe: {}", universe_name);
+                    open_space(world, &result.space_root);
+                }
+                Err(e) => {
+                    warn!("⚠ Space scaffold failed: {} — opening empty universe", e);
+                    if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                        notifs.success(format!("Universe '{}' created (empty)", universe_name));
+                    }
+                }
             }
         }
         Err(e) => {
@@ -656,6 +675,50 @@ pub fn new_universe(world: &mut World) {
             }
         }
     }
+}
+
+/// Scaffold a Space directory with all standard services and space.toml.
+fn scaffold_space(space_root: &Path) {
+    let services = [
+        ("Workspace", "workspace", "Workspace service — contains all 3D entities"),
+        ("Lighting", "lighting", "Lighting service — environment and lights"),
+        ("StarterGui", "startergui", "StarterGui service — screen UI elements"),
+        ("SoulService", "soulservice", "SoulService — scripts and logic"),
+        ("StarterPack", "starterpack", "StarterPack — default player inventory"),
+        ("StarterPlayer", "starterplayer", "StarterPlayer — player configuration"),
+        ("ReplicatedStorage", "replicatedstorage", "ReplicatedStorage — shared assets"),
+        ("ServerStorage", "serverstorage", "ServerStorage — server-only data"),
+        ("ServerScriptService", "serverscriptservice", "ServerScriptService — server scripts"),
+        ("MaterialService", "materialservice", "MaterialService — custom materials"),
+        ("SoundService", "soundservice", "SoundService — audio management"),
+    ];
+
+    for (name, id, description) in &services {
+        let service_dir = space_root.join(name);
+        if std::fs::create_dir_all(&service_dir).is_err() { continue; }
+
+        let toml = format!(
+            "[service]\nclass_name = \"{name}\"\nid = \"{id}-service\"\n\n[metadata]\ndescription = \"{description}\"\ncreated = \"{now}\"\n",
+            name = name,
+            id = id,
+            description = description,
+            now = chrono::Utc::now().to_rfc3339(),
+        );
+        let _ = std::fs::write(service_dir.join("_service.toml"), toml);
+    }
+
+    let space_name = space_root.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Space1");
+
+    let space_toml = format!(
+        "[space]\nname = \"{}\"\nversion = \"0.1.0\"\ncreated = \"{}\"\n",
+        space_name,
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let _ = std::fs::write(space_root.join("space.toml"), space_toml);
+
+    info!("📁 Scaffolded Space at {:?} with {} services", space_root, services.len());
 }
 
 pub fn new_space(world: &mut World) {

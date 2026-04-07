@@ -55,62 +55,20 @@ fn is_dir_empty(path: &Path) -> bool {
 }
 
 /// Create the default Universe + Space structure for first-time users.
-///
-/// Layout:
-/// ```
-/// Documents/Eustress/
-/// └── Universe1/
-///     └── spaces/
-///         └── Space1/
-///             ├── Workspace/
-///             │   └── _service.toml
-///             ├── Lighting/
-///             │   └── _service.toml
-///             ├── StarterGui/
-///             │   └── _service.toml
-///             ├── SoulService/
-///             │   └── _service.toml
-///             ├── StarterPack/
-///             │   └── _service.toml
-///             ├── StarterPlayer/
-///             │   └── _service.toml
-///             └── space.toml
-/// ```
+/// Uses the full scaffold_new_space from space_ops for complete setup.
 fn scaffold_default_universe(root: &Path) {
     let universe = root.join("Universe1");
-    let space = universe.join("spaces").join("Space1");
+    let spaces_dir = universe.join("spaces");
+    let _ = std::fs::create_dir_all(&spaces_dir);
 
-    let services = [
-        ("Workspace", "workspace", "Workspace service — contains all 3D entities"),
-        ("Lighting", "lighting", "Lighting service — environment and lights"),
-        ("StarterGui", "startergui", "StarterGui service — screen UI elements"),
-        ("SoulService", "soulservice", "SoulService — scripts and logic"),
-        ("StarterPack", "starterpack", "StarterPack — default player inventory"),
-        ("StarterPlayer", "starterplayer", "StarterPlayer — player configuration"),
-    ];
+    // Create Universe-level asset directories
+    let _ = std::fs::create_dir_all(universe.join(".eustress").join("assets").join("parts"));
+    let _ = std::fs::create_dir_all(universe.join(".eustress").join("assets").join("meshes"));
 
-    for (name, id, description) in &services {
-        let service_dir = space.join(name);
-        if std::fs::create_dir_all(&service_dir).is_err() { continue; }
-
-        let toml = format!(
-            "[service]\nclass_name = \"{name}\"\nid = \"{id}-service\"\n\n[metadata]\ndescription = \"{description}\"\ncreated = \"{now}\"\n",
-            name = name,
-            id = id,
-            description = description,
-            now = chrono::Utc::now().to_rfc3339(),
-        );
-        let _ = std::fs::write(service_dir.join("_service.toml"), toml);
+    match space_ops::scaffold_new_space(&spaces_dir, "Space1", "Eustress User") {
+        Ok(_) => info!("🌍 Created default Universe with Space1 at {:?}", universe),
+        Err(e) => warn!("⚠ First-launch scaffold failed: {} — creating minimal structure", e),
     }
-
-    // space.toml
-    let space_toml = format!(
-        "[space]\nname = \"Space1\"\nversion = \"0.1.0\"\ncreated = \"{}\"\n",
-        chrono::Utc::now().to_rfc3339(),
-    );
-    let _ = std::fs::write(space.join("space.toml"), space_toml);
-
-    info!("🌍 Created default Universe at {:?}", universe);
 }
 
 pub fn looks_like_space_root(path: &Path) -> bool {
