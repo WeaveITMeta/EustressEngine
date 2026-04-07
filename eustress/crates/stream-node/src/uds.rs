@@ -218,6 +218,22 @@ async fn dispatch_uds_frame(
             }).collect();
             Some(ServerFrame::TopicList(stats))
         }
+        ClientFrame::PublishBatchTopic { topic, payloads } => {
+            let offsets: Vec<u64> = payloads.into_iter()
+                .map(|p| stream.producer(&topic).send_bytes(Bytes::from(p)))
+                .collect();
+            Some(ServerFrame::BatchAck { offsets })
+        }
+        ClientFrame::PublishNoAck { topic, payload } => {
+            stream.producer(&topic).send_bytes(Bytes::from(payload));
+            None
+        }
+        ClientFrame::PublishBatchNoAck { topic, payloads } => {
+            for p in payloads {
+                stream.producer(&topic).send_bytes(Bytes::from(p));
+            }
+            None
+        }
         ClientFrame::Ping => Some(ServerFrame::Pong),
         ClientFrame::Unsubscribe { .. } => None,
     }
@@ -339,6 +355,13 @@ async fn uds_client_reader(
             Ok(ServerFrame::TopicList(list)) => {
                 if let Some(tx) = inner.topic_list_waiter.lock().await.take() {
                     let _ = tx.send(list);
+                }
+            }
+            Ok(ServerFrame::BatchAckCompact { first_offset, count }) => {
+                // Compact batch ack — expand to offsets if needed
+                let offsets: Vec<u64> = (0..count).map(|i| first_offset + i as u64).collect();
+                if let Some(tx) = inner.batch_ack_queue.lock().await.pop_front() {
+                    let _ = tx.send(offsets);
                 }
             }
             Ok(ServerFrame::Pong) => {}
