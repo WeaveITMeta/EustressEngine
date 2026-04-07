@@ -44,6 +44,11 @@ pub fn LoginPage() -> impl IntoView {
     let reg_id_needs_back = RwSignal::new(false); // passport = no back needed
     let reg_step = RwSignal::new(1_u32); // 1=form, 2=verify, 3=done
     let kyc_session_id = RwSignal::new(uuid::Uuid::new_v4().to_string()); // links uploads to registration
+    let kyc_status_text = RwSignal::new(String::new()); // "Verifying...", "Verified as John Doe", "Rejected"
+    let kyc_verified = RwSignal::new(false);
+    let kyc_rejected = RwSignal::new(false);
+    let kyc_verified_name = RwSignal::new(String::new()); // name extracted by Grok
+    let kyc_reject_reason = RwSignal::new(String::new());
 
     // Jurisdiction detection (from Cloudflare cdn-cgi/trace)
     let detected_country = RwSignal::new("US".to_string());
@@ -502,12 +507,31 @@ pub fn LoginPage() -> impl IntoView {
                                                             let name = file.name();
                                                             reg_id_front_name.set(name.clone());
                                                             let id_type = reg_id_type.get();
+                                                            let id_number = reg_id_number.get();
+                                                            let birthday = reg_birthday.get();
+                                                            let uname = reg_username.get();
                                                             let sess = kyc_session_id.get();
+                                                            kyc_status_text.set("Uploading document...".to_string());
+                                                            kyc_verified.set(false);
+                                                            kyc_rejected.set(false);
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "front", &id_type, &sess).await {
-                                                                    Ok(_) => reg_id_front_uploaded.set(true),
+                                                                match upload_id_document(&file, "front", &id_type, &id_number, &birthday, &uname, &sess).await {
+                                                                    Ok(resp) => {
+                                                                        reg_id_front_uploaded.set(true);
+                                                                        kyc_status_text.set("Verifying your identity...".to_string());
+                                                                        // Start polling for verification result
+                                                                        poll_kyc_status(
+                                                                            resp.verification_id,
+                                                                            kyc_status_text,
+                                                                            kyc_verified_name,
+                                                                            kyc_verified,
+                                                                            kyc_rejected,
+                                                                            kyc_reject_reason,
+                                                                        ).await;
+                                                                    }
                                                                     Err(e) => {
-                                                                        error.set(Some(format!("Front upload failed: {}", e)));
+                                                                        error.set(Some(format!("Upload failed: {}", e)));
+                                                                        kyc_status_text.set(String::new());
                                                                         reg_id_front_uploaded.set(false);
                                                                     }
                                                                 }
@@ -550,9 +574,12 @@ pub fn LoginPage() -> impl IntoView {
                                                             let name = file.name();
                                                             reg_id_back_name.set(name.clone());
                                                             let id_type = reg_id_type.get();
+                                                            let id_number = reg_id_number.get();
+                                                            let birthday = reg_birthday.get();
+                                                            let uname = reg_username.get();
                                                             let sess = kyc_session_id.get();
                                                             spawn_local(async move {
-                                                                match upload_id_document(&file, "back", &id_type, &sess).await {
+                                                                match upload_id_document(&file, "back", &id_type, &id_number, &birthday, &uname, &sess).await {
                                                                     Ok(_) => reg_id_back_uploaded.set(true),
                                                                     Err(e) => {
                                                                         error.set(Some(format!("Back upload failed: {}", e)));
@@ -582,6 +609,46 @@ pub fn LoginPage() -> impl IntoView {
                                         "They are only used for one-time verification."
                                     </p>
 
+                                    // ── Verification Status Feedback ──
+                                    {move || {
+                                        let status = kyc_status_text.get();
+                                        let verified = kyc_verified.get();
+                                        let rejected = kyc_rejected.get();
+                                        let name = kyc_verified_name.get();
+                                        let reason = kyc_reject_reason.get();
+
+                                        if status.is_empty() {
+                                            None
+                                        } else if verified {
+                                            Some(view! {
+                                                <div class="kyc-status kyc-verified">
+                                                    <span class="kyc-icon">"✓"</span>
+                                                    <div>
+                                                        <strong>"Identity Verified"</strong>
+                                                        <p>{format!("Verified as {}", if name.is_empty() { "you".to_string() } else { name })}</p>
+                                                    </div>
+                                                </div>
+                                            })
+                                        } else if rejected {
+                                            Some(view! {
+                                                <div class="kyc-status kyc-rejected">
+                                                    <span class="kyc-icon">"✗"</span>
+                                                    <div>
+                                                        <strong>"Verification Failed"</strong>
+                                                        <p>{if reason.is_empty() { "Please try again with a clearer photo".to_string() } else { reason }}</p>
+                                                    </div>
+                                                </div>
+                                            })
+                                        } else {
+                                            Some(view! {
+                                                <div class="kyc-status kyc-processing">
+                                                    <span class="kyc-spinner"></span>
+                                                    <span>{status}</span>
+                                                </div>
+                                            })
+                                        }
+                                    }}
+
                                     <div class="register-nav-buttons">
                                         <button
                                             type="button"
@@ -595,9 +662,10 @@ pub fn LoginPage() -> impl IntoView {
                                                 reg_id_number.get().trim().is_empty()
                                                 || !reg_id_front_uploaded.get()
                                                 || (reg_id_needs_back.get() && !reg_id_back_uploaded.get())
+                                                || !kyc_verified.get()
                                             }
                                             on:click=move |_| reg_step.set(3)
-                                        >"Continue"</button>
+                                        >{move || if kyc_verified.get() { "Continue" } else { "Waiting for verification..." }}</button>
                                     </div>
                                 </div>
                             })}
@@ -756,31 +824,45 @@ pub fn LoginPage() -> impl IntoView {
 
 /// Upload an ID document to Cloudflare R2 via the KYC API.
 /// Called immediately when user selects a file.
+/// Upload response from KYC worker
+#[derive(Clone, Debug, serde::Deserialize)]
+struct KycUploadResponse {
+    verification_id: String,
+    status: String,
+}
+
+/// Status poll response from KYC worker
+#[derive(Clone, Debug, serde::Deserialize)]
+struct KycStatusResponse {
+    status: String,
+    verified: Option<bool>,
+    ocr_name: Option<String>,
+    decision: Option<serde_json::Value>,
+}
+
 async fn upload_id_document(
     file: &web_sys::File,
     side: &str,
     id_type: &str,
+    id_number: &str,
+    birthday: &str,
+    username: &str,
     session_id: &str,
-) -> Result<String, String> {
+) -> Result<KycUploadResponse, String> {
     let form_data = web_sys::FormData::new()
         .map_err(|_| "Failed to create FormData".to_string())?;
     form_data
         .append_with_blob_and_filename("document", file, &file.name())
         .map_err(|_| "Failed to append file".to_string())?;
-    form_data
-        .append_with_str("side", side)
-        .map_err(|_| "Failed to append side".to_string())?;
-    form_data
-        .append_with_str("id_type", id_type)
-        .map_err(|_| "Failed to append id_type".to_string())?;
-    form_data
-        .append_with_str("session_id", session_id)
-        .map_err(|_| "Failed to append session_id".to_string())?;
+    form_data.append_with_str("side", side).map_err(|_| "append side".to_string())?;
+    form_data.append_with_str("id_type", id_type).map_err(|_| "append id_type".to_string())?;
+    form_data.append_with_str("id_number", id_number).map_err(|_| "append id_number".to_string())?;
+    form_data.append_with_str("birthday", birthday).map_err(|_| "append birthday".to_string())?;
+    form_data.append_with_str("username", username).map_err(|_| "append username".to_string())?;
+    form_data.append_with_str("session_id", session_id).map_err(|_| "append session_id".to_string())?;
 
-    // KYC uploads always go to Cloudflare Worker (R2 is only there)
     let api_url = "https://api.eustress.dev".to_string();
 
-    // Get auth token if available
     let token: Option<String> = {
         use gloo_storage::Storage;
         gloo_storage::LocalStorage::get("auth_token").ok()
@@ -800,11 +882,80 @@ async fn upload_id_document(
 
     if resp.status() == 200 || resp.status() == 201 {
         let text = resp.text().await.unwrap_or_default();
-        Ok(text)
+        serde_json::from_str::<KycUploadResponse>(&text)
+            .map_err(|e| format!("Parse error: {}", e))
     } else {
         let text = resp.text().await.unwrap_or_default();
         Err(format!("Upload error ({}): {}", resp.status(), text))
     }
+}
+
+/// Poll KYC verification status until resolved (verified/rejected/error)
+async fn poll_kyc_status(
+    verification_id: String,
+    status_signal: RwSignal<String>,
+    verified_name_signal: RwSignal<String>,
+    kyc_verified_signal: RwSignal<bool>,
+    kyc_rejected_signal: RwSignal<bool>,
+    reject_reason_signal: RwSignal<String>,
+) {
+    let api_url = "https://api.eustress.dev";
+    let url = format!("{}/api/kyc/status/{}", api_url, verification_id);
+
+    // Poll every 2 seconds, max 60 attempts (2 minutes)
+    for _ in 0..60 {
+        gloo_timers::future::TimeoutFuture::new(2_000).await;
+
+        let resp = match gloo_net::http::Request::get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let result: KycStatusResponse = match serde_json::from_str(&text) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        match result.status.as_str() {
+            "verified" => {
+                let name = result.ocr_name.unwrap_or_default();
+                status_signal.set(format!("Verified as {}", if name.is_empty() { "you" } else { &name }));
+                verified_name_signal.set(name);
+                kyc_verified_signal.set(true);
+                return;
+            }
+            "rejected" => {
+                let reasons = result.decision
+                    .and_then(|d| d.get("reasons").cloned())
+                    .and_then(|r| r.as_array().map(|a| {
+                        a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>().join(", ")
+                    }))
+                    .unwrap_or_else(|| "Verification failed".to_string());
+                status_signal.set("Rejected".to_string());
+                reject_reason_signal.set(reasons);
+                kyc_rejected_signal.set(true);
+                return;
+            }
+            "error" => {
+                status_signal.set("Verification error — please retry".to_string());
+                kyc_rejected_signal.set(true);
+                return;
+            }
+            _ => {
+                // Still processing
+                status_signal.set("Verifying your identity...".to_string());
+            }
+        }
+    }
+
+    // Timeout
+    status_signal.set("Verification timed out — please retry".to_string());
+    kyc_rejected_signal.set(true);
 }
 
 /// Generate the README file that accompanies identity.toml downloads.
