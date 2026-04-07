@@ -38,16 +38,21 @@ use eustress_common::{
 /// Order matters: Workspace first so the 3D viewport has a target immediately.
 const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "Workspace",               class: "Workspace",              icon: "workspace",          description: "3D world objects — Parts, Models, Terrain" },
-    ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "Lighting",                class: "Lighting",               icon: "lighting",           description: "Light sources — Sun, Sky, Atmosphere" },
     ServiceFolder { name: "Players",                 class: "Players",                icon: "players",            description: "Player instances and character models" },
-    ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul scripts (.soul files)" },
-    ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio — Sound effects and music" },
-    ServiceFolder { name: "ServerStorage",           class: "ServerStorage",          icon: "serverstorage",      description: "Server-only assets hidden from clients" },
     ServiceFolder { name: "StarterGui",              class: "StarterGui",             icon: "startergui",         description: "UI templates shown to every player" },
     ServiceFolder { name: "StarterPack",             class: "StarterPack",            icon: "starterpack",        description: "Tools given to players on spawn" },
-    ServiceFolder { name: "StarterPlayer",           class: "StarterPlayer",          icon: "starterplayer",      description: "StarterPlayerScripts and StarterCharacterScripts" },
+    ServiceFolder { name: "StarterPlayerScripts",    class: "StarterPlayerScripts",   icon: "starterplayer",      description: "Scripts cloned into each player on join" },
+    ServiceFolder { name: "StarterCharacterScripts", class: "StarterCharacterScripts",icon: "starterplayer",      description: "Scripts cloned into each character on spawn" },
+    ServiceFolder { name: "ReplicatedStorage",       class: "ReplicatedStorage",      icon: "replicatedstorage",  description: "Shared assets visible to server and client" },
+    ServiceFolder { name: "ServerStorage",           class: "ServerStorage",          icon: "serverstorage",      description: "Server-only assets hidden from clients" },
+    ServiceFolder { name: "ServerScriptService",     class: "ServerScriptService",    icon: "serverscriptservice",description: "Server-side scripts" },
+    ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul and Rune scripts (.soul, .rune files)" },
+    ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
+    ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio — Sound effects and music" },
+    ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
     ServiceFolder { name: "Teams",                   class: "Teams",                  icon: "teams",              description: "Team definitions and spawn points" },
+    ServiceFolder { name: "Chat",                    class: "Chat",                   icon: "chat",               description: "In-game chat system" },
 ];
 
 struct ServiceFolder {
@@ -113,6 +118,7 @@ pub fn scaffold_new_space(
     // ── Top-level directories ──────────────────────────────────────────────
     create_dir_all(&space_root)?;
     create_dir_all(&space_root.join(".eustress").join("local"))?;
+    create_dir_all(&space_root.join(".eustress").join("knowledge"))?;
     create_dir_all(&space_root.join("src"))?;
 
     // Ensure Universe-level assets/parts/ has engine default GLBs
@@ -493,6 +499,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         .map(|u| u.username.clone());
     ensure_manifest_set(space_path, Some(&space_name_from_path(space_path)), author.as_deref());
 
+    // Verify and repair: create any missing service folders + knowledge dir
+    ensure_space_integrity(space_path);
+
     // Ensure Universe-level assets/parts/ has engine default GLBs
     ensure_universe_default_parts(space_path);
 
@@ -640,9 +649,10 @@ pub fn new_universe(world: &mut World) {
 
     match std::fs::create_dir(&requested_universe_root) {
         Ok(()) => {
-            // Create Universe-level asset directories and copy engine default parts
+            // Create Universe-level directories and copy engine default parts
             let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("assets").join("parts"));
             let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("assets").join("meshes"));
+            let _ = std::fs::create_dir_all(requested_universe_root.join(".eustress").join("knowledge"));
             copy_engine_default_parts(&requested_universe_root.join(".eustress").join("assets").join("parts"));
 
             // Scaffold default Space with full service structure
@@ -766,6 +776,66 @@ pub fn new_space(world: &mut World) {
                 notifs.error(format!("Failed to create Space: {}", e));
             }
         }
+    }
+}
+
+/// Verify Space has all required service folders, .eustress dirs, and knowledge.
+/// Creates any that are missing — non-destructive (never deletes or overwrites).
+fn ensure_space_integrity(space_root: &Path) {
+    let mut repaired = 0;
+
+    // Ensure .eustress subdirectories
+    for subdir in &["local", "knowledge"] {
+        let path = space_root.join(".eustress").join(subdir);
+        if !path.exists() {
+            let _ = std::fs::create_dir_all(&path);
+            repaired += 1;
+        }
+    }
+
+    // Ensure Universe-level knowledge dir
+    if let Some(universe_root) = space_root.parent().and_then(|p| p.parent()) {
+        let knowledge = universe_root.join(".eustress").join("knowledge");
+        if !knowledge.exists() {
+            let _ = std::fs::create_dir_all(&knowledge);
+            repaired += 1;
+        }
+    }
+
+    // Ensure all service folders exist with _service.toml
+    let svc_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("service_templates");
+
+    for svc in SERVICE_FOLDERS {
+        let svc_dir = space_root.join(svc.name);
+        if !svc_dir.exists() {
+            let _ = std::fs::create_dir_all(&svc_dir);
+
+            // Try template first, fallback to minimal TOML
+            let template_path = svc_template_dir.join(svc.name).join("_service.toml");
+            if let Ok(content) = std::fs::read_to_string(&template_path) {
+                let _ = std::fs::write(svc_dir.join("_service.toml"), &content);
+            } else {
+                let toml = service_toml(svc.name, svc.class, svc.icon, svc.description);
+                let _ = std::fs::write(svc_dir.join("_service.toml"), &toml);
+            }
+            repaired += 1;
+        } else if !svc_dir.join("_service.toml").exists() {
+            // Dir exists but missing _service.toml
+            let template_path = svc_template_dir.join(svc.name).join("_service.toml");
+            if let Ok(content) = std::fs::read_to_string(&template_path) {
+                let _ = std::fs::write(svc_dir.join("_service.toml"), &content);
+            } else {
+                let toml = service_toml(svc.name, svc.class, svc.icon, svc.description);
+                let _ = std::fs::write(svc_dir.join("_service.toml"), &toml);
+            }
+            repaired += 1;
+        }
+    }
+
+    if repaired > 0 {
+        info!("🔧 Space integrity check: repaired {} missing items", repaired);
     }
 }
 
