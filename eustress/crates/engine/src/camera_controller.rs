@@ -270,6 +270,7 @@ fn update_camera_viewport_for_ui(
 fn ensure_camera_exists(
     mut commands: Commands,
     camera_query: Query<Entity, (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
+    mut scattering_mediums: ResMut<Assets<bevy::pbr::ScatteringMedium>>,
 ) {
     // If no cameras exist, spawn a new one at the origin
     if camera_query.is_empty() {
@@ -287,20 +288,13 @@ fn ensure_camera_exists(
             Camera3d::default(),
             // ACES tone mapping — cinematic color response
             bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
-            // Bloom — natural HDR glow on bright surfaces
-            bevy::core_pipeline::bloom::Bloom::NATURAL,
-            // Exposure — tuned for atmosphere-filtered sunlight
-            bevy::camera::Exposure { ev100: 13.0 },
-            // Bevy Atmosphere — physically based sky rendering
-            bevy::pbr::Atmosphere::EARTH,
+            // Bevy Atmosphere — physically based sky rendering with scattering
+            bevy::pbr::Atmosphere::earthlike(
+                scattering_mediums.add(bevy::pbr::ScatteringMedium::default()),
+            ),
             bevy::pbr::AtmosphereSettings::default(),
             // Environment map lighting from atmosphere (reflections + ambient)
             bevy::light::AtmosphereEnvironmentMapLight::default(),
-            // Volumetric fog for god rays
-            bevy::light::VolumetricFog {
-                ambient_intensity: 0.0,
-                ..default()
-            },
             Transform::from_xyz(10.0, 10.0, 15.0)
                 .looking_at(Vec3::ZERO, Vec3::Y),
             Projection::Perspective(PerspectiveProjection {

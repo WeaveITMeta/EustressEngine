@@ -10,7 +10,7 @@
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
-use bevy::pbr::{DistanceFog, FogFalloff, Atmosphere, AtmosphereSettings};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::core_pipeline::Skybox;
 use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
