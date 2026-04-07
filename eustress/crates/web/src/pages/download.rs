@@ -12,11 +12,64 @@ use crate::components::{CentralNav, Footer};
 // Main Component
 // -----------------------------------------------------------------------------
 
-/// Download page - platform-aware download buttons.
+/// Download page - fetches version info from releases.eustress.dev/latest.json.
 #[component]
 pub fn DownloadPage() -> impl IntoView {
-    // Detect OS from user agent (simplified - in production use wasm-bindgen)
     let detected_os = RwSignal::new("windows".to_string());
+    let version = RwSignal::new("...".to_string());
+    let release_date = RwSignal::new(String::new());
+    let changelog = RwSignal::new(String::new());
+    let win_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-windows-x64.zip".to_string());
+    let win_size = RwSignal::new("~85 MB".to_string());
+    let mac_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-macos-arm64.dmg".to_string());
+    let mac_size = RwSignal::new("~82 MB".to_string());
+    let linux_url = RwSignal::new("https://releases.eustress.dev/latest/eustress-engine-linux-x64.tar.gz".to_string());
+    let linux_size = RwSignal::new("~80 MB".to_string());
+
+    // Fetch latest.json on mount
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Ok(resp) = gloo_net::http::Request::get("https://releases.eustress.dev/latest.json")
+            .send().await
+        {
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if let Some(v) = data.get("version").and_then(|v| v.as_str()) {
+                    version.set(format!("v{}", v));
+                }
+                if let Some(d) = data.get("date").and_then(|v| v.as_str()) {
+                    release_date.set(d.to_string());
+                }
+                if let Some(c) = data.get("changelog").and_then(|v| v.as_str()) {
+                    changelog.set(c.to_string());
+                }
+                if let Some(platforms) = data.get("platforms") {
+                    if let Some(w) = platforms.get("windows-x64") {
+                        if let Some(u) = w.get("url").and_then(|v| v.as_str()) {
+                            win_url.set(u.to_string());
+                        }
+                        if let Some(s) = w.get("size_bytes").and_then(|v| v.as_u64()) {
+                            win_size.set(format!("~{} MB", s / 1_000_000));
+                        }
+                    }
+                    if let Some(m) = platforms.get("macos-arm64") {
+                        if let Some(u) = m.get("url").and_then(|v| v.as_str()) {
+                            mac_url.set(u.to_string());
+                        }
+                        if let Some(s) = m.get("size_bytes").and_then(|v| v.as_u64()) {
+                            mac_size.set(format!("~{} MB", s / 1_000_000));
+                        }
+                    }
+                    if let Some(l) = platforms.get("linux-x64") {
+                        if let Some(u) = l.get("url").and_then(|v| v.as_str()) {
+                            linux_url.set(u.to_string());
+                        }
+                        if let Some(s) = l.get("size_bytes").and_then(|v| v.as_u64()) {
+                            linux_size.set(format!("~{} MB", s / 1_000_000));
+                        }
+                    }
+                }
+            }
+        }
+    });
     
     view! {
         <div class="page page-download-industrial">
@@ -41,8 +94,11 @@ pub fn DownloadPage() -> impl IntoView {
                 
                 // Version Info
                 <div class="version-info">
-                    <span class="version-badge">"v0.16.1"</span>
+                    <span class="version-badge">{move || version.get()}</span>
                     <span class="version-label">"Public Beta"</span>
+                    <Show when=move || !release_date.get().is_empty()>
+                        <span class="version-date">{move || format!("Released {}", release_date.get())}</span>
+                    </Show>
                 </div>
             </section>
             
@@ -58,31 +114,31 @@ pub fn DownloadPage() -> impl IntoView {
                     
                     // Platform Buttons
                     <div class="platform-buttons">
-                        <a href="https://downloads.eustress.dev/windows/EustressEngine-Setup.exe" class="platform-btn windows">
+                        <a href=move || win_url.get() class="platform-btn windows">
                             <img src="/assets/icons/windows.svg" alt="Windows" />
                             <div class="btn-text">
                                 <span class="btn-label">"Download for"</span>
                                 <span class="btn-platform">"Windows"</span>
                             </div>
-                            <span class="btn-size">"~150 MB"</span>
+                            <span class="btn-size">{move || win_size.get()}</span>
                         </a>
-                        
-                        <a href="https://downloads.eustress.dev/mac/EustressEngine.dmg" class="platform-btn macos">
+
+                        <a href=move || mac_url.get() class="platform-btn macos">
                             <img src="/assets/icons/macos.svg" alt="macOS" />
                             <div class="btn-text">
                                 <span class="btn-label">"Download for"</span>
-                                <span class="btn-platform">"macOS"</span>
+                                <span class="btn-platform">"macOS (Apple Silicon)"</span>
                             </div>
-                            <span class="btn-size">"~160 MB"</span>
+                            <span class="btn-size">{move || mac_size.get()}</span>
                         </a>
-                        
-                        <a href="https://downloads.eustress.dev/linux/EustressEngine.AppImage" class="platform-btn linux">
+
+                        <a href=move || linux_url.get() class="platform-btn linux">
                             <img src="/assets/icons/linux.svg" alt="Linux" />
                             <div class="btn-text">
                                 <span class="btn-label">"Download for"</span>
                                 <span class="btn-platform">"Linux"</span>
                             </div>
-                            <span class="btn-size">"~145 MB"</span>
+                            <span class="btn-size">{move || linux_size.get()}</span>
                         </a>
                     </div>
                     

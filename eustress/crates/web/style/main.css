@@ -10319,6 +10319,12 @@ p {
     color: var(--color-text-muted);
 }
 
+.version-date {
+    font-size: 12px;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+}
+
 /* Primary Download */
 .primary-download {
     position: relative;
