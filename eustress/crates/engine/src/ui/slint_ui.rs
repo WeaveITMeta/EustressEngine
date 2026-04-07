@@ -2420,7 +2420,12 @@ fn drain_slint_actions(
     let actions = queue.drain();
     if actions.is_empty() { return; }
     let ui = slint_context.as_ref().map(|context| &context.window);
-    
+
+    // Diagnostic: log if StudioState is missing (would silently drop all tool/play actions)
+    if res.state.is_none() {
+        warn!("⚠ drain_slint_actions: StudioState is None — {} actions will be partially dropped!", actions.len());
+    }
+
     for action in actions {
         match action {
             // File operations → FileEvent
@@ -2458,6 +2463,7 @@ fn drain_slint_actions(
             
             // Tool selection → StudioState
             SlintAction::SelectTool(tool) => {
+                info!("🔧 SlintAction::SelectTool('{}') received", tool);
                 if let Some(ref mut s) = res.state {
                     s.current_tool = match tool.as_str() {
                         "move" => Tool::Move,
@@ -2466,9 +2472,12 @@ fn drain_slint_actions(
                         "terrain" => Tool::Terrain,
                         _ => Tool::Select,
                     };
+                    info!("🔧 Tool set to {:?}", s.current_tool);
                     if let Some(ref mut out) = res.output {
                         out.info(format!("Tool: {}", tool));
                     }
+                } else {
+                    warn!("⚠ SelectTool: StudioState is None, tool change dropped!");
                 }
             }
             
@@ -2484,8 +2493,12 @@ fn drain_slint_actions(
             
             // Play controls → StudioState flags (consumed by play_mode.rs)
             SlintAction::PlaySolo => {
+                info!("▶ SlintAction::PlaySolo received");
                 if let Some(ref mut s) = res.state {
                     s.play_solo_requested = true;
+                    info!("▶ play_solo_requested = true");
+                } else {
+                    warn!("⚠ PlaySolo: StudioState is None!");
                 }
             }
             SlintAction::PlayWithCharacter => {

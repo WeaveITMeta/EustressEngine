@@ -611,7 +611,6 @@ fn handle_start_play(
     mut play_mode: ResMut<PlayMode>,
     mut runtime: ResMut<PlayModeRuntime>,
     mut snapshot_stack: ResMut<SnapshotStack>,
-    snapshot_config: Res<SnapshotConfig>,
     char_config: Res<PlayModeCharacterConfig>,
     mut next_state: ResMut<NextState<PlayModeState>>,
     player_service: Res<PlayerService>,
@@ -665,14 +664,14 @@ fn handle_start_play(
             let mut entity_snapshot = EntitySnapshot::new(entity_index);
             
             // Capture transform
-            if snapshot_config.capture_transforms {
+            if true /* capture_transforms */ {
                 if let Some(t) = transform {
                     entity_snapshot.transform = Some(TransformSnapshot::from(t));
                 }
             }
             
             // Capture Instance
-            if snapshot_config.capture_instance {
+            if true /* capture_instance */ {
                 if let Some(inst) = instance {
                     entity_snapshot.instance = Some(InstanceSnapshot {
                         name: inst.name.clone(),
@@ -682,7 +681,7 @@ fn handle_start_play(
             }
             
             // Capture BasePart
-            if snapshot_config.capture_basepart {
+            if true /* capture_basepart */ {
                 if let Some(bp) = basepart {
                     let rgba = bp.color.to_linear().to_f32_array();
                     entity_snapshot.basepart = Some(BasePartSnapshot {
@@ -695,7 +694,7 @@ fn handle_start_play(
             }
             
             // Capture Humanoid
-            if snapshot_config.capture_humanoid {
+            if true /* capture_humanoid */ {
                 if let Some(h) = humanoid {
                     entity_snapshot.humanoid = Some(HumanoidSnapshot {
                         health: h.health,
@@ -729,7 +728,8 @@ fn handle_start_play(
         
         // Clear any existing snapshots and push initial
         snapshot_stack.clear();
-        snapshot_stack.push(snapshot.clone(), &snapshot_config);
+        let default_config = SnapshotConfig::default();
+        snapshot_stack.push(snapshot.clone(), &default_config);
         
         play_mode.world_snapshot = Some(snapshot);
         play_mode.play_type = event.play_type;
