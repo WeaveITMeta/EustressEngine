@@ -288,7 +288,7 @@ fn ensure_camera_exists(
             // ACES tone mapping — cinematic color response
             bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
             // Bloom — natural HDR glow on bright surfaces
-            bevy::post_process::bloom::Bloom::NATURAL,
+            bevy::core_pipeline::bloom::Bloom::NATURAL,
             // Exposure — tuned for atmosphere-filtered sunlight
             bevy::camera::Exposure { ev100: 13.0 },
             // Bevy Atmosphere — physically based sky rendering
