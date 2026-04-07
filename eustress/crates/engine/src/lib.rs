@@ -83,6 +83,11 @@ pub mod manufacturing;
 pub mod class_conversion;
 pub mod txt_to_toml_watcher;
 pub mod stream_node_plugin;
+pub mod updater;
+pub mod simulation;
+pub mod frame_diagnostics;
+pub mod io_manager;
+pub mod window_focus;
 
 // SimWriterResource must live in the lib so scenarios/plugin.rs and viga/pipeline.rs
 // can reference it via `crate::SimWriterResource` from library code.
