@@ -834,6 +834,21 @@ fn ensure_space_integrity(space_root: &Path) {
         }
     }
 
+    // Ensure simulation.toml exists
+    let sim_path = space_root.join("simulation.toml");
+    if !sim_path.exists() {
+        let _ = std::fs::write(&sim_path, simulation_toml());
+        repaired += 1;
+    }
+
+    // Ensure space.toml exists
+    let space_toml_path = space_root.join("space.toml");
+    if !space_toml_path.exists() {
+        let name = space_root.file_name().and_then(|n| n.to_str()).unwrap_or("Space");
+        let _ = std::fs::write(&space_toml_path, space_meta_toml(name, "Eustress User"));
+        repaired += 1;
+    }
+
     if repaired > 0 {
         info!("🔧 Space integrity check: repaired {} missing items", repaired);
     }
