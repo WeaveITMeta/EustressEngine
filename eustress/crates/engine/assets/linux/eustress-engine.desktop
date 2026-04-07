@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Eustress Engine
+GenericName=Simulation Engine
+Comment=Build anything at the speed of thought. 100% Rust.
+Exec=eustress-engine %F
+Icon=eustress-engine
+Terminal=false
+Type=Application
+Categories=Development;IDE;Graphics;3DGraphics;Simulation;Education;
+MimeType=application/x-eustress;
+Keywords=engine;simulation;3d;physics;game;development;rust;bevy;
+StartupWMClass=eustress-engine
+StartupNotify=true

@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # Windows x64
+  # ─────────────────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            eustress/target
+          key: windows-cargo-${{ hashFiles('eustress/Cargo.lock') }}
+
+      - name: Build
+        working-directory: eustress
+        run: cargo build --release --package eustress-engine
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mkdir -p dist
+          cp eustress/target/release/eustress-engine.exe dist/
+          cp -r eustress/crates/engine/assets dist/assets
+          cd dist
+          7z a ../eustress-engine-${VERSION}-windows-x64.zip *
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: eustress-engine-*-windows-x64.zip
+
+  # ─────────────────────────────────────────────────────────────────────
+  # macOS ARM64 (Apple Silicon)
+  # ─────────────────────────────────────────────────────────────────────
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            eustress/target
+          key: macos-arm64-cargo-${{ hashFiles('eustress/Cargo.lock') }}
+
+      - name: Build
+        working-directory: eustress
+        run: cargo build --release --package eustress-engine --target aarch64-apple-darwin
+
+      - name: Package DMG
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          APP="Eustress Engine.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp eustress/target/aarch64-apple-darwin/release/eustress-engine "$APP/Contents/MacOS/"
+          cp -r eustress/crates/engine/assets "$APP/Contents/Resources/assets"
+          cp eustress/crates/engine/assets/icon.png "$APP/Contents/Resources/AppIcon.png"
+          cat > "$APP/Contents/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Eustress Engine</string>
+            <key>CFBundleExecutable</key><string>eustress-engine</string>
+            <key>CFBundleIdentifier</key><string>dev.eustress.engine</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>CFBundleIconFile</key><string>AppIcon</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          hdiutil create -volname "Eustress Engine" -srcfolder "$APP" -ov -format UDZO \
+            "eustress-engine-${VERSION}-macos-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: eustress-engine-*-macos-arm64.dmg
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Linux x64
+  # ─────────────────────────────────────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libvulkan-dev libx11-dev libxi-dev libxcursor-dev \
+            imagemagick
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            eustress/target
+          key: linux-cargo-${{ hashFiles('eustress/Cargo.lock') }}
+
+      - name: Build
+        working-directory: eustress
+        run: cargo build --release --package eustress-engine
+
+      - name: Generate icons
+        run: bash eustress/crates/engine/assets/linux/generate-icons.sh
+
+      - name: Package
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mkdir -p dist/icons
+          cp eustress/target/release/eustress-engine dist/
+          cp -r eustress/crates/engine/assets dist/assets
+          cp eustress/crates/engine/assets/linux/eustress-engine.desktop dist/
+          cp eustress/crates/engine/assets/linux/install.sh dist/
+          cp eustress/crates/engine/assets/linux/icons/*.png dist/icons/
+          chmod +x dist/install.sh dist/eustress-engine
+          tar czf "eustress-engine-${VERSION}-linux-x64.tar.gz" -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: eustress-engine-*-linux-x64.tar.gz
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Upload to R2 + Create GitHub Release
+  # ─────────────────────────────────────────────────────────────────────
+  publish:
+    needs: [build-windows, build-macos-arm64, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: |
+          sha256sum eustress-engine-*.zip eustress-engine-*.dmg eustress-engine-*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Generate latest.json
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          DATE=$(date -u +%Y-%m-%d)
+
+          WIN_SHA=$(grep windows-x64.zip checksums.txt | awk '{print $1}')
+          WIN_SIZE=$(stat -c%s eustress-engine-*-windows-x64.zip)
+
+          MAC_SHA=$(grep macos-arm64.dmg checksums.txt | awk '{print $1}')
+          MAC_SIZE=$(stat -c%s eustress-engine-*-macos-arm64.dmg)
+
+          LIN_SHA=$(grep linux-x64.tar.gz checksums.txt | awk '{print $1}')
+          LIN_SIZE=$(stat -c%s eustress-engine-*-linux-x64.tar.gz)
+
+          BASE="https://releases.eustress.dev/${VERSION}"
+
+          cat > latest.json << MANIFEST
+          {
+            "version": "${VERSION#v}",
+            "date": "${DATE}",
+            "channel": "stable",
+            "min_version": "0.1.0",
+            "changelog_url": "https://eustress.dev/changelog#${VERSION}",
+            "changelog": "See https://github.com/WeaveITMeta/EustressEngine/releases/tag/${VERSION}",
+            "platforms": {
+              "windows-x64": {
+                "url": "${BASE}/eustress-engine-${VERSION}-windows-x64.zip",
+                "sha256": "${WIN_SHA}",
+                "size_bytes": ${WIN_SIZE},
+                "installer": false
+              },
+              "macos-arm64": {
+                "url": "${BASE}/eustress-engine-${VERSION}-macos-arm64.dmg",
+                "sha256": "${MAC_SHA}",
+                "size_bytes": ${MAC_SIZE},
+                "installer": true
+              },
+              "linux-x64": {
+                "url": "${BASE}/eustress-engine-${VERSION}-linux-x64.tar.gz",
+                "sha256": "${LIN_SHA}",
+                "size_bytes": ${LIN_SIZE},
+                "installer": false
+              }
+            }
+          }
+          MANIFEST
+
+          echo "Generated latest.json:"
+          cat latest.json
+
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.CF_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          pip install awscli
+
+          # Upload artifacts
+          aws s3 cp eustress-engine-${VERSION}-windows-x64.zip \
+            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-windows-x64.zip
+
+          aws s3 cp eustress-engine-${VERSION}-macos-arm64.dmg \
+            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-macos-arm64.dmg
+
+          aws s3 cp eustress-engine-${VERSION}-linux-x64.tar.gz \
+            s3://eustress-releases/${VERSION}/eustress-engine-${VERSION}-linux-x64.tar.gz
+
+          # Upload manifest (short cache for quick propagation)
+          aws s3 cp latest.json s3://eustress-releases/latest.json \
+            --cache-control "max-age=300"
+
+          # Upload checksums
+          aws s3 cp checksums.txt s3://eustress-releases/${VERSION}/checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            eustress-engine-*-windows-x64.zip
+            eustress-engine-*-macos-arm64.dmg
+            eustress-engine-*-linux-x64.tar.gz
+            checksums.txt
+            latest.json
+          generate_release_notes: true
