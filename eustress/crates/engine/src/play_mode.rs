@@ -1489,10 +1489,17 @@ impl Plugin for PlayModePlugin {
             .add_systems(Update, (
                 handle_play_mode_ui_buttons  // Handle ribbon button clicks
                     .after(crate::ui::slint_ui::SlintSystems::Drain),
-                play_mode_shortcuts,
-                handle_start_play,
-                handle_stop_play,
-                handle_pause_toggle,
+                play_mode_shortcuts
+                    .after(crate::ui::slint_ui::SlintSystems::Drain),
+                handle_start_play
+                    .after(handle_play_mode_ui_buttons)
+                    .after(play_mode_shortcuts),
+                handle_stop_play
+                    .after(handle_play_mode_ui_buttons)
+                    .after(play_mode_shortcuts),
+                handle_pause_toggle
+                    .after(handle_play_mode_ui_buttons)
+                    .after(play_mode_shortcuts),
             ))
             .add_systems(Update, (
                 handle_create_save_point,
