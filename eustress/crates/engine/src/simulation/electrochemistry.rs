@@ -115,7 +115,7 @@ fn electrochemical_tick(
     let dt = clock.dt() as f32;
     if dt <= 0.0 { return; }
 
-    for (_name, mut echem_state, thermo) in &mut query {
+    for (_name, mut echem_state, mut thermo) in &mut query {
         // Skip entities with zero capacity (passive components like housing, terminals)
         if echem_state.capacity_ah <= 0.0 {
             continue;
@@ -237,7 +237,7 @@ fn electrochemical_tick(
         // Q(N)/Q₀ = 1 - α·N^β
         // α ≈ 0.00005, β ≈ 0.5 for NASICON solid-state
         echem_state.capacity_retention = echem::capacity_retention_power_law(
-            echem_state.cycle_count,
+            echem_state.cycle_count as f32,
             0.00005,
             0.5,
         ).clamp(0.01, 1.0);
