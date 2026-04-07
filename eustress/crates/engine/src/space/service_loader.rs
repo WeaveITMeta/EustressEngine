@@ -40,10 +40,12 @@ impl PropertyValue {
         match self {
             PropertyValue::Bool(b) => b.to_string(),
             PropertyValue::Int(i) => i.to_string(),
-            PropertyValue::Float(f) => format!("{:.3}", f),
+            PropertyValue::Float(f) => format!("{:.2}", f),
             PropertyValue::String(s) => s.clone(),
-            PropertyValue::Vec3(v) => format!("{:.3}, {:.3}, {:.3}", v[0], v[1], v[2]),
-            PropertyValue::Vec4(v) => format!("{:.3}, {:.3}, {:.3}, {:.3}", v[0], v[1], v[2], v[3]),
+            PropertyValue::Vec3(v) => format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]),
+            // Colors on 0-255 scale with alpha as decimal
+            PropertyValue::Vec4(v) => format!("{:.0}, {:.0}, {:.0}, {:.2}",
+                v[0] * 255.0, v[1] * 255.0, v[2] * 255.0, v[3]),
         }
     }
 }
@@ -203,8 +205,14 @@ pub fn spawn_service(
     };
     
     // Convert all TOML properties to dynamic PropertyValue map
+    // Merge from both [service] flattened props and [properties] section
     let mut properties = HashMap::new();
     for (key, value) in &props.properties {
+        if let Some(prop_val) = toml_to_property_value(value) {
+            properties.insert(key.clone(), prop_val);
+        }
+    }
+    for (key, value) in &definition.properties {
         if let Some(prop_val) = toml_to_property_value(value) {
             properties.insert(key.clone(), prop_val);
         }
