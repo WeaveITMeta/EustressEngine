@@ -1138,8 +1138,8 @@ impl Plugin for SlintUiPlugin {
             .add_plugins(super::monaco_bridge::MonacoBridgePlugin)
             // Slint software renderer overlay systems
             .add_systems(Startup, setup_slint_overlay)
-            .add_systems(Update, forward_input_to_slint)
-            .add_systems(Update, forward_keyboard_to_slint)
+            .add_systems(Update, forward_input_to_slint.before(SlintSystems::Drain))
+            .add_systems(Update, forward_keyboard_to_slint.before(SlintSystems::Drain))
             .add_systems(Update, update_slint_ui_focus)
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
@@ -1956,10 +1956,8 @@ fn render_slint_to_texture(
     
     let frame = RENDER_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     
-    // Update Slint timers and animations every frame (needed for animations/transitions)
+    // Update Slint timers, animations, and process deferred events
     slint::platform::update_timers_and_animations();
-    // Process queued events — WITHOUT THIS, Slint callbacks NEVER fire
-    slint::platform::process_events(Default::default());
     
     let adapter = &slint_context.adapter;
     

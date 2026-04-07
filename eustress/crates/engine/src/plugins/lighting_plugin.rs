@@ -275,7 +275,9 @@ fn sync_service_properties_to_lighting(
             let new_tod = (*v as f32) / 24.0; // ClockTime is hours (0-24), time_of_day is 0-1
             if (lighting.time_of_day - new_tod).abs() > 0.001 {
                 lighting.time_of_day = new_tod.clamp(0.0, 1.0);
-                lighting.clock_time = lighting.clock_time_string();
+                let hours = (lighting.time_of_day * 24.0) as u32;
+                let minutes = ((lighting.time_of_day * 24.0 * 60.0) % 60.0) as u32;
+                lighting.clock_time = format!("{:02}:{:02}:00", hours, minutes);
             }
         }
         if let Some(PropertyValue::Float(v)) = props.get("brightness") {
