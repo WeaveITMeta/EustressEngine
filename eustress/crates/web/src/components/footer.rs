@@ -31,6 +31,9 @@ pub fn Footer() -> impl IntoView {
                         <a href="https://discord.gg/DGP9my8DYN" class="social-link" title="Discord">
                             <img src="/assets/icons/discord.svg" alt="Discord" />
                         </a>
+                        <a href="https://github.com/WeaveITMeta/EustressEngine" class="social-link" title="GitHub">
+                            <img src="/assets/icons/github.svg" alt="GitHub" />
+                        </a>
                     </div>
                 </div>
                 

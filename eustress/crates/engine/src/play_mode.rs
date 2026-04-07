@@ -642,8 +642,12 @@ fn handle_start_play(
     };
 
     let Some(play_type) = play_type else { return };
+    info!("▶ handle_start_play: play_type={:?}, started_at={:?}", play_type, play_mode.started_at);
     // Only start from Editing (check via play_mode — already started means skip)
-    if play_mode.started_at.is_some() { return; }
+    if play_mode.started_at.is_some() {
+        warn!("▶ handle_start_play: BLOCKED — play_mode.started_at is already set");
+        return;
+    }
 
     // --- Original handle_start_play logic below ---
     {
@@ -1455,6 +1459,14 @@ fn play_mode_shortcuts(
 }
 
 // ============================================================================
+// System Sets
+// ============================================================================
+
+/// System set for play mode handlers. Configured to run after SlintSystems::Drain.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlayModeSystems;
+
+// ============================================================================
 // Plugin
 // ============================================================================
 
@@ -1507,14 +1519,12 @@ impl Plugin for PlayModePlugin {
             // Systems (always run) - split into groups to avoid tuple size limits
             // handle_play_mode_ui_buttons must run after drain_slint_actions sets
             // the play_solo_requested / pause_requested / stop_requested flags.
-            // Play mode handlers read StudioState flags directly
-            // (set by drain_slint_actions in the same frame — no message hop)
-            .add_systems(Update, handle_start_play)
-            .add_systems(Update, handle_stop_play
-                .after(crate::ui::slint_ui::SlintSystems::Drain))
-            .add_systems(Update, handle_pause_toggle
-                .after(crate::ui::slint_ui::SlintSystems::Drain))
-            .add_systems(Update, play_mode_shortcuts)
+            // Play mode handlers run AFTER Slint drains actions (which sets StudioState flags)
+            .configure_sets(Update, PlayModeSystems.after(crate::ui::slint_ui::SlintSystems::Drain))
+            .add_systems(Update, handle_start_play.in_set(PlayModeSystems))
+            .add_systems(Update, handle_stop_play.in_set(PlayModeSystems))
+            .add_systems(Update, handle_pause_toggle.in_set(PlayModeSystems))
+            .add_systems(Update, play_mode_shortcuts.in_set(PlayModeSystems))
             .add_systems(Update, (
                 handle_create_save_point,
                 handle_restore_save_point,
