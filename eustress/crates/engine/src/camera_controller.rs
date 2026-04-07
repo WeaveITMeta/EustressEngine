@@ -288,6 +288,8 @@ fn ensure_camera_exists(
             Camera3d::default(),
             // ACES tone mapping — cinematic color response
             bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
+            // Exposure tuned for atmosphere-filtered sunlight
+            bevy::camera::Exposure { ev100: 13.0 },
             // Bevy Atmosphere — physically based sky rendering with scattering
             bevy::pbr::Atmosphere::earthlike(
                 scattering_mediums.add(bevy::pbr::ScatteringMedium::default()),
