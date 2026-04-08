@@ -152,8 +152,8 @@ fn advance_simulation_clock(
     static TICK_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let log_frame = TICK_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if log_frame % 60 == 0 {
-        info!("⏱ Sim clock: ticks_to_run={}, total_ticks={}, sim_time={:.2}s, wall_delta={:.4}s, paused={}",
-            ticks_to_run, clock.tick_count, clock.simulation_time_s, wall_delta, time.is_paused());
+        info!("⏱ Sim clock: ticks_to_run={}, total_ticks={}, sim_time={:.2}s, wall_delta={:.4}s",
+            ticks_to_run, clock.tick_count, clock.simulation_time_s, wall_delta);
     }
     
     for _ in 0..ticks_to_run {

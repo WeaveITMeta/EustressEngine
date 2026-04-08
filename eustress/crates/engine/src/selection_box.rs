@@ -74,7 +74,7 @@ fn spawn_gizmo_camera(mut commands: Commands) {
         Camera3d::default(),
         Camera {
             order: 400,
-            clear_color: bevy::render::camera::ClearColorConfig::None,
+            clear_color: ClearColorConfig::None,
             ..default()
         },
         Transform::from_xyz(10.0, 10.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
