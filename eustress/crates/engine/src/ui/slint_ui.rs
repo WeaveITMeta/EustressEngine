@@ -152,105 +152,16 @@ struct SlintScene {
 
 
 // ============================================================================
-// Bevy Resource Wrappers
+// Types imported from parent module (ui/mod.rs) — single source of truth
 // ============================================================================
+pub use super::{
+    BevySelectionManager, BevyTransformManager,
+    Tool, TransformMode, ViewMode, RibbonTab, SecondaryPanelTab,
+    MindSpaceMode, TabEntry, CustomTab, RibbonTabManagerState,
+    SyncDomainModalState,
+};
 
-/// Bevy resource wrapping SelectionManager for UI access
-#[derive(Resource, Clone)]
-pub struct BevySelectionManager(pub Arc<RwLock<SelectionManager>>);
-
-/// Bevy resource wrapping TransformManager for UI access
-#[derive(Resource, Clone)]
-pub struct BevyTransformManager(pub Arc<RwLock<TransformManager>>);
-
-// ============================================================================
-// Tool and Mode Enums
-// ============================================================================
-
-/// Current tool selection
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tool {
-    #[default]
-    Select,
-    Move,
-    Rotate,
-    Scale,
-    Terrain,
-}
-
-/// Transform mode (local vs world space)
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TransformMode {
-    #[default]
-    World,
-    Local,
-}
-
-/// View mode
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ViewMode {
-    #[default]
-    Perspective,
-    Top,
-    Front,
-    Right,
-    Orthographic,
-}
-
-/// Ribbon tab selection
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RibbonTab {
-    #[default]
-    Home,
-    Model,
-    Test,
-    View,
-    Plugins,
-}
-
-/// Secondary panel tab (Terrain/MindSpace)
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SecondaryPanelTab {
-    #[default]
-    Terrain,
-    MindSpace,
-}
-
-/// MindSpace mode
-#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MindSpaceMode {
-    #[default]
-    Edit,
-    Connect,
-}
-
-/// Tab entry for ribbon
-#[derive(Clone, Debug)]
-pub enum TabEntry {
-    BuiltIn { name: String },
-    Plugin { plugin_id: String, name: String },
-}
-
-/// Custom tab definition
-#[derive(Clone, Debug, Default)]
-pub struct CustomTab {
-    pub name: String,
-    pub items: Vec<String>,
-}
-
-/// Ribbon tab manager state
-#[derive(Default, Clone, Debug)]
-pub struct RibbonTabManagerState {
-    pub show: bool,
-    pub selected_tab: Option<usize>,
-}
-
-/// Sync domain modal state
-#[derive(Default, Clone, Debug)]
-pub struct SyncDomainModalState {
-    pub domain_name: String,
-    pub object_type: String,
-}
+// (Duplicate type definitions removed — using super:: imports above)
 
 // ============================================================================
 // System Set Labels
