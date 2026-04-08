@@ -98,7 +98,13 @@ pub fn compile_scripts_on_play(
 ) {
     let total_scripts = scripts.iter().count();
     let sources: Vec<ScriptSource> = scripts.iter()
-        .filter(|(_, _, data)| !data.source.is_empty() && data.run_context == super::SoulRunContext::Rune)
+        .filter(|(_, name, data)| {
+            !data.source.is_empty()
+            && data.run_context == super::SoulRunContext::Rune
+            // Only compile actual .rune scripts, not .md/.txt files loaded as SoulScriptData
+            && !name.as_str().ends_with(".md")
+            && !name.as_str().ends_with(".txt")
+        })
         .map(|(entity, name, data)| ScriptSource {
             entity_index: entity.index().index(),
             name: name.as_str().to_string(),
