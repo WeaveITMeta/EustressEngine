@@ -40,6 +40,9 @@ impl Plugin for GizmoToolsPlugin {
 /// Configure transform gizmos to render on top
 fn configure_transform_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
-    config.depth_bias = -1.0; // Render on top of everything
-    config.line.width = 3.0; // Thicker lines for better visibility
+    config.depth_bias = -1.0;
+    config.line.width = 4.0;
+    config.enabled = true;
+    info!("🔧 TransformGizmo config: depth_bias={}, line_width={}, enabled={}",
+        config.depth_bias, config.line.width, config.enabled);
 }

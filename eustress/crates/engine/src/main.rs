@@ -179,8 +179,6 @@ fn main() {
                 ..default()
             })
         )
-        // Deferred rendering — required for Atmosphere sun/moon disk + gizmo compatibility
-        .insert_resource(bevy::pbr::DefaultOpaqueRendererMethod::deferred())
         // Diagnostic plugins for FPS and performance profiling
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EntityCountDiagnosticsPlugin::default())

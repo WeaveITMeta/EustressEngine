@@ -69,8 +69,11 @@ impl Plugin for SelectionBoxPlugin {
 /// Configure gizmos to render on top at startup
 fn configure_gizmos_on_top(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    config.depth_bias = -1.0; // Render on top of everything
-    config.line.width = 2.0;  // Thicker lines for better visibility
+    config.depth_bias = -1.0;
+    config.line.width = 3.0;
+    config.enabled = true;
+    info!("🎯 Gizmo config: depth_bias={}, line_width={}, enabled={}",
+        config.depth_bias, config.line.width, config.enabled);
 }
 
 // ============================================================================
@@ -132,6 +135,22 @@ fn draw_selection_boxes(
     all_transforms: Query<(&GlobalTransform, Option<&BasePart>), Without<BillboardGuiMarker>>,
     billboard_markers: Query<(), With<BillboardGuiMarker>>,
 ) {
+    // DEBUG: log count every 120 frames
+    static FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let frame = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if frame % 120 == 0 {
+        let count = query.iter().count();
+        if count > 0 {
+            for (entity, transform, base_part, _) in &query {
+                let t = transform.compute_transform();
+                let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
+                info!("🎯 GIZMO: entity={:?} pos={:.1},{:.1},{:.1} size={:.1},{:.1},{:.1}",
+                    entity, t.translation.x, t.translation.y, t.translation.z,
+                    size.x, size.y, size.z);
+            }
+        }
+    }
+
     if query.is_empty() { return; }
 
     for (entity, transform, base_part, part) in &query {
