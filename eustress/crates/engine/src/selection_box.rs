@@ -55,11 +55,22 @@ impl Plugin for SelectionBoxPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, configure_gizmos_on_top)
             .add_systems(Update, (
+                debug_test_gizmo,
                 draw_selection_boxes,
                 draw_hover_highlights,
                 draw_billboard_gui_selection,
             ));
     }
+}
+
+/// DEBUG: Draw a permanent red cross at origin to verify gizmo pipeline works
+fn debug_test_gizmo(mut gizmos: Gizmos) {
+    // Red X-axis line
+    gizmos.line(Vec3::new(-5.0, 0.5, 0.0), Vec3::new(5.0, 0.5, 0.0), Color::srgb(1.0, 0.0, 0.0));
+    // Green Y-axis line
+    gizmos.line(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.0, 5.5, 0.0), Color::srgb(0.0, 1.0, 0.0));
+    // Blue Z-axis line
+    gizmos.line(Vec3::new(0.0, 0.5, -5.0), Vec3::new(0.0, 0.5, 5.0), Color::srgb(0.0, 0.0, 1.0));
 }
 
 // ============================================================================
