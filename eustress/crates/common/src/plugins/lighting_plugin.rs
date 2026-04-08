@@ -387,7 +387,7 @@ pub fn create_procedural_skybox_with_sun(
     lighting: &LightingService,
     sun_dir_override: Option<Vec3>,
 ) -> Handle<Image> {
-    const SIZE: u32 = 256;
+    const SIZE: u32 = 512;
     
     // AAA sky palette
     let zenith: [f32; 3] = [0.16, 0.32, 0.75];      // Deep blue zenith
@@ -486,7 +486,32 @@ pub fn create_procedural_skybox_with_sun(
                         b = b + (sun_color[2] * 0.7 - b) * glow_strength * 0.5;
                     }
                 }
-                
+
+                // Moon disc — opposite side from sun, only when sun is low/below horizon
+                {
+                    let moon_dir = -sun_dir; // Simplified: moon opposite sun
+                    let moon_radius = sun_angular_radius.to_radians() * 0.9; // Slightly smaller than sun
+                    let dot = nx * moon_dir.x + ny * moon_dir.y + nz * moon_dir.z;
+                    let angle = dot.clamp(-1.0, 1.0).acos();
+
+                    if angle < moon_radius && ny > -0.05 {
+                        // Moon disc — pale silver
+                        let t = 1.0 - (angle / moon_radius);
+                        let brightness = 0.7 + 0.3 * t * t;
+                        r = brightness * 0.85;
+                        g = brightness * 0.87;
+                        b = brightness * 0.92;
+                    } else if angle < moon_radius * 3.0 && ny > -0.05 {
+                        // Subtle moon glow
+                        let glow_t = 1.0 - ((angle - moon_radius) / (moon_radius * 2.0));
+                        let glow_t = glow_t * glow_t * glow_t;
+                        let glow = glow_t * 0.15;
+                        r = r + (0.85 - r) * glow;
+                        g = g + (0.87 - g) * glow;
+                        b = b + (0.92 - b) * glow;
+                    }
+                }
+
                 data.push((r.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push((g.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push((b.clamp(0.0, 1.0) * 255.0) as u8);

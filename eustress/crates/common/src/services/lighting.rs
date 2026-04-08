@@ -102,7 +102,7 @@ impl Default for LightingService {
             // Sun
             sun_color: [1.0, 0.98, 0.95, 1.0],
             sun_intensity: 15000.0,
-            sun_angular_radius: 0.5,
+            sun_angular_radius: 3.0, // Degrees — visible disc in 256px skybox
             
             // Shadows
             shadows_enabled: true,
