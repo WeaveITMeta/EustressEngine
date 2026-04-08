@@ -1076,6 +1076,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, update_ui_performance)
             // Simulation clock display in ribbon
             .add_systems(Update, sync_sim_clock_to_slint)
+            // Axis orientation gizmo (bottom-right of viewport)
+            .add_systems(Update, sync_axis_gizmo_to_slint)
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState (runs first)
             .add_systems(Update, sync_viewport_selection_to_explorer)
             // Unified explorer sync: entities + filesystem (throttled internally)
@@ -5492,6 +5494,34 @@ fn sync_sim_clock_to_slint(
         };
         ui.set_sim_clock_display(display.into());
     }
+}
+
+/// Sync camera orientation axes to Slint for the axis gizmo widget.
+/// Projects world X/Y/Z axes into 2D camera-relative coordinates.
+fn sync_axis_gizmo_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<SlintOverlayCamera>)>,
+) {
+    let Some(ref context) = slint_context else { return };
+    let Some(cam_transform) = camera_query.iter().next() else { return };
+    let ui = &context.window;
+
+    // Get camera's view matrix vectors
+    let right = cam_transform.right().as_vec3();
+    let up = cam_transform.up().as_vec3();
+
+    // Project each world axis into 2D screen space (dot product with camera right/up)
+    // X axis (1,0,0) projected onto camera plane
+    ui.set_axis_x_dx(Vec3::X.dot(right));
+    ui.set_axis_x_dy(-Vec3::X.dot(up)); // Negate Y because screen Y is down
+
+    // Y axis (0,1,0)
+    ui.set_axis_y_dx(Vec3::Y.dot(right));
+    ui.set_axis_y_dy(-Vec3::Y.dot(up));
+
+    // Z axis (0,0,1)
+    ui.set_axis_z_dx(Vec3::Z.dot(right));
+    ui.set_axis_z_dy(-Vec3::Z.dot(up));
 }
 
 /// Bridges viewport click selection → UnifiedExplorerState.

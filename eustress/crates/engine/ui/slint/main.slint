@@ -205,6 +205,15 @@ export component StudioWindow inherits Window {
     in-out property <[WatchpointData]> sim-watchpoints: [];
     in-out property <[SimOutputBinding]> sim-output-bindings: [];
     
+    // Camera orientation for axis gizmo (projected 2D endpoints)
+    // Each axis is projected from camera view: (dx, dy) normalized to -1..1
+    in-out property <float> axis-x-dx: 1.0;
+    in-out property <float> axis-x-dy: 0.0;
+    in-out property <float> axis-y-dx: 0.0;
+    in-out property <float> axis-y-dy: -1.0;
+    in-out property <float> axis-z-dx: 0.5;
+    in-out property <float> axis-z-dy: 0.5;
+
     // Workshop Panel state (System 0: Ideation conversational interface)
     in-out property <[ChatMessage]> workshop-messages: [];
     in-out property <string> workshop-input-text: "";
@@ -1619,6 +1628,88 @@ export component StudioWindow inherits Window {
                             entity-count: root.current-entity-count;
                         }
                         
+                        // Axis orientation gizmo (bottom-right of viewport)
+                        Rectangle {
+                            x: parent.width - self.width - 12px;
+                            y: parent.height - self.height - 12px;
+                            width: 80px;
+                            height: 80px;
+                            background: #00000040;
+                            border-radius: 6px;
+
+                            // Center point
+                            property <float> cx: 40.0;
+                            property <float> cy: 40.0;
+                            property <float> len: 28.0;
+
+                            // X axis (red)
+                            Rectangle {
+                                x: (parent.cx + min(root.axis-x-dx * parent.len, parent.len)) * 1px - 1px;
+                                y: (parent.cy + min(root.axis-x-dy * parent.len, parent.len)) * 1px - 1px;
+                                width: 3px; height: 3px;
+                                border-radius: 1.5px;
+                                background: #ef5350;
+                            }
+                            Path {
+                                x: 0px; y: 0px; width: 80px; height: 80px;
+                                stroke: #ef5350;
+                                stroke-width: 2px;
+                                MoveTo { x: parent.cx; y: parent.cy; }
+                                LineTo { x: parent.cx + root.axis-x-dx * parent.len; y: parent.cy + root.axis-x-dy * parent.len; }
+                            }
+                            Text {
+                                x: (parent.cx + root.axis-x-dx * parent.len + 2) * 1px;
+                                y: (parent.cy + root.axis-x-dy * parent.len - 6) * 1px;
+                                text: "X";
+                                color: #ef5350;
+                                font-size: 9px;
+                                font-weight: 700;
+                            }
+
+                            // Y axis (green)
+                            Path {
+                                x: 0px; y: 0px; width: 80px; height: 80px;
+                                stroke: #66bb6a;
+                                stroke-width: 2px;
+                                MoveTo { x: parent.cx; y: parent.cy; }
+                                LineTo { x: parent.cx + root.axis-y-dx * parent.len; y: parent.cy + root.axis-y-dy * parent.len; }
+                            }
+                            Text {
+                                x: (parent.cx + root.axis-y-dx * parent.len + 2) * 1px;
+                                y: (parent.cy + root.axis-y-dy * parent.len - 6) * 1px;
+                                text: "Y";
+                                color: #66bb6a;
+                                font-size: 9px;
+                                font-weight: 700;
+                            }
+
+                            // Z axis (blue)
+                            Path {
+                                x: 0px; y: 0px; width: 80px; height: 80px;
+                                stroke: #42a5f5;
+                                stroke-width: 2px;
+                                MoveTo { x: parent.cx; y: parent.cy; }
+                                LineTo { x: parent.cx + root.axis-z-dx * parent.len; y: parent.cy + root.axis-z-dy * parent.len; }
+                            }
+                            Text {
+                                x: (parent.cx + root.axis-z-dx * parent.len + 2) * 1px;
+                                y: (parent.cy + root.axis-z-dy * parent.len - 6) * 1px;
+                                text: "Z";
+                                color: #42a5f5;
+                                font-size: 9px;
+                                font-weight: 700;
+                            }
+
+                            // Center dot
+                            Rectangle {
+                                x: (parent.cx - 2) * 1px;
+                                y: (parent.cy - 2) * 1px;
+                                width: 4px; height: 4px;
+                                border-radius: 2px;
+                                background: #ffffff80;
+                            }
+                        }
+
                         // Snap status — hidden (accessible via keybinds 1/2/3)
                         
                         // Play mode indicator with simulation clock
