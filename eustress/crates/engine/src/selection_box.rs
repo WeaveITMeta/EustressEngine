@@ -83,6 +83,8 @@ fn spawn_gizmo_camera(mut commands: Commands) {
             ..default()
         }),
         bevy::camera::visibility::RenderLayers::layer(30),
+        // Prevent skybox from being attached to this camera
+        eustress_common::plugins::lighting_plugin::SkyboxAttached,
         GizmoCamera,
         Name::new("GizmoCamera"),
     ));
