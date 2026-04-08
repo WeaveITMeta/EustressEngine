@@ -161,7 +161,7 @@ pub use super::{
     BevySelectionManager, BevyTransformManager,
     Tool, TransformMode, ViewMode, RibbonTab, SecondaryPanelTab,
     MindSpaceMode, TabEntry, CustomTab, RibbonTabManagerState,
-    SyncDomainModalState,
+    SyncDomainModalState, StudioState,
 };
 
 // (Duplicate type definitions removed — using super:: imports above)
