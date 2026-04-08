@@ -51,10 +51,15 @@ pub struct HoverHighlight;
 /// Plugin for managing Roblox-style selection box visuals
 pub struct SelectionBoxPlugin;
 
+/// Marker for the gizmo-only camera
+#[derive(Component)]
+pub struct GizmoCamera;
+
 impl Plugin for SelectionBoxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, configure_gizmos_on_top)
+        app.add_systems(Startup, (configure_gizmos_on_top, spawn_gizmo_camera))
             .add_systems(Update, (
+                sync_gizmo_camera,
                 draw_selection_boxes,
                 draw_hover_highlights,
                 draw_billboard_gui_selection,
@@ -62,17 +67,53 @@ impl Plugin for SelectionBoxPlugin {
     }
 }
 
+/// Spawn a Camera3d at order 400 that only renders gizmo layer 30.
+/// This renders AFTER the Slint overlay (order 300) so gizmos are always on top.
+fn spawn_gizmo_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: 400,
+            clear_color: bevy::render::camera::ClearColorConfig::None,
+            ..default()
+        },
+        Transform::from_xyz(10.0, 10.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 70.0_f32.to_radians(),
+            ..default()
+        }),
+        bevy::camera::visibility::RenderLayers::layer(30),
+        GizmoCamera,
+        Name::new("GizmoCamera"),
+    ));
+    info!("📷 Spawned GizmoCamera (order 400, layer 30)");
+}
+
+/// Sync gizmo camera transform, projection, and viewport to match the main 3D camera.
+fn sync_gizmo_camera(
+    main_camera: Query<(&Transform, &Projection, &Camera), (With<Camera3d>, Without<GizmoCamera>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
+    mut gizmo_camera: Query<(&mut Transform, &mut Projection, &mut Camera), With<GizmoCamera>>,
+) {
+    let Some((main_tf, main_proj, main_cam)) = main_camera.iter().next() else { return };
+    let Some((mut gizmo_tf, mut gizmo_proj, mut gizmo_cam)) = gizmo_camera.iter_mut().next() else { return };
+    *gizmo_tf = *main_tf;
+    *gizmo_proj = main_proj.clone();
+    gizmo_cam.viewport = main_cam.viewport.clone();
+}
+
 // ============================================================================
 // 3. Gizmo Configuration
 // ============================================================================
 
-/// Configure gizmos to render on top at startup
+/// Configure gizmos to render on layer 30 (gizmo-only camera).
+/// A dedicated Camera3d at order 400 renders only this layer AFTER the Slint overlay.
 fn configure_gizmos_on_top(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    config.depth_bias = -100.0;  // Extreme to force in front
-    config.line.width = 10.0;    // Very thick to ensure visibility
+    config.depth_bias = -1.0;
+    config.line.width = 2.5;
     config.enabled = true;
-    info!("🎯 Gizmo config: depth_bias={}, line_width={}, enabled={}",
+    config.render_layers = bevy::camera::visibility::RenderLayers::layer(30);
+    info!("🎯 Gizmo config: depth_bias={}, line_width={}, render_layer=30, enabled={}",
         config.depth_bias, config.line.width, config.enabled);
 }
 
