@@ -2059,10 +2059,12 @@ fn forward_input_to_slint(
         || mouse_buttons.pressed(MouseButton::Right)
         || mouse_buttons.pressed(MouseButton::Middle);
 
-    if let Some(cursor_pos) = window.cursor_position() {
+    // Use physical cursor position and convert with Slint's scale factor
+    // to ensure coordinate spaces match exactly.
+    if let Some(phys_pos) = window.physical_cursor_position() {
         let position = LogicalPosition::new(
-            cursor_pos.x / scale_factor,
-            cursor_pos.y / scale_factor,
+            phys_pos.x / scale_factor,
+            phys_pos.y / scale_factor,
         );
         // Only dispatch PointerMoved when position actually changes.
         // Sending it every frame causes Slint to re-evaluate hover states and
