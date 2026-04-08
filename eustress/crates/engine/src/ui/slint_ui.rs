@@ -395,7 +395,10 @@ impl SlintActionQueue {
     /// Push an action from a Slint callback
     pub fn push(&self, action: SlintAction) {
         if let Ok(mut queue) = self.0.lock() {
+            info!("📬 SlintActionQueue::push({:?}) — queue size: {}", action, queue.len());
             queue.push(action);
+        } else {
+            error!("❌ SlintActionQueue::push FAILED — mutex poisoned!");
         }
     }
     
@@ -2011,10 +2014,13 @@ fn forward_input_to_slint(
 
     // Forward mouse button events
     for event in mouse_button.read() {
-        // DEBUG: Log every click with position
+        // DEBUG: Log every click with position + Slint window size for coordinate debugging
         if event.state == ButtonState::Pressed {
             if let Some(pos) = cursor_state.position {
-                info!("🖱️ Click at ({:.0}, {:.0}) — dispatching to Slint", pos.x, pos.y);
+                let slint_size = adapter.size.get();
+                let sf = adapter.scale_factor.get();
+                info!("🖱️ Click at ({:.0}, {:.0}) — Slint size: {}x{}, scale: {:.2}",
+                    pos.x, pos.y, slint_size.width, slint_size.height, sf);
             }
         }
         if let Some(position) = cursor_state.position {
@@ -2351,9 +2357,13 @@ fn drain_slint_actions(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
 ) {
-    let Some(queue) = queue else { return };
+    let Some(queue) = queue else {
+        warn!("⚠ drain_slint_actions: SlintActionQueue resource not found!");
+        return;
+    };
     let actions = queue.drain();
     if actions.is_empty() { return; }
+    info!("📭 drain_slint_actions: processing {} actions", actions.len());
     let ui = slint_context.as_ref().map(|context| &context.window);
 
     // Diagnostic: log if StudioState is missing (would silently drop all tool/play actions)
