@@ -299,8 +299,6 @@ fn ensure_camera_exists(
             bevy::light::AtmosphereEnvironmentMapLight::default(),
             // MSAA off — required for Atmosphere + gizmo compatibility
             Msaa::Off,
-            // FXAA replaces MSAA for anti-aliasing
-            bevy::anti_alias::fxaa::Fxaa::default(),
             Transform::from_xyz(10.0, 10.0, 15.0)
                 .looking_at(Vec3::ZERO, Vec3::Y),
             Projection::Perspective(PerspectiveProjection {
