@@ -974,7 +974,7 @@ impl Plugin for StudioUiPlugin {
             .insert_resource(BevySelectionManager(self.selection_manager.clone()))
             .insert_resource(BevyTransformManager(self.transform_manager.clone()))
             // UI state resources
-            // StudioState is initialized in ui/mod.rs — NOT here (was causing duplicate resource bug)
+            .init_resource::<StudioState>()
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
@@ -1028,7 +1028,7 @@ impl Plugin for SlintUiPlugin {
         
         app
             // UI state resources
-            // StudioState is initialized in ui/mod.rs — NOT here (was causing duplicate resource bug)
+            .init_resource::<StudioState>()
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
