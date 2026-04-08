@@ -263,17 +263,33 @@ pub struct StudioState {
     // Center tab management (Space1 + script/web tabs)
     pub center_tabs: Vec<slint_ui::CenterTabData>,
     pub active_center_tab: i32,
+    pub tabs_dirty: bool,
+    pub tabs_deferred_frames: u8,
     pub pending_open_script: Option<(i32, String)>,
     pub pending_open_web: Option<String>,
+    pub pending_build_entity: Option<Entity>,
     pub pending_close_tab: Option<i32>,
     pub pending_reorder: Option<(i32, i32)>,
     pub script_editor_content: String,
-    
+    pub script_content_dirty: bool,
+    // HighlightLine is a Slint-generated type — use opaque Vec to avoid
+    // mod.rs depending on slint::include_modules!(). Cast in slint_ui.rs.
+    pub script_highlight_lines: Vec<slint_ui::SlintHighlightLine>,
+
     // Web browser state for active web tab
     pub pending_web_navigate: Option<String>,
     pub pending_web_back: bool,
     pub pending_web_forward: bool,
     pub pending_web_refresh: bool,
+
+    // Properties panel
+    pub show_help_icons: bool,
+    pub help_opens_in_tab: bool,
+    pub collapsed_sections: std::collections::HashSet<String>,
+    pub last_properties_hash: u64,
+    pub last_selected_entity: Option<Entity>,
+    pub frames_since_selection_change: u32,
+    pub last_log_count: usize,
 }
 
 impl Default for StudioState {
@@ -333,15 +349,27 @@ impl Default for StudioState {
             mindspace_last_selected: None,
             center_tabs: Vec::new(),
             active_center_tab: 0,
+            tabs_dirty: false,
+            tabs_deferred_frames: 0,
             pending_open_script: None,
             pending_open_web: None,
+            pending_build_entity: None,
             pending_close_tab: None,
             pending_reorder: None,
             script_editor_content: String::new(),
+            script_content_dirty: false,
+            script_highlight_lines: Vec::new(),
             pending_web_navigate: None,
             pending_web_back: false,
             pending_web_forward: false,
             pending_web_refresh: false,
+            show_help_icons: true,
+            help_opens_in_tab: false,
+            collapsed_sections: std::collections::HashSet::new(),
+            last_properties_hash: 0,
+            last_selected_entity: None,
+            frames_since_selection_change: 0,
+            last_log_count: 0,
         }
     }
 }

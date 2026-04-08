@@ -32,8 +32,11 @@ use super::menu_events::MenuActionEvent;
 use super::{SlintUIFocus};
 use super::world_view::{WorldViewPlugin, UIWorldSnapshot};
 
-// Include Slint modules - this creates StudioWindow type
+// Include Slint modules - this creates StudioWindow type + Slint structs (HighlightLine, etc.)
 slint::include_modules!();
+
+/// Re-export Slint-generated HighlightLine so mod.rs can reference it without include_modules
+pub type SlintHighlightLine = HighlightLine;
 
 // ============================================================================
 // Slint Software Renderer - BevyWindowAdapter (from official bevy-hosts-slint)
@@ -407,11 +410,15 @@ impl SlintActionQueue {
 }
 
 // ============================================================================
-// UI State Resources
+// UI State Resources — StudioState defined in ui/mod.rs (single source of truth)
 // ============================================================================
 
-/// Global studio state - main UI state resource
-#[derive(Resource)]
+// StudioState, OutputConsole, and CenterTabData definitions follow.
+// StudioState is imported from super (ui/mod.rs) to avoid duplication.
+// REMOVED: duplicate StudioState struct — was causing ALL buttons to fail
+// because drain_slint_actions wrote to this copy while tools read mod.rs copy.
+
+/* REMOVED: duplicate StudioState — see ui/mod.rs for the canonical definition
 pub struct StudioState {
     pub show_explorer: bool,
     pub show_properties: bool,
@@ -518,6 +525,7 @@ pub struct StudioState {
     // Output console — last log count to avoid rebuilding model on every sync
     pub last_log_count: usize,
 }
+END OF REMOVED STUDIO STATE */
 
 /// Data for a single center tab (script or web)
 #[derive(Debug, Clone)]
@@ -531,6 +539,7 @@ pub struct CenterTabData {
     pub loading: bool,
 }
 
+/* REMOVED: duplicate Default for StudioState — see ui/mod.rs
 impl Default for StudioState {
     fn default() -> Self {
         Self {
@@ -609,6 +618,7 @@ impl Default for StudioState {
         }
     }
 }
+END OF REMOVED DEFAULT */
 
 /// Output console for logs
 #[derive(Resource, Default)]
@@ -961,7 +971,7 @@ impl Plugin for StudioUiPlugin {
             .insert_resource(BevySelectionManager(self.selection_manager.clone()))
             .insert_resource(BevyTransformManager(self.transform_manager.clone()))
             // UI state resources
-            .init_resource::<StudioState>()
+            // StudioState is initialized in ui/mod.rs — NOT here (was causing duplicate resource bug)
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
@@ -1015,7 +1025,7 @@ impl Plugin for SlintUiPlugin {
         
         app
             // UI state resources
-            .init_resource::<StudioState>()
+            // StudioState is initialized in ui/mod.rs — NOT here (was causing duplicate resource bug)
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
