@@ -207,12 +207,12 @@ export component StudioWindow inherits Window {
     
     // Camera orientation for axis gizmo (projected 2D endpoints)
     // Each axis is projected from camera view: (dx, dy) normalized to -1..1
-    in-out property <float> axis-x-dx: 1.0;
-    in-out property <float> axis-x-dy: 0.0;
-    in-out property <float> axis-y-dx: 0.0;
-    in-out property <float> axis-y-dy: -1.0;
-    in-out property <float> axis-z-dx: 0.5;
-    in-out property <float> axis-z-dy: 0.5;
+    in-out property <float> gizmo-ax: 1.0;
+    in-out property <float> gizmo-ay: 0.0;
+    in-out property <float> gizmo-bx: 0.0;
+    in-out property <float> gizmo-by: -1.0;
+    in-out property <float> gizmo-cx: 0.5;
+    in-out property <float> gizmo-cy: 0.5;
 
     // Workshop Panel state (System 0: Ideation conversational interface)
     in-out property <[ChatMessage]> workshop-messages: [];
@@ -1644,8 +1644,8 @@ export component StudioWindow inherits Window {
 
                             // X axis (red)
                             Rectangle {
-                                x: (parent.cx + min(root.axis-x-dx * parent.len, parent.len)) * 1px - 1px;
-                                y: (parent.cy + min(root.axis-x-dy * parent.len, parent.len)) * 1px - 1px;
+                                x: (parent.cx + min(root.gizmo-ax * parent.len, parent.len)) * 1px - 1px;
+                                y: (parent.cy + min(root.gizmo-ay * parent.len, parent.len)) * 1px - 1px;
                                 width: 3px; height: 3px;
                                 border-radius: 1.5px;
                                 background: #ef5350;
@@ -1655,11 +1655,11 @@ export component StudioWindow inherits Window {
                                 stroke: #ef5350;
                                 stroke-width: 2px;
                                 MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.axis-x-dx * parent.len; y: parent.cy + root.axis-x-dy * parent.len; }
+                                LineTo { x: parent.cx + root.gizmo-ax * parent.len; y: parent.cy + root.gizmo-ay * parent.len; }
                             }
                             Text {
-                                x: (parent.cx + root.axis-x-dx * parent.len + 2) * 1px;
-                                y: (parent.cy + root.axis-x-dy * parent.len - 6) * 1px;
+                                x: (parent.cx + root.gizmo-ax * parent.len + 2) * 1px;
+                                y: (parent.cy + root.gizmo-ay * parent.len - 6) * 1px;
                                 text: "X";
                                 color: #ef5350;
                                 font-size: 9px;
@@ -1672,11 +1672,11 @@ export component StudioWindow inherits Window {
                                 stroke: #66bb6a;
                                 stroke-width: 2px;
                                 MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.axis-y-dx * parent.len; y: parent.cy + root.axis-y-dy * parent.len; }
+                                LineTo { x: parent.cx + root.gizmo-bx * parent.len; y: parent.cy + root.gizmo-by * parent.len; }
                             }
                             Text {
-                                x: (parent.cx + root.axis-y-dx * parent.len + 2) * 1px;
-                                y: (parent.cy + root.axis-y-dy * parent.len - 6) * 1px;
+                                x: (parent.cx + root.gizmo-bx * parent.len + 2) * 1px;
+                                y: (parent.cy + root.gizmo-by * parent.len - 6) * 1px;
                                 text: "Y";
                                 color: #66bb6a;
                                 font-size: 9px;
@@ -1689,11 +1689,11 @@ export component StudioWindow inherits Window {
                                 stroke: #42a5f5;
                                 stroke-width: 2px;
                                 MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.axis-z-dx * parent.len; y: parent.cy + root.axis-z-dy * parent.len; }
+                                LineTo { x: parent.cx + root.gizmo-cx * parent.len; y: parent.cy + root.gizmo-cy * parent.len; }
                             }
                             Text {
-                                x: (parent.cx + root.axis-z-dx * parent.len + 2) * 1px;
-                                y: (parent.cy + root.axis-z-dy * parent.len - 6) * 1px;
+                                x: (parent.cx + root.gizmo-cx * parent.len + 2) * 1px;
+                                y: (parent.cy + root.gizmo-cy * parent.len - 6) * 1px;
                                 text: "Z";
                                 color: #42a5f5;
                                 font-size: 9px;

@@ -5512,16 +5512,14 @@ fn sync_axis_gizmo_to_slint(
 
     // Project each world axis into 2D screen space (dot product with camera right/up)
     // X axis (1,0,0) projected onto camera plane
-    ui.set_axis_x_dx(Vec3::X.dot(right));
-    ui.set_axis_x_dy(-Vec3::X.dot(up)); // Negate Y because screen Y is down
+    ui.set_gizmo_ax(Vec3::X.dot(right));
+    ui.set_gizmo_ay(-Vec3::X.dot(up));
 
-    // Y axis (0,1,0)
-    ui.set_axis_y_dx(Vec3::Y.dot(right));
-    ui.set_axis_y_dy(-Vec3::Y.dot(up));
+    ui.set_gizmo_bx(Vec3::Y.dot(right));
+    ui.set_gizmo_by(-Vec3::Y.dot(up));
 
-    // Z axis (0,0,1)
-    ui.set_axis_z_dx(Vec3::Z.dot(right));
-    ui.set_axis_z_dy(-Vec3::Z.dot(up));
+    ui.set_gizmo_cx(Vec3::Z.dot(right));
+    ui.set_gizmo_cy(-Vec3::Z.dot(up));
 }
 
 /// Bridges viewport click selection → UnifiedExplorerState.
