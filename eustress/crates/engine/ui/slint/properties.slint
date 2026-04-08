@@ -228,13 +228,19 @@ component MaterialDropdown inherits Rectangle {
                 mouse-cursor: pointer;
                 clicked => {
                     root.dropdown-open = !root.dropdown-open;
+                    if root.dropdown-open {
+                        dropdown-popup.show();
+                    } else {
+                        dropdown-popup.close();
+                    }
                 }
             }
 
             HorizontalLayout {
                 padding-left: 6px;
-                padding-right: 4px;
+                padding-right: 6px;
                 spacing: 4px;
+                alignment: center;
 
                 Text {
                     text: root.value;
@@ -246,8 +252,8 @@ component MaterialDropdown inherits Rectangle {
                 }
 
                 Image {
-                    width: 10px;
-                    height: 10px;
+                    width: 12px;
+                    height: 12px;
                     source: @image-url("../../assets/icons/ui/chevron-down.svg");
                     image-fit: contain;
                     colorize: Theme.text-secondary;
@@ -257,18 +263,22 @@ component MaterialDropdown inherits Rectangle {
         }
     }
 
-    // Dropdown popup
-    if root.dropdown-open: Rectangle {
+    // Dropdown popup — uses PopupWindow to render above all other content
+    dropdown-popup := PopupWindow {
         x: 112px;
         y: parent.height;
         width: parent.width - 120px;
         height: min(320px, root.options.length * 24px + 12px);
-        background: #1e1e2e;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: #3a3a4a;
-        drop-shadow-blur: 12px;
-        drop-shadow-color: #00000080;
+
+        Rectangle {
+            background: #1e1e1e;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000080;
+            width: 100%;
+            height: 100%;
 
         // Must be above other properties
         // Prevent clicks from going through to viewport
@@ -287,7 +297,7 @@ component MaterialDropdown inherits Rectangle {
 
                     for option[idx] in root.options: Rectangle {
                         height: 24px;
-                        background: opt-touch.has-hover ? #3a3a5a : (option == root.value ? #2a2a4a : transparent);
+                        background: opt-touch.has-hover ? #3a3a3a : (option == root.value ? #2a2a2a : transparent);
                         border-radius: 3px;
 
                         opt-touch := TouchArea {
@@ -295,6 +305,7 @@ component MaterialDropdown inherits Rectangle {
                             clicked => {
                                 root.value-changed(option);
                                 root.dropdown-open = false;
+                                dropdown-popup.close();
                             }
                         }
 
@@ -324,7 +335,8 @@ component MaterialDropdown inherits Rectangle {
                 }
             }
         }
-    }
+        } // close inner Rectangle
+    } // close PopupWindow
 
     // Close dropdown when clicking outside
     if root.dropdown-open: Rectangle {
@@ -375,9 +387,9 @@ component PropRow inherits Rectangle {
             open-learn-url(url) => { root.open-learn-url(url); }
         }
         
-        // Label with better typography
+        // Label — fixed width for consistent alignment
         Text {
-            width: 100px;
+            width: 110px;
             text: root.label;
             color: Theme.text-secondary;
             font-size: 11px;
