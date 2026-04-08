@@ -150,10 +150,9 @@ export component IconButton inherits Rectangle {
     touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
-        clicked => { 
-            if !root.is-pressing {
-                root.clicked(); 
-            }
+        clicked => {
+            root.is-pressing = false;
+            root.clicked();
         }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
