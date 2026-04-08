@@ -502,6 +502,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     // Verify and repair: create any missing service folders + knowledge dir
     ensure_space_integrity(space_path);
 
+    // Migrate recordings dir if space was renamed
+    migrate_recordings_on_rename(space_path);
+
     // Ensure Universe-level assets/parts/ has engine default GLBs
     ensure_universe_default_parts(space_path);
 
@@ -870,6 +873,44 @@ fn ensure_space_integrity(space_root: &Path) {
 
     if repaired > 0 {
         info!("🔧 Space integrity check: repaired {} missing items", repaired);
+    }
+}
+
+/// If a space was renamed (folder name changed), migrate the recordings directory
+/// in the Universe's knowledge/recordings/ to match the new name.
+///
+/// Uses a `.last_name` file in the space's .eustress/ dir to track the previous name.
+fn migrate_recordings_on_rename(space_root: &Path) {
+    let current_name = space_root.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Space");
+
+    let last_name_file = space_root.join(".eustress").join(".last_name");
+
+    // Read previous name
+    let previous_name = std::fs::read_to_string(&last_name_file).ok();
+
+    // Write current name for next time
+    let _ = std::fs::create_dir_all(space_root.join(".eustress"));
+    let _ = std::fs::write(&last_name_file, current_name);
+
+    // If name changed, rename recordings dir
+    if let Some(prev) = previous_name {
+        let prev = prev.trim().to_string();
+        if !prev.is_empty() && prev != current_name {
+            if let Some(universe_root) = space_root.parent().and_then(|p| p.parent()) {
+                let recordings_base = universe_root.join(".eustress").join("knowledge").join("recordings");
+                let old_dir = recordings_base.join(&prev);
+                let new_dir = recordings_base.join(current_name);
+
+                if old_dir.exists() && !new_dir.exists() {
+                    match std::fs::rename(&old_dir, &new_dir) {
+                        Ok(_) => info!("📁 Migrated recordings: '{}' → '{}'", prev, current_name),
+                        Err(e) => warn!("⚠ Failed to migrate recordings dir: {}", e),
+                    }
+                }
+            }
+        }
     }
 }
 
