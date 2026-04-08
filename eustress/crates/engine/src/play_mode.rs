@@ -642,10 +642,10 @@ fn handle_start_play(
     };
 
     let Some(play_type) = play_type else { return };
-    info!("▶ handle_start_play: play_type={:?}, started_at={:?}", play_type, play_mode.started_at);
-    // Only start from Editing (check via play_mode — already started means skip)
+
+    // If already playing/paused, treat Play as resume (same as unpause)
     if play_mode.started_at.is_some() {
-        warn!("▶ handle_start_play: BLOCKED — play_mode.started_at is already set");
+        studio_state.pause_requested = true; // Toggle pause via handle_pause_toggle
         return;
     }
 
