@@ -66,6 +66,7 @@ fn on_play_stop(
     mut breakpoints: ResMut<BreakPointRegistry>,
     mut recording: ResMut<ActiveRecording>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     sim_clock.reset();
     sim_state.reset();
@@ -81,9 +82,24 @@ fn on_play_stop(
             info!("📊 Simulation recording stopped: {} ticks, {:.2}s simulated, {} watchpoints",
                 ticks, sim_duration, series_count);
 
-            // Auto-export to space recordings directory
-            if let Some(home) = dirs::home_dir() {
-                let recordings_dir = home.join(".eustress_engine").join("recordings");
+            // Auto-export to Universe knowledge/recordings/{space_name}/
+            let recordings_dir = if let Some(ref sr) = space_root {
+                let space_name = sr.0.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("default");
+                // Walk up from space root: spaces/SpaceName → Universe root
+                let universe_root = sr.0.parent() // spaces/
+                    .and_then(|p| p.parent()); // Universe root
+                if let Some(ur) = universe_root {
+                    ur.join(".eustress").join("knowledge").join("recordings").join(space_name)
+                } else {
+                    sr.0.join(".eustress").join("recordings")
+                }
+            } else {
+                // Fallback if no space root
+                crate::space::workspace_root().join(".eustress").join("recordings")
+            };
+            {
                 if let Err(e) = std::fs::create_dir_all(&recordings_dir) {
                     warn!("Failed to create recordings dir: {}", e);
                 } else {
