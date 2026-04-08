@@ -428,9 +428,20 @@ export component LogEntry inherits Rectangle {
     in property <string> level: "info";
     in property <string> timestamp: "";
     in property <string> message: "";
-    
+
+    callback ctrl-clicked(string);
+
     height: 20px;
-    background: transparent;
+    background: log-touch.has-hover ? #ffffff08 : transparent;
+
+    log-touch := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.up && event.button == PointerEventButton.left && event.modifiers.control {
+                root.ctrl-clicked(root.message);
+            }
+        }
+    }
     
     // Level indicator SVG icon
     Image {

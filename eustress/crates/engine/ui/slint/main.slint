@@ -523,6 +523,7 @@ export component StudioWindow inherits Window {
     // Auth
     callback login();
     callback logout();
+    callback open-path-from-log(string);
     
     // Terrain
     callback generate-terrain(string); // "small", "medium", "large"
@@ -2079,6 +2080,7 @@ export component StudioWindow inherits Window {
                 logs: root.output-logs;
                 on-clear => { root.output-logs = []; }
                 on-close => { root.show-output = false; }
+                on-open-path(msg) => { root.open-path-from-log(msg); }
             }
         }
         

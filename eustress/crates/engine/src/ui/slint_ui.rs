@@ -1390,6 +1390,47 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_login_with_identity(move || q.push(SlintAction::LoginWithIdentity));
 
+    // Ctrl+Click file path in Output panel → open parent folder with file selected
+    ui.on_open_path_from_log(move |msg| {
+        let msg: String = msg.into();
+        // Extract file path from log message — look for common path patterns
+        let path = if let Some(idx) = msg.find("C:\\") {
+            Some(&msg[idx..])
+        } else if let Some(idx) = msg.find("/home/") {
+            Some(&msg[idx..])
+        } else if let Some(idx) = msg.find("~/") {
+            Some(&msg[idx..])
+        } else {
+            None
+        };
+
+        if let Some(path_str) = path {
+            let path_str = path_str.trim();
+            info!("📂 Opening path: {}", path_str);
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", path_str))
+                    .spawn();
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open")
+                    .arg("-R")
+                    .arg(path_str)
+                    .spawn();
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(parent) = std::path::Path::new(path_str).parent() {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(parent)
+                        .spawn();
+                }
+            }
+        }
+    });
+
     // Update system
     let q = queue.clone();
     ui.on_update_clicked(move || q.push(SlintAction::UpdateClicked));

@@ -31,6 +31,7 @@ export component OutputConsole inherits Rectangle {
     callback on-toggle-level(string);
     callback on-copy-log(int);
     callback on-close();
+    callback on-open-path(string);
     
     background: Theme.panel-background;
     
@@ -504,6 +505,7 @@ export component OutputConsole inherits Rectangle {
                     level: log.level;
                     timestamp: log.timestamp;
                     message: log.message;
+                    ctrl-clicked(msg) => { root.on-open-path(msg); }
                 }
                 
                 // Empty state
