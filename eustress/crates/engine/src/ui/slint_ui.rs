@@ -2088,6 +2088,12 @@ fn forward_input_to_slint(
 
     // Forward mouse button events
     for event in mouse_button.read() {
+        // DEBUG: Log every click with position
+        if event.state == ButtonState::Pressed {
+            if let Some(pos) = cursor_state.position {
+                info!("🖱️ Click at ({:.0}, {:.0}) — dispatching to Slint", pos.x, pos.y);
+            }
+        }
         if let Some(position) = cursor_state.position {
             let button = match event.button {
                 MouseButton::Left => slint::platform::PointerEventButton::Left,
