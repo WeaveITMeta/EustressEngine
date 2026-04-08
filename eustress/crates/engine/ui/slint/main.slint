@@ -1637,63 +1637,51 @@ export component StudioWindow inherits Window {
                             background: #00000040;
                             border-radius: 6px;
 
-                            // Center point
-                            property <float> cx: 40.0;
-                            property <float> cy: 40.0;
-                            property <float> len: 28.0;
-
-                            // X axis (red)
+                            // X axis endpoint + label (red)
                             Rectangle {
-                                x: (parent.cx + min(root.gizmo-ax * parent.len, parent.len)) * 1px - 1px;
-                                y: (parent.cy + min(root.gizmo-ay * parent.len, parent.len)) * 1px - 1px;
-                                width: 3px; height: 3px;
-                                border-radius: 1.5px;
+                                x: (40 + root.gizmo-ax * 28 - 3) * 1px;
+                                y: (40 + root.gizmo-ay * 28 - 3) * 1px;
+                                width: 6px; height: 6px;
+                                border-radius: 3px;
                                 background: #ef5350;
                             }
-                            Path {
-                                x: 0px; y: 0px; width: 80px; height: 80px;
-                                stroke: #ef5350;
-                                stroke-width: 2px;
-                                MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.gizmo-ax * parent.len; y: parent.cy + root.gizmo-ay * parent.len; }
-                            }
                             Text {
-                                x: (parent.cx + root.gizmo-ax * parent.len + 2) * 1px;
-                                y: (parent.cy + root.gizmo-ay * parent.len - 6) * 1px;
+                                x: (40 + root.gizmo-ax * 28 + 4) * 1px;
+                                y: (40 + root.gizmo-ay * 28 - 6) * 1px;
                                 text: "X";
                                 color: #ef5350;
                                 font-size: 9px;
                                 font-weight: 700;
                             }
 
-                            // Y axis (green)
-                            Path {
-                                x: 0px; y: 0px; width: 80px; height: 80px;
-                                stroke: #66bb6a;
-                                stroke-width: 2px;
-                                MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.gizmo-bx * parent.len; y: parent.cy + root.gizmo-by * parent.len; }
+                            // Y axis endpoint + label (green)
+                            Rectangle {
+                                x: (40 + root.gizmo-bx * 28 - 3) * 1px;
+                                y: (40 + root.gizmo-by * 28 - 3) * 1px;
+                                width: 6px; height: 6px;
+                                border-radius: 3px;
+                                background: #66bb6a;
                             }
                             Text {
-                                x: (parent.cx + root.gizmo-bx * parent.len + 2) * 1px;
-                                y: (parent.cy + root.gizmo-by * parent.len - 6) * 1px;
+                                x: (40 + root.gizmo-bx * 28 + 4) * 1px;
+                                y: (40 + root.gizmo-by * 28 - 6) * 1px;
                                 text: "Y";
                                 color: #66bb6a;
                                 font-size: 9px;
                                 font-weight: 700;
                             }
 
-                            // Z axis (blue)
-                            Path {
-                                x: 0px; y: 0px; width: 80px; height: 80px;
-                                stroke: #42a5f5;
-                                stroke-width: 2px;
-                                MoveTo { x: parent.cx; y: parent.cy; }
-                                LineTo { x: parent.cx + root.gizmo-cx * parent.len; y: parent.cy + root.gizmo-cy * parent.len; }
+                            // Z axis endpoint + label (blue)
+                            Rectangle {
+                                x: (40 + root.gizmo-cx * 28 - 3) * 1px;
+                                y: (40 + root.gizmo-cy * 28 - 3) * 1px;
+                                width: 6px; height: 6px;
+                                border-radius: 3px;
+                                background: #42a5f5;
                             }
                             Text {
-                                x: (parent.cx + root.gizmo-cx * parent.len + 2) * 1px;
-                                y: (parent.cy + root.gizmo-cy * parent.len - 6) * 1px;
+                                x: (40 + root.gizmo-cx * 28 + 4) * 1px;
+                                y: (40 + root.gizmo-cy * 28 - 6) * 1px;
                                 text: "Z";
                                 color: #42a5f5;
                                 font-size: 9px;
@@ -1702,8 +1690,7 @@ export component StudioWindow inherits Window {
 
                             // Center dot
                             Rectangle {
-                                x: (parent.cx - 2) * 1px;
-                                y: (parent.cy - 2) * 1px;
+                                x: 38px; y: 38px;
                                 width: 4px; height: 4px;
                                 border-radius: 2px;
                                 background: #ffffff80;
