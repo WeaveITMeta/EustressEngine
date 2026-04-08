@@ -863,12 +863,33 @@ fn ensure_space_integrity(space_root: &Path) {
         repaired += 1;
     }
 
-    // Ensure space.toml exists
+    // Ensure space.toml exists and name matches folder
     let space_toml_path = space_root.join("space.toml");
+    let folder_name = space_root.file_name().and_then(|n| n.to_str()).unwrap_or("Space");
     if !space_toml_path.exists() {
-        let name = space_root.file_name().and_then(|n| n.to_str()).unwrap_or("Space");
-        let _ = std::fs::write(&space_toml_path, space_meta_toml(name, "Eustress User"));
+        let _ = std::fs::write(&space_toml_path, space_meta_toml(folder_name, "Eustress User"));
         repaired += 1;
+    } else {
+        // Sync name in space.toml to match folder name
+        if let Ok(content) = std::fs::read_to_string(&space_toml_path) {
+            if let Ok(mut doc) = content.parse::<toml::Value>() {
+                let needs_update = doc.get("space")
+                    .and_then(|s| s.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|n| n != folder_name)
+                    .unwrap_or(false);
+                if needs_update {
+                    if let Some(space) = doc.get_mut("space").and_then(|s| s.as_table_mut()) {
+                        space.insert("name".to_string(), toml::Value::String(folder_name.to_string()));
+                        if let Ok(new_content) = toml::to_string_pretty(&doc) {
+                            let _ = std::fs::write(&space_toml_path, new_content);
+                            info!("📝 Updated space.toml name to '{}'", folder_name);
+                            repaired += 1;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if repaired > 0 {
