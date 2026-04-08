@@ -1,0 +1,5 @@
+[service]
+class_name = "AdornmentService"
+icon = "adornmentservice"
+description = "Beams, billboards, particles, and highlights"
+can_have_children = true
