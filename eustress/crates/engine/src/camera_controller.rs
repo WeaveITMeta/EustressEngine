@@ -290,13 +290,17 @@ fn ensure_camera_exists(
             bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
             // Exposure tuned for atmosphere-filtered sunlight
             bevy::camera::Exposure { ev100: 13.0 },
-            // Bevy Atmosphere — physically based sky rendering with scattering
+            // Bevy Atmosphere — physically based sky, sun disk, moon
             bevy::pbr::Atmosphere::earthlike(
                 scattering_mediums.add(bevy::pbr::ScatteringMedium::default()),
             ),
             bevy::pbr::AtmosphereSettings::default(),
-            // Environment map lighting from atmosphere (reflections + ambient)
+            // Environment map lighting from atmosphere
             bevy::light::AtmosphereEnvironmentMapLight::default(),
+            // MSAA off — required for Atmosphere + gizmo compatibility
+            Msaa::Off,
+            // FXAA replaces MSAA for anti-aliasing
+            bevy::anti_alias::fxaa::Fxaa::default(),
             Transform::from_xyz(10.0, 10.0, 15.0)
                 .looking_at(Vec3::ZERO, Vec3::Y),
             Projection::Perspective(PerspectiveProjection {
