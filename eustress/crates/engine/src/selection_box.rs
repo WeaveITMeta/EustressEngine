@@ -69,8 +69,8 @@ impl Plugin for SelectionBoxPlugin {
 /// Configure gizmos to render on top at startup
 fn configure_gizmos_on_top(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    config.depth_bias = -1.0;
-    config.line.width = 3.0;
+    config.depth_bias = -100.0;  // Extreme to force in front
+    config.line.width = 10.0;    // Very thick to ensure visibility
     config.enabled = true;
     info!("🎯 Gizmo config: depth_bias={}, line_width={}, enabled={}",
         config.depth_bias, config.line.width, config.enabled);
