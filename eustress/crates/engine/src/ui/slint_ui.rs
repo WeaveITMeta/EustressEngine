@@ -2711,10 +2711,12 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::LoginWithIdentity => {
-                // Read identity.toml and authenticate via SPI
+                // Read identity.toml and authenticate
                 let identity_path: String = ui.as_ref()
                     .map(|u| { let p: String = u.get_login_identity_path().into(); p })
                     .unwrap_or_default();
+
+                info!("🔐 LoginWithIdentity: path='{}'", identity_path);
 
                 if identity_path.is_empty() {
                     if let Some(ref ui) = ui {
@@ -2738,9 +2740,12 @@ fn drain_slint_actions(
                                     }
                                 }
                             }
+                            info!("🔐 Parsed: username='{}', public_key='{}'",
+                                username, if public_key.is_empty() { "EMPTY" } else { &public_key[..8.min(public_key.len())] });
+
                             if public_key.is_empty() {
                                 if let Some(ref ui) = ui {
-                                    ui.set_login_error("No public_key found in identity.toml".into());
+                                    ui.set_login_error("No public_key found in identity file".into());
                                 }
                             } else {
                                 let display_name = if username.is_empty() {
