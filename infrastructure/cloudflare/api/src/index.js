@@ -254,11 +254,19 @@ async function handleRegister(request, env, cors) {
     if (existingByHash) return json({ error: 'This ID has already been used to register' }, 409, cors);
   }
 
-  // AI Screening — check criminal record verdicts via Grok before account creation
-  if (env.GROK_API_KEY && username && birthday) {
-    const screening = await performScreening(username, birthday, id_type, id_hash, env);
-
-    // Store screening result regardless of outcome
+  // AI Screening — reuse the result from KYC submit (single Grok call did
+  // document verification + OCR + criminal screening together).
+  // Only call performScreening as a fallback if KYC submit wasn't done.
+  let screening = null;
+  if (kyc_session_id) {
+    const kycScreening = await env.SCREENING.get(`screen:session-${kyc_session_id}`);
+    if (kycScreening) screening = JSON.parse(kycScreening);
+  }
+  if (!screening && env.GROK_API_KEY && username && birthday) {
+    // Fallback: no KYC session or KYC submit wasn't called — run standalone screening
+    screening = await performScreening(username, birthday, id_type, id_hash, env);
+  }
+  if (screening) {
     const screeningKey = `screen:${id_hash || public_key}`;
     await env.SCREENING.put(screeningKey, JSON.stringify(screening), { expirationTtl: 86400 * 365 * 7 });
 
@@ -270,11 +278,7 @@ async function handleRegister(request, env, cors) {
         appeal: 'Contact support@eustress.dev to appeal this decision',
       }, 403, cors);
     }
-
-    if (screening.decision === 'REVIEW') {
-      // Allow registration but flag for manual review
-      // Admin will see this in the screening report
-    }
+    // REVIEW: allow registration but flag for manual review
   }
 
   const user_id = crypto.randomUUID();
@@ -670,8 +674,8 @@ async function handleKycStatus(verificationId, env, cors) {
 }
 
 /// Submit KYC for verification after documents are uploaded.
-/// Fetches the document image from R2, sends it to Grok Vision for OCR +
-/// authenticity check, then marks as verified or rejected based on AI analysis.
+/// Fetches ALL document images from R2, sends them to Grok in a SINGLE call
+/// that performs document verification + OCR + criminal background screening.
 async function handleKycSubmit(request, env, cors) {
   try {
     const body = await request.json();
@@ -687,34 +691,63 @@ async function handleKycSubmit(request, env, cors) {
     if (!frontData)
       return json({ error: 'Front document not uploaded', status: 'incomplete' }, 400, cors);
 
+    const front = JSON.parse(frontData);
+    let back = null;
+
     // Check back if required
     if (needsBack) {
       const backKey = `kyc-${sessionId}-back`;
       const backData = await env.KYC_STATUS.get(backKey);
       if (!backData)
         return json({ error: 'Back document not uploaded', status: 'incomplete' }, 400, cors);
+      back = JSON.parse(backData);
     }
 
-    const front = JSON.parse(frontData);
     const verificationId = frontKey;
 
-    // ── Grok Vision document verification ──
-    const grokResult = await verifyDocumentWithGrok(front.r2_key, body.full_name || '', body.birthday || '', env);
+    // ── Single Grok call: document verification + OCR + criminal screening ──
+    const grokResult = await performFullKycVerification(
+      front.r2_key,
+      back?.r2_key || null,
+      body.full_name || '',
+      body.birthday || '',
+      front.id_type || '',
+      env,
+    );
+
+    // Store screening result in SCREENING KV (same format as performScreening)
+    // so handleRegister can skip the duplicate call
+    const screeningKey = `screen:session-${sessionId}`;
+    await env.SCREENING.put(screeningKey, JSON.stringify({
+      decision: grokResult.screening_decision,
+      risk_score: grokResult.risk_score,
+      reason: grokResult.screening_reason,
+      flags: grokResult.screening_flags,
+      verdict_found: grokResult.verdict_found,
+      details: grokResult.screening_details,
+      screened_at: new Date().toISOString(),
+      model: 'grok-4.20-reasoning',
+    }), { expirationTtl: 86400 * 365 * 7 });
+
+    // Determine final decision: DENY if document fails OR screening denies
+    const docApproved = grokResult.doc_decision === 'APPROVE';
+    const screenApproved = grokResult.screening_decision !== 'DENY';
+    const finalStatus = (docApproved && screenApproved) ? 'verified' : 'rejected';
 
     const verifiedRecord = {
       ...front,
-      status: grokResult.decision === 'APPROVE' ? 'verified' : 'rejected',
+      status: finalStatus,
       verified_at: new Date().toISOString(),
       ocr_name: grokResult.extracted_name || body.full_name || '',
+      extracted_dob: grokResult.extracted_dob || '',
       grok_analysis: grokResult,
-      decision: grokResult,
     };
 
     await env.KYC_STATUS.put(verificationId, JSON.stringify(verifiedRecord), {
       expirationTtl: 86400 * 365,
     });
 
-    if (grokResult.decision === 'APPROVE') {
+    if (finalStatus === 'verified') {
       return json({
         status: 'verified',
         verification_id: verificationId,
@@ -733,56 +766,120 @@ async function handleKycSubmit(request, env, cors) {
 }
 
 /**
- * Verify an ID document image using Grok Vision.
- * Fetches the image from R2, sends it to Grok's vision model for:
- * 1. Is this a real government-issued ID document?
- * 2. Is the image clear enough to read?
- * 3. Extract the full legal name and date of birth
- * 4. Does the extracted info match what the user provided?
+ * Single Grok call that does EVERYTHING:
+ * 1. Document verification — are the images real government IDs?
+ * 2. Image quality — clear enough to read?
+ * 3. OCR — extract full legal name and date of birth
+ * 4. Cross-reference — does extracted info match what user claimed?
+ * 5. Criminal background screening — public court verdicts for extracted name + DOB
  *
- * Falls back to APPROVE if Grok is unavailable (graceful degradation).
+ * Receives front image (required) + back image (optional) + claimed identity.
+ * Falls back to APPROVE if Grok is unavailable.
  */
-async function verifyDocumentWithGrok(r2Key, claimedName, claimedBirthday, env) {
+async function performFullKycVerification(frontR2Key, backR2Key, claimedName, claimedBirthday, idType, env) {
   if (!env.GROK_API_KEY) {
-    return { decision: 'APPROVE', reason: 'Vision verification unavailable', extracted_name: claimedName, confidence: 0 };
+    return {
+      doc_decision: 'APPROVE', screening_decision: 'APPROVE',
+      reason: 'Verification unavailable', extracted_name: claimedName,
+      risk_score: 0, screening_flags: [], confidence: 0,
+    };
   }
 
   try {
-    // Fetch document image from R2
-    const r2Object = await env.KYC_BUCKET.get(r2Key);
-    if (!r2Object) {
-      return { decision: 'APPROVE', reason: 'Document not found in storage — approved on upload record', extracted_name: claimedName, confidence: 0 };
+    // Fetch front image from R2
+    const frontObj = await env.KYC_BUCKET.get(frontR2Key);
+    if (!frontObj) {
+      return {
+        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
+        reason: 'Front document not found in storage', extracted_name: claimedName,
+        risk_score: 0, screening_flags: [], confidence: 0,
+      };
+    }
+    const frontBytes = await frontObj.arrayBuffer();
+    const frontType = frontObj.httpMetadata?.contentType || 'image/jpeg';
+    const frontB64 = btoa(String.fromCharCode(...new Uint8Array(frontBytes)));
+
+    // Fetch back image from R2 (if available)
+    let backB64 = null;
+    let backType = 'image/jpeg';
+    if (backR2Key) {
+      const backObj = await env.KYC_BUCKET.get(backR2Key);
+      if (backObj) {
+        const backBytes = await backObj.arrayBuffer();
+        backType = backObj.httpMetadata?.contentType || 'image/jpeg';
+        backB64 = btoa(String.fromCharCode(...new Uint8Array(backBytes)));
+      }
     }
 
-    const imageBytes = await r2Object.arrayBuffer();
-    const contentType = r2Object.httpMetadata?.contentType || 'image/jpeg';
-    const base64Image = btoa(String.fromCharCode(...new Uint8Array(imageBytes)));
-    const dataUrl = `data:${contentType};base64,${base64Image}`;
+    const imageCount = backB64 ? 'two images (front and back)' : 'one image (front only — passport or single-sided ID)';
 
-    const prompt = `You are a KYC document verification AI for Eustress, a game engine platform.
-Analyze this ID document image and respond in EXACTLY this JSON format, nothing else:
+    const prompt = `You are the KYC + Background Screening AI for Eustress, a game engine platform.
+You are given ${imageCount} of an ID document. The user claims:
+- Name: "${claimedName}"
+- Date of Birth: "${claimedBirthday}"
+- ID Type: "${idType}"
 
+Perform ALL of the following in a single analysis:
+
+## PART 1: Document Verification
+- Is each image a real government-issued ID document (not a screenshot, printed copy, or digitally altered)?
+- Is the image quality sufficient to read text?
+- What type of document is it (passport, drivers license, national ID, other)?
+
+## PART 2: OCR Extraction
+- Extract the full legal name exactly as printed on the document
+- Extract the date of birth exactly as printed (convert to YYYY-MM-DD)
+- Does the extracted name roughly match the claimed name "${claimedName}"?
+- Does the extracted DOB match the claimed DOB "${claimedBirthday}"?
+
+## PART 3: Criminal Background Screening
+Using the EXTRACTED legal name and date of birth (NOT the username or claimed name):
+- Search publicly available criminal record VERDICTS (final court decisions only)
+- Do NOT consider arrests, charges, accusations, or pending cases — ONLY convictions/verdicts
+- If you cannot confidently identify the person, assume clean record
+
+Respond in EXACTLY this JSON format, nothing else:
 {
+  "doc_decision": "APPROVE|DENY",
+  "doc_reason": "one sentence about document authenticity and quality",
   "is_id_document": true/false,
   "document_type": "passport|drivers_license|national_id|other|not_a_document",
   "image_quality": "clear|acceptable|blurry|unreadable",
-  "extracted_name": "Full Legal Name from document or empty string if unreadable",
-  "extracted_dob": "YYYY-MM-DD from document or empty string if unreadable",
+  "extracted_name": "Full Legal Name from document or empty string",
+  "extracted_dob": "YYYY-MM-DD from document or empty string",
   "name_matches": true/false,
   "dob_matches": true/false,
-  "decision": "APPROVE|DENY",
-  "reason": "one sentence explanation",
+  "screening_decision": "APPROVE|REVIEW|DENY",
+  "screening_reason": "one sentence about background check result",
+  "risk_score": 0-100,
+  "screening_flags": [],
+  "verdict_found": false,
+  "screening_details": "",
   "confidence": 0-100
 }
 
-Rules:
-- APPROVE if: it IS a government ID, image is clear/acceptable, and name roughly matches "${claimedName}"
-- APPROVE even if DOB doesn't perfectly match (typos happen) — just note it
-- DENY if: not an ID document, completely unreadable, or obviously fraudulent (screenshot of screen, printed copy of photo, digitally altered)
-- Partial name matches are OK (e.g. "John Smith" matches "Jonathan Smith")
-- If you cannot read the name but the document looks genuine and clear: APPROVE with empty extracted_name
-- Err on the side of APPROVE — this is a game platform, not a bank
-- Never fabricate information you cannot read from the document`;
+Document rules:
+- APPROVE if genuine government ID with clear/acceptable quality
+- DENY if not an ID, unreadable, screenshot of screen, printed copy, digitally altered
+- Partial name matches OK (e.g. "John Smith" ≈ "Jonathan Smith")
+- If name unreadable but document looks genuine: APPROVE with empty extracted_name
+
+Screening rules:
+- risk_score 0-20: APPROVE (clean or minor non-violent misdemeanor 5+ years ago)
+- risk_score 21-60: REVIEW (non-violent felony, recent misdemeanor, pattern)
+- risk_score 61-100: DENY (violent felony, sex offense, fraud conviction)
+- Cannot identify person or no records: risk_score 0, APPROVE
+- NEVER deny on name similarity alone — require matching DOB AND legal name
+- Do NOT hallucinate or fabricate criminal records
+- Err on the side of approval — innocent until proven guilty by verdict`;
+
+    // Build input array with images + prompt
+    const input = [];
+    input.push({ type: 'image_url', image_url: { url: `data:${frontType};base64,${frontB64}` } });
+    if (backB64) {
+      input.push({ type: 'image_url', image_url: { url: `data:${backType};base64,${backB64}` } });
+    }
+    input.push({ type: 'text', text: prompt });
 
     const resp = await fetch('https://api.x.ai/v1/responses', {
       method: 'POST',
@@ -792,17 +889,18 @@ Rules:
       },
       body: JSON.stringify({
         model: 'grok-4.20-reasoning',
-        input: [
-          { type: 'image_url', image_url: { url: dataUrl } },
-          { type: 'text', text: prompt },
-        ],
+        input,
       }),
     });
 
     if (!resp.ok) {
       const errText = await resp.text();
-      console.error('Grok vision error:', resp.status, errText);
-      return { decision: 'APPROVE', reason: 'Vision service error — approved on upload', extracted_name: claimedName, confidence: 0 };
+      console.error('Grok KYC error:', resp.status, errText);
+      return {
+        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
+        reason: 'Verification service error — approved on upload',
+        extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+      };
     }
 
     const data = await resp.json();
@@ -810,26 +908,40 @@ Rules:
 
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      return { decision: 'APPROVE', reason: 'Could not parse vision response — approved on upload', extracted_name: claimedName, confidence: 0 };
+      return {
+        doc_decision: 'APPROVE', screening_decision: 'APPROVE',
+        reason: 'Could not parse response — approved on upload',
+        extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+      };
     }
 
-    const result = JSON.parse(jsonMatch[0]);
+    const r = JSON.parse(jsonMatch[0]);
     return {
-      decision: result.decision || 'APPROVE',
-      reason: result.reason || 'No issues found',
-      is_id_document: result.is_id_document ?? true,
-      document_type: result.document_type || 'unknown',
-      image_quality: result.image_quality || 'unknown',
-      extracted_name: result.extracted_name || '',
-      extracted_dob: result.extracted_dob || '',
-      name_matches: result.name_matches ?? true,
-      dob_matches: result.dob_matches ?? true,
-      confidence: Math.min(100, Math.max(0, result.confidence || 0)),
+      doc_decision: r.doc_decision || 'APPROVE',
+      doc_reason: r.doc_reason || 'No issues found',
+      is_id_document: r.is_id_document ?? true,
+      document_type: r.document_type || 'unknown',
+      image_quality: r.image_quality || 'unknown',
+      extracted_name: r.extracted_name || '',
+      extracted_dob: r.extracted_dob || '',
+      name_matches: r.name_matches ?? true,
+      dob_matches: r.dob_matches ?? true,
+      screening_decision: r.screening_decision || 'APPROVE',
+      screening_reason: r.screening_reason || 'No concerns found',
+      risk_score: Math.min(100, Math.max(0, r.risk_score || 0)),
+      screening_flags: r.screening_flags || [],
+      verdict_found: r.verdict_found || false,
+      screening_details: r.screening_details || '',
+      confidence: Math.min(100, Math.max(0, r.confidence || 0)),
       model: 'grok-4.20-reasoning',
     };
   } catch (e) {
-    console.error('Grok vision exception:', e);
-    return { decision: 'APPROVE', reason: `Vision error: ${e.message} — approved on upload`, extracted_name: claimedName, confidence: 0 };
+    console.error('Grok KYC exception:', e);
+    return {
+      doc_decision: 'APPROVE', screening_decision: 'APPROVE',
+      reason: `Verification error: ${e.message} — approved on upload`,
+      extracted_name: claimedName, risk_score: 0, screening_flags: [], confidence: 0,
+    };
   }
 }
 
