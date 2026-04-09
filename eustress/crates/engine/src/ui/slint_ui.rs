@@ -2137,8 +2137,9 @@ fn update_slint_ui_focus(
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<super::ViewportBounds>>,
     mut ui_focus: ResMut<super::SlintUIFocus>,
-    gui_elements: Query<&eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+    gui_elements: Query<(&eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&eustress_common::classes::Instance>)>,
     slint_context: Option<NonSend<SlintUiState>>,
+    mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
 ) {
     // Track text input focus from Slint (blocks keyboard shortcuts while typing)
     ui_focus.text_input_focused = slint_context.as_ref()
@@ -2181,12 +2182,13 @@ fn update_slint_ui_focus(
     // Check if cursor is over any visible ScreenGui element (buttons, labels, frames)
     // These are rendered inside the viewport but should consume clicks.
     ui_focus.gui_element_hit = false;
+    ui_focus.gui_clicked_button = None;
     if in_viewport {
         // Convert cursor to viewport-local coordinates
         let vp_x = cursor_pos.x - vb.x;
         let vp_y = cursor_pos.y - vb.y;
 
-        for gui in &gui_elements {
+        for (gui, instance) in &gui_elements {
             if !gui.visible { continue; }
             // "ignore" filter — completely transparent to mouse
             if gui.mouse_filter == "ignore" { continue; }
@@ -2199,6 +2201,14 @@ fn update_slint_ui_focus(
                 // "stop" (default) consumes the event; "pass" lets it through
                 if gui.mouse_filter != "pass" {
                     ui_focus.gui_element_hit = true;
+                    // If left mouse just pressed on a TextButton, record its name for script dispatch
+                    if mouse.just_pressed(bevy::input::mouse::MouseButton::Left)
+                        && gui.class_type == "TextButton"
+                    {
+                        let btn_name = instance.map(|i| i.name.clone()).unwrap_or_default();
+                        info!("🖱️ ScreenGui button clicked: '{}'", btn_name);
+                        ui_focus.gui_clicked_button = Some(btn_name);
+                    }
                     break;
                 }
             }

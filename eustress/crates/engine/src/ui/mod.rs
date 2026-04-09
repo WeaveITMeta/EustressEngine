@@ -517,6 +517,8 @@ pub struct SlintUIFocus {
     pub last_ui_position: Option<Vec2>,
     /// Which entity currently has keyboard focus (for FocusManager pattern)
     pub focused_entity: Option<Entity>,
+    /// Name of ScreenGui button that was clicked this frame (consumed by script dispatch)
+    pub gui_clicked_button: Option<String>,
 }
 
 #[derive(Resource)]

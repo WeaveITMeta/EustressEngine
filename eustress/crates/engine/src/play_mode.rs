@@ -1560,8 +1560,10 @@ impl Plugin for PlayModePlugin {
                     .after(crate::soul::rune_api::run_script_init),
                 crate::soul::rune_api::run_script_update
                     .after(crate::soul::rune_api::run_script_ready),
-                crate::soul::rune_api::cleanup_script_bindings
+                dispatch_gui_button_clicks
                     .after(crate::soul::rune_api::run_script_update),
+                crate::soul::rune_api::cleanup_script_bindings
+                    .after(dispatch_gui_button_clicks),
                 crate::soul::rune_api::drain_script_logs_to_output
                     .after(crate::soul::rune_api::run_script_update),
             ).run_if(in_state(PlayModeState::Playing)))
@@ -1940,6 +1942,32 @@ fn deactivate_physics_for_parts(
     
     if deactivated_count > 0 {
         info!("🛑 Deactivated physics for {} parts", deactivated_count);
+    }
+}
+
+/// Dispatch ScreenGui button clicks to Rune scripts via on_button_click(name).
+/// Reads gui_clicked_button from SlintUIFocus (set by update_slint_ui_focus when
+/// a TextButton is left-clicked in the viewport during play mode).
+fn dispatch_gui_button_clicks(
+    ui_focus: Res<crate::ui::SlintUIFocus>,
+    runtime: Res<eustress_common::soul::rune_runtime::RuneRuntimeState>,
+) {
+    let Some(ref button_name) = ui_focus.gui_clicked_button else { return };
+
+    for (_idx, compiled) in runtime.compiled.iter() {
+        let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+        match vm.call(["on_button_click"], (button_name.clone(),)) {
+            Ok(_) => {
+                info!("📜 on_button_click('{}') dispatched to '{}'", button_name, compiled.name);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // Silently ignore "missing function" — not all scripts handle buttons
+                if !msg.contains("missing") && !msg.contains("not found") {
+                    warn!("⚠ on_button_click error in '{}': {}", compiled.name, msg);
+                }
+            }
+        }
     }
 }
 

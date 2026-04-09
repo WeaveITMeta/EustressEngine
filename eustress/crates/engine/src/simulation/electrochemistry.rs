@@ -33,10 +33,36 @@ impl Plugin for ElectrochemistryPlugin {
             (
                 apply_sim_values_to_ecs,
                 electrochemical_tick.after(apply_sim_values_to_ecs),
+                publish_echem_to_sim_values.after(electrochemical_tick),
             ).run_if(in_state(PlayModeState::Playing)),
         )
         .add_systems(OnEnter(PlayModeState::Playing), set_default_discharge);
     }
+}
+
+/// Publish ElectrochemicalState fields into the SIM_VALUES thread-local
+/// so Rune scripts (battery_hud.rune) and watchpoints can read them.
+fn publish_echem_to_sim_values(
+    query: Query<(&ElectrochemicalState, Option<&ThermodynamicState>)>,
+) {
+    // Use the first cell found (single-cell demo). Multi-cell would need indexing.
+    let Some((echem, thermo)) = query.iter().next() else { return };
+
+    crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
+        let mut sv = sv.borrow_mut();
+        sv.insert("battery.voltage".into(), echem.terminal_voltage as f64);
+        sv.insert("battery.current".into(), echem.current as f64);
+        sv.insert("battery.soc".into(), echem.soc as f64);
+        sv.insert("battery.power".into(), (echem.terminal_voltage * echem.current) as f64);
+        sv.insert("battery.c_rate".into(), echem.c_rate as f64);
+        sv.insert("battery.dendrite_risk".into(), echem.dendrite_risk as f64);
+        sv.insert("battery.capacity_retention".into(), echem.capacity_retention as f64);
+        sv.insert("battery.cycle_count".into(), echem.cycle_count as f64);
+        sv.insert("battery.heat_generation".into(), echem.heat_generation as f64);
+        // Temperature from ThermodynamicState (Kelvin → Celsius)
+        let temp_c = thermo.map(|t| t.temperature - 273.15).unwrap_or(25.0);
+        sv.insert("battery.temperature_c".into(), temp_c as f64);
+    });
 }
 
 /// Set a default 0.5C discharge current on play start so the demo shows
