@@ -274,7 +274,7 @@ pub fn GalleryPage() -> impl IntoView {
 /// Featured experience card (larger) - Industrial style.
 #[component]
 fn FeaturedCard(experience: Experience) -> impl IntoView {
-    let exp_url = format!("/experience/{}", experience.id);
+    let exp_url = format!("/simulation/{}", experience.id);
     let creator_url = format!("/profile/{}", experience.creator_id);
     let creator_name = experience.creator_name.clone();
     let player_count = experience.player_count;
@@ -328,7 +328,7 @@ fn FeaturedCard(experience: Experience) -> impl IntoView {
 /// Regular experience card - Industrial style.
 #[component]
 fn ExperienceCard(experience: Experience) -> impl IntoView {
-    let exp_url = format!("/experience/{}", experience.id);
+    let exp_url = format!("/simulation/{}", experience.id);
     let exp_url2 = exp_url.clone();
     let creator_url = format!("/profile/{}", experience.creator_id);
     let creator_name = experience.creator_name.clone();

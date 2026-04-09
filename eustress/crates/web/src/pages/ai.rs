@@ -8,6 +8,7 @@
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
 use crate::state::AppState;
+use crate::api::ApiClient;
 
 // -----------------------------------------------------------------------------
 // Data Types
@@ -40,7 +41,7 @@ fn get_ai_tools() -> Vec<AiTool> {
         AiTool {
             name: "Soul Language",
             description: "Write game logic in natural English. Soul compiles your intent into optimized Rust code that runs at native speed.",
-            icon: "/assets/icons/sparkle.svg",
+            icon: "/assets/icons/sparkles.svg",
             status: "Available",
             features: vec![
                 "Natural language to Rust compilation",
@@ -76,7 +77,7 @@ fn get_ai_tools() -> Vec<AiTool> {
         AiTool {
             name: "Terrain Sculptor",
             description: "Describe landscapes in words and watch them materialize. AI-driven terrain generation with biome awareness.",
-            icon: "/assets/icons/terrain.svg",
+            icon: "/assets/icons/image.svg",
             status: "Beta",
             features: vec![
                 "Text-to-terrain generation",
@@ -181,14 +182,9 @@ fn get_soul_examples() -> Vec<SoulExample> {
 /// AI tools and generation page — industrial design.
 #[component]
 pub fn AiPage() -> impl IntoView {
-    let _app_state = expect_context::<AppState>();
+    let app_state = expect_context::<AppState>();
     let selected_tool = RwSignal::new(0usize);
-    let active_example = RwSignal::new(0usize);
     let tools = get_ai_tools();
-    let examples = get_soul_examples();
-    let examples_for_prompt = examples.clone();
-    let examples_for_output = examples.clone();
-    let examples_for_desc = examples.clone();
 
     view! {
         <div class="page page-ai-industrial">
@@ -212,7 +208,9 @@ pub fn AiPage() -> impl IntoView {
                 </div>
                 <h1 class="ai-title">"Create at the "<span class="title-accent">"Speed of Thought"</span></h1>
                 <p class="ai-tagline">
-                    "Eustress integrates AI directly into every stage of creation. From natural-language scripting with Soul to procedural world generation, our AI tools amplify your creativity without replacing it."
+                    "Eustress integrates AI directly into every stage of creation."<br/>
+                    "From natural-language scripting with Soul to procedural world generation,"<br/>
+                    "our AI tools amplify your creativity without replacing it."
                 </p>
                 <div class="ai-stats-bar">
                     <div class="ai-stat">
@@ -233,78 +231,11 @@ pub fn AiPage() -> impl IntoView {
             </section>
 
             // ═══════════════════════════════════════════════════════════════
-            // SOUL LANGUAGE SHOWCASE
+            // API KEYS (for signed-in users)
             // ═══════════════════════════════════════════════════════════════
-            <section class="soul-showcase">
-                <div class="section-header">
-                    <span class="section-tag">"SOUL LANGUAGE"</span>
-                    <h2 class="section-title-epic">"English to Rust. Instantly."</h2>
-                    <p class="section-desc">"Write what you want in plain English. Soul compiles it into optimized, type-safe Rust code."</p>
-                </div>
-
-                <div class="soul-demo">
-                    // Example tabs
-                    <div class="demo-tabs">
-                        {examples.iter().enumerate().map(|(index, _example)| {
-                            let is_active = move || active_example.get() == index;
-                            view! {
-                                <button
-                                    class="demo-tab"
-                                    class:active=is_active
-                                    on:click=move |_| active_example.set(index)
-                                >
-                                    {format!("Example {}", index + 1)}
-                                </button>
-                            }
-                        }).collect::<Vec<_>>()}
-                    </div>
-
-                    // Prompt
-                    <div class="demo-prompt">
-                        <div class="prompt-label">
-                            <img src="/assets/icons/sparkle.svg" alt="Soul" class="prompt-icon" />
-                            "You Write"
-                        </div>
-                        <div class="prompt-text">
-                            {move || {
-                                let idx = active_example.get();
-                                examples_for_prompt.get(idx).map(|example| example.prompt.to_string()).unwrap_or_default()
-                            }}
-                        </div>
-                    </div>
-
-                    // Arrow
-                    <div class="demo-arrow">
-                        <div class="arrow-line"></div>
-                        <span class="arrow-label">"Soul Compiles"</span>
-                        <div class="arrow-line"></div>
-                    </div>
-
-                    // Generated code
-                    <div class="demo-output">
-                        <div class="output-label">
-                            <img src="/assets/icons/code.svg" alt="Rust" class="output-icon" />
-                            "Rust Output"
-                        </div>
-                        <pre class="output-code">
-                            <code>
-                                {move || {
-                                    let idx = active_example.get();
-                                    examples_for_output.get(idx).map(|example| example.generated_code.to_string()).unwrap_or_default()
-                                }}
-                            </code>
-                        </pre>
-                    </div>
-
-                    // Description
-                    <div class="demo-description">
-                        {move || {
-                            let idx = active_example.get();
-                            examples_for_desc.get(idx).map(|example| example.description.to_string()).unwrap_or_default()
-                        }}
-                    </div>
-                </div>
-            </section>
+            <Show when=move || app_state.auth.get().is_authenticated()>
+                <super::projects::ApiKeysSection />
+            </Show>
 
             // ═══════════════════════════════════════════════════════════════
             // AI TOOL CARDS
@@ -312,8 +243,8 @@ pub fn AiPage() -> impl IntoView {
             <section class="ai-tools-section">
                 <div class="section-header">
                     <span class="section-tag">"INTEGRATED TOOLS"</span>
-                    <h2 class="section-title-epic">"AI That Understands Games"</h2>
-                    <p class="section-desc">"Purpose-built AI tools trained on game development patterns, not generic models."</p>
+                    <h2 class="section-title-epic">"AI That Understands Simulation"</h2>
+                    <p class="section-desc">"Purpose-built AI tools trained on development patterns, not generic models."</p>
                 </div>
 
                 <div class="ai-tools-grid">
@@ -432,13 +363,8 @@ pub fn AiPage() -> impl IntoView {
                     <h2 class="cta-headline">"Ready to Build with "<span class="cta-accent">"AI"</span>"?"</h2>
                     <p class="cta-subtext">"Download Eustress Engine and start creating with Soul Language today."</p>
                     <div class="cta-buttons">
-                        <a href="/download" class="btn-primary-steel cta-btn">
-                            "Download Engine"
-                            <span class="btn-icon">"→"</span>
-                        </a>
-                        <a href="/docs/scripting" class="btn-secondary-steel">
-                            "Soul Language Docs"
-                        </a>
+                        <a href="/download" class="ai-cta-primary">"Download Engine →"</a>
+                        <a href="/docs/scripting" class="ai-cta-secondary">"Soul Language Docs"</a>
                     </div>
                 </div>
             </section>

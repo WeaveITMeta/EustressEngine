@@ -1,49 +1,33 @@
 //! # Gizmo Tools Plugin
 //!
-//! This plugin coordinates transform gizmos for selected objects.
+//! Coordinates transform gizmos for selected objects.
+//! Tool gizmos (move arrows, rotation arcs, scale handles) are still drawn
+//! via Bevy's immediate-mode Gizmos API — they change every frame based on
+//! mouse hover/drag state so mesh-based rendering isn't beneficial.
 //!
-//! ## Architecture
-//!
-//! The actual tool gizmos are drawn by their respective tool plugins:
-//! - `SelectionBoxPlugin` -> draws selection box highlights
-//! - `MoveToolPlugin` -> draws move arrows when `Tool::Move` is active
-//! - `RotateToolPlugin` -> draws rotation circles when `Tool::Rotate` is active
-//! - `ScaleToolPlugin` -> draws scale handles when `Tool::Scale` is active
-//!
-//! All tool gizmos check before drawing:
-//! 1. `state.active` - the tool is currently selected
-//! 2. `!query.is_empty()` - there are selected entities
-//!
-//! This ensures gizmos are NEVER drawn at origin or without a selection.
+//! Selection outlines are handled separately by SelectionBoxPlugin (mesh-based).
 
 use bevy::prelude::*;
 use bevy::gizmos::config::{GizmoConfigStore, GizmoConfigGroup};
 
-/// Custom gizmo group for transformation tools to ensure they render on top
+/// Custom gizmo group for transformation tools
 #[derive(Default, Reflect, GizmoConfigGroup)]
 pub struct TransformGizmoGroup;
 
-/// Plugin for transform gizmo coordination
-///
-/// This is a placeholder plugin that ensures the gizmo system is properly
-/// initialized. The actual gizmo drawing is delegated to individual tool plugins.
 pub struct GizmoToolsPlugin;
 
 impl Plugin for GizmoToolsPlugin {
     fn build(&self, app: &mut App) {
-        // Register the shared gizmo group and configure it
         app.init_gizmo_group::<TransformGizmoGroup>()
            .add_systems(Startup, configure_transform_gizmos);
     }
 }
 
-/// Configure transform gizmos to render on top
+/// Configure transform gizmos to render on the default layer (main camera).
 fn configure_transform_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
     config.depth_bias = -1.0;
     config.line.width = 3.0;
     config.enabled = true;
-    config.render_layers = bevy::camera::visibility::RenderLayers::layer(30);
-    info!("🔧 TransformGizmo config: depth_bias={}, line_width={}, render_layer=31, enabled={}",
-        config.depth_bias, config.line.width, config.enabled);
+    // Default render_layers = layer 0 (main camera) — no custom layer needed
 }

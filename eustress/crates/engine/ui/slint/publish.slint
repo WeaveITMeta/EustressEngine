@@ -1,10 +1,20 @@
 // ============================================================================
-// Eustress Engine - Publish Dialog
-// Simulation publishing workflow
+// Eustress Engine - Publish Dialog (Two-Panel Layout)
+// Universe/Space publishing with hierarchy tree
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, TextEdit, CheckBox, ComboBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+
+// Tree node for hierarchy panel
+export struct PublishTreeNode {
+    name: string,
+    depth: int,
+    is-folder: bool,
+    is-primary: bool,
+    file-count: int,
+    icon-hint: string, // "universe", "space", "service", "file", "excluded"
+}
 
 component PubSection inherits Rectangle {
     in property <string> title: "";
@@ -29,17 +39,69 @@ component PubSection inherits Rectangle {
     }
 }
 
-component PubHint inherits Rectangle {
-    in property <string> text: "";
-    height: 16px;
-    background: transparent;
-    Text {
-        text: root.text;
-        color: Theme.text-disabled;
-        font-size: 10px;
-        vertical-alignment: center;
-        wrap: word-wrap;
-        width: parent.width;
+// Tree item row in the hierarchy panel
+component TreeRow inherits Rectangle {
+    in property <string> name: "";
+    in property <int> depth: 0;
+    in property <bool> is-folder: true;
+    in property <bool> is-primary: false;
+    in property <int> file-count: 0;
+    in property <string> icon-hint: "file";
+
+    height: 22px;
+    background: root.is-primary ? rgba(74, 124, 201, 0.06) : transparent;
+
+    HorizontalLayout {
+        padding-left: 8px + root.depth * 12px;
+        spacing: 4px;
+
+        // Folder/file icon
+        Text {
+            width: 14px;
+            text: root.is-folder ? (root.icon-hint == "universe" ? "◆" : root.icon-hint == "space" ? "◇" : "▸") : "·";
+            color: root.icon-hint == "excluded" ? Theme.text-disabled :
+                   root.is-primary ? Theme.accent-blue : Theme.text-disabled;
+            font-size: root.is-folder ? 9px : 7px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+
+        // Name
+        Text {
+            text: root.name;
+            color: root.icon-hint == "excluded" ? Theme.text-disabled :
+                   root.is-primary ? Theme.text-primary : Theme.text-secondary;
+            font-size: 10.5px;
+            font-weight: root.is-primary ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        // File count badge
+        if root.is-folder && root.file-count > 0: Text {
+            text: root.file-count;
+            color: Theme.text-disabled;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+
+        // Primary badge
+        if root.is-primary: Rectangle {
+            width: 42px;
+            height: 14px;
+            border-radius: 3px;
+            background: rgba(74, 124, 201, 0.15);
+
+            Text {
+                text: "primary";
+                color: Theme.accent-blue;
+                font-size: 8px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
     }
 }
 
@@ -50,12 +112,15 @@ export component PublishDialog inherits Rectangle {
     in-out property <bool> is-public: true;
     in-out property <bool> open-source: false;
     in-out property <bool> studio-editable: false;
-    in property <string> publish-target: "Cloudflare bucket";
-    in property <string> sync-status: "Local-first";
+    in property <[string]> spaces: [];
+    in property <[PublishTreeNode]> tree-nodes: [];
+    in property <string> publish-target: "Cloudflare R2";
+    in property <string> sync-status: "Cloud sync ready";
+    in property <string> pak-size-estimate: "";
     in property <bool> is-publishing: false;
     in property <string> error-message: "";
     in property <bool> is-update: false;
-    in property <bool> is-as-new: false;
+    in property <string> publish-mode: "universe";
 
     callback on-publish(string, string, string, bool, bool, bool, bool);
     callback on-close();
@@ -66,28 +131,22 @@ export component PublishDialog inherits Rectangle {
 
     TouchArea {
         clicked => { root.on-close(); }
-        scroll-event(event) => {
-            return accept;
-        }
+        scroll-event(event) => { return accept; }
     }
 
     Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 540px;
-        height: min(parent.height - 80px, 500px);
+        width: 780px;
+        height: min(parent.height - 60px, 560px);
         background: Theme.background-secondary;
         border-radius: 8px;
         border-width: 1px;
         border-color: Theme.border-color;
-        drop-shadow-blur: 28px;
-        drop-shadow-color: #000000a0;
+        drop-shadow-blur: 32px;
+        drop-shadow-color: #00000090;
 
-        TouchArea {
-            scroll-event(event) => {
-                return accept;
-            }
-        }
+        TouchArea { scroll-event(event) => { return accept; } }
 
         VerticalLayout {
             padding: 0px;
@@ -95,14 +154,16 @@ export component PublishDialog inherits Rectangle {
 
             // ── Title bar ──
             Rectangle {
-                height: 46px;
+                height: 42px;
                 background: #13131f;
                 border-radius: 8px;
 
                 Text {
                     width: parent.width;
                     height: parent.height;
-                    text: root.is-as-new ? "Publish As New Simulation" : root.is-update ? "Update Simulation" : "Publish Simulation";
+                    text: root.publish-mode == "space" ?
+                        (root.is-update ? "Update Space" : "Publish Space") :
+                        (root.is-update ? "Update Universe" : "Publish Universe");
                     color: Theme.text-primary;
                     font-size: 13px;
                     font-weight: 600;
@@ -116,12 +177,10 @@ export component PublishDialog inherits Rectangle {
                     width: 28px; height: 28px;
                     border-radius: 5px;
                     background: close-ta.has-hover ? #3d1515 : transparent;
-
                     close-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.on-close(); }
                     }
-
                     Text {
                         text: "×";
                         color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
@@ -131,158 +190,234 @@ export component PublishDialog inherits Rectangle {
                     }
                 }
 
-                Rectangle {
-                    y: parent.height - 1px;
-                    width: 100%; height: 1px;
-                    background: Theme.border-color;
-                }
+                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
             }
 
-            // ── Content ──
-            ScrollView {
+            // ── Two-panel content ──
+            HorizontalLayout {
                 vertical-stretch: 1;
+                spacing: 0px;
 
-                VerticalLayout {
-                    padding: 20px;
-                    spacing: 4px;
-                    alignment: start;
-                    width: 500px;
+                // ── LEFT: Hierarchy Tree ──
+                Rectangle {
+                    width: 260px;
+                    background: #0e0e1a;
+                    border-radius: 0px;
 
-                    PubSection { title: "DETAILS"; }
+                    VerticalLayout {
+                        padding: 0px;
+                        spacing: 0px;
 
-                    Rectangle {
-                        height: 28px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text {
-                                width: 110px;
-                                text: "Simulation Name";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
+                        // Tree header
+                        Rectangle {
+                            height: 30px;
+                            background: rgba(255, 255, 255, 0.02);
+                            border-width: 0px;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 6px;
+                                alignment: start;
+
+                                Text {
+                                    text: "FILES";
+                                    color: Theme.text-disabled;
+                                    font-size: 9px;
+                                    font-weight: 700;
+                                    letter-spacing: 0.8px;
+                                    vertical-alignment: center;
+                                }
                             }
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                height: 22px;
-                                background: Theme.input-background;
-                                border-radius: 3px;
-                                border-width: 1px;
-                                border-color: Theme.input-border;
 
-                                LineEdit {
-                                    width: 100%; height: 100%;
-                                    text <=> root.experience-name;
+                            Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: Theme.border-color; }
+                        }
+
+                        // Tree scroll area
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            VerticalLayout {
+                                padding: 4px;
+                                spacing: 0px;
+
+                                for node[idx] in root.tree-nodes: TreeRow {
+                                    name: node.name;
+                                    depth: node.depth;
+                                    is-folder: node.is-folder;
+                                    is-primary: node.is-primary;
+                                    file-count: node.file-count;
+                                    icon-hint: node.icon-hint;
+                                }
+                            }
+                        }
+
+                        // Size estimate footer
+                        Rectangle {
+                            height: 28px;
+                            background: rgba(255, 255, 255, 0.02);
+
+                            Rectangle { y: 0px; width: 100%; height: 1px; background: Theme.border-color; }
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+
+                                Text {
+                                    text: root.pak-size-estimate != "" ? "Estimated .pak: " + root.pak-size-estimate : ".git, node_modules excluded";
+                                    color: Theme.text-disabled;
+                                    font-size: 9px;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
                     }
+                }
 
-                    Rectangle { height: 4px; }
+                // Divider
+                Rectangle { width: 1px; background: Theme.border-color; }
 
-                    Text {
-                        text: "Description";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                    }
-                    Rectangle {
-                        height: 80px;
-                        background: Theme.input-background;
-                        border-radius: 3px;
-                        border-width: 1px;
-                        border-color: Theme.input-border;
+                // ── RIGHT: Publish Form ──
+                ScrollView {
+                    horizontal-stretch: 1;
 
-                        TextEdit {
-                            width: parent.width;
-                            height: parent.height;
-                            text <=> root.description;
-                        }
-                    }
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+                        width: 480px;
 
-                    Rectangle { height: 4px; }
+                        PubSection { title: "DETAILS"; }
 
-                    Rectangle {
-                        height: 28px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text {
-                                width: 110px;
-                                text: "Genre";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                            ComboBox {
-                                horizontal-stretch: 1;
-                                model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
-                                current-value <=> root.genre;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 8px; }
-                    PubSection { title: "VISIBILITY"; }
-
-                    Rectangle {
-                        height: 28px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            CheckBox {
-                                text: "Public";
-                                checked <=> root.is-public;
-                            }
-                            Text {
-                                text: root.is-public ? "Anyone can play" : "Only you can access";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 110px;
+                                    text: "Simulation Name";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 22px;
+                                    background: Theme.input-background;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: Theme.input-border;
+                                    LineEdit {
+                                        width: 100%; height: 100%;
+                                        text <=> root.experience-name;
+                                    }
+                                }
                             }
                         }
-                    }
 
-                    Rectangle {
-                        height: 28px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            CheckBox {
-                                text: "Open Source";
-                                checked <=> root.open-source;
-                            }
-                            Text {
-                                text: "Allow source access and reuse";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 4px; }
-                    PubHint { text: "Target: " + root.publish-target + " • Sync: " + root.sync-status; }
-
-                    if root.error-message != "": Rectangle {
-                        height: 28px;
-                        background: #2a1515;
-                        border-radius: 3px;
-                        border-width: 1px;
-                        border-color: #4a2020;
+                        Rectangle { height: 4px; }
 
                         Text {
-                            x: 10px;
-                            text: root.error-message;
-                            color: Theme.text-error;
-                            font-size: 10px;
-                            vertical-alignment: center;
+                            text: "Description";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                        }
+                        Rectangle {
+                            height: 80px;
+                            background: Theme.input-background;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: Theme.input-border;
+                            TextEdit {
+                                width: parent.width; height: parent.height;
+                                text <=> root.description;
+                            }
+                        }
+
+                        Rectangle { height: 4px; }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    width: 110px;
+                                    text: "Genre";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                ComboBox {
+                                    horizontal-stretch: 1;
+                                    model: ["All", "Adventure", "Building", "Comedy", "Fighting", "FPS", "Horror", "Medieval", "Military", "Naval", "RPG", "Sci-Fi", "Sports", "Town and City", "Western"];
+                                    current-value <=> root.genre;
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 12px; }
+                        PubSection { title: "VISIBILITY"; }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                CheckBox { text: "Public"; checked <=> root.is-public; }
+                                Text {
+                                    text: root.is-public ? "Anyone can play" : "Only you can access";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 28px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                CheckBox { text: "Open Source"; checked <=> root.open-source; }
+                                Text {
+                                    text: "Allow source access and reuse";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 8px; }
+
+                        // Target info
+                        Text {
+                            text: "Target: " + root.publish-target + " • Sync: " + root.sync-status;
+                            color: Theme.text-disabled;
+                            font-size: 9.5px;
+                        }
+
+                        // Error
+                        if root.error-message != "": Rectangle {
+                            height: 28px;
+                            background: #2a1515;
+                            border-radius: 3px;
+                            border-width: 1px;
+                            border-color: #4a2020;
+                            Text {
+                                x: 10px;
+                                text: root.error-message;
+                                color: Theme.text-error;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
             }
 
             // ── Footer ──
+            Rectangle { height: 1px; background: Theme.border-color; }
             Rectangle {
-                height: 1px; background: Theme.border-color;
-            }
-            Rectangle {
-                height: 52px;
+                height: 48px;
                 background: #0f0f1a;
                 border-radius: 8px;
 
@@ -293,38 +428,36 @@ export component PublishDialog inherits Rectangle {
                     alignment: center;
 
                     Rectangle {
-                        width: 80px; height: 32px;
+                        width: 80px; height: 30px;
                         border-radius: 5px;
-                        background: cancel-ta.has-hover ? #1a1a2e : Theme.button-background;
+                        background: cancel-btn.has-hover ? #1a1a2e : Theme.button-background;
                         border-width: 1px;
                         border-color: Theme.border-color;
-
-                        cancel-ta := TouchArea {
+                        cancel-btn := TouchArea {
                             mouse-cursor: pointer;
                             clicked => { root.on-close(); }
                         }
-
                         Text {
                             text: "Cancel";
                             color: Theme.text-primary;
-                            font-size: 12px;
+                            font-size: 11.5px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
 
                     Rectangle {
-                        width: 120px; height: 32px;
+                        width: 120px; height: 30px;
                         border-radius: 5px;
                         background: root.is-publishing || root.experience-name == "" ?
                             Theme.button-background :
-                            (pub-ta.has-hover ? #1a4a2a : #152a1e);
+                            (pub-btn.has-hover ? #1a4a2a : #152a1e);
                         border-width: 1px;
                         border-color: root.is-publishing || root.experience-name == "" ?
                             Theme.border-color :
-                            (pub-ta.has-hover ? #4caf50 : #2a5a32);
+                            (pub-btn.has-hover ? #4caf50 : #2a5a32);
 
-                        pub-ta := TouchArea {
+                        pub-btn := TouchArea {
                             mouse-cursor: root.is-publishing || root.experience-name == "" ? default : pointer;
                             enabled: !root.is-publishing && root.experience-name != "";
                             clicked => {
@@ -335,17 +468,17 @@ export component PublishDialog inherits Rectangle {
                                     root.is-public,
                                     root.open-source,
                                     false,
-                                    root.is-as-new,
+                                    root.publish-mode == "space",
                                 );
                             }
                         }
 
                         Text {
-                            text: root.is-publishing ? "Publishing..." : root.is-as-new ? "Publish As New" : root.is-update ? "Update" : "Publish";
+                            text: root.is-publishing ? "Publishing..." : root.is-update ? "Update" : "Publish";
                             color: root.is-publishing || root.experience-name == "" ?
                                 Theme.text-secondary :
-                                (pub-ta.has-hover ? #a5d6a7 : #66bb6a);
-                            font-size: 12px;
+                                (pub-btn.has-hover ? #a5d6a7 : #66bb6a);
+                            font-size: 11.5px;
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;

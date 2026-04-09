@@ -193,8 +193,8 @@ pub enum SlintAction {
     OpenScene,
     SaveScene,
     SaveSceneAs,
-    OpenPublishDialog,
-    OpenPublishAsDialog,
+    PublishUniverse,
+    PublishSpace,
     Publish(PublishRequest),
     
     // Edit operations
@@ -244,6 +244,10 @@ pub enum SlintAction {
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
     
+    // History panel
+    HistoryJumpTo(i32),
+    HistoryClear,
+
     // Properties
     PropertyChanged(String, String),
     SectionToggle(String), // Toggle collapse/expand of a property section by category name
@@ -395,7 +399,7 @@ impl SlintActionQueue {
     /// Push an action from a Slint callback
     pub fn push(&self, action: SlintAction) {
         if let Ok(mut queue) = self.0.lock() {
-            info!("📬 SlintActionQueue::push({:?}) — queue size: {}", action, queue.len());
+            // Debug logging removed — was firing every action every frame, killing FPS
             queue.push(action);
         } else {
             error!("❌ SlintActionQueue::push FAILED — mutex poisoned!");
@@ -444,7 +448,7 @@ pub struct StudioState {
     
     // Dialogs
     pub show_publish_dialog: bool,
-    pub publish_as_new: bool,
+    pub publish_mode: String, // "universe" or "space"
     pub trigger_login: bool,
     
     // Paste mode
@@ -561,7 +565,7 @@ impl Default for StudioState {
             mindspace_panel_visible: false,
             secondary_panel_tab: SecondaryPanelTab::Terrain,
             show_publish_dialog: false,
-            publish_as_new: false,
+            publish_mode: "universe".to_string(),
             trigger_login: false,
             pending_paste: false,
             pending_file_action: None,
@@ -985,6 +989,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<UIPerformance>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
+            .init_resource::<crate::forge::ForgeState>()
             .init_resource::<crate::auth::BlissNodeState>()
             .init_resource::<crate::soul::SoulServiceSettings>()
             .init_resource::<crate::commands::CommandHistory>()
@@ -994,6 +999,7 @@ impl Plugin for StudioUiPlugin {
             .add_message::<ExplorerToggleEvent>()
             .add_message::<crate::commands::UndoCommandEvent>()
             .add_message::<crate::commands::RedoCommandEvent>()
+            .add_message::<crate::commands::HistoryActionEvent>()
             // Plugins
             .add_plugins(SpawnEventsPlugin)
             .add_plugins(WorldViewPlugin)
@@ -1002,6 +1008,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<super::file_event_handler::PendingFileActions>()
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
+            .add_systems(Update, crate::commands::process_history_events)
             .add_systems(Update, (
                 super::file_event_handler::drain_file_events,
                 super::file_event_handler::execute_file_actions,
@@ -1041,6 +1048,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<SlintUIFocus>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
+            .init_resource::<crate::forge::ForgeState>()
             .init_resource::<crate::auth::BlissNodeState>()
             .init_resource::<crate::soul::SoulServiceSettings>()
             .init_resource::<crate::commands::CommandHistory>()
@@ -1055,6 +1063,7 @@ impl Plugin for SlintUiPlugin {
             .add_message::<ExplorerToggleEvent>()
             .add_message::<crate::commands::UndoCommandEvent>()
             .add_message::<crate::commands::RedoCommandEvent>()
+            .add_message::<crate::commands::HistoryActionEvent>()
             // Plugins
             .add_plugins(SpawnEventsPlugin)
             .add_plugins(WorldViewPlugin)
@@ -1078,6 +1087,10 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_sim_clock_to_slint)
             // Axis orientation gizmo (bottom-right of viewport)
             .add_systems(Update, sync_axis_gizmo_to_slint)
+            // History panel sync
+            .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
+            // Publish dialog state sync (for camera blocking)
+            .add_systems(Update, sync_publish_dialog_state.after(SlintSystems::Drain))
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState (runs first)
             .add_systems(Update, sync_viewport_selection_to_explorer)
             // Unified explorer sync: entities + filesystem (throttled internally)
@@ -1185,11 +1198,11 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
     let q = queue.clone();
-    ui.on_open_publish_dialog(move || q.push(SlintAction::OpenPublishDialog));
+    ui.on_publish_universe(move || q.push(SlintAction::PublishUniverse));
     let q = queue.clone();
-    ui.on_publish_as(move || q.push(SlintAction::OpenPublishAsDialog));
+    ui.on_publish_space(move || q.push(SlintAction::PublishSpace));
     let q = queue.clone();
-    ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, as_new| {
+    ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, space_only| {
         q.push(SlintAction::Publish(PublishRequest {
             experience_name: experience_name.to_string(),
             description: description.to_string(),
@@ -1197,7 +1210,7 @@ fn setup_slint_overlay(world: &mut World) {
             is_public,
             open_source,
             studio_editable,
-            as_new,
+            space_only,
         }))
     });
     
@@ -1206,6 +1219,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_undo(move || q.push(SlintAction::Undo));
     let q = queue.clone();
     ui.on_redo(move || q.push(SlintAction::Redo));
+    let q = queue.clone();
+    ui.on_history_jump_to(move |id| q.push(SlintAction::HistoryJumpTo(id)));
+    let q = queue.clone();
+    ui.on_history_clear(move || q.push(SlintAction::HistoryClear));
     let q = queue.clone();
     ui.on_copy(move || q.push(SlintAction::Copy));
     let q = queue.clone();
@@ -2187,8 +2204,36 @@ fn try_restore_auth_session(
                         let display_name = if username.is_empty() {
                             public_key[..std::cmp::min(8, public_key.len())].to_string()
                         } else {
-                            username
+                            username.clone()
                         };
+
+                        // Read private key for challenge-response auth
+                        let mut private_key = String::new();
+                        for line in content.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.starts_with("private_key") {
+                                if let Some(val) = trimmed.splitn(2, '=').nth(1) {
+                                    private_key = val.trim().trim_matches('"').trim_matches('\'').to_string();
+                                }
+                            }
+                        }
+
+                        // Try challenge-response auth with the API
+                        let token = if !private_key.is_empty() {
+                            match do_challenge_auth(&public_key, &private_key) {
+                                Ok(jwt) => {
+                                    tracing::info!("Challenge auth succeeded for {}", display_name);
+                                    Some(jwt)
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Challenge auth failed: {} — using local identity", e);
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
                         auth_state.user = Some(crate::auth::AuthUser {
                             id: public_key.clone(),
                             username: display_name.clone(),
@@ -2199,7 +2244,7 @@ fn try_restore_auth_session(
                             bliss_balance: 0,
                             total_hours: 0.0,
                         });
-                        auth_state.token = Some(public_key);
+                        auth_state.token = token.or(Some(public_key));
                         auth_state.status = crate::auth::AuthStatus::LoggedIn;
                         tracing::info!("Auto-login from saved identity: {}", display_name);
                     }
@@ -2220,6 +2265,7 @@ struct DrainEventWriters<'w> {
     menu_events: MessageWriter<'w, MenuActionEvent>,
     undo_events: MessageWriter<'w, crate::commands::UndoCommandEvent>,
     redo_events: MessageWriter<'w, crate::commands::RedoCommandEvent>,
+    history_events: MessageWriter<'w, crate::commands::HistoryActionEvent>,
     exit_events: MessageWriter<'w, bevy::app::AppExit>,
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
     terrain_spawn: MessageWriter<'w, super::spawn_events::SpawnTerrainEvent>,
@@ -2294,14 +2340,76 @@ struct DrainResources<'w> {
     /// Task 12: change queue — emit SceneDeltas on property write-back (streaming feature only).
     #[cfg(feature = "streaming")]
     change_queue: Option<Res<'w, eustress_common::change_queue::ChangeQueue>>,
+    /// Forge orchestration state
+    forge_state: Option<ResMut<'w, crate::forge::ForgeState>>,
+}
+
+/// Perform Ed25519 challenge-response auth against the API.
+/// Returns a JWT token on success.
+fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<String, String> {
+    use ed25519_dalek::{SigningKey, Signer};
+
+    let api_url = "https://api.eustress.dev";
+
+    // Step 1: Request challenge
+    let challenge_body = serde_json::json!({ "public_key": public_key_hex });
+    let challenge_resp = ureq::post(&format!("{}/api/auth/challenge", api_url))
+        .set("Content-Type", "application/json")
+        .send_string(&challenge_body.to_string())
+        .map_err(|e| format!("Challenge request failed: {}", e))?;
+
+    let challenge_json: serde_json::Value = challenge_resp.into_json()
+        .map_err(|e| format!("Parse challenge: {}", e))?;
+    let challenge = challenge_json["challenge"].as_str()
+        .ok_or("No challenge in response")?
+        .to_string();
+
+    // Step 2: Sign challenge with Ed25519 private key
+    let secret_bytes = hex::decode(private_key_hex)
+        .map_err(|e| format!("Invalid private key hex: {}", e))?;
+    if secret_bytes.len() != 32 {
+        return Err(format!("Private key must be 32 bytes, got {}", secret_bytes.len()));
+    }
+    let signing_key = SigningKey::from_bytes(
+        secret_bytes.as_slice().try_into().map_err(|_| "Invalid key length")?
+    );
+    let signature = signing_key.sign(challenge.as_bytes());
+    let sig_hex = hex::encode(signature.to_bytes());
+
+    // Step 3: Verify signature and get JWT
+    let verify_body = serde_json::json!({
+        "public_key": public_key_hex,
+        "challenge": challenge,
+        "signature": sig_hex,
+    });
+    let verify_resp = ureq::post(&format!("{}/api/auth/verify-challenge", api_url))
+        .set("Content-Type", "application/json")
+        .send_string(&verify_body.to_string())
+        .map_err(|e| format!("Verify failed: {}", e))?;
+
+    let verify_json: serde_json::Value = verify_resp.into_json()
+        .map_err(|e| format!("Parse verify response: {}", e))?;
+    let token = verify_json["token"].as_str()
+        .ok_or("No token in verify response")?
+        .to_string();
+
+    Ok(token)
 }
 
 fn default_publish_name(space_root: Option<&Path>) -> String {
+    // Use Universe name (parent of Space), not Space name
     space_root
-        .and_then(|path| path.file_name())
-        .map(|name| name.to_string_lossy().to_string())
+        .and_then(|path| crate::space::universe_root_for_path(path))
+        .and_then(|universe| universe.file_name().map(|n| n.to_string_lossy().to_string()))
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "Untitled".to_string())
+        .unwrap_or_else(|| {
+            // Fallback to Space name if Universe can't be resolved
+            space_root
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().to_string())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "Untitled".to_string())
+        })
 }
 
 fn publish_target_from_sync_manifest(sync_manifest: &eustress_common::SyncManifest) -> String {
@@ -2318,17 +2426,21 @@ fn publish_target_from_sync_manifest(sync_manifest: &eustress_common::SyncManife
     }
 }
 
-fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, as_new: bool) {
+fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_only: bool) {
     let mut request = PublishRequest {
         experience_name: default_publish_name(space_root),
-        as_new,
         ..PublishRequest::default()
     };
-    let mut publish_target = "Cloudflare bucket".to_string();
+    let mut publish_target = "Cloudflare R2".to_string();
     let mut is_update = false;
 
-    if let Some(space_root) = space_root {
-        let project_dir = space_root.join(".eustress");
+    // Resolve Universe root for publish manifests
+    let universe_root = space_root.and_then(|p| crate::space::universe_root_for_path(p));
+    let project_dir = universe_root.as_deref()
+        .or(space_root)
+        .map(|p| p.join(".eustress"));
+
+    if let Some(ref project_dir) = project_dir {
         let publish_path = project_dir.join("publish.toml");
         let sync_path = project_dir.join("sync.toml");
 
@@ -2353,11 +2465,9 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, as_new:
         if sync_path.exists() {
             if let Ok(sync_manifest) = eustress_common::load_toml_file::<eustress_common::SyncManifest>(&sync_path) {
                 publish_target = publish_target_from_sync_manifest(&sync_manifest);
-                if !as_new {
-                    is_update = is_update
-                        || sync_manifest.remote.experience_id.is_some()
-                        || sync_manifest.remote.project_id.is_some();
-                }
+                is_update = is_update
+                    || sync_manifest.remote.experience_id.is_some()
+                    || sync_manifest.remote.project_id.is_some();
             }
         }
     }
@@ -2368,10 +2478,151 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, as_new:
     ui.set_publish_is_public(request.is_public);
     ui.set_publish_open_source(request.open_source);
     ui.set_publish_studio_editable(request.studio_editable);
-    ui.set_publish_as_new(as_new);
-    ui.set_publish_is_update(!as_new && is_update);
+    ui.set_publish_is_update(is_update);
     ui.set_publish_target(publish_target.into());
+
+    // Populate Spaces list from Universe
+    let mut space_names: Vec<slint::SharedString> = Vec::new();
+    if let Some(ref universe) = universe_root {
+        let spaces_dir = universe.join("spaces");
+        if spaces_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&spaces_dir) {
+                let mut names: Vec<String> = entries
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().to_str().map(String::from))
+                    .collect();
+                names.sort();
+                // Put the current Space first (primary)
+                if let Some(current_space) = space_root.and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()) {
+                    if let Some(pos) = names.iter().position(|n| n == &current_space) {
+                        let name = names.remove(pos);
+                        names.insert(0, name);
+                    }
+                }
+                space_names = names.into_iter().map(|n| n.into()).collect();
+            }
+        }
+    }
+    let spaces_model = slint::ModelRc::new(slint::VecModel::from(space_names));
+    ui.set_publish_spaces(spaces_model);
+
+    // Build hierarchy tree for the left panel
+    let mut tree_nodes: Vec<PublishTreeNode> = Vec::new();
+    if let Some(ref universe) = universe_root {
+        build_publish_tree(&mut tree_nodes, universe, universe, 0, space_root);
+    }
+    let tree_model = slint::ModelRc::new(slint::VecModel::from(tree_nodes));
+    ui.set_publish_tree_nodes(tree_model);
+    ui.set_publish_pak_size("".into()); // Calculated during packaging
+
     ui.set_show_publish_dialog(true);
+}
+
+/// Recursively build the publish tree from the Universe folder.
+fn build_publish_tree(
+    nodes: &mut Vec<PublishTreeNode>,
+    dir: &std::path::Path,
+    universe_root: &std::path::Path,
+    depth: i32,
+    current_space: Option<&std::path::Path>,
+) {
+    let name = dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    // Determine icon hint
+    let icon_hint = if depth == 0 {
+        "universe"
+    } else if dir.join("_service.toml").exists() || dir.join("simulation.toml").exists() {
+        "space"
+    } else if name.starts_with('.') && name != ".eustress" {
+        "excluded"
+    } else if name == "node_modules" || name == "target" {
+        "excluded"
+    } else {
+        "service"
+    };
+
+    // Check if this is the primary space
+    let is_primary = current_space.map_or(false, |cs| dir == cs);
+
+    // Count files in this directory (non-recursive)
+    let file_count = std::fs::read_dir(dir).ok()
+        .map(|entries| entries.flatten().filter(|e| e.path().is_file()).count())
+        .unwrap_or(0);
+
+    // Skip excluded directories entirely
+    if icon_hint == "excluded" {
+        nodes.push(PublishTreeNode {
+            name: format!("{}/", name).into(),
+            depth,
+            is_folder: true,
+            is_primary: false,
+            file_count: 0,
+            icon_hint: "excluded".into(),
+        });
+        return;
+    }
+
+    nodes.push(PublishTreeNode {
+        name: format!("{}/", name).into(),
+        depth,
+        is_folder: true,
+        is_primary,
+        file_count: file_count as i32,
+        icon_hint: icon_hint.into(),
+    });
+
+    // Don't recurse too deep
+    if depth > 3 { return; }
+
+    // Sort entries: folders first, then files
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .ok()
+        .map(|e| e.flatten().collect())
+        .unwrap_or_default();
+    entries.sort_by(|a, b| {
+        let a_dir = a.path().is_dir();
+        let b_dir = b.path().is_dir();
+        b_dir.cmp(&a_dir).then_with(|| a.file_name().cmp(&b.file_name()))
+    });
+
+    for entry in entries {
+        let path = entry.path();
+        let entry_name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip hidden files (except .eustress)
+        if entry_name.starts_with('.') && entry_name != ".eustress" { continue; }
+        if entry_name == "node_modules" || entry_name == "target" { continue; }
+
+        if path.is_dir() {
+            build_publish_tree(nodes, &path, universe_root, depth + 1, current_space);
+        } else {
+            // Show individual files at depth <= 2
+            if depth <= 2 {
+                nodes.push(PublishTreeNode {
+                    name: entry_name.into(),
+                    depth: depth + 1,
+                    is_folder: false,
+                    is_primary: false,
+                    file_count: 0,
+                    icon_hint: "file".into(),
+                });
+            }
+        }
+    }
+}
+
+/// Sync publish dialog visibility from Slint back to StudioState (for camera blocking).
+/// Called in sync_bevy_to_slint or a nearby per-frame system.
+fn sync_publish_dialog_state(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut state: Option<ResMut<StudioState>>,
+) {
+    let Some(ref context) = slint_context else { return };
+    let Some(ref mut state) = state else { return };
+    state.show_publish_dialog = context.window.get_show_publish_dialog();
 }
 
 /// Custom SystemParam bundle to group entity queries and stay under 16-parameter limit
@@ -2406,7 +2657,7 @@ fn drain_slint_actions(
     };
     let actions = queue.drain();
     if actions.is_empty() { return; }
-    info!("📭 drain_slint_actions: processing {} actions", actions.len());
+    // Debug logging removed — was firing every frame, killing FPS
     let ui = slint_context.as_ref().map(|context| &context.window);
 
     // Diagnostic: log if StudioState is missing (would silently drop all tool/play actions)
@@ -2422,16 +2673,30 @@ fn drain_slint_actions(
             SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
-            SlintAction::OpenPublishDialog => {
+            SlintAction::PublishUniverse => {
                 if let Some(ui) = ui {
                     let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
+                    ui.set_publish_mode("universe".into());
                     populate_publish_dialog(ui, current_space_root, false);
                 }
             }
-            SlintAction::OpenPublishAsDialog => {
-                if let Some(ui) = ui {
+            SlintAction::PublishSpace => {
+                // Check if Universe is already published — Space publish requires it
+                let has_experience_id = res.space_root.as_ref()
+                    .and_then(|sr| crate::space::universe_root_for_path(&sr.0))
+                    .map(|ur| ur.join(".eustress").join("sync.toml"))
+                    .and_then(|p| eustress_common::load_toml_file::<eustress_common::SyncManifest>(&p).ok())
+                    .and_then(|s| s.remote.experience_id)
+                    .is_some();
+
+                if !has_experience_id {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Publish the Universe first before publishing individual Spaces.".to_string());
+                    }
+                } else if let Some(ui) = ui {
                     let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
-                    populate_publish_dialog(ui, current_space_root, true);
+                    ui.set_publish_mode("space".into());
+                    populate_publish_dialog(ui, current_space_root, false);
                 }
             }
             SlintAction::Publish(request) => { events.file_events.write(FileEvent::Publish(request)); }
@@ -2439,6 +2704,8 @@ fn drain_slint_actions(
             // Edit operations → MenuActionEvent
             SlintAction::Undo => { events.undo_events.write(crate::commands::UndoCommandEvent); }
             SlintAction::Redo => { events.redo_events.write(crate::commands::RedoCommandEvent); }
+            SlintAction::HistoryJumpTo(id) => { events.history_events.write(crate::commands::HistoryActionEvent::JumpTo(id)); }
+            SlintAction::HistoryClear => { events.history_events.write(crate::commands::HistoryActionEvent::Clear); }
             SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
             SlintAction::Cut => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
@@ -2601,19 +2868,78 @@ fn drain_slint_actions(
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::StopServer));
             }
             SlintAction::ConnectForge => {
-                if let Some(ref mut s) = res.state {
-                    s.show_forge_connect_window = true;
+                let already_open = res.state.as_ref().map_or(false, |s| s.show_forge_connect_window);
+                if already_open {
+                    // Dialog is open — user clicked Connect button. Perform actual connection.
+                    if let (Some(ui), Some(ref mut forge)) = (ui.as_ref(), res.forge_state.as_mut()) {
+                        let url = ui.get_forge_server_url().to_string();
+                        let api_key = ui.get_forge_api_key().to_string();
+                        crate::forge::connect_to_forge(forge, &url, &api_key);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Connecting to Forge at {}...", url));
+                        }
+                    }
+                } else {
+                    // Show the dialog
+                    if let Some(ref mut s) = res.state {
+                        s.show_forge_connect_window = true;
+                    }
                 }
             }
-            SlintAction::DisconnectForge => {}
-            SlintAction::AllocateForgeServer => {}
+            SlintAction::DisconnectForge => {
+                if let Some(ref mut forge) = res.forge_state {
+                    forge.status = crate::forge::ForgeConnectionStatus::Disconnected;
+                    forge.deployment = None;
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info("Disconnected from Forge.".to_string());
+                }
+                if let Some(ui) = ui {
+                    ui.set_forge_connected(false);
+                }
+            }
+            SlintAction::AllocateForgeServer => {
+                if let Some(ref mut forge) = res.forge_state {
+                    // Get the simulation ID from publish manifest
+                    let sim_id = res.space_root.as_ref()
+                        .and_then(|sr| {
+                            let publish_path = crate::space::universe_root_for_path(&sr.0)
+                                .unwrap_or(sr.0.clone())
+                                .join(".eustress").join("sync.toml");
+                            eustress_common::load_toml_file::<eustress_common::SyncManifest>(&publish_path).ok()
+                        })
+                        .and_then(|sync| sync.remote.experience_id)
+                        .unwrap_or_else(|| "local".to_string());
+
+                    crate::forge::allocate_server(
+                        forge,
+                        &sim_id,
+                        100, // max_players
+                        eustress_forge_sdk::types::Region::UsEast, // default region
+                    );
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Allocating Forge server for {}...", sim_id));
+                    }
+                } else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Forge not initialized. Open Forge Connect first.".to_string());
+                    }
+                }
+            }
             SlintAction::SpawnSyntheticClients(count) => {
                 if let Some(ref mut s) = res.state {
                     s.synthetic_client_count = count as u32;
                     s.synthetic_clients_changed = true;
                 }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Spawning {} synthetic clients...", count));
+                }
             }
-            SlintAction::DisconnectAllClients => {}
+            SlintAction::DisconnectAllClients => {
+                if let Some(ref mut out) = res.output {
+                    out.info("Disconnecting all clients...".to_string());
+                }
+            }
 
             // Stress test
             SlintAction::ShowStressTest => {
@@ -3719,6 +4045,24 @@ fn drain_slint_actions(
                                     gui.height = parts[1];
                                 }
                             }
+                        }
+                        "Material" => {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
+                                let new_mat = crate::classes::Material::from_string(&val);
+                                bp.material = new_mat;
+                                // MaterialSyncPlugin picks up Changed<BasePart> and updates StandardMaterial
+                            }
+                        }
+                        "Reflectance" => {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
+                                if let Ok(v) = val.parse::<f32>() {
+                                    bp.reflectance = v;
+                                }
+                            }
+                        }
+                        "CastShadow" => {
+                            // CastShadow is managed via NotShadowCaster component, not a BasePart field.
+                            // TOML persistence handles it via update_toml_property.
                         }
                         _ => {
                             // Unhandled property
@@ -5508,6 +5852,48 @@ fn update_ui_performance(
     time: Res<Time>,
 ) {
     perf.update(time.delta_secs());
+}
+
+/// Sync CommandHistory state to the Slint HistoryPanel.
+/// Only rebuilds when history changes (generation tracking).
+fn sync_history_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    history: Option<Res<crate::commands::CommandHistory>>,
+) {
+    let Some(ref context) = slint_context else { return };
+    let Some(ref history) = history else { return };
+
+    // Only sync when CommandHistory actually changed
+    if !history.is_changed() {
+        return;
+    }
+
+    let ui = &context.window;
+
+    // Check if right panel is showing History tab (index 1)
+    let right_tab = ui.get_right_tab_index();
+    if right_tab != 1 {
+        return;
+    }
+
+    // Build snapshot from CommandHistory
+    let (entries, current_index) = history.snapshot();
+
+    // Push to Slint
+    let slint_entries: Vec<HistoryEntry> = entries.iter().map(|e| {
+        HistoryEntry {
+            id: e.id,
+            action: e.action.clone().into(),
+            description: e.description.clone().into(),
+            timestamp: e.timestamp.clone().into(),
+            is_current: e.is_current,
+            can_undo: (e.id as usize) < current_index,
+        }
+    }).collect();
+
+    let model = slint::ModelRc::new(slint::VecModel::from(slint_entries));
+    ui.set_history_entries(model);
+    ui.set_history_current_index(current_index.saturating_sub(1) as i32);
 }
 
 /// Sync simulation clock display to the Slint ribbon.

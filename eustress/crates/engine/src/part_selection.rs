@@ -3,7 +3,7 @@ use bevy::window::PrimaryWindow;
 use crate::rendering::PartEntity;
 use eustress_common::default_scene::PartEntityMarker;
 use crate::classes::{Instance, BasePart};
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::math_utils::ray_obb_intersection;
 use crate::entity_utils::entity_to_id_string;
 
@@ -27,7 +27,7 @@ pub fn part_selection_system(
     // Query for child transforms/baseparts
     child_transform_query: Query<(&GlobalTransform, Option<&BasePart>)>,
     // Query for SELECTED entities (for tool handle checks) - Matches tool rendering logic
-    selected_query: Query<(Entity, &GlobalTransform, Option<&BasePart>), With<SelectionBox>>,
+    selected_query: Query<(Entity, &GlobalTransform, Option<&BasePart>), With<Selected>>,
     // Query to check if a parent entity is a Model
     parent_query: Query<&Instance>,
     selection_manager: Option<Res<BevySelectionManager>>,

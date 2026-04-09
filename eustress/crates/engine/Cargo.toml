@@ -79,8 +79,11 @@ mime_guess = "2"
 blake3 = "1"
 bitflags = "2"
 zstd = "0.13"
+tar = "0.4"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["std"] }
+hex = "0.4"
 base64 = "0.22"
 urlencoding = "2"
 open = "5"
@@ -90,6 +93,7 @@ rayon = "1.10"
 crossbeam = "0.8"
 tracing = "0.1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
+eustress-forge-sdk = { path = "../forge-sdk" }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
 csv = "1.3"

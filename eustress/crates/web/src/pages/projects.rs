@@ -319,10 +319,6 @@ pub fn ProjectsPage() -> impl IntoView {
                             <img src="/assets/icons/folder.svg" alt="No spaces" class="empty-icon" />
                             <h3>"No spaces found"</h3>
                             <p>"Download Eustress Engine to create your first space"</p>
-                            <a href="/download" class="btn-create-new">
-                                <img src="/assets/icons/download.svg" alt="Download" class="btn-icon" />
-                                "Download Studio"
-                            </a>
                         </div>
                     }
                 >
@@ -339,60 +335,94 @@ pub fn ProjectsPage() -> impl IntoView {
                 </Show>
             </section>
             
-            // API Keys Section (for signed-in users)
-            <Show when=move || app_state.auth.get().is_authenticated()>
-                <ApiKeysSection />
-            </Show>
-            
-            // AI Training Portal Section
+            // Eustress Engine Protocol — AI Training Data Export
             <section class="ai-training-section">
-                <div class="ai-section-header">
-                    <div class="ai-icon-wrap">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-                            <path d="M2 17l10 5 10-5"/>
-                            <path d="M2 12l10 5 10-5"/>
-                        </svg>
+                <div class="ai-section-header-centered">
+                    <h2>"Eustress Engine Protocol"</h2>
+                    <p class="ai-subtitle">"Spatial AI Training Data Export"</p>
+                    <p class="ai-description">"Export consented spatial data from your published spaces to train AI models. One API key indexes all your spaces and entities marked with "<code>"AI=true"</code>"."</p>
+                </div>
+
+                <div class="ai-protocol-grid">
+                    <div class="ai-protocol-card">
+                        <div class="ai-protocol-card-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="10"/>
+                                <polyline points="12 6 12 12 16 14"/>
+                            </svg>
+                        </div>
+                        <h3>"Real-time Streams"</h3>
+                        <p>"Subscribe to live ECS deltas via EustressStream for spatial reasoning agents. Zero-copy rkyv serialization with sub-microsecond dispatch."</p>
+                        <div class="ai-benchmark-table">
+                            <div class="ai-bench-row ai-bench-header">
+                                <span class="ai-bench-label">"Transport"</span>
+                                <span class="ai-bench-value">"Latency"</span>
+                                <span class="ai-bench-value">"Throughput"</span>
+                            </div>
+                            <div class="ai-bench-row ai-bench-highlight">
+                                <span class="ai-bench-label">"In-process"</span>
+                                <span class="ai-bench-value">"< 1 \u{00B5}s"</span>
+                                <span class="ai-bench-value">"~85M msg/s"</span>
+                            </div>
+                            <div class="ai-bench-row">
+                                <span class="ai-bench-label">"TCP"</span>
+                                <span class="ai-bench-value">"103.6 \u{00B5}s"</span>
+                                <span class="ai-bench-value">"9,651 msg/s"</span>
+                            </div>
+                            <div class="ai-bench-row">
+                                <span class="ai-bench-label">"QUIC"</span>
+                                <span class="ai-bench-value">"182.4 \u{00B5}s"</span>
+                                <span class="ai-bench-value">"5,483 msg/s"</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="ai-section-text">
-                        <h2>"AI Training Portal"</h2>
-                        <p>"Export consented spatial data from your spaces to train AI models. One API key indexes all your spaces and entities marked with AI=true."</p>
+                    <div class="ai-protocol-card">
+                        <div class="ai-protocol-card-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                                <circle cx="9" cy="7" r="4"/>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                            </svg>
+                        </div>
+                        <h3>"Team Aggregation"</h3>
+                        <p>"Aggregate spatial data across team members and spaces. Shared training datasets with per-entity consent controls."</p>
+                        <ul class="ai-feature-list">
+                            <li>"Merge scene graphs from multiple contributors"</li>
+                            <li>"Per-entity AI opt-in via Instance.AI property"</li>
+                            <li>"Automatic PII redaction for player data"</li>
+                            <li>"Organization-scoped dataset namespaces"</li>
+                        </ul>
+                    </div>
+                    <div class="ai-protocol-card">
+                        <div class="ai-protocol-card-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                                <line x1="8" y1="21" x2="16" y2="21"/>
+                                <line x1="12" y1="17" x2="12" y2="21"/>
+                            </svg>
+                        </div>
+                        <h3>"Scene Export"</h3>
+                        <p>"Export full scene graphs as structured .pak archives. Human-readable TOML files preserved for direct AI ingestion."</p>
+                        <ul class="ai-feature-list">
+                            <li>"Transforms, materials, physics, scripting context"</li>
+                            <li>"TOML files readable without custom deserializers"</li>
+                            <li>"Zstd-compressed .pak archives for R2 storage"</li>
+                            <li>"Incremental exports via SceneDelta stream"</li>
+                        </ul>
                     </div>
                 </div>
-                
-                <div class="ai-features">
-                    <div class="ai-feature">
+
+                <div class="ai-btn-wrap">
+                    <a href="/ai" class="ai-portal-btn">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                            <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
                         </svg>
-                        <span>"50% less tokens with TOON format"</span>
-                    </div>
-                    <div class="ai-feature">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="10"/>
-                            <polyline points="12 6 12 12 16 14"/>
-                        </svg>
-                        <span>"Real-time Eustress Streams"</span>
-                    </div>
-                    <div class="ai-feature">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                            <circle cx="9" cy="7" r="4"/>
-                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                        </svg>
-                        <span>"Team data aggregation"</span>
-                    </div>
+                        "Manage API Keys"
+                    </a>
                 </div>
-                
-                <a href="/ai" class="ai-portal-btn">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
-                    </svg>
-                    "Manage API Keys"
-                </a>
             </section>
-            
+
             <Footer />
         </div>
     }
@@ -565,7 +595,7 @@ pub struct CreateKeyResponse {
 
 /// API Keys management section for signed-in users.
 #[component]
-fn ApiKeysSection() -> impl IntoView {
+pub fn ApiKeysSection() -> impl IntoView {
     let app_state = expect_context::<AppState>();
     
     // State

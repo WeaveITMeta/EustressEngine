@@ -14,7 +14,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::gizmo_tools::TransformGizmoGroup;
 use crate::math_utils::{ray_plane_intersection, calculate_rotated_aabb};
 use crate::move_tool::Axis3d;
@@ -65,9 +65,9 @@ impl Plugin for RotateToolPlugin {
 fn draw_rotate_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<RotateToolState>,
-    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
     if !state.active || query.is_empty() { return; }
@@ -142,7 +142,7 @@ fn handle_rotate_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
-    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<SelectionBox>>,
+    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
@@ -358,9 +358,9 @@ fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
 
 /// Compute the world-space center and extent of the combined AABB of all selected entities.
 fn compute_group_center_and_extent(
-    query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: &Query<&Children>,
-    child_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+    child_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
 ) -> (Vec3, Vec3) {
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);

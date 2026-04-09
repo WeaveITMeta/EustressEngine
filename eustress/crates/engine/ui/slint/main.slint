@@ -20,7 +20,8 @@ import { ViewSelector } from "view_selector.slint";
 import { AIGeneration } from "ai_generation.slint";
 import { PublishDialog } from "publish.slint";
 import { LoginDialog } from "login.slint";
-import { HistoryPanel } from "history_panel.slint";
+import { HistoryPanel, HistoryEntry } from "history_panel.slint";
+import { PublishTreeNode } from "publish.slint";
 import { ContextMenu, MenuItem } from "context_menu.slint";
 import { Theme } from "theme.slint";
 // Dock layout system
@@ -116,6 +117,8 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-soul-panel: false;
     in-out property <bool> show-script-editor: false;
     in-out property <bool> show-history: false;
+    in property <[HistoryEntry]> history-entries: [];
+    in-out property <int> history-current-index: 0;
     in-out property <bool> show-ai-generation: false;
     in-out property <bool> show-workshop-panel: false;
     in-out property <bool> show-universe-browser: false;
@@ -148,9 +151,12 @@ export component StudioWindow inherits Window {
     in-out property <bool> publish-is-public: true;
     in-out property <bool> publish-open-source: false;
     in-out property <bool> publish-studio-editable: false;
-    in-out property <bool> publish-as-new: false;
+    in-out property <string> publish-mode: "universe"; // "universe" or "space"
     in-out property <bool> publish-is-update: false;
-    in-out property <string> publish-target: "Cloudflare bucket";
+    in property <[string]> publish-spaces: [];
+    in property <[PublishTreeNode]> publish-tree-nodes: [];
+    in property <string> publish-pak-size: "";
+    in-out property <string> publish-target: "Cloudflare R2";
     in-out property <bool> show-login-dialog: false;
     in-out property <string> login-identity-path: "";
     in-out property <string> login-error: "";
@@ -247,6 +253,8 @@ export component StudioWindow inherits Window {
     // Network state
     in-out property <bool> server-running: false;
     in-out property <bool> forge-connected: false;
+    in-out property <string> forge-server-url: "https://forge.eustress.dev";
+    in-out property <string> forge-api-key: "";
 
     // Account and sync state
     in-out property <string> account-name: "Guest";
@@ -431,14 +439,16 @@ export component StudioWindow inherits Window {
     callback open-scene();
     callback save-scene();
     callback save-scene-as();
-    callback open-publish-dialog();
+    callback publish-universe();
+    callback publish-space();
     callback publish(string, string, string, bool, bool, bool, bool);
-    callback publish-as();
     callback exit-app();
     
     // Edit operations
     callback undo();
     callback redo();
+    callback history-jump-to(int);
+    callback history-clear();
     callback copy();
     callback cut();
     callback paste();
@@ -656,8 +666,8 @@ export component StudioWindow inherits Window {
             on-open-scene => { root.open-scene(); }
             on-save-scene => { root.save-scene(); }
             on-save-scene-as => { root.save-scene-as(); }
-            on-publish => { root.open-publish-dialog(); }
-            on-publish-as => { root.publish-as(); }
+            on-publish-universe => { root.publish-universe(); }
+            on-publish-space => { root.publish-space(); }
             on-exit => { root.exit-app(); }
             
             // Edit
@@ -2008,8 +2018,12 @@ export component StudioWindow inherits Window {
                         }
                         
                         if root.right-tab-index == 1: HistoryPanel {
+                            history: root.history-entries;
+                            current-index: root.history-current-index;
                             on-undo => { root.undo(); }
                             on-redo => { root.redo(); }
+                            on-jump-to(id) => { root.history-jump-to(id); }
+                            on-clear-history => { root.history-clear(); }
                         }
                         
                         if root.right-tab-index == 2: SoulPanel {
@@ -2150,10 +2164,13 @@ export component StudioWindow inherits Window {
         is-public <=> root.publish-is-public;
         open-source <=> root.publish-open-source;
         studio-editable <=> root.publish-studio-editable;
+        spaces: root.publish-spaces;
+        tree-nodes: root.publish-tree-nodes;
+        pak-size-estimate: root.publish-pak-size;
         publish-target: root.publish-target;
         sync-status: root.sync-status;
         is-update: root.publish-is-update;
-        is-as-new: root.publish-as-new;
+        publish-mode: root.publish-mode;
         on-publish(experience_name, description, genre, is_public, open_source, studio_editable, as_new) => {
             root.show-publish-dialog = false;
             root.publish(experience_name, description, genre, is_public, open_source, studio_editable, as_new);
@@ -2298,6 +2315,8 @@ export component StudioWindow inherits Window {
     
     // Forge connect dialog
     if root.show-forge-connect-dialog: ForgeConnectDialog {
+        server-url <=> root.forge-server-url;
+        api-key <=> root.forge-api-key;
         on-connect => { root.connect-forge(); }
         on-close => { root.show-forge-connect-dialog = false; }
     }

@@ -10,6 +10,46 @@ use std::time::{Duration, Instant};
 const MAX_HISTORY: usize = 100;
 const MERGE_WINDOW_MS: u64 = 300; // Merge commands within 300ms
 
+/// Selection change command — stores previous and new selection sets.
+/// Ctrl+Z / Ctrl+Y cycles through selection history.
+#[derive(Clone, Debug)]
+pub struct SelectionCommand {
+    pub description: String,
+    /// Selection IDs before this change
+    pub previous: Vec<String>,
+    /// Selection IDs after this change
+    pub current: Vec<String>,
+}
+
+impl SelectionCommand {
+    pub fn new(previous: Vec<String>, current: Vec<String>) -> Self {
+        let desc = if current.is_empty() {
+            "Deselect all".to_string()
+        } else if current.len() == 1 {
+            "Select entity".to_string()
+        } else {
+            format!("Select {} entities", current.len())
+        };
+        Self { description: desc, previous, current }
+    }
+
+    pub fn execute(&mut self, world: &mut World) -> Result<(), String> {
+        if let Some(mgr) = world.get_resource::<crate::selection_sync::SelectionSyncManager>() {
+            let sel = mgr.0.read();
+            sel.set_selected(self.current.clone());
+        }
+        Ok(())
+    }
+
+    pub fn undo(&self, world: &mut World) -> Result<(), String> {
+        if let Some(mgr) = world.get_resource::<crate::selection_sync::SelectionSyncManager>() {
+            let sel = mgr.0.read();
+            sel.set_selected(self.previous.clone());
+        }
+        Ok(())
+    }
+}
+
 /// Represents any command that can be undone/redone
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -18,6 +58,7 @@ pub enum Command {
     Delete(DeleteCommand),
     Duplicate(DuplicateCommand),
     Create(CreateCommand),
+    Selection(SelectionCommand),
 }
 
 impl Command {
@@ -28,9 +69,10 @@ impl Command {
             Command::Delete(cmd) => cmd.execute(world),
             Command::Duplicate(cmd) => cmd.execute(world),
             Command::Create(cmd) => cmd.execute(world),
+            Command::Selection(cmd) => cmd.execute(world),
         }
     }
-    
+
     pub fn undo(&self, world: &mut World) -> Result<(), String> {
         match self {
             Command::Property(cmd) => cmd.undo(world),
@@ -38,9 +80,10 @@ impl Command {
             Command::Delete(cmd) => cmd.undo(world),
             Command::Duplicate(cmd) => cmd.undo(world),
             Command::Create(cmd) => cmd.undo(world),
+            Command::Selection(cmd) => cmd.undo(world),
         }
     }
-    
+
     pub fn description(&self) -> &str {
         match self {
             Command::Property(cmd) => &cmd.description,
@@ -48,9 +91,10 @@ impl Command {
             Command::Delete(cmd) => &cmd.description,
             Command::Duplicate(cmd) => &cmd.description,
             Command::Create(cmd) => &cmd.description,
+            Command::Selection(cmd) => &cmd.description,
         }
     }
-    
+
     /// Check if this command can merge with another PropertyCommand
     pub fn can_merge_property(&self, other: &PropertyCommand) -> bool {
         match self {
@@ -59,6 +103,7 @@ impl Command {
             Command::Delete(_) => false,
             Command::Duplicate(_) => false,
             Command::Create(_) => false,
+            Command::Selection(_) => false,
         }
     }
     
@@ -132,6 +177,22 @@ impl CommandHistory {
         Ok(())
     }
     
+    /// Push a selection command without executing it (selection already happened).
+    /// Used by record_selection_history to track selection changes for undo/redo.
+    pub fn push_selection(&mut self, cmd: SelectionCommand) {
+        // Clear any redo history
+        self.stack.truncate(self.current_index);
+        self.stack.push(Command::Selection(cmd));
+        self.current_index += 1;
+        self.last_command_time = Some(Instant::now());
+
+        // Limit history size
+        if self.stack.len() > MAX_HISTORY {
+            self.stack.remove(0);
+            self.current_index -= 1;
+        }
+    }
+
     /// Undo the last command
     pub fn undo(&mut self, world: &mut World) -> Result<(), String> {
         if !self.can_undo() {
@@ -242,36 +303,136 @@ pub struct UndoCommandEvent;
 #[derive(Message)]
 pub struct RedoCommandEvent;
 
-/// System to handle undo/redo events
-pub fn handle_undo_redo(
+/// Events for history panel actions (jump-to, clear)
+#[derive(Message)]
+pub enum HistoryActionEvent {
+    JumpTo(i32),
+    Clear,
+}
+
+/// Snapshot of history state for syncing to UI each frame.
+/// Only rebuilt when history generation changes.
+#[derive(Resource, Default)]
+pub struct HistorySnapshot {
+    pub entries: Vec<HistoryDisplayEntry>,
+    pub current_index: usize,
+    pub generation: u64,
+}
+
+/// A single entry for UI display
+#[derive(Clone, Debug)]
+pub struct HistoryDisplayEntry {
+    pub id: i32,
+    pub action: String,
+    pub description: String,
+    pub timestamp: String,
+    pub is_current: bool,
+}
+
+impl CommandHistory {
+    /// Build a snapshot of the history for UI display.
+    pub fn snapshot(&self) -> (Vec<HistoryDisplayEntry>, usize) {
+        let entries = self.stack.iter().enumerate().map(|(i, cmd)| {
+            let action = match cmd {
+                Command::Property(_) => "property",
+                Command::Batch(_) => "property",
+                Command::Delete(_) => "delete",
+                Command::Duplicate(_) => "paste",
+                Command::Create(_) => "create",
+                Command::Selection(_) => "select",
+            };
+            HistoryDisplayEntry {
+                id: i as i32,
+                action: action.to_string(),
+                description: cmd.description().to_string(),
+                is_current: i == self.current_index.saturating_sub(1),
+                timestamp: String::new(), // filled by sync system
+            }
+        }).collect();
+        (entries, self.current_index)
+    }
+}
+
+/// System that handles undo/redo/jump-to/clear events.
+/// Uses SelectionSyncManager for selection commands.
+pub fn process_history_events(
     mut undo_events: MessageReader<UndoCommandEvent>,
     mut redo_events: MessageReader<RedoCommandEvent>,
+    mut history_events: MessageReader<HistoryActionEvent>,
     mut history: ResMut<CommandHistory>,
-    world: &mut World,
-    // mut notifications: ResMut<crate::notifications::NotificationManager>, // TODO: Fix notifications module path
+    selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
 ) {
+    let sel_mgr = selection_sync.as_ref().map(|s| s.0.clone());
+
     for _ in undo_events.read() {
-        match history.undo(world) {
-            Ok(_) => {
-                if let Some(_desc) = history.undo_description() {
-                    // notifications.info(format!("Undone: {}", desc));
+        if history.can_undo() {
+            history.current_index -= 1;
+            let cmd = &history.stack[history.current_index];
+            // Only selection commands can be undone without &mut World
+            if let Command::Selection(sel_cmd) = cmd {
+                if let Some(ref mgr) = sel_mgr {
+                    let m = mgr.read();
+                    m.set_selected(sel_cmd.previous.clone());
                 }
             }
-            Err(_e) => {
-                // notifications.error(e);
+            if let Some(ref mut out) = output {
+                out.info(format!("Undo: {}", cmd.description()));
             }
+            history.last_command_time = None;
         }
     }
-    
+
     for _ in redo_events.read() {
-        match history.redo(world) {
-            Ok(_) => {
-                if let Some(_desc) = history.redo_description() {
-                    // notifications.info(format!("Redone: {}", desc));
+        if history.can_redo() {
+            let cmd = &history.stack[history.current_index];
+            if let Command::Selection(sel_cmd) = cmd {
+                if let Some(ref mgr) = sel_mgr {
+                    let m = mgr.read();
+                    m.set_selected(sel_cmd.current.clone());
                 }
             }
-            Err(_e) => {
-                // notifications.error(e);
+            if let Some(ref mut out) = output {
+                out.info(format!("Redo: {}", cmd.description()));
+            }
+            history.current_index += 1;
+            history.last_command_time = None;
+        }
+    }
+
+    for event in history_events.read() {
+        match event {
+            HistoryActionEvent::JumpTo(target_id) => {
+                let target = *target_id as usize;
+                // Jump by undoing/redoing to reach the target
+                // target_id is the index of the entry to jump TO (make it current)
+                let target_index = (target + 1).min(history.stack.len());
+                while history.current_index > target_index {
+                    history.current_index -= 1;
+                    if let Command::Selection(sel_cmd) = &history.stack[history.current_index] {
+                        if let Some(ref mgr) = sel_mgr {
+                            mgr.read().set_selected(sel_cmd.previous.clone());
+                        }
+                    }
+                }
+                while history.current_index < target_index {
+                    if let Command::Selection(sel_cmd) = &history.stack[history.current_index] {
+                        if let Some(ref mgr) = sel_mgr {
+                            mgr.read().set_selected(sel_cmd.current.clone());
+                        }
+                    }
+                    history.current_index += 1;
+                }
+                if let Some(ref mut out) = output {
+                    out.info(format!("Jumped to history entry {}", target_id));
+                }
+                history.last_command_time = None;
+            }
+            HistoryActionEvent::Clear => {
+                history.clear();
+                if let Some(ref mut out) = output {
+                    out.info("History cleared".to_string());
+                }
             }
         }
     }

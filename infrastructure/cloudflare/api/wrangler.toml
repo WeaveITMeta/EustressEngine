@@ -48,6 +48,11 @@ id = "44abf849a950492c8699a3fd3b7e3c27"
 binding = "KYC_BUCKET"
 bucket_name = "eustress-kyc-documents"
 
+# R2 bucket for published scene .pak files and thumbnails
+[[r2_buckets]]
+binding = "SCENES"
+bucket_name = "eustress-simulations"
+
 # Secrets (set via wrangler secret put):
 # JWT_SECRET            — persistent JWT signing key
 # GROK_API_KEY          — xAI Grok API key for AI-enhanced search

@@ -565,7 +565,7 @@ pub fn ProfilePage() -> impl IntoView {
 /// Experience card for profile.
 #[component]
 fn ProfileExperienceCard(experience: UserExperience) -> impl IntoView {
-    let exp_url = format!("/experience/{}", experience.id);
+    let exp_url = format!("/simulation/{}", experience.id);
     
     view! {
         <a href=exp_url class="profile-experience-card">

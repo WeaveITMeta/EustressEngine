@@ -95,7 +95,9 @@ pub struct PublishRequest {
     pub is_public: bool,
     pub open_source: bool,
     pub studio_editable: bool,
-    pub as_new: bool,
+    /// If true, only publish the current Space (incremental update).
+    /// If false, publish the entire Universe.
+    pub space_only: bool,
 }
 
 impl Default for PublishRequest {
@@ -107,7 +109,7 @@ impl Default for PublishRequest {
             is_public: true,
             open_source: false,
             studio_editable: false,
-            as_new: false,
+            space_only: false,
         }
     }
 }
@@ -127,10 +129,8 @@ pub enum FileEvent {
     SaveSceneAs,
     /// Open a recent scene by path
     OpenRecent(PathBuf),
-    /// Publish the experience to Eustress platform
+    /// Publish Universe or Space to Eustress platform
     Publish(PublishRequest),
-    /// Publish with new name/settings
-    PublishAs,
 }
 
 /// Show file picker for opening scenes

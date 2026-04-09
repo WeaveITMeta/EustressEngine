@@ -14,7 +14,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::gizmo_tools::TransformGizmoGroup;
 use crate::math_utils::{ray_plane_intersection, ray_to_point_distance, calculate_rotated_aabb};
 use crate::move_tool::Axis3d;
@@ -95,7 +95,7 @@ impl Plugin for ScaleToolPlugin {
 fn draw_scale_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<ScaleToolState>,
-    query: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    query: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
     if !state.active || query.is_empty() { return; }
@@ -201,7 +201,7 @@ fn handle_scale_interaction(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
-    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>, Option<&crate::spawn::MeshSource>), With<SelectionBox>>,
+    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>, Option<&crate::classes::Part>, Option<&mut Mesh3d>, Option<&crate::spawn::MeshSource>), With<Selected>>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     mut meshes: ResMut<Assets<Mesh>>,
     parent_query: Query<&ChildOf>,

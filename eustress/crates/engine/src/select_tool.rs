@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use avian3d::prelude::*;
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::rendering::PartEntity;
 use crate::classes::{BasePart, Instance};
 use crate::ui::{StudioState, Tool, BevySelectionManager, SlintUIFocus};
@@ -167,8 +167,8 @@ fn handle_select_drag(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     // Support both PartEntity (legacy) and Instance (modern) components
-    mut selected_query: Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<SelectionBox>>,
-    all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<SelectionBox>>,
+    mut selected_query: Query<(Entity, &mut Transform, &GlobalTransform, Option<&PartEntity>, Option<&Instance>, Option<&mut BasePart>), With<Selected>>,
+    all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<Selected>>,
     // Query for children of selected entities (for Model support)
     hierarchy_queries: (Query<&Children>, Query<&ChildOf>),
     spatial_query: SpatialQuery,
@@ -715,7 +715,7 @@ fn handle_box_selection(
     selection_manager: Option<Res<BevySelectionManager>>,
     // Query entities with PartEntity OR Instance (supports both legacy and modern)
     parts_query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&PartEntity>, Option<&Instance>), Or<(With<PartEntity>, With<Instance>)>>,
-    selected_query: Query<Entity, With<SelectionBox>>,
+    selected_query: Query<Entity, With<Selected>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     let Some(studio_state) = studio_state else { return };

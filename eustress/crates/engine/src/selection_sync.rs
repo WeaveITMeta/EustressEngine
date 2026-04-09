@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::rendering::PartEntity;
 use crate::classes::{Instance, ClassName};
 use crate::commands::SelectionManager;
@@ -24,7 +24,12 @@ pub struct SelectionSyncManager(pub Arc<RwLock<SelectionManager>>);
 #[derive(Resource, Default)]
 struct SelectionGeneration(u64);
 
-/// Plugin to synchronize SelectionManager state with Bevy SelectionBox components
+/// Tracks previous selection state for undo/redo recording.
+#[derive(Resource, Default)]
+struct PreviousSelection(Vec<String>);
+
+/// Plugin to synchronize SelectionManager state with Bevy Selected components.
+/// When Selected is added/removed, SelectionBoxPlugin spawns/despawns adornment meshes.
 pub struct SelectionSyncPlugin {
     pub selection_manager: Arc<RwLock<SelectionManager>>,
 }
@@ -34,20 +39,20 @@ impl Plugin for SelectionSyncPlugin {
         app
             .insert_resource(SelectionSyncManager(self.selection_manager.clone()))
             .init_resource::<SelectionGeneration>()
-            .add_systems(Update, sync_selection_boxes);
+            .init_resource::<PreviousSelection>()
+            .add_systems(Update, (record_selection_history, sync_selection_components).chain());
     }
 }
 
 /// Get the part_id for an entity (from PartEntity or Instance)
 fn get_part_id(entity: Entity, _part_entity: Option<&PartEntity>, instance: Option<&Instance>) -> Option<String> {
-    // Always use entity ID format — must match part_selection_system's entity_to_id_string()
     if _part_entity.is_some() || instance.is_some() {
         return Some(format!("{}v{}", entity.index(), entity.generation()));
     }
     None
 }
 
-/// Check if an instance is an abstract/non-visual class that shouldn't show selection boxes
+/// Check if an instance is an abstract/non-visual class that shouldn't show selection
 fn is_abstract_celestial(instance: Option<&Instance>) -> bool {
     if let Some(inst) = instance {
         ABSTRACT_CLASSES.contains(&inst.class_name)
@@ -56,25 +61,60 @@ fn is_abstract_celestial(instance: Option<&Instance>) -> bool {
     }
 }
 
-/// System to add/remove SelectionBox components based on SelectionManager state.
+/// Record selection changes into CommandHistory for Ctrl+Z/Y cycling.
+/// Runs BEFORE sync_selection_components so the "previous" state is captured first.
+fn record_selection_history(
+    selection_manager: Option<Res<SelectionSyncManager>>,
+    last_gen: Res<SelectionGeneration>,
+    mut prev: ResMut<PreviousSelection>,
+    mut history: Option<ResMut<crate::commands::CommandHistory>>,
+) {
+    let Some(selection_manager) = selection_manager else { return };
+    let Some(ref mut history) = history else { return };
+    let mgr = selection_manager.0.read();
+    let current_gen = mgr.generation();
+
+    // Only record when generation changes
+    if current_gen == last_gen.0 {
+        return;
+    }
+
+    let current_ids = mgr.get_selected();
+    drop(mgr);
+
+    // Skip recording if previous and current are identical (can happen on first frame)
+    if prev.0 == current_ids {
+        return;
+    }
+
+    // Don't record into history via world — just push directly to the stack.
+    // We can't call history.execute() because that requires &mut World.
+    // Instead, push a Selection command with no-op execute (the sync system handles the actual state).
+    let cmd = crate::commands::SelectionCommand::new(prev.0.clone(), current_ids.clone());
+    history.push_selection(cmd);
+
+    // Update previous state
+    prev.0 = current_ids;
+}
+
+/// System to add/remove `Selected` components based on SelectionManager state.
 /// Uses generation tracking to skip the O(n) entity scan when selection hasn't changed.
-fn sync_selection_boxes(
+/// When `Selected` is added, SelectionBoxPlugin reacts via `Added<Selected>` to spawn meshes.
+/// When `Selected` is removed, `RemovedComponents<Selected>` triggers despawn.
+fn sync_selection_components(
     mut commands: Commands,
     selection_manager: Option<Res<SelectionSyncManager>>,
     mut last_gen: ResMut<SelectionGeneration>,
-    // Query entities that could be selected — must match part_selection_system's filter:
-    // PartEntityMarker OR PartEntity OR (BasePart + Instance)
-    unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<SelectionBox>, Or<(With<eustress_common::default_scene::PartEntityMarker>, With<PartEntity>, With<Instance>)>)>,
-    selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<SelectionBox>>,
+    unselected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), (Without<Selected>, Or<(With<eustress_common::default_scene::PartEntityMarker>, With<PartEntity>, With<Instance>)>)>,
+    selected_query: Query<(Entity, Option<&PartEntity>, Option<&Instance>), With<Selected>>,
 ) {
     let Some(selection_manager) = selection_manager else {
-        warn!("SelectionSyncManager missing — selection outlines disabled");
         return;
     };
     let mgr = selection_manager.0.read();
     let current_gen = mgr.generation();
 
-    // Fast path: nothing changed since last frame — skip entirely
+    // Fast path: nothing changed since last frame
     if current_gen == last_gen.0 {
         return;
     }
@@ -84,37 +124,23 @@ fn sync_selection_boxes(
     drop(mgr);
     let selected_set: std::collections::HashSet<String> = selected_ids.into_iter().collect();
 
-    info!("[sel-sync] gen={} selected={:?} unselected_count={}", current_gen, selected_set, unselected_query.iter().count());
-
-    let mut matched = 0;
-    // Add SelectionBox to newly selected entities
+    // Add Selected to newly selected entities
     for (entity, part_entity, instance) in &unselected_query {
-        // Skip abstract celestial services - they don't get selection boxes
         if is_abstract_celestial(instance) {
             continue;
         }
-
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {
             if selected_set.contains(&part_id) {
-                commands.entity(entity).insert(SelectionBox);
-                matched += 1;
-                info!("[sel-sync] matched entity {:?} with id '{}'", entity, part_id);
+                commands.entity(entity).insert(Selected);
             }
         }
     }
-    if matched == 0 && !selected_set.is_empty() {
-        // Log first 10 entity IDs to see what format they actually have
-        let sample_ids: Vec<String> = unselected_query.iter().take(10)
-            .filter_map(|(e, pe, inst)| get_part_id(e, pe, inst))
-            .collect();
-        warn!("[sel-sync] no entities matched selected IDs! wanted={:?} available_sample={:?}", selected_set, sample_ids);
-    }
 
-    // Remove SelectionBox from deselected entities
+    // Remove Selected from deselected entities
     for (entity, part_entity, instance) in &selected_query {
         if let Some(part_id) = get_part_id(entity, part_entity, instance) {
             if !selected_set.contains(&part_id) {
-                commands.entity(entity).remove::<SelectionBox>();
+                commands.entity(entity).remove::<Selected>();
             }
         }
     }

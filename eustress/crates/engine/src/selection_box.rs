@@ -1,521 +1,592 @@
 // ============================================================================
-// selection_box.rs — Roblox-style selection box visuals
+// selection_box.rs — Mesh-based selection adornments
 // ============================================================================
 //
-// Table of Contents:
-//   1. Imports & Constants
-//   2. Components & Plugin
-//   3. Gizmo Configuration
-//   4. Hover Highlight Component
-//   5. Selection Box Drawing (boxes, spheres, cylinders)
-//   6. Corner Dot Drawing
-//   7. Hover Highlight Drawing
-//   8. BillboardGui Selection
-//   9. Helper Geometry Functions
+// Spawns wireframe mesh entities as children of selected parts.
+// Adornments are non-interactive (no BasePart, no PartEntityMarker) —
+// all click events pass through to the part underneath.
+//
+// Meshes are generated once on selection and only rebuilt when the part's
+// transform or size changes. Despawned on deselect.
 // ============================================================================
 
 use bevy::prelude::*;
-use bevy::gizmos::config::{GizmoConfigStore, DefaultGizmoConfigGroup};
+use bevy::light::NotShadowCaster;
+use bevy::mesh::PrimitiveTopology;
+use bevy::asset::RenderAssetUsages;
+use std::collections::HashMap;
+
 use crate::classes::{BasePart, Part, PartType};
-use crate::spawn::BillboardGuiMarker;
 
 // ============================================================================
-// 1. Constants
+// Constants
 // ============================================================================
 
-/// Primary selection outline color (Roblox-style bright cyan-blue)
-const SELECTION_COLOR: Color = Color::srgba(0.35, 0.75, 1.0, 1.0);
-/// Brighter highlight for the selection outline edges
-const SELECTION_EDGE_COLOR: Color = Color::srgba(0.5, 0.9, 1.0, 1.0);
-/// Corner dot color (white with slight blue tint)
-const CORNER_DOT_COLOR: Color = Color::srgba(0.9, 0.97, 1.0, 1.0);
-/// Hover highlight color (yellow-orange, semi-transparent)
-const HOVER_COLOR: Color = Color::srgba(1.0, 0.85, 0.2, 0.75);
-/// Minimum corner dot radius
-const CORNER_DOT_MIN_RADIUS: f32 = 0.04;
-/// Maximum corner dot radius
-const CORNER_DOT_MAX_RADIUS: f32 = 0.18;
+/// Scale factor for wireframe mesh (slightly larger than part to avoid z-fight)
+const WIREFRAME_SCALE: f32 = 1.02;
+
+/// Selection outline color (Eustress blue)
+const SELECTION_COLOR: Color = Color::srgb(0.0, 0.6, 1.0);
+
+/// Hover highlight color
+const HOVER_COLOR: Color = Color::srgb(1.0, 0.85, 0.2);
+
+/// Corner dot sphere radius as fraction of part size
+const CORNER_DOT_FRACTION: f32 = 0.025;
+const CORNER_DOT_MIN: f32 = 0.04;
+const CORNER_DOT_MAX: f32 = 0.18;
+
+/// Number of segments for circle approximation
+const CIRCLE_SEGMENTS: u32 = 32;
 
 // ============================================================================
-// 2. Components & Plugin
+// Components
 // ============================================================================
 
-/// Component marking entities that should show selection boxes
+/// Marker on the PART entity indicating it is selected.
+/// SelectionSyncPlugin adds/removes this based on SelectionManager state.
 #[derive(Component)]
-pub struct SelectionBox;
+pub struct Selected;
 
-/// Component marking entities that should show a hover highlight
+/// Marker on the PART entity indicating it is hovered (but not selected).
 #[derive(Component)]
-pub struct HoverHighlight;
+pub struct Hovered;
 
-/// Plugin for managing Roblox-style selection box visuals
+/// Marker on adornment child entities — identifies them for cleanup.
+/// These entities are invisible to the Explorer (filtered by Adornment { meta: true }).
+#[derive(Component)]
+pub struct SelectionAdornment;
+
+/// Marker on hover adornment child entities.
+#[derive(Component)]
+pub struct HoverAdornment;
+
+// ============================================================================
+// Resources
+// ============================================================================
+
+/// Shared material handles for selection adornments (created once).
+#[derive(Resource)]
+pub struct SelectionMaterials {
+    pub selection: Handle<StandardMaterial>,
+    pub selection_bright: Handle<StandardMaterial>,
+    pub hover: Handle<StandardMaterial>,
+    pub corner_dot: Handle<StandardMaterial>,
+}
+
+/// Cache of wireframe meshes keyed by (shape, quantized_size).
+/// Identical parts share the same mesh handle.
+#[derive(Resource, Default)]
+pub struct WireframeMeshCache {
+    cache: HashMap<WireframeCacheKey, Handle<Mesh>>,
+    dot_mesh: Option<Handle<Mesh>>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct WireframeCacheKey {
+    shape: ShapeKind,
+    /// Size quantized to 2 decimal places to allow sharing
+    sx: i32,
+    sy: i32,
+    sz: i32,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+enum ShapeKind {
+    Box,
+    Ball,
+    Cylinder,
+}
+
+impl WireframeCacheKey {
+    fn new(shape: ShapeKind, size: Vec3) -> Self {
+        Self {
+            shape,
+            sx: (size.x * 100.0) as i32,
+            sy: (size.y * 100.0) as i32,
+            sz: (size.z * 100.0) as i32,
+        }
+    }
+}
+
+// ============================================================================
+// Plugin
+// ============================================================================
+
 pub struct SelectionBoxPlugin;
-
-/// Marker for the gizmo-only camera
-#[derive(Component)]
-pub struct GizmoCamera;
 
 impl Plugin for SelectionBoxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (configure_gizmos_on_top, spawn_gizmo_camera))
-            .add_systems(Update, (
-                sync_gizmo_camera,
-                draw_selection_boxes,
-                draw_hover_highlights,
-                draw_billboard_gui_selection,
-            ));
-    }
-}
-
-/// Spawn a Camera3d at order 400 that only renders gizmo layer 30.
-/// This renders AFTER the Slint overlay (order 300) so gizmos are always on top.
-fn spawn_gizmo_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: 400,
-            clear_color: ClearColorConfig::None,
-            ..default()
-        },
-        Transform::from_xyz(10.0, 10.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-        Projection::Perspective(PerspectiveProjection {
-            fov: 70.0_f32.to_radians(),
-            ..default()
-        }),
-        bevy::camera::visibility::RenderLayers::layer(30),
-        // Prevent skybox from being attached to this camera
-        eustress_common::plugins::lighting_plugin::SkyboxAttached,
-        GizmoCamera,
-        Name::new("GizmoCamera"),
-    ));
-    info!("📷 Spawned GizmoCamera (order 400, layer 30)");
-}
-
-/// Sync gizmo camera transform, projection, and viewport to match the main 3D camera.
-fn sync_gizmo_camera(
-    main_camera: Query<(&Transform, &Projection, &Camera), (With<Camera3d>, Without<GizmoCamera>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
-    mut gizmo_camera: Query<(&mut Transform, &mut Projection, &mut Camera), With<GizmoCamera>>,
-) {
-    let Some((main_tf, main_proj, main_cam)) = main_camera.iter().next() else { return };
-    let Some((mut gizmo_tf, mut gizmo_proj, mut gizmo_cam)) = gizmo_camera.iter_mut().next() else { return };
-    *gizmo_tf = *main_tf;
-    *gizmo_proj = main_proj.clone();
-    gizmo_cam.viewport = main_cam.viewport.clone();
-}
-
-// ============================================================================
-// 3. Gizmo Configuration
-// ============================================================================
-
-/// Configure gizmos to render on layer 30 (gizmo-only camera).
-/// A dedicated Camera3d at order 400 renders only this layer AFTER the Slint overlay.
-fn configure_gizmos_on_top(mut config_store: ResMut<GizmoConfigStore>) {
-    let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    config.depth_bias = -1.0;
-    config.line.width = 2.5;
-    config.enabled = true;
-    config.render_layers = bevy::camera::visibility::RenderLayers::layer(30);
-    info!("🎯 Gizmo config: depth_bias={}, line_width={}, render_layer=30, enabled={}",
-        config.depth_bias, config.line.width, config.enabled);
-}
-
-// ============================================================================
-// 4. Hover Highlight Drawing
-// ============================================================================
-
-/// Draw hover highlight outlines for hovered (but not selected) entities
-fn draw_hover_highlights(
-    mut gizmos: Gizmos,
-    query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), (With<HoverHighlight>, Without<SelectionBox>, Without<BillboardGuiMarker>)>,
-    children_query: Query<&Children>,
-    all_transforms: Query<(&GlobalTransform, Option<&BasePart>), Without<BillboardGuiMarker>>,
-    billboard_markers: Query<(), With<BillboardGuiMarker>>,
-) {
-    for (entity, transform, base_part, part) in &query {
-        if let Ok(children) = children_query.get(entity) {
-            if let Some((min, max)) = calculate_children_bounds(children, &all_transforms, &billboard_markers) {
-                let center = (min + max) * 0.5;
-                let size = max - min;
-                draw_wireframe_box(&mut gizmos, center, Quat::IDENTITY, size, HOVER_COLOR, false);
-                continue;
-            }
-        }
-
-        let t = transform.compute_transform();
-        let size = resolve_part_size(&t, base_part);
-        if size.max_element() < 0.01 { continue; }
-
-        let shape_type = part.map(|p| p.shape).unwrap_or(PartType::Block);
-        match shape_type {
-            PartType::Ball => {
-                let radius = size.x / 2.0;
-                draw_wireframe_sphere(&mut gizmos, t.translation, t.rotation, radius, HOVER_COLOR);
-            }
-            PartType::Cylinder => {
-                let radius = size.x / 2.0;
-                draw_wireframe_cylinder(&mut gizmos, t.translation, t.rotation, radius, size.y, HOVER_COLOR);
-            }
-            _ => {
-                draw_wireframe_box(&mut gizmos, t.translation, t.rotation, size, HOVER_COLOR, false);
-            }
-        }
+        app.init_resource::<WireframeMeshCache>()
+            .add_systems(Startup, create_selection_materials)
+            .add_systems(
+                PostUpdate,
+                (
+                    spawn_selection_adornments,
+                    despawn_selection_adornments,
+                    spawn_hover_adornments,
+                    despawn_hover_adornments,
+                    update_changed_adornments,
+                ).chain(),
+            );
     }
 }
 
 // ============================================================================
-// 5. Selection Box Drawing
+// Startup: Create shared materials
 // ============================================================================
 
-/// Draw Roblox-style selection outlines using Bevy gizmos.
-/// - Boxes for blocks/wedges, spheres for balls, cylinders for cylinders.
-/// - For models with children, calculates combined bounding box.
-/// - Draws corner dots at all 8 box corners.
-/// - BillboardGui entities use a separate visualization.
-fn draw_selection_boxes(
-    mut gizmos: Gizmos,
-    query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), (With<SelectionBox>, Without<BillboardGuiMarker>)>,
-    children_query: Query<&Children>,
-    all_transforms: Query<(&GlobalTransform, Option<&BasePart>), Without<BillboardGuiMarker>>,
-    billboard_markers: Query<(), With<BillboardGuiMarker>>,
+fn create_selection_materials(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // DEBUG: log count every 120 frames
-    static FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let frame = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if frame % 120 == 0 {
-        let count = query.iter().count();
-        if count > 0 {
-            for (entity, transform, base_part, _) in &query {
-                let t = transform.compute_transform();
-                let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
-                info!("🎯 GIZMO: entity={:?} pos={:.1},{:.1},{:.1} size={:.1},{:.1},{:.1}",
-                    entity, t.translation.x, t.translation.y, t.translation.z,
-                    size.x, size.y, size.z);
-            }
-        }
-    }
+    let selection = materials.add(StandardMaterial {
+        base_color: SELECTION_COLOR.with_alpha(0.15),
+        emissive: LinearRgba::from(SELECTION_COLOR) * 2.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None, // Render both sides of wireframe
+        ..default()
+    });
 
+    let selection_bright = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.5, 0.9, 1.0, 0.3),
+        emissive: LinearRgba::from(Color::srgb(0.5, 0.9, 1.0)) * 3.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    });
+
+    let hover = materials.add(StandardMaterial {
+        base_color: HOVER_COLOR.with_alpha(0.12),
+        emissive: LinearRgba::from(HOVER_COLOR) * 2.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    });
+
+    let corner_dot = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.9, 0.97, 1.0, 0.9),
+        emissive: LinearRgba::from(Color::srgb(0.9, 0.97, 1.0)) * 3.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+
+    commands.insert_resource(SelectionMaterials {
+        selection,
+        selection_bright,
+        hover,
+        corner_dot,
+    });
+}
+
+// ============================================================================
+// Systems: Spawn/Despawn adornments on selection change
+// ============================================================================
+
+/// Spawn wireframe adornment children for newly selected entities.
+/// Runs only when `Selected` is added (event-driven, not every frame).
+fn spawn_selection_adornments(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cache: ResMut<WireframeMeshCache>,
+    materials: Option<Res<SelectionMaterials>>,
+    query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), Added<Selected>>,
+) {
+    let Some(mats) = materials else { return };
     if query.is_empty() { return; }
 
-    for (entity, transform, base_part, part) in &query {
-        // Model with children: draw combined AABB
-        if let Ok(children) = children_query.get(entity) {
-            if let Some((min, max)) = calculate_children_bounds(children, &all_transforms, &billboard_markers) {
-                let center = (min + max) * 0.5;
-                let size = max - min;
-                draw_wireframe_box(&mut gizmos, center, Quat::IDENTITY, size, SELECTION_COLOR, true);
-                draw_corner_dots(&mut gizmos, center, Quat::IDENTITY, size);
-                continue;
-            }
-        }
+    for (entity, _, base_part, part) in &query {
+        let size = base_part.map(|bp| bp.size).unwrap_or(Vec3::ONE);
+        let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
-        let t = transform.compute_transform();
-        let size = resolve_part_size(&t, base_part);
-        if size.max_element() < 0.01 { continue; }
-
-        let shape_type = part.map(|p| p.shape).unwrap_or(PartType::Block);
-        match shape_type {
-            PartType::Ball => {
-                let radius = size.x / 2.0;
-                draw_wireframe_sphere(&mut gizmos, t.translation, t.rotation, radius, SELECTION_COLOR);
-                // Draw 6 cardinal dots on sphere surface
-                draw_sphere_dots(&mut gizmos, t.translation, t.rotation, radius);
-            }
-            PartType::Cylinder => {
-                let radius = size.x / 2.0;
-                draw_wireframe_cylinder(&mut gizmos, t.translation, t.rotation, radius, size.y, SELECTION_COLOR);
-            }
-            _ => {
-                draw_wireframe_box(&mut gizmos, t.translation, t.rotation, size, SELECTION_COLOR, true);
-                draw_corner_dots(&mut gizmos, t.translation, t.rotation, size);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// 6. Corner Dot Drawing
-// ============================================================================
-
-/// Draw small sphere dots at all 8 corners of the bounding box
-fn draw_corner_dots(gizmos: &mut Gizmos, center: Vec3, rotation: Quat, size: Vec3) {
-    let half = size * 0.5;
-    // Scale dot radius with part size, clamped
-    let dot_radius = (size.max_element() * 0.025)
-        .max(CORNER_DOT_MIN_RADIUS)
-        .min(CORNER_DOT_MAX_RADIUS);
-
-    let local_corners = [
-        Vec3::new(-half.x, -half.y, -half.z),
-        Vec3::new( half.x, -half.y, -half.z),
-        Vec3::new(-half.x,  half.y, -half.z),
-        Vec3::new( half.x,  half.y, -half.z),
-        Vec3::new(-half.x, -half.y,  half.z),
-        Vec3::new( half.x, -half.y,  half.z),
-        Vec3::new(-half.x,  half.y,  half.z),
-        Vec3::new( half.x,  half.y,  half.z),
-    ];
-
-    for local in &local_corners {
-        let world_pos = center + rotation * *local;
-        // Draw a small cross (+) at each corner for crisp look at any distance
-        let right = rotation * Vec3::X * dot_radius;
-        let up    = rotation * Vec3::Y * dot_radius;
-        let fwd   = rotation * Vec3::Z * dot_radius;
-        gizmos.line(world_pos - right, world_pos + right, CORNER_DOT_COLOR);
-        gizmos.line(world_pos - up,    world_pos + up,    CORNER_DOT_COLOR);
-        gizmos.line(world_pos - fwd,   world_pos + fwd,   CORNER_DOT_COLOR);
-    }
-}
-
-/// Draw dots at the 6 cardinal points on a sphere surface
-fn draw_sphere_dots(gizmos: &mut Gizmos, center: Vec3, rotation: Quat, radius: f32) {
-    let dot_radius = (radius * 0.05).max(CORNER_DOT_MIN_RADIUS).min(CORNER_DOT_MAX_RADIUS);
-    let axes = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z];
-    for axis in &axes {
-        let world_pos = center + rotation * (*axis * radius);
-        let right = rotation * Vec3::X * dot_radius;
-        let up    = rotation * Vec3::Y * dot_radius;
-        let fwd   = rotation * Vec3::Z * dot_radius;
-        gizmos.line(world_pos - right, world_pos + right, CORNER_DOT_COLOR);
-        gizmos.line(world_pos - up,    world_pos + up,    CORNER_DOT_COLOR);
-        gizmos.line(world_pos - fwd,   world_pos + fwd,   CORNER_DOT_COLOR);
-    }
-}
-
-// ============================================================================
-// 7. Helper: Resolve Part Size
-// ============================================================================
-
-/// Determine the visual size of a part from its transform and optional BasePart
-fn resolve_part_size(t: &Transform, base_part: Option<&BasePart>) -> Vec3 {
-    if (t.scale - Vec3::ONE).length() > 0.01 {
-        t.scale
-    } else if let Some(bp) = base_part {
-        bp.size
-    } else {
-        t.scale
-    }
-}
-
-// ============================================================================
-// 8. BillboardGui Selection
-// ============================================================================
-
-/// Draw special selection visualization for BillboardGui entities
-fn draw_billboard_gui_selection(
-    mut gizmos: Gizmos,
-    query: Query<(Entity, &GlobalTransform), (With<SelectionBox>, With<BillboardGuiMarker>)>,
-    billboard_gui_query: Query<&eustress_common::classes::BillboardGui>,
-) {
-    let outline_color = Color::srgba(0.2, 0.5, 0.9, 0.8);
-
-    for (entity, transform) in &query {
-        let t = transform.compute_transform();
-
-        let (width, height) = if let Ok(gui) = billboard_gui_query.get(entity) {
-            (gui.size_offset[0], gui.size_offset[1])
-        } else {
-            (200.0, 50.0)
-        };
-
-        let world_width  = width  * 0.01;
-        let world_height = height * 0.01;
-
-        draw_billboard_rect(&mut gizmos, t.translation, t.rotation, world_width, world_height, SELECTION_COLOR);
-
-        let outline_offset = 0.02;
-        draw_billboard_rect(
-            &mut gizmos,
-            t.translation,
-            t.rotation,
-            world_width  + outline_offset * 2.0,
-            world_height + outline_offset * 2.0,
-            outline_color,
+        // Get or create wireframe mesh
+        let wireframe_handle = get_or_create_wireframe(
+            &mut cache, &mut meshes, shape, size,
         );
-    }
-}
 
-// ============================================================================
-// 9. Helper Geometry Functions
-// ============================================================================
+        // Spawn wireframe child entity
+        commands.spawn((
+            Mesh3d(wireframe_handle),
+            MeshMaterial3d(mats.selection.clone()),
+            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            SelectionAdornment,
+            eustress_common::adornments::Adornment { meta: true },
+            NotShadowCaster,
+            Name::new("SelectionWireframe"),
+            ChildOf(entity),
+        ));
 
-/// Calculate combined bounding box for all children recursively.
-/// Excludes BillboardGui entities.
-fn calculate_children_bounds(
-    children: &Children,
-    all_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<BillboardGuiMarker>>,
-    billboard_markers: &Query<(), With<BillboardGuiMarker>>,
-) -> Option<(Vec3, Vec3)> {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut found_any = false;
-
-    for child in children.iter() {
-        if billboard_markers.get(child).is_ok() { continue; }
-
-        if let Ok((child_transform, base_part)) = all_transforms.get(child) {
-            let t = child_transform.compute_transform();
-            let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
-            let half = size * 0.5;
-
-            let corners = [
-                Vec3::new(-half.x, -half.y, -half.z),
-                Vec3::new( half.x, -half.y, -half.z),
-                Vec3::new(-half.x,  half.y, -half.z),
-                Vec3::new( half.x,  half.y, -half.z),
-                Vec3::new(-half.x, -half.y,  half.z),
-                Vec3::new( half.x, -half.y,  half.z),
-                Vec3::new(-half.x,  half.y,  half.z),
-                Vec3::new( half.x,  half.y,  half.z),
-            ];
-
-            for corner in &corners {
-                let world = t.translation + t.rotation * *corner;
-                min = min.min(world);
-                max = max.max(world);
-            }
-            found_any = true;
+        // Spawn corner dots for box shapes
+        if shape == ShapeKind::Box {
+            spawn_corner_dots(
+                &mut commands,
+                &mut cache,
+                &mut meshes,
+                &mats,
+                entity,
+                size,
+            );
         }
     }
-
-    if found_any { Some((min, max)) } else { None }
 }
 
-/// Draw a wireframe box.
-/// When `bright_edges` is true, draws a second pass with a brighter color for emphasis.
-fn draw_wireframe_box(
-    gizmos: &mut Gizmos,
-    translation: Vec3,
-    rotation: Quat,
-    scale: Vec3,
-    color: Color,
-    bright_edges: bool,
+/// Despawn adornment children when `Selected` is removed.
+fn despawn_selection_adornments(
+    mut commands: Commands,
+    mut removed: RemovedComponents<Selected>,
+    adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
 ) {
-    let half = scale * 0.5;
+    for removed_entity in removed.read() {
+        // Find and despawn all adornment children of this entity
+        for (adornment_entity, child_of) in &adornment_query {
+            if child_of.parent() == removed_entity {
+                commands.entity(adornment_entity).despawn();
+            }
+        }
+    }
+}
 
-    let local_corners = [
-        Vec3::new(-half.x, -half.y, -half.z), // 0
-        Vec3::new( half.x, -half.y, -half.z), // 1
-        Vec3::new(-half.x,  half.y, -half.z), // 2
-        Vec3::new( half.x,  half.y, -half.z), // 3
-        Vec3::new(-half.x, -half.y,  half.z), // 4
-        Vec3::new( half.x, -half.y,  half.z), // 5
-        Vec3::new(-half.x,  half.y,  half.z), // 6
-        Vec3::new( half.x,  half.y,  half.z), // 7
+/// Spawn hover adornment for newly hovered entities.
+fn spawn_hover_adornments(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cache: ResMut<WireframeMeshCache>,
+    materials: Option<Res<SelectionMaterials>>,
+    query: Query<(Entity, Option<&BasePart>, Option<&Part>), (Added<Hovered>, Without<Selected>)>,
+) {
+    let Some(mats) = materials else { return };
+
+    for (entity, base_part, part) in &query {
+        let size = base_part.map(|bp| bp.size).unwrap_or(Vec3::ONE);
+        let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
+
+        let wireframe_handle = get_or_create_wireframe(
+            &mut cache, &mut meshes, shape, size,
+        );
+
+        commands.spawn((
+            Mesh3d(wireframe_handle),
+            MeshMaterial3d(mats.hover.clone()),
+            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            HoverAdornment,
+            eustress_common::adornments::Adornment { meta: true },
+            NotShadowCaster,
+            Name::new("HoverWireframe"),
+            ChildOf(entity),
+        ));
+    }
+}
+
+/// Despawn hover adornments when `Hovered` is removed.
+fn despawn_hover_adornments(
+    mut commands: Commands,
+    mut removed: RemovedComponents<Hovered>,
+    adornment_query: Query<(Entity, &ChildOf), With<HoverAdornment>>,
+) {
+    for removed_entity in removed.read() {
+        for (adornment_entity, child_of) in &adornment_query {
+            if child_of.parent() == removed_entity {
+                commands.entity(adornment_entity).despawn();
+            }
+        }
+    }
+}
+
+/// Update adornment meshes when the adorned part's BasePart changes size.
+/// Only runs on parts that have `Selected` AND `Changed<BasePart>`.
+fn update_changed_adornments(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut cache: ResMut<WireframeMeshCache>,
+    materials: Option<Res<SelectionMaterials>>,
+    changed_parts: Query<(Entity, &BasePart, Option<&Part>), (With<Selected>, Changed<BasePart>)>,
+    adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
+) {
+    let Some(mats) = materials else { return };
+
+    for (part_entity, base_part, part) in &changed_parts {
+        let size = base_part.size;
+        let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
+
+        // Despawn old adornments
+        for (adornment_entity, child_of) in &adornment_query {
+            if child_of.parent() == part_entity {
+                commands.entity(adornment_entity).despawn();
+            }
+        }
+
+        // Spawn new with updated size
+        let wireframe_handle = get_or_create_wireframe(
+            &mut cache, &mut meshes, shape, size,
+        );
+
+        commands.spawn((
+            Mesh3d(wireframe_handle),
+            MeshMaterial3d(mats.selection.clone()),
+            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            SelectionAdornment,
+            eustress_common::adornments::Adornment { meta: true },
+            NotShadowCaster,
+            Name::new("SelectionWireframe"),
+            ChildOf(part_entity),
+        ));
+
+        if shape == ShapeKind::Box {
+            spawn_corner_dots(
+                &mut commands,
+                &mut cache,
+                &mut meshes,
+                &mats,
+                part_entity,
+                size,
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Wireframe Mesh Generation
+// ============================================================================
+
+fn get_or_create_wireframe(
+    cache: &mut WireframeMeshCache,
+    meshes: &mut Assets<Mesh>,
+    shape: ShapeKind,
+    size: Vec3,
+) -> Handle<Mesh> {
+    let key = WireframeCacheKey::new(shape, size);
+    if let Some(handle) = cache.cache.get(&key) {
+        return handle.clone();
+    }
+
+    let mesh = match shape {
+        ShapeKind::Box => generate_box_wireframe(size),
+        ShapeKind::Ball => generate_sphere_wireframe(size.x / 2.0),
+        ShapeKind::Cylinder => generate_cylinder_wireframe(size.x / 2.0, size.y),
+    };
+
+    let handle = meshes.add(mesh);
+    cache.cache.insert(key, handle.clone());
+    handle
+}
+
+/// Generate a wireframe box mesh (12 edges = 24 vertices as LineList).
+/// Size is in LOCAL space — the mesh is centered at origin.
+/// The parent part's transform positions it in world space.
+fn generate_box_wireframe(_size: Vec3) -> Mesh {
+    // Wireframe is at unit scale since the parent transform already has the size.
+    // We use half-extents of 0.5 (unit cube) because the parent's scale = BasePart.size.
+    let h = Vec3::splat(0.5);
+
+    let corners = [
+        Vec3::new(-h.x, -h.y, -h.z), // 0
+        Vec3::new( h.x, -h.y, -h.z), // 1
+        Vec3::new(-h.x,  h.y, -h.z), // 2
+        Vec3::new( h.x,  h.y, -h.z), // 3
+        Vec3::new(-h.x, -h.y,  h.z), // 4
+        Vec3::new( h.x, -h.y,  h.z), // 5
+        Vec3::new(-h.x,  h.y,  h.z), // 6
+        Vec3::new( h.x,  h.y,  h.z), // 7
     ];
 
-    let wc: Vec<Vec3> = local_corners.iter()
-        .map(|&c| translation + rotation * c)
-        .collect();
-
-    // 12 edges
-    let edges = [
-        (0,1),(4,5),(0,4),(1,5), // bottom face
-        (2,3),(6,7),(2,6),(3,7), // top face
-        (0,2),(1,3),(4,6),(5,7), // verticals
+    let edges: [(usize, usize); 12] = [
+        (0,1),(2,3),(4,5),(6,7), // horizontal
+        (0,2),(1,3),(4,6),(5,7), // vertical
+        (0,4),(1,5),(2,6),(3,7), // depth
     ];
 
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(24);
     for (a, b) in &edges {
-        gizmos.line(wc[*a], wc[*b], color);
+        positions.push(corners[*a].into());
+        positions.push(corners[*b].into());
     }
 
-    // Second pass with brighter color for the top face edges (most visible)
-    if bright_edges {
-        let bright = SELECTION_EDGE_COLOR;
-        gizmos.line(wc[2], wc[3], bright); // top-back
-        gizmos.line(wc[6], wc[7], bright); // top-front
-        gizmos.line(wc[2], wc[6], bright); // top-left
-        gizmos.line(wc[3], wc[7], bright); // top-right
-    }
+    Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
 }
 
-/// Draw a wireframe sphere (3 orthogonal great circles)
-fn draw_wireframe_sphere(
-    gizmos: &mut Gizmos,
-    translation: Vec3,
-    rotation: Quat,
-    radius: f32,
-    color: Color,
-) {
-    let segments = 32;
-    draw_circle_3d(gizmos, translation, rotation * Vec3::Z, radius, segments, color);
-    draw_circle_3d(gizmos, translation, rotation * Vec3::Y, radius, segments, color);
-    draw_circle_3d(gizmos, translation, rotation * Vec3::X, radius, segments, color);
+/// Generate a wireframe sphere mesh (3 great circles).
+fn generate_sphere_wireframe(_radius: f32) -> Mesh {
+    // Unit sphere (radius 0.5) — parent scale handles actual size
+    let r = 0.5;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(CIRCLE_SEGMENTS as usize * 2 * 3);
+
+    // XY plane circle
+    append_circle_line_list(&mut positions, Vec3::ZERO, Vec3::Z, r, CIRCLE_SEGMENTS);
+    // XZ plane circle
+    append_circle_line_list(&mut positions, Vec3::ZERO, Vec3::Y, r, CIRCLE_SEGMENTS);
+    // YZ plane circle
+    append_circle_line_list(&mut positions, Vec3::ZERO, Vec3::X, r, CIRCLE_SEGMENTS);
+
+    Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
 }
 
-/// Draw a wireframe cylinder (top/bottom circles + vertical lines)
-fn draw_wireframe_cylinder(
-    gizmos: &mut Gizmos,
-    translation: Vec3,
-    rotation: Quat,
-    radius: f32,
-    height: f32,
-    color: Color,
-) {
-    let segments = 32;
-    let half_h = height / 2.0;
-    let up = rotation * Vec3::Y;
-    let top    = translation + up * half_h;
-    let bottom = translation - up * half_h;
+/// Generate a wireframe cylinder mesh (2 end circles + vertical lines).
+fn generate_cylinder_wireframe(_radius: f32, _height: f32) -> Mesh {
+    // Unit cylinder — parent scale handles actual size
+    let r = 0.5;
+    let half_h = 0.5;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
 
-    draw_circle_3d(gizmos, top,    up, radius, segments, color);
-    draw_circle_3d(gizmos, bottom, up, radius, segments, color);
+    // Top circle
+    let top = Vec3::new(0.0, half_h, 0.0);
+    append_circle_line_list(&mut positions, top, Vec3::Y, r, CIRCLE_SEGMENTS);
 
+    // Bottom circle
+    let bottom = Vec3::new(0.0, -half_h, 0.0);
+    append_circle_line_list(&mut positions, bottom, Vec3::Y, r, CIRCLE_SEGMENTS);
+
+    // 8 vertical lines connecting top to bottom
     for i in 0..8u32 {
         let angle = (i as f32 / 8.0) * std::f32::consts::TAU;
-        let local = Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius);
-        let world = rotation * local;
-        gizmos.line(top + world, bottom + world, color);
+        let x = angle.cos() * r;
+        let z = angle.sin() * r;
+        positions.push([x, half_h, z]);
+        positions.push([x, -half_h, z]);
     }
+
+    Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
 }
 
-/// Draw a circle in 3D space defined by a center, normal, and radius
-fn draw_circle_3d(
-    gizmos: &mut Gizmos,
+/// Append a circle as LineList segments to a positions buffer.
+fn append_circle_line_list(
+    positions: &mut Vec<[f32; 3]>,
     center: Vec3,
     normal: Vec3,
     radius: f32,
     segments: u32,
-    color: Color,
 ) {
     let up = if normal.dot(Vec3::Y).abs() > 0.99 { Vec3::X } else { Vec3::Y };
-    let tangent   = normal.cross(up).normalize();
+    let tangent = normal.cross(up).normalize();
     let bitangent = tangent.cross(normal).normalize();
 
-    let mut prev = center + tangent * radius;
-    for i in 1..=segments {
-        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
-        let point = center + (tangent * angle.cos() + bitangent * angle.sin()) * radius;
-        gizmos.line(prev, point, color);
-        prev = point;
+    for i in 0..segments {
+        let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+        let p0 = center + (tangent * a0.cos() + bitangent * a0.sin()) * radius;
+        let p1 = center + (tangent * a1.cos() + bitangent * a1.sin()) * radius;
+        positions.push(p0.into());
+        positions.push(p1.into());
     }
 }
 
-/// Draw a rectangle in 3D space (for BillboardGui selection)
-fn draw_billboard_rect(
-    gizmos: &mut Gizmos,
-    center: Vec3,
-    rotation: Quat,
-    width: f32,
-    height: f32,
-    color: Color,
+// ============================================================================
+// Corner Dot Spawning
+// ============================================================================
+
+/// Spawn 8 small cross-shaped meshes at box corners.
+fn spawn_corner_dots(
+    commands: &mut Commands,
+    cache: &mut WireframeMeshCache,
+    meshes: &mut Assets<Mesh>,
+    mats: &SelectionMaterials,
+    parent: Entity,
+    size: Vec3,
 ) {
-    let hw = width  * 0.5;
-    let hh = height * 0.5;
+    let dot_mesh = get_or_create_dot_mesh(cache, meshes);
+    let h = Vec3::splat(0.5); // Unit space
 
     let corners = [
-        Vec3::new(-hw, -hh, 0.0),
-        Vec3::new( hw, -hh, 0.0),
-        Vec3::new( hw,  hh, 0.0),
-        Vec3::new(-hw,  hh, 0.0),
+        Vec3::new(-h.x, -h.y, -h.z),
+        Vec3::new( h.x, -h.y, -h.z),
+        Vec3::new(-h.x,  h.y, -h.z),
+        Vec3::new( h.x,  h.y, -h.z),
+        Vec3::new(-h.x, -h.y,  h.z),
+        Vec3::new( h.x, -h.y,  h.z),
+        Vec3::new(-h.x,  h.y,  h.z),
+        Vec3::new( h.x,  h.y,  h.z),
     ];
 
-    let wc: Vec<Vec3> = corners.iter()
-        .map(|&c| center + rotation * c)
-        .collect();
+    // Corner dot scale: fraction of part size, clamped.
+    // Since parent transform has scale = size, we need to counter-scale.
+    // Dot radius in world = size.max_element() * CORNER_DOT_FRACTION, clamped.
+    let world_radius = (size.max_element() * CORNER_DOT_FRACTION)
+        .max(CORNER_DOT_MIN)
+        .min(CORNER_DOT_MAX);
+    // In parent-local space, we need to divide by parent scale per axis
+    // to get uniform world-space dots despite non-uniform parent scale.
+    let local_scale = Vec3::new(
+        world_radius / size.x.max(0.001),
+        world_radius / size.y.max(0.001),
+        world_radius / size.z.max(0.001),
+    );
 
-    gizmos.line(wc[0], wc[1], color);
-    gizmos.line(wc[1], wc[2], color);
-    gizmos.line(wc[2], wc[3], color);
-    gizmos.line(wc[3], wc[0], color);
+    for corner in &corners {
+        commands.spawn((
+            Mesh3d(dot_mesh.clone()),
+            MeshMaterial3d(mats.corner_dot.clone()),
+            Transform {
+                translation: *corner,
+                scale: local_scale,
+                ..default()
+            },
+            SelectionAdornment,
+            eustress_common::adornments::Adornment { meta: true },
+            NotShadowCaster,
+            Name::new("CornerDot"),
+            ChildOf(parent),
+        ));
+    }
+}
+
+/// Get or create the corner dot mesh (a small 3-axis cross).
+fn get_or_create_dot_mesh(
+    cache: &mut WireframeMeshCache,
+    meshes: &mut Assets<Mesh>,
+) -> Handle<Mesh> {
+    if let Some(ref handle) = cache.dot_mesh {
+        return handle.clone();
+    }
+
+    // Cross shape: 3 lines (6 vertices) centered at origin, length 1.0
+    let half = 0.5;
+    let positions: Vec<[f32; 3]> = vec![
+        [-half, 0.0, 0.0], [half, 0.0, 0.0], // X axis
+        [0.0, -half, 0.0], [0.0, half, 0.0], // Y axis
+        [0.0, 0.0, -half], [0.0, 0.0, half], // Z axis
+    ];
+
+    let mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+
+    let handle = meshes.add(mesh);
+    cache.dot_mesh = Some(handle.clone());
+    handle
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Cleanup: remove all selection adornments.
+/// Called when deselecting everything or on app shutdown.
+pub fn cleanup_all_selections(
+    mut commands: Commands,
+    selected: Query<Entity, With<Selected>>,
+    hovered: Query<Entity, With<Hovered>>,
+    adornments: Query<Entity, Or<(With<SelectionAdornment>, With<HoverAdornment>)>>,
+) {
+    for entity in &selected {
+        commands.entity(entity).remove::<Selected>();
+    }
+    for entity in &hovered {
+        commands.entity(entity).remove::<Hovered>();
+    }
+    for entity in &adornments {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn shape_kind(part_type: PartType) -> ShapeKind {
+    match part_type {
+        PartType::Ball => ShapeKind::Ball,
+        PartType::Cylinder | PartType::Cone => ShapeKind::Cylinder,
+        _ => ShapeKind::Box,
+    }
 }

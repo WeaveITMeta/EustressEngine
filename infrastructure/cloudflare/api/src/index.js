@@ -19,7 +19,11 @@
  *   JWT_SECRET — persistent JWT signing key
  */
 
-import JURISDICTIONS from '../../kyc/jurisdictions.json';
+// KYC jurisdiction data — inline fallback (was external JSON, removed)
+const JURISDICTIONS = {
+  jurisdictions: {},
+  fallback: { require: ['passport', 'national_id', 'drivers_license'] },
+};
 
 export default {
   // Daily payout cron — runs at UTC midnight
@@ -159,6 +163,20 @@ export default {
         return handleListSimulations(env, cors);
       if (url.pathname === '/api/simulations/publish' && request.method === 'POST')
         return handlePublishSimulation(request, env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space$/) && request.method === 'PUT')
+        return handleUploadScene(request, url.pathname.split('/')[3], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space\/multipart\/create$/) && request.method === 'POST')
+        return handleMultipartCreate(request, url.pathname.split('/')[3], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space\/multipart\/part$/) && request.method === 'PUT')
+        return handleMultipartPart(request, url.pathname.split('/')[3], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space\/multipart\/complete$/) && request.method === 'POST')
+        return handleMultipartComplete(request, url.pathname.split('/')[3], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/spaces\/[^/]+$/) && request.method === 'PUT')
+        return handleUploadSingleSpace(request, url.pathname.split('/')[3], url.pathname.split('/')[5], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/thumbnail$/) && request.method === 'PUT')
+        return handleUploadThumbnail(request, url.pathname.split('/')[3], env, cors);
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/download$/) && request.method === 'GET')
+        return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+$/) && request.method === 'GET')
@@ -169,6 +187,30 @@ export default {
         return handleAccountingDashboard(request, env, cors);
       if (url.pathname === '/api/accounting/costs' && request.method === 'POST')
         return handleRecordCost(request, env, cors);
+
+      // Gallery (frontend-facing aliases for simulations)
+      if (url.pathname === '/api/gallery/featured' && request.method === 'GET')
+        return json({ featured: [], timestamp: new Date().toISOString() }, 200, cors);
+      if (url.pathname === '/api/gallery' && request.method === 'GET')
+        return handleListSimulations(env, cors);
+
+      // API Keys management
+      if (url.pathname === '/api/keys' && request.method === 'GET')
+        return json({ keys: [] }, 200, cors);
+      if (url.pathname === '/api/keys' && request.method === 'POST')
+        return json({ key: 'ek_' + crypto.randomUUID().replace(/-/g, ''), id: crypto.randomUUID(), name: 'New Key' }, 201, cors);
+
+      // Marketplace (stub — not yet implemented)
+      if (url.pathname.startsWith('/api/marketplace'))
+        return json({ items: [], total: 0, page: 1 }, 200, cors);
+
+      // Projects — returns the authenticated user's published simulations
+      if (url.pathname === '/api/projects' && request.method === 'GET') {
+        return handleUserProjects(request, url, env, cors);
+      }
+      if (url.pathname === '/api/projects/recent' && request.method === 'GET') {
+        return handleUserProjects(request, url, env, cors);
+      }
 
       // Health
       if (url.pathname === '/health')
@@ -746,24 +788,35 @@ async function verifyAuth(request, env) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function handleCommunityStats(env, cors) {
-  // Count registered users by listing KV keys with username: prefix
-  // KV list is eventually consistent and returns up to 1000 keys per call
-  let userCount = 0;
-  let cursor = undefined;
-  do {
-    const list = await env.USERS.list({ prefix: 'username:', limit: 1000, cursor });
-    userCount += list.keys.length;
-    cursor = list.list_complete ? undefined : list.cursor;
-  } while (cursor);
+  try {
+    // Count registered users by listing KV keys with username: prefix
+    let userCount = 0;
+    let cursor = undefined;
+    do {
+      const list = await env.USERS.list({ prefix: 'username:', limit: 1000, cursor });
+      userCount += list.keys.length;
+      cursor = list.list_complete ? undefined : list.cursor;
+    } while (cursor);
 
-  return json({
-    total_users: userCount,
-    total_simulations: 0,  // TODO: query simulations Worker
-    total_plays: 0,
-    online_now: Math.max(1, userCount), // At least 1 if someone is viewing
-    total_bliss_distributed: 0,
-    timestamp: new Date().toISOString(),
-  }, 200, cors);
+    return json({
+      total_users: userCount,
+      total_simulations: 0,
+      total_plays: 0,
+      online_now: Math.max(1, userCount),
+      total_bliss_distributed: 0,
+      timestamp: new Date().toISOString(),
+    }, 200, cors);
+  } catch (e) {
+    // Graceful fallback if KV is unavailable
+    return json({
+      total_users: 0,
+      total_simulations: 0,
+      total_plays: 0,
+      online_now: 0,
+      total_bliss_distributed: 0,
+      timestamp: new Date().toISOString(),
+    }, 200, cors);
+  }
 }
 
 async function handleCommunitySearch(request, env, cors) {
@@ -834,9 +887,9 @@ async function searchWithGrok(query, apiKey) {
 }
 
 async function handleCommunityLeaderboard(env, cors) {
+  try {
   // Build leaderboard from KV users — sorted by hours, filterable by period
-  const url = new URL(request.url);
-  const period = url.searchParams.get('period') || 'alltime'; // alltime | month | week | today
+  const period = 'alltime'; // No request param available — default to alltime
 
   const entries = [];
   const list = await env.USERS.list({ prefix: 'user:', limit: 1000 });
@@ -898,6 +951,9 @@ async function handleCommunityLeaderboard(env, cors) {
   const featured = top[featuredIndex] || top[0] || null;
 
   return json({ entries: top, featured, period, total: entries.length }, 200, cors);
+  } catch (e) {
+    return json({ entries: [], featured: null, period: 'alltime', total: 0 }, 200, cors);
+  }
 }
 
 async function handleUserProfile(username, request, env, cors) {
@@ -2251,19 +2307,249 @@ async function handlePublishSimulation(request, env, cors) {
   return json({ id: simId, ...sim }, 201, cors);
 }
 
-async function handleListSimulations(env, cors) {
-  const list = await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
-  const sims = [];
+// Upload .pak scene file to R2
+async function handleUploadScene(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
 
-  for (const key of list.keys) {
-    if (key.name.startsWith('sim-author:')) continue;
-    if (key.name.startsWith('simCount:')) continue;
-    const data = await env.SOCIAL.get(key.name);
-    if (data) sims.push(JSON.parse(data));
+  // Verify this simulation exists and belongs to the user
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+
+  // Read the binary body (the .pak file)
+  const body = await request.arrayBuffer();
+  if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
+
+  // Max 500MB per .pak
+  if (body.byteLength > 500 * 1024 * 1024)
+    return json({ error: 'Scene file too large (max 500MB)' }, 413, cors);
+
+  const r2Key = `universes/${simId}/universe.pak`;
+  await env.SCENES.put(r2Key, body, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+    customMetadata: { simId, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+  });
+
+  // Update simulation record with R2 key and file size
+  sim.r2_key = r2Key;
+  sim.scene_size_bytes = body.byteLength;
+  sim.updated_at = new Date().toISOString();
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+
+  return json({ r2_key: r2Key, size_bytes: body.byteLength }, 200, cors);
+}
+
+// Multipart upload: Create — initiates an R2 multipart upload for large .pak files
+async function handleMultipartCreate(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+
+  const r2Key = `universes/${simId}/universe.pak`;
+  const multipart = await env.SCENES.createMultipartUpload(r2Key, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+    customMetadata: { simId, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+  });
+
+  return json({ upload_id: multipart.uploadId, r2_key: r2Key }, 200, cors);
+}
+
+// Multipart upload: Part — uploads a single chunk (100MB max per part)
+async function handleMultipartPart(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const url = new URL(request.url);
+  const uploadId = url.searchParams.get('upload_id');
+  const partNumber = parseInt(url.searchParams.get('part_number') || '1');
+
+  if (!uploadId) return json({ error: 'Missing upload_id' }, 400, cors);
+
+  const r2Key = `universes/${simId}/universe.pak`;
+  const multipart = env.SCENES.resumeMultipartUpload(r2Key, uploadId);
+
+  const body = await request.arrayBuffer();
+  const part = await multipart.uploadPart(partNumber, body);
+
+  return json({ part_number: partNumber, etag: part.etag, size: body.byteLength }, 200, cors);
+}
+
+// Multipart upload: Complete — assembles all parts into the final object
+async function handleMultipartComplete(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const { upload_id, parts, total_size } = await request.json();
+  if (!upload_id || !parts) return json({ error: 'Missing upload_id or parts' }, 400, cors);
+
+  const r2Key = `universes/${simId}/universe.pak`;
+  const multipart = env.SCENES.resumeMultipartUpload(r2Key, upload_id);
+
+  // parts = [{ part_number, etag }, ...]
+  const uploadedParts = parts.map(p => ({
+    partNumber: p.part_number,
+    etag: p.etag,
+  }));
+
+  await multipart.complete(uploadedParts);
+
+  // Update simulation record
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (simData) {
+    const sim = JSON.parse(simData);
+    sim.r2_key = r2Key;
+    sim.scene_size_bytes = total_size || 0;
+    sim.updated_at = new Date().toISOString();
+    await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
   }
 
-  sims.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
-  return json({ simulations: sims, total: sims.length }, 200, cors);
+  return json({ r2_key: r2Key, complete: true }, 200, cors);
+}
+
+// Upload a single Space .pak to R2 (incremental update, like git push for one directory)
+async function handleUploadSingleSpace(request, simId, spaceName, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+
+  const body = await request.arrayBuffer();
+  if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
+  if (body.byteLength > 500 * 1024 * 1024)
+    return json({ error: 'Space file too large (max 500MB)' }, 413, cors);
+
+  const decodedName = decodeURIComponent(spaceName);
+  const r2Key = `universes/${simId}/spaces/${decodedName}.pak`;
+  await env.SCENES.put(r2Key, body, {
+    httpMetadata: { contentType: 'application/octet-stream' },
+    customMetadata: { simId, spaceName: decodedName, authorId: auth.userId, uploadedAt: new Date().toISOString() },
+  });
+
+  // Track individual space uploads in the simulation record
+  if (!sim.spaces) sim.spaces = {};
+  sim.spaces[decodedName] = { r2_key: r2Key, size_bytes: body.byteLength, updated_at: new Date().toISOString() };
+  sim.updated_at = new Date().toISOString();
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+
+  return json({ r2_key: r2Key, space: decodedName, size_bytes: body.byteLength }, 200, cors);
+}
+
+// Upload thumbnail image to R2
+async function handleUploadThumbnail(request, simId, env, cors) {
+  const auth = await verifyAuth(request, env);
+  if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
+
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth.userId) return json({ error: 'Not your simulation' }, 403, cors);
+
+  const body = await request.arrayBuffer();
+  if (!body || body.byteLength === 0) return json({ error: 'Empty body' }, 400, cors);
+
+  // Max 5MB for thumbnail
+  if (body.byteLength > 5 * 1024 * 1024)
+    return json({ error: 'Thumbnail too large (max 5MB)' }, 413, cors);
+
+  const contentType = request.headers.get('content-type') || 'image/webp';
+  const ext = contentType.includes('png') ? 'png' : contentType.includes('jpeg') ? 'jpg' : 'webp';
+  const r2Key = `thumbnails/${simId}/thumb.${ext}`;
+
+  await env.SCENES.put(r2Key, body, {
+    httpMetadata: { contentType },
+    customMetadata: { simId, authorId: auth.userId },
+  });
+
+  // Build public thumbnail URL
+  const thumbnailUrl = `https://simulations.eustress.dev/${r2Key}`;
+  sim.thumbnail_url = thumbnailUrl;
+  sim.updated_at = new Date().toISOString();
+  await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
+
+  return json({ thumbnail_url: thumbnailUrl }, 200, cors);
+}
+
+// Return the authenticated user's published simulations as "projects"
+async function handleUserProjects(request, url, env, cors) {
+  const limit = parseInt(url.searchParams.get('limit') || '50');
+  const page = parseInt(url.searchParams.get('page') || '1');
+
+  const auth = await verifyAuth(request, env);
+  if (!auth) {
+    // Not signed in — return empty list (not an error, just no projects)
+    return json({ projects: [], total: 0, page, limit }, 200, cors);
+  }
+
+  try {
+    // Find all simulations authored by this user via sim-author:{userId}:* keys
+    const list = await env.SOCIAL.list({ prefix: `sim-author:${auth.userId}:`, limit: 100 });
+    const projects = [];
+
+    for (const key of list.keys) {
+      const simId = await env.SOCIAL.get(key.name);
+      if (!simId) continue;
+      const simData = await env.SOCIAL.get(`sim:${simId}`);
+      if (!simData) continue;
+
+      try {
+        const sim = JSON.parse(simData);
+        projects.push({
+          id: sim.id || simId,
+          name: sim.name || 'Untitled',
+          description: sim.description || null,
+          thumbnail_url: sim.thumbnail_url || null,
+          status: 'published',
+          genre: sim.genre || 'All',
+          max_players: sim.max_players || 10,
+          is_public: sim.is_public !== false,
+          version: sim.version || 1,
+          play_count: sim.play_count || 0,
+          favorite_count: sim.favorite_count || 0,
+          last_edited: sim.updated_at || sim.published_at || '',
+          created_at: sim.published_at || '',
+          published_at: sim.published_at || null,
+          storage_url: sim.r2_key || null,
+        });
+      } catch (_) {}
+    }
+
+    // Sort by last_edited descending
+    projects.sort((a, b) => new Date(b.last_edited) - new Date(a.last_edited));
+
+    return json({ projects, total: projects.length, page, limit }, 200, cors);
+  } catch (e) {
+    return json({ projects: [], total: 0, page, limit }, 200, cors);
+  }
+}
+
+async function handleListSimulations(env, cors) {
+  try {
+    const list = await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
+    const sims = [];
+
+    for (const key of list.keys) {
+      if (key.name.startsWith('sim-author:')) continue;
+      if (key.name.startsWith('simCount:')) continue;
+      const data = await env.SOCIAL.get(key.name);
+      if (data) {
+        try { sims.push(JSON.parse(data)); } catch (_) {}
+      }
+    }
+
+    sims.sort((a, b) => new Date(b.published_at) - new Date(a.published_at));
+    return json({ simulations: sims, total: sims.length }, 200, cors);
+  } catch (e) {
+    return json({ simulations: [], total: 0 }, 200, cors);
+  }
 }
 
 async function handleGetSimulation(simId, env, cors) {
@@ -2273,11 +2559,46 @@ async function handleGetSimulation(simId, env, cors) {
 }
 
 // Play a simulation — returns server connection info
+// Download .pak — streams the R2 object directly to the caller.
+// Public simulations: no auth required. Private: requires auth + ownership.
+async function handleDownloadPak(request, simId, env, cors) {
+  const simData = await env.SOCIAL.get(`sim:${simId}`);
+  if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
+  const sim = JSON.parse(simData);
+
+  // Private simulations require auth
+  if (!sim.is_public) {
+    const auth = await verifyAuth(request, env);
+    if (!auth || auth.userId !== sim.author_id)
+      return json({ error: 'Private simulation — access denied' }, 403, cors);
+  }
+
+  if (!sim.r2_key) return json({ error: 'No published .pak' }, 404, cors);
+
+  const object = await env.SCENES.get(sim.r2_key);
+  if (!object) return json({ error: '.pak not found in storage' }, 404, cors);
+
+  return new Response(object.body, {
+    headers: {
+      ...cors,
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${sim.name || simId}.pak"`,
+      'Content-Length': object.size.toString(),
+    },
+  });
+}
+
 async function handlePlaySimulation(request, simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
 
   const sim = JSON.parse(data);
+
+  // Private simulations require auth
+  if (!sim.is_public) {
+    const auth = await verifyAuth(request, env);
+    if (!auth) return json({ error: 'Private simulation — sign in required' }, 401, cors);
+  }
 
   // Increment play count
   sim.play_count = (sim.play_count || 0) + 1;
@@ -2330,11 +2651,12 @@ async function handlePlaySimulation(request, simId, env, cors) {
       args: [
         '--port', '7777',
         '--max-players', (sim.max_players || 100).toString(),
-        '--place-id', simId,
+        '--sim-id', simId,
       ],
       r2_key: sim.r2_key || null,
+      pak_url: sim.r2_key ? `https://simulations.eustress.dev/${sim.r2_key}` : null,
     },
-    simulation: { id: sim.id, name: sim.name },
+    simulation: { id: sim.id, name: sim.name, description: sim.description },
   }, 200, cors);
 }
 

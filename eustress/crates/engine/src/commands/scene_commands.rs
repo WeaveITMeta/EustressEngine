@@ -82,6 +82,13 @@ impl SelectionManager {
         self.selected.lock().expect("SelectionManager mutex poisoned").len()
     }
 
+    /// Replace selection with an exact set of IDs (used by undo/redo)
+    pub fn set_selected(&self, ids: Vec<String>) {
+        let mut selected = self.selected.lock().expect("SelectionManager mutex poisoned");
+        *selected = ids;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Clear all selections
     pub fn clear(&self) {
         let mut selected = self.selected.lock().expect("SelectionManager mutex poisoned");

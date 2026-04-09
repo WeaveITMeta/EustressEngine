@@ -217,7 +217,55 @@ fn get_mock_servers(experience_id: &str) -> Vec<GameServer> {
 }
 
 fn get_experience_by_id(id: &str) -> Option<Experience> {
+    // Try API first, fall back to mock data for demo IDs
+    // API fetch happens asynchronously in the component via spawn_local;
+    // this synchronous path handles mock data for backwards compatibility.
     get_mock_experiences().into_iter().find(|e| e.id == id)
+}
+
+/// API response from GET /api/simulations/{id}
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ApiSimulation {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    genre: Option<String>,
+    #[serde(default)]
+    author_name: Option<String>,
+    #[serde(default)]
+    author_id: Option<String>,
+    #[serde(default)]
+    thumbnail_url: Option<String>,
+    #[serde(default)]
+    play_count: u64,
+    #[serde(default)]
+    favorite_count: u64,
+    #[serde(default)]
+    max_players: u32,
+    #[serde(default)]
+    version: u32,
+}
+
+impl From<ApiSimulation> for Experience {
+    fn from(sim: ApiSimulation) -> Self {
+        Experience {
+            id: sim.id,
+            title: sim.name,
+            description: sim.description.unwrap_or_default(),
+            thumbnail: sim.thumbnail_url.unwrap_or_else(|| "/assets/icons/gamepad.svg".to_string()),
+            creator_id: sim.author_id.unwrap_or_default(),
+            creator_name: sim.author_name.unwrap_or_else(|| "Unknown".to_string()),
+            tags: sim.genre.map(|g| vec![g]).unwrap_or_default(),
+            player_count: 0, // Live count comes from server, not listing
+            max_players: sim.max_players.max(1),
+            rating: 0.0,
+            visits: sim.play_count,
+            twitter_url: None,
+            discord_url: None,
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -266,7 +314,7 @@ pub fn ExperiencesPage() -> impl IntoView {
                     <span class="header-tag">"DISCOVER"</span>
                     <div class="header-line"></div>
                 </div>
-                <h1 class="experiences-title">"Experiences"</h1>
+                <h1 class="experiences-title">"Simulations"</h1>
                 <p class="experiences-subtitle">"Explore millions of player-created worlds"</p>
             </section>
             
@@ -341,7 +389,7 @@ fn ExperienceCard(
     let rating = format!("{:.1}", experience.rating);
     let visits = format_visits(experience.visits);
     let tags: Vec<String> = experience.tags.iter().take(2).cloned().collect();
-    let href = format!("/experience/{}", id);
+    let href = format!("/simulation/{}", id);
     let creator_href = format!("/profile/{}", creator_id);
     
     view! {
@@ -927,24 +975,41 @@ fn PlayModal(
 /// Standalone experience detail page - accessed via /experience/:id
 #[component]
 pub fn ExperienceDetailPage() -> impl IntoView {
+    let app_state = expect_context::<AppState>();
     let params = use_params_map();
     let experience_id = move || params.read().get("id").unwrap_or_default();
     let show_play_modal = RwSignal::new(false);
-    
+
+    // Try fetching from API — stores result in a signal
+    let api_experience = RwSignal::new(None::<Experience>);
+    let api_loaded = RwSignal::new(false);
+    {
+        let api_url = app_state.api_url.clone();
+        let id = experience_id();
+        spawn_local(async move {
+            let client = crate::api::ApiClient::new(&api_url);
+            if let Ok(sim) = client.get::<ApiSimulation>(&format!("/api/simulations/{}", id)).await {
+                api_experience.set(Some(Experience::from(sim)));
+            }
+            api_loaded.set(true);
+        });
+    }
+
     view! {
         <div class="page page-experience-detail">
             <CentralNav active="".to_string() />
-            
+
             // Background
             <div class="experiences-bg">
                 <div class="bg-grid"></div>
                 <div class="bg-glow bg-glow-1"></div>
                 <div class="bg-glow bg-glow-2"></div>
             </div>
-            
+
             {move || {
                 let id = experience_id();
-                match get_experience_by_id(&id) {
+                // Use API data if available, fall back to mock
+                match api_experience.get().or_else(|| get_experience_by_id(&id)) {
                     Some(experience) => {
                         let servers = get_mock_servers(&experience.id);
                         let friend_servers: Vec<GameServer> = servers.iter()
@@ -1133,9 +1198,9 @@ pub fn ExperienceDetailPage() -> impl IntoView {
                     None => {
                         view! {
                             <div class="experience-not-found">
-                                <h1>"Experience Not Found"</h1>
+                                <h1>"Simulation Not Found"</h1>
                                 <p>"The experience you're looking for doesn't exist or has been removed."</p>
-                                <a href="/experiences" class="btn btn-primary">"Browse Experiences"</a>
+                                <a href="/simulations" class="btn btn-primary">"Browse Simulations"</a>
                             </div>
                         }.into_any()
                     }

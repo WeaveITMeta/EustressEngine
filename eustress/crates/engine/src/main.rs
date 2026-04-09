@@ -18,6 +18,7 @@ use eustress_common::change_queue::{ChangeQueueConfig, StreamingPlugin};
 use eustress_common::sim_stream::SimStreamWriter;
 
 mod auth;
+mod forge;
 mod terrain_plugin;
 mod ui;
 mod parts;

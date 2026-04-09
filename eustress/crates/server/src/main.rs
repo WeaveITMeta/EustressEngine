@@ -38,6 +38,7 @@
 
 use bevy::prelude::*;
 use clap::Parser;
+use std::io::Read;
 use std::path::PathBuf;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -63,9 +64,17 @@ struct Args {
     #[arg(short, long, default_value = "100")]
     max_players: u32,
     
-    /// Scene file to load
+    /// Local scene/Universe folder to load
     #[arg(short, long)]
     scene: Option<PathBuf>,
+
+    /// Simulation ID — downloads .pak from R2 on startup
+    #[arg(long)]
+    sim_id: Option<String>,
+
+    /// API base URL for .pak download
+    #[arg(long, default_value = "https://api.eustress.dev")]
+    api_url: String,
     
     /// Configuration file
     #[arg(short, long)]
@@ -214,13 +223,35 @@ fn main() {
     let region = args.region.clone();
     let place_id = args.place_id;
     
+    // Resolve Universe folder — either local path or download .pak from R2
+    let universe_root = if let Some(ref scene_path) = args.scene {
+        info!("Loading local Universe from {:?}", scene_path);
+        scene_path.clone()
+    } else if let Some(ref sim_id) = args.sim_id {
+        info!("Downloading Universe .pak for simulation {}...", sim_id);
+        match download_and_extract_pak(sim_id, &args.api_url) {
+            Ok(path) => {
+                info!("Universe extracted to {:?}", path);
+                path
+            }
+            Err(e) => {
+                tracing::error!("Failed to download .pak: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        warn!("No scene or sim_id specified — running empty server");
+        std::env::temp_dir().join("eustress-server-empty")
+    };
+
     info!("Server configuration:");
+    info!("  Universe: {:?}", universe_root);
     info!("  Port: {}", port);
     info!("  Max players: {}", max_players);
     info!("  Tick rate: {} Hz", tick_rate);
     info!("  Region: {}", region);
     info!("  Place ID: {}", place_id);
-    
+
     // Create Bevy app (headless)
     App::new()
         // Minimal plugins (no rendering)
@@ -331,6 +362,62 @@ fn handle_shutdown(
     // This is a placeholder for graceful shutdown
     
     // Check for Ctrl+C via tokio signal handler in production
+}
+
+// ============================================================================
+// .pak Download & Extraction
+// ============================================================================
+
+/// Download a Universe .pak from R2 via the API and extract it to a temp directory.
+/// Returns the path to the extracted Universe folder.
+fn download_and_extract_pak(sim_id: &str, api_url: &str) -> Result<PathBuf, String> {
+    // Step 1: Get simulation metadata to find the R2 key
+    let meta_resp = ureq::get(&format!("{}/api/simulations/{}", api_url, sim_id))
+        .call()
+        .map_err(|e| format!("Fetch simulation metadata: {}", e))?;
+    let meta: serde_json::Value = meta_resp.into_json()
+        .map_err(|e| format!("Parse metadata: {}", e))?;
+
+    let r2_key = meta["r2_key"].as_str()
+        .ok_or("Simulation has no published .pak (r2_key missing)")?;
+
+    // Step 2: Download the .pak via the API download endpoint (handles auth for private sims)
+    let pak_url = format!("{}/api/simulations/{}/download", api_url, sim_id);
+    info!("Downloading .pak from {}...", pak_url);
+
+    let pak_resp = ureq::get(&pak_url)
+        .call()
+        .map_err(|e| format!("Download .pak: {}", e))?;
+
+    let mut pak_bytes = Vec::new();
+    pak_resp.into_reader().read_to_end(&mut pak_bytes)
+        .map_err(|e| format!("Read .pak bytes: {}", e))?;
+
+    info!("Downloaded {:.1} MB .pak", pak_bytes.len() as f64 / 1_048_576.0);
+
+    // Step 3: Decompress zstd
+    let tar_bytes = zstd::decode_all(std::io::Cursor::new(&pak_bytes))
+        .map_err(|e| format!("Zstd decompress: {}", e))?;
+
+    // Step 4: Extract tar to temp directory
+    let extract_dir = std::env::temp_dir()
+        .join("eustress-server")
+        .join(sim_id);
+
+    // Clean previous extraction if exists
+    if extract_dir.exists() {
+        let _ = std::fs::remove_dir_all(&extract_dir);
+    }
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Create extract dir: {}", e))?;
+
+    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+    archive.unpack(&extract_dir)
+        .map_err(|e| format!("Extract tar: {}", e))?;
+
+    // The Universe folder structure is preserved inside the tar
+    // Return the extract directory as the Universe root
+    Ok(extract_dir)
 }
 
 // ============================================================================

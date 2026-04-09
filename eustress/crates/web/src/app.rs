@@ -45,6 +45,7 @@ use crate::pages::{
     download_player::DownloadPlayerPage,
     experience::{ExperiencesPage, ExperienceDetailPage},
     friends::FriendsPage,
+    play::PlayPage,
     premium::PremiumPage,
     press::PressPage,
     privacy::PrivacyPage,
@@ -160,8 +161,9 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/") view=HomePage />
                 <Route path=path!("/login") view=LoginPage />
                 <Route path=path!("/gallery") view=GalleryPage />
-                <Route path=path!("/experiences") view=ExperiencesPage />
-                <Route path=path!("/experience/:id") view=ExperienceDetailPage />
+                <Route path=path!("/simulations") view=ExperiencesPage />
+                <Route path=path!("/simulation/:id") view=ExperienceDetailPage />
+                <Route path=path!("/play/:id") view=PlayPage />
                 <Route path=path!("/community") view=CommunityPage />
                 <Route path=path!("/leaderboard") view=LeaderboardPage />
                 <Route path=path!("/marketplace") view=MarketplacePage />

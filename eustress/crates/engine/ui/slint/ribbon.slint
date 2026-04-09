@@ -331,8 +331,8 @@ export component Ribbon inherits Rectangle {
     callback on-open-scene();
     callback on-save-scene();
     callback on-save-scene-as();
-    callback on-publish();
-    callback on-publish-as();
+    callback on-publish-universe();
+    callback on-publish-space();
     callback on-exit();
     
     // Edit callbacks
@@ -468,8 +468,8 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Save Space"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
                                 DropdownItem { label: "Save Space As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
                                 DropdownSeparator {}
-                                DropdownItem { label: "Publish..."; shortcut: "Ctrl+P"; clicked => { root.on-publish(); } }
-                                DropdownItem { label: "Publish As..."; clicked => { root.on-publish-as(); } }
+                                DropdownItem { label: "Publish Universe"; shortcut: "Ctrl+P"; clicked => { root.on-publish-universe(); } }
+                                DropdownItem { label: "Publish Space"; shortcut: "Ctrl+Shift+P"; clicked => { root.on-publish-space(); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Keyboard Shortcuts..."; clicked => { root.on-show-keybindings(); } }
                                 DropdownItem { label: "Soul Settings..."; clicked => { root.on-show-soul-settings(); } }

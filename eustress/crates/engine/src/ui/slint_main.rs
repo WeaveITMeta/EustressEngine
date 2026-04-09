@@ -86,10 +86,10 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_open_scene(move || q.push(SlintAction::OpenScene));
     let q = queue.clone(); ui.on_save_scene(move || q.push(SlintAction::SaveScene));
     let q = queue.clone(); ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
-    let q = queue.clone(); ui.on_open_publish_dialog(move || q.push(SlintAction::OpenPublishDialog));
-    let q = queue.clone(); ui.on_publish_as(move || q.push(SlintAction::OpenPublishAsDialog));
+    let q = queue.clone(); ui.on_publish_universe(move || q.push(SlintAction::PublishUniverse));
+    let q = queue.clone(); ui.on_publish_space(move || q.push(SlintAction::PublishSpace));
     let q = queue.clone();
-    ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, as_new| {
+    ui.on_publish(move |experience_name, description, genre, is_public, open_source, studio_editable, space_only| {
         q.push(SlintAction::Publish(super::file_dialogs::PublishRequest {
             experience_name: experience_name.to_string(),
             description: description.to_string(),
@@ -97,13 +97,15 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
             is_public,
             open_source,
             studio_editable,
-            as_new,
+            space_only,
         }))
     });
 
     // Edit operations
     let q = queue.clone(); ui.on_undo(move || q.push(SlintAction::Undo));
     let q = queue.clone(); ui.on_redo(move || q.push(SlintAction::Redo));
+    let q = queue.clone(); ui.on_history_jump_to(move |id| q.push(SlintAction::HistoryJumpTo(id)));
+    let q = queue.clone(); ui.on_history_clear(move || q.push(SlintAction::HistoryClear));
     let q = queue.clone(); ui.on_copy(move || q.push(SlintAction::Copy));
     let q = queue.clone(); ui.on_cut(move || q.push(SlintAction::Cut));
     let q = queue.clone(); ui.on_paste(move || q.push(SlintAction::Paste));
@@ -331,7 +333,7 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
     if let Some(v) = state.publish_is_public { ui.set_publish_is_public(v); }
     if let Some(v) = state.publish_open_source { ui.set_publish_open_source(v); }
     if let Some(v) = state.publish_studio_editable { ui.set_publish_studio_editable(v); }
-    if let Some(v) = state.publish_as_new { ui.set_publish_as_new(v); }
+    if let Some(v) = state.publish_mode { ui.set_publish_mode(v.into()); }
     if let Some(v) = state.publish_is_update { ui.set_publish_is_update(v); }
 
     // ── Workshop ──

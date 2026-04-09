@@ -16,7 +16,7 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
-use crate::selection_box::SelectionBox;
+use crate::selection_box::Selected;
 use crate::editor_settings::EditorSettings;
 use crate::gizmo_tools::TransformGizmoGroup;
 use crate::math_utils::{
@@ -141,9 +141,9 @@ fn camera_scale_factor(camera_pos: Vec3, target: Vec3, fov_radians: f32) -> f32 
 fn draw_move_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<MoveToolState>,
-    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<SelectionBox>>,
+    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
     if !state.active || query.is_empty() {
@@ -252,10 +252,10 @@ fn handle_move_interaction(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
-    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<SelectionBox>>,
+    mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_global_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
-    unselected_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&crate::rendering::PartEntity>, Option<&crate::classes::Instance>, Option<&crate::classes::BasePart>), Without<SelectionBox>>,
+    child_global_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
+    unselected_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&crate::rendering::PartEntity>, Option<&crate::classes::Instance>, Option<&crate::classes::BasePart>), Without<Selected>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     spatial_query: SpatialQuery,

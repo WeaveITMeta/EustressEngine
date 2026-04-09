@@ -3,6 +3,7 @@
 //! Desktop editor/studio functionality.
 
 pub mod auth;
+pub mod forge;
 pub mod parts;
 pub mod rendering;
 pub mod camera;

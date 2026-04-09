@@ -21,7 +21,12 @@ pub use property_command::{PropertyCommand, BatchCommand};
 #[allow(unused_imports)]
 pub use entity_command::{DeleteCommand, DuplicateCommand, CreateCommand, DeletedEntity, DuplicatedEntity};
 #[allow(unused_imports)]
-pub use history::{Command, CommandHistory, UndoCommandEvent, RedoCommandEvent, handle_undo_redo};
+pub use history::{
+    Command, CommandHistory, SelectionCommand,
+    UndoCommandEvent, RedoCommandEvent, HistoryActionEvent,
+    HistorySnapshot, HistoryDisplayEntry,
+    process_history_events,
+};
 
 // These managers provide full-featured state tracking and command execution
 // Integrated with egui UI for professional editing workflows

@@ -92,7 +92,7 @@ pub struct BridgeState {
     pub publish_is_public: Option<bool>,
     pub publish_open_source: Option<bool>,
     pub publish_studio_editable: Option<bool>,
-    pub publish_as_new: Option<bool>,
+    pub publish_mode: Option<String>,
     pub publish_is_update: Option<bool>,
 
     // ---- Model Data (VecModel payloads serialized as Vec) ----

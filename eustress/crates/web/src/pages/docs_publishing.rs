@@ -532,16 +532,16 @@ POST api.eustress.dev/v1/publish/finalize
                                 "Every published simulation gets a permanent URL on eustress.dev. The URL uses
                                 the simulation's unique identifier, which is assigned on first publish and never changes."
                             </p>
-                            <pre class="code-block"><code>{"https://eustress.dev/experience/sim_7a3f2e1b
+                            <pre class="code-block"><code>{"https://eustress.dev/simulation/sim_7a3f2e1b
 
 # URL anatomy:
 # eustress.dev       — Platform root
-# /experience/       — Experience namespace
+# /simulation/       — Simulation namespace
 # sim_7a3f2e1b       — Unique simulation ID (stable across versions)"}</code></pre>
                             <p>
                                 "You can also set a custom slug after your first publish, giving you a friendlier URL:"
                             </p>
-                            <pre class="code-block"><code>{"https://eustress.dev/experience/crystal-caverns"}</code></pre>
+                            <pre class="code-block"><code>{"https://eustress.dev/simulation/crystal-caverns"}</code></pre>
                         </div>
 
                         <div id="simulation-page-layout" class="docs-block">

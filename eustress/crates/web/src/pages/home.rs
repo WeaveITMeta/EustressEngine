@@ -514,7 +514,7 @@ pub fn HomePage() -> impl IntoView {
                 </div>
                 <div class="cta-container">
                     <h2 class="cta-headline">"Ready to Build Something "<span class="cta-accent">"Amazing"</span>"?"</h2>
-                    <p class="cta-subtext">"Join thousands of developers creating the next generation of games."</p>
+                    <p class="cta-subtext">"Join developers in creating the next generation of simulations."</p>
                     
                     <a href="/login" class="btn-primary-steel cta-btn">
                         "Start Free Today"

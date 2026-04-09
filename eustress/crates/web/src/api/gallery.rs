@@ -14,21 +14,33 @@ use super::{ApiClient, ApiError};
 // 1. Types
 // -----------------------------------------------------------------------------
 
-/// Gallery experience listing.
+/// Gallery simulation listing.
+/// Accepts both frontend field names and API field names via serde aliases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GalleryExperience {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub thumbnail_url: Option<String>,
+    #[serde(alias = "author_name", default)]
     pub creator_name: String,
+    #[serde(alias = "author_id", default)]
     pub creator_id: String,
+    #[serde(alias = "play_count", default)]
     pub visit_count: u64,
+    #[serde(alias = "favorite_count", default)]
     pub like_count: u64,
+    #[serde(alias = "max_players", default)]
     pub player_count: u32,
+    #[serde(default)]
     pub rating: f32,
+    #[serde(default)]
     pub genre: String,
+    #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(alias = "published_at", default)]
     pub created_at: String,
 }
 
@@ -49,8 +61,10 @@ pub struct GalleryQuery {
 // -----------------------------------------------------------------------------
 
 /// Response from get_gallery endpoint.
+/// API returns { simulations: [...] }, we alias to experiences for backward compat.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GalleryResponse {
+    #[serde(alias = "simulations")]
     pub experiences: Vec<GalleryExperience>,
 }
 

@@ -47,6 +47,11 @@ bytes = { version = "1.7" }
 # Zero-copy delta serialization
 rkyv = { workspace = true }
 
+# .pak download and extraction
+ureq = { version = "2", features = ["json"] }
+tar = "0.4"
+zstd = "0.13"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
