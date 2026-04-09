@@ -670,14 +670,13 @@ async function handleKycStatus(verificationId, env, cors) {
 }
 
 /// Submit KYC for verification after documents are uploaded.
-/// Checks that front (and optionally back) are uploaded, then marks as verified.
-/// In production this would trigger an async verification pipeline; for now
-/// documents in R2 + successful upload = auto-approved.
+/// Fetches the document image from R2, sends it to Grok Vision for OCR +
+/// authenticity check, then marks as verified or rejected based on AI analysis.
 async function handleKycSubmit(request, env, cors) {
   try {
     const body = await request.json();
     const sessionId = body.session_id;
-    const needsBack = body.needs_back !== false; // default true
+    const needsBack = body.needs_back !== false;
 
     if (!sessionId)
       return json({ error: 'Missing session_id' }, 400, cors);
@@ -696,30 +695,141 @@ async function handleKycSubmit(request, env, cors) {
         return json({ error: 'Back document not uploaded', status: 'incomplete' }, 400, cors);
     }
 
-    // All documents present — mark session as verified
-    // (Production: queue for AI/human review instead of auto-approve)
-    const verificationId = `kyc-${sessionId}-front`;
     const front = JSON.parse(frontData);
+    const verificationId = frontKey;
+
+    // ── Grok Vision document verification ──
+    const grokResult = await verifyDocumentWithGrok(front.r2_key, body.full_name || '', body.birthday || '', env);
 
     const verifiedRecord = {
       ...front,
-      status: 'verified',
+      status: grokResult.decision === 'APPROVE' ? 'verified' : 'rejected',
       verified_at: new Date().toISOString(),
-      ocr_name: body.full_name || '',
+      ocr_name: grokResult.extracted_name || body.full_name || '',
+      grok_analysis: grokResult,
+      decision: grokResult,
     };
 
-    // Update the front key status (this is what the frontend polls)
     await env.KYC_STATUS.put(verificationId, JSON.stringify(verifiedRecord), {
-      expirationTtl: 86400 * 365, // Keep verified records for 1 year
+      expirationTtl: 86400 * 365,
     });
 
-    return json({
-      status: 'verified',
-      verification_id: verificationId,
-      ocr_name: body.full_name || '',
-    }, 200, cors);
+    if (grokResult.decision === 'APPROVE') {
+      return json({
+        status: 'verified',
+        verification_id: verificationId,
+        ocr_name: grokResult.extracted_name || body.full_name || '',
+      }, 200, cors);
+    } else {
+      return json({
+        status: 'rejected',
+        verification_id: verificationId,
+        decision: grokResult,
+      }, 200, cors);
+    }
   } catch (e) {
     return json({ error: 'Submit failed: ' + e.message }, 500, cors);
+  }
+}
+
+/**
+ * Verify an ID document image using Grok Vision.
+ * Fetches the image from R2, sends it to Grok's vision model for:
+ * 1. Is this a real government-issued ID document?
+ * 2. Is the image clear enough to read?
+ * 3. Extract the full legal name and date of birth
+ * 4. Does the extracted info match what the user provided?
+ *
+ * Falls back to APPROVE if Grok is unavailable (graceful degradation).
+ */
+async function verifyDocumentWithGrok(r2Key, claimedName, claimedBirthday, env) {
+  if (!env.GROK_API_KEY) {
+    return { decision: 'APPROVE', reason: 'Vision verification unavailable', extracted_name: claimedName, confidence: 0 };
+  }
+
+  try {
+    // Fetch document image from R2
+    const r2Object = await env.KYC_BUCKET.get(r2Key);
+    if (!r2Object) {
+      return { decision: 'APPROVE', reason: 'Document not found in storage — approved on upload record', extracted_name: claimedName, confidence: 0 };
+    }
+
+    const imageBytes = await r2Object.arrayBuffer();
+    const contentType = r2Object.httpMetadata?.contentType || 'image/jpeg';
+    const base64Image = btoa(String.fromCharCode(...new Uint8Array(imageBytes)));
+    const dataUrl = `data:${contentType};base64,${base64Image}`;
+
+    const prompt = `You are a KYC document verification AI for Eustress, a game engine platform.
+Analyze this ID document image and respond in EXACTLY this JSON format, nothing else:
+
+{
+  "is_id_document": true/false,
+  "document_type": "passport|drivers_license|national_id|other|not_a_document",
+  "image_quality": "clear|acceptable|blurry|unreadable",
+  "extracted_name": "Full Legal Name from document or empty string if unreadable",
+  "extracted_dob": "YYYY-MM-DD from document or empty string if unreadable",
+  "name_matches": true/false,
+  "dob_matches": true/false,
+  "decision": "APPROVE|DENY",
+  "reason": "one sentence explanation",
+  "confidence": 0-100
+}
+
+Rules:
+- APPROVE if: it IS a government ID, image is clear/acceptable, and name roughly matches "${claimedName}"
+- APPROVE even if DOB doesn't perfectly match (typos happen) — just note it
+- DENY if: not an ID document, completely unreadable, or obviously fraudulent (screenshot of screen, printed copy of photo, digitally altered)
+- Partial name matches are OK (e.g. "John Smith" matches "Jonathan Smith")
+- If you cannot read the name but the document looks genuine and clear: APPROVE with empty extracted_name
+- Err on the side of APPROVE — this is a game platform, not a bank
+- Never fabricate information you cannot read from the document`;
+
+    const resp = await fetch('https://api.x.ai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.GROK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'grok-4.20-reasoning',
+        input: [
+          { type: 'image_url', image_url: { url: dataUrl } },
+          { type: 'text', text: prompt },
+        ],
+      }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('Grok vision error:', resp.status, errText);
+      return { decision: 'APPROVE', reason: 'Vision service error — approved on upload', extracted_name: claimedName, confidence: 0 };
+    }
+
+    const data = await resp.json();
+    const responseText = data.output?.[0]?.content?.[0]?.text || data.output_text || '';
+
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return { decision: 'APPROVE', reason: 'Could not parse vision response — approved on upload', extracted_name: claimedName, confidence: 0 };
+    }
+
+    const result = JSON.parse(jsonMatch[0]);
+    return {
+      decision: result.decision || 'APPROVE',
+      reason: result.reason || 'No issues found',
+      is_id_document: result.is_id_document ?? true,
+      document_type: result.document_type || 'unknown',
+      image_quality: result.image_quality || 'unknown',
+      extracted_name: result.extracted_name || '',
+      extracted_dob: result.extracted_dob || '',
+      name_matches: result.name_matches ?? true,
+      dob_matches: result.dob_matches ?? true,
+      confidence: Math.min(100, Math.max(0, result.confidence || 0)),
+      model: 'grok-4.20-reasoning',
+    };
+  } catch (e) {
+    console.error('Grok vision exception:', e);
+    return { decision: 'APPROVE', reason: `Vision error: ${e.message} — approved on upload`, extracted_name: claimedName, confidence: 0 };
   }
 }
 
