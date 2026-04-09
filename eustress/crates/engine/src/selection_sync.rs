@@ -67,14 +67,13 @@ fn record_selection_history(
     selection_manager: Option<Res<SelectionSyncManager>>,
     last_gen: Res<SelectionGeneration>,
     mut prev: ResMut<PreviousSelection>,
-    mut history: Option<ResMut<crate::commands::CommandHistory>>,
+    history: Option<ResMut<crate::commands::CommandHistory>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
-    let Some(ref mut history) = history else { return };
     let mgr = selection_manager.0.read();
     let current_gen = mgr.generation();
 
-    // Only record when generation changes
+    // Only record when generation changes — early exit BEFORE touching history
     if current_gen == last_gen.0 {
         return;
     }
@@ -82,14 +81,13 @@ fn record_selection_history(
     let current_ids = mgr.get_selected();
     drop(mgr);
 
-    // Skip recording if previous and current are identical (can happen on first frame)
+    // Skip recording if previous and current are identical
     if prev.0 == current_ids {
         return;
     }
 
-    // Don't record into history via world — just push directly to the stack.
-    // We can't call history.execute() because that requires &mut World.
-    // Instead, push a Selection command with no-op execute (the sync system handles the actual state).
+    // Only now access history mutably (triggers Bevy change detection)
+    let Some(mut history) = history else { return };
     let cmd = crate::commands::SelectionCommand::new(prev.0.clone(), current_ids.clone());
     history.push_selection(cmd);
 

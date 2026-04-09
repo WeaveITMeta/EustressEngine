@@ -377,8 +377,9 @@ pub fn spawn_point_light(
     commands.spawn((
         PointLight {
             color: light.color,
-            intensity: light.brightness * 1000.0,
+            intensity: light.brightness, // Lumens — physically based
             range: light.range,
+            radius: light.radius, // Spherical area light radius
             shadows_enabled: light.shadows,
             ..default()
         },
@@ -404,10 +405,10 @@ pub fn spawn_spot_light(
     commands.spawn((
         SpotLight {
             color: light.color,
-            intensity: light.brightness * 1000.0,
+            intensity: light.brightness, // Lumens — physically based
             range: light.range,
-            inner_angle: light.angle * 0.8,
-            outer_angle: light.angle,
+            inner_angle: (light.angle * 0.85).to_radians(),
+            outer_angle: light.angle.to_radians(),
             shadows_enabled: light.shadows,
             ..default()
         },

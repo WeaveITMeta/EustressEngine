@@ -1,0 +1,15 @@
+[material]
+name = "WoodPlanks"
+preset = "WoodPlanks"
+description = "WoodPlanks surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.75
+reflectance = 0.2
+
+[textures]
+base_color = "materials/textures/wood_planks_base_color.png"
+normal = "materials/textures/wood_planks_normal.png"
+metallic_roughness = "materials/textures/wood_planks_metallic_roughness.png"

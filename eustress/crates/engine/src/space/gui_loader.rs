@@ -288,6 +288,7 @@ pub fn spawn_gui_element(
         archivable: gui_def.metadata.archivable,
         id: 0,
         ai: false,
+                uuid: String::new(),
     };
 
     let loaded_from = super::file_loader::LoadedFromFile {
@@ -379,6 +380,7 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
         text_align,
         image_path: String::new(),
         class_type: class_type.to_string(),
+        mouse_filter: "stop".to_string(),
     }
 }
 

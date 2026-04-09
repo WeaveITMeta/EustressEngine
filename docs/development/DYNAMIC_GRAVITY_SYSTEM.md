@@ -10,7 +10,7 @@ Explorer Workspace-integrated gravitational physics with real-time force calcula
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Dynamic Gravity System                        │
+│                    Dynamic Gravity System                       │
 ├─────────────────────────────────────────────────────────────────┤
 │  Tier 1: Heavy Objects (>1e20 kg)                               │
 │    ├── Planets, Stars, Large Moons                              │
@@ -27,7 +27,7 @@ Explorer Workspace-integrated gravitational physics with real-time force calcula
 │    ├── Minimal calculations (1 Hz)                              │
 │    └── Only affected by Heavy objects                           │
 ├─────────────────────────────────────────────────────────────────┤
-│  Force Metatable                                                 │
+│  Force Metatable                                                │
 │    ├── Real-time force tracking between pairs                   │
 │    ├── Cached calculations for performance                      │
 │    └── Automatic cleanup of old entries                         │

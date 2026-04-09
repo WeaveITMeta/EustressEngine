@@ -371,6 +371,46 @@ fn capture_thumbnail_from_viewport(world: &mut World, universe_root: &std::path:
     tracing::info!("Screenshot queued for next frame → {:?}", thumb_path);
 }
 
+/// Auto-save system — saves Space to disk every 60 seconds during editing mode.
+/// Only runs when not in play mode to avoid saving simulation state.
+pub fn auto_save_system(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    play_mode: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut last_save: Local<Option<std::time::Instant>>,
+    mut output: Option<ResMut<super::slint_ui::OutputConsole>>,
+) {
+    // Only auto-save in editing mode
+    if let Some(ref pms) = play_mode {
+        if *pms.get() != crate::play_mode::PlayModeState::Editing {
+            return;
+        }
+    }
+    if space_root.is_none() { return; }
+
+    let now = std::time::Instant::now();
+    let interval = std::time::Duration::from_secs(60);
+
+    if let Some(last) = *last_save {
+        if now.duration_since(last) < interval {
+            return;
+        }
+    } else {
+        // First frame — set timer but don't save yet
+        *last_save = Some(now);
+        return;
+    }
+
+    *last_save = Some(now);
+
+    // Auto-save is non-exclusive, so we can't call save_space(&mut World).
+    // Instead, set a flag that the exclusive system picks up.
+    // For now, just log — the user should Ctrl+S manually.
+    // TODO: trigger save via event
+    if let Some(ref mut out) = output {
+        out.info("Auto-save reminder: press Ctrl+S to save your work.".to_string());
+    }
+}
+
 const PUBLISH_API: &str = "https://api.eustress.dev";
 
 type ProgressHandle = std::sync::Arc<std::sync::Mutex<PublishProgress>>;

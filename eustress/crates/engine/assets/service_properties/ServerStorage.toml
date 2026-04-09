@@ -1,0 +1,9 @@
+# ServerStorage Service Properties
+# Container for server-only objects not replicated to clients, forge server reference
+
+[Data]
+Name = { type = "string", value = "ServerStorage", readonly = true }
+ClassName = { type = "string", value = "ServerStorage", readonly = true }
+
+[Description]
+Description = { type = "string", value = "Objects in ServerStorage are only accessible by server scripts and are not replicated to clients", readonly = true }

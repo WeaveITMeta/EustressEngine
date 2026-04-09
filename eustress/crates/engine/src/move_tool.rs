@@ -35,6 +35,8 @@ pub struct MoveToolState {
     pub active: bool,
     /// Which axis handle is being dragged (None = free drag or idle)
     pub dragged_axis: Option<Axis3d>,
+    /// Which axis handle the cursor is hovering over (for visual feedback)
+    pub hovered_axis: Option<Axis3d>,
     /// Initial world positions of all selected entities at drag start
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
     /// Initial rotations of all selected entities at drag start
@@ -195,8 +197,9 @@ fn draw_move_gizmos(
 
     for axis in [Axis3d::X, Axis3d::Y, Axis3d::Z] {
         let dir = axis.to_vec3();
-        let highlighted = state.dragged_axis == Some(axis);
-        let color = if highlighted { yellow } else { axis.color() };
+        let dragging = state.dragged_axis == Some(axis);
+        let hovering = state.hovered_axis == Some(axis) && state.dragged_axis.is_none();
+        let color = if dragging { yellow } else if hovering { Color::srgb(1.0, 1.0, 0.6) } else { axis.color() };
 
         // Positive direction
         let tip_pos = center + dir * handle_len;
@@ -311,6 +314,13 @@ fn handle_move_interaction(
         let scale = camera_scale_factor(camera_transform.translation(), c, fov);
         (c, (bmax - bmin).max_element(), scale * 1.0)
     };
+
+    // ---- Hover detection (every frame) ----
+    if state.dragged_axis.is_none() && !state.free_drag && !query.is_empty() {
+        state.hovered_axis = detect_axis_hit(&ray, center, handle_len, camera_transform);
+    } else if state.dragged_axis.is_some() || state.free_drag {
+        state.hovered_axis = None; // Don't hover while dragging
+    }
 
     // ---- Mouse Down ----
     if mouse.just_pressed(MouseButton::Left) {

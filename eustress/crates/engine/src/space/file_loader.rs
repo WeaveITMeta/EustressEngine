@@ -525,6 +525,7 @@ pub fn spawn_file_entry(
                     archivable: true,
                     id: 0,
                     ai: false,
+                uuid: String::new(),
                 },
                 eustress_common::default_scene::PartEntityMarker {
                     part_id: file_meta.name.clone(),
@@ -551,6 +552,7 @@ pub fn spawn_file_entry(
                             archivable: true,
                             id: 0,
                             ai: false,
+                uuid: String::new(),
                         },
                         crate::soul::SoulScriptData {
                             source: markdown_source,
@@ -590,6 +592,7 @@ pub fn spawn_file_entry(
                             archivable: true,
                             id: 0,
                             ai: false,
+                uuid: String::new(),
                         },
                         crate::soul::SoulScriptData {
                             source: rune_source,
@@ -686,6 +689,55 @@ pub fn spawn_file_entry(
         FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
             info!("🔊 Audio file discovered: {:?} (loader not yet implemented)", file_meta.path);
             return None;
+        }
+
+        FileType::Material => {
+            // Load .mat.toml into MaterialRegistry and spawn a marker entity
+            match super::material_loader::load_material_definition(&file_meta.path) {
+                Ok(mat_def) => {
+                    let mat_name = mat_def.material.name.clone();
+                    // Build StandardMaterial from definition and register
+                    let mat_toml_dir = file_meta.path.parent().unwrap_or(Path::new("."));
+                    let std_mat = super::material_loader::build_standard_material(
+                        &mat_def, asset_server, mat_toml_dir, space_path,
+                    );
+                    let mat_handle = materials.add(std_mat);
+                    material_registry.insert(
+                        mat_name.clone(),
+                        mat_handle,
+                        mat_def.clone(),
+                        file_meta.path.clone(),
+                    );
+
+                    // Spawn a marker entity so it appears in the Explorer under MaterialService
+                    let e = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: mat_name.clone(),
+                            class_name: eustress_common::classes::ClassName::Instance,
+                            archivable: true,
+                            id: 0,
+                            ..Default::default()
+                        },
+                        super::material_loader::MaterialDefinitionComponent {
+                            name: mat_name.clone(),
+                            source_path: file_meta.path.clone(),
+                        },
+                        LoadedFromFile {
+                            path: file_meta.path.clone(),
+                            file_type: file_meta.file_type,
+                            service: file_meta.service.clone(),
+                        },
+                        Name::new(mat_name.clone()),
+                    )).id();
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("🎨 Loaded material '{}' from {:?}", mat_name, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("❌ Failed to load material {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
         }
 
         _ => {
@@ -833,6 +885,7 @@ pub fn spawn_directory_entry(
                 archivable: true,
                 id: 0,
                 ai: false,
+                uuid: String::new(),
             },
             LoadedFromFile {
                 path: dir_meta.path.clone(),
@@ -862,6 +915,7 @@ pub fn spawn_directory_entry(
                 font_size: 14.0, text_align: "center".to_string(),
                 image_path: String::new(),
                 class_type: "frame".to_string(),
+                mouse_filter: "stop".to_string(),
             }
         };
         commands.spawn((
@@ -871,6 +925,7 @@ pub fn spawn_directory_entry(
                 archivable: true,
                 id: 0,
                 ai: false,
+                uuid: String::new(),
             },
             LoadedFromFile {
                 path: dir_meta.path.clone(),
@@ -890,6 +945,7 @@ pub fn spawn_directory_entry(
                 archivable: true,
                 id: 0,
                 ai: false,
+                uuid: String::new(),
             },
             LoadedFromFile {
                 path: dir_meta.path.clone(),

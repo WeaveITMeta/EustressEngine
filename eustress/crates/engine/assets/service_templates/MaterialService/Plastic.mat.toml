@@ -1,0 +1,10 @@
+[material]
+name = "Plastic"
+preset = "Plastic"
+description = "Plastic surface — pure PBR, no textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.6
+reflectance = 0.4

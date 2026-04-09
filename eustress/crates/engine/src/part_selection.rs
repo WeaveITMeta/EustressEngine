@@ -59,6 +59,16 @@ pub fn part_selection_system(
         }
     }
 
+    // Block selection if click is over a ScreenGui element (BatteryHUD, etc.)
+    // ScreenGui elements are rendered in the Slint overlay but positioned within the viewport.
+    // Without this check, clicks on GUI buttons fall through to 3D selection.
+    if let Some(ref focus) = ui_focus {
+        if focus.gui_element_hit {
+            debug!("[select] blocked — click over ScreenGui element");
+            return;
+        }
+    }
+
     // Check if click is within the viewport bounds (not on UI panels)
     let window = match windows.single() {
         Ok(w) => w,

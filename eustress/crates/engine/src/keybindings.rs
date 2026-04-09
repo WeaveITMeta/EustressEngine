@@ -16,6 +16,7 @@ pub enum Action {
     Undo,
     Redo,
     Copy,
+    Cut,
     Paste,
     Duplicate,
     Delete,
@@ -80,6 +81,7 @@ impl Action {
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::Copy => "Copy",
+            Action::Cut => "Cut",
             Action::Paste => "Paste",
             Action::Duplicate => "Duplicate",
             Action::Delete => "Delete",
@@ -205,6 +207,7 @@ impl Default for KeyBindings {
         bindings.insert(Action::Undo, KeyBinding::new(KeyCode::KeyZ).with_ctrl());
         bindings.insert(Action::Redo, KeyBinding::new(KeyCode::KeyY).with_ctrl());
         bindings.insert(Action::Copy, KeyBinding::new(KeyCode::KeyC).with_ctrl());
+        bindings.insert(Action::Cut, KeyBinding::new(KeyCode::KeyX).with_ctrl());
         bindings.insert(Action::Paste, KeyBinding::new(KeyCode::KeyV).with_ctrl());
         bindings.insert(Action::Duplicate, KeyBinding::new(KeyCode::KeyD).with_ctrl());
         bindings.insert(Action::Delete, KeyBinding::new(KeyCode::Delete));
@@ -312,7 +315,15 @@ fn dispatch_keyboard_shortcuts(
     bindings: Option<Res<KeyBindings>>,
     studio_state: Option<ResMut<crate::ui::StudioState>>,
     mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
+    // Block keyboard shortcuts when a text input has focus
+    // (typing in Properties, command bar, etc. shouldn't trigger Delete/Copy/etc.)
+    if let Some(ref focus) = ui_focus {
+        if focus.text_input_focused {
+            return;
+        }
+    }
     let Some(mut studio_state) = studio_state else { return };
     let Some(bindings) = bindings else { return };
 
@@ -352,7 +363,7 @@ fn dispatch_keyboard_shortcuts(
     // All other actions → dispatch as MenuActionEvent
     let actions = [
         Action::Undo, Action::Redo,
-        Action::Copy, Action::Paste, Action::Duplicate, Action::Delete,
+        Action::Copy, Action::Cut, Action::Paste, Action::Duplicate, Action::Delete,
         Action::SelectAll, Action::Group, Action::Ungroup,
         Action::LockSelection, Action::UnlockSelection, Action::ToggleAnchor,
         Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
@@ -401,6 +412,7 @@ fn handle_menu_action_events(
     // Query InstanceFile to delete TOML from disk when entity is deleted
     instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
     mut file_registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
+    mut copy_events: MessageWriter<crate::clipboard::CopyEvent>,
 ) {
     let Some(mut studio_state) = studio_state else { return };
 
@@ -421,7 +433,9 @@ fn handle_menu_action_events(
             Action::ToggleProperties => { studio_state.show_properties = !studio_state.show_properties; }
             Action::ToggleOutput     => { studio_state.show_output = !studio_state.show_output; }
 
-            // Paste
+            // Copy / Paste
+            Action::Copy => { copy_events.write(crate::clipboard::CopyEvent { is_cut: false }); }
+            Action::Cut => { copy_events.write(crate::clipboard::CopyEvent { is_cut: true }); }
             Action::Paste => { studio_state.pending_paste = true; }
 
             // Command bar
@@ -500,13 +514,25 @@ fn handle_menu_action_events(
                         {
                             camera_deleted = true;
                         }
-                        // Delete the TOML file on disk and unregister from file registry
+                        // Move TOML file to .eustress/trash/ (recoverable delete)
+                        // On undo, the file can be moved back from trash
                         if let Ok(inst_file) = instance_file_query.get(entity) {
                             let toml_path = inst_file.toml_path.clone();
                             if toml_path.exists() {
-                                if let Err(e) = std::fs::remove_file(&toml_path) {
-                                    error!("❌ Failed to delete TOML file {:?}: {}", toml_path, e);
+                                // Create trash directory next to the Space root
+                                if let Some(space_dir) = toml_path.ancestors().find(|p| p.join("_service.toml").exists() || p.join("simulation.toml").exists()) {
+                                    let trash_dir = space_dir.join(".eustress").join("trash");
+                                    let _ = std::fs::create_dir_all(&trash_dir);
+                                    let trash_path = trash_dir.join(toml_path.file_name().unwrap_or_default());
+                                    if let Err(e) = std::fs::rename(&toml_path, &trash_path) {
+                                        // Fallback: hard delete if move fails
+                                        let _ = std::fs::remove_file(&toml_path);
+                                        warn!("🗑️ Hard deleted {:?} (move to trash failed: {})", toml_path, e);
+                                    } else {
+                                        info!("🗑️ Moved {:?} to trash", toml_path.file_name().unwrap_or_default());
+                                    }
                                 } else {
+                                    let _ = std::fs::remove_file(&toml_path);
                                     info!("🗑️ Deleted TOML file {:?}", toml_path);
                                 }
                             }

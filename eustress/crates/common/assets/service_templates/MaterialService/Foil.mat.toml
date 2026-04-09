@@ -1,0 +1,15 @@
+[material]
+name = "Foil"
+preset = "Foil"
+description = "Foil surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 1.0
+roughness = 0.08
+reflectance = 0.92
+
+[textures]
+base_color = "materials/textures/foil_base_color.png"
+normal = "materials/textures/foil_normal.png"
+metallic_roughness = "materials/textures/foil_metallic_roughness.png"

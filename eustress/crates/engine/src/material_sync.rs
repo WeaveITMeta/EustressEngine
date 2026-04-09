@@ -70,6 +70,14 @@ fn sync_basepart_to_material(
                 material.alpha_mode = AlphaMode::Opaque;
             }
             
+            // Texture repeat (UV tiling)
+            let [u_repeat, v_repeat] = basepart.texture_repeat;
+            if u_repeat != 1.0 || v_repeat != 1.0 {
+                material.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(u_repeat, v_repeat));
+            } else {
+                material.uv_transform = bevy::math::Affine2::IDENTITY;
+            }
+
             // Glass material gets specular/diffuse transmission for colored shadows
             if is_glass {
                 material.specular_transmission = 0.9;

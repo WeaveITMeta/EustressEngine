@@ -23,7 +23,7 @@ use crate::classes::{BasePart, Part, PartType};
 // ============================================================================
 
 /// Scale factor for wireframe mesh (slightly larger than part to avoid z-fight)
-const WIREFRAME_SCALE: f32 = 1.02;
+const WIREFRAME_SCALE: f32 = 1.03;
 
 /// Selection outline color (Eustress blue)
 const SELECTION_COLOR: Color = Color::srgb(0.0, 0.6, 1.0);
@@ -141,11 +141,11 @@ fn create_selection_materials(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let selection = materials.add(StandardMaterial {
-        base_color: SELECTION_COLOR.with_alpha(0.15),
-        emissive: LinearRgba::from(SELECTION_COLOR) * 2.0,
+        base_color: SELECTION_COLOR.with_alpha(0.4),
+        emissive: LinearRgba::from(SELECTION_COLOR) * 5.0,
         unlit: true,
         alpha_mode: AlphaMode::Blend,
-        cull_mode: None, // Render both sides of wireframe
+        cull_mode: None,
         ..default()
     });
 
@@ -296,21 +296,22 @@ fn despawn_hover_adornments(
     }
 }
 
-/// Update adornment meshes when the adorned part's BasePart changes size.
-/// Only runs on parts that have `Selected` AND `Changed<BasePart>`.
+/// Update adornment meshes when the adorned part's shape type changes.
+/// Size changes are handled automatically by parent transform propagation.
+/// Only rebuilds when Part.shape actually changes (Block → Ball etc.).
 fn update_changed_adornments(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
-    changed_parts: Query<(Entity, &BasePart, Option<&Part>), (With<Selected>, Changed<BasePart>)>,
+    changed_parts: Query<(Entity, &BasePart, &Part), (With<Selected>, Changed<Part>)>,
     adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
 ) {
     let Some(mats) = materials else { return };
 
     for (part_entity, base_part, part) in &changed_parts {
         let size = base_part.size;
-        let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
+        let shape = shape_kind(part.shape);
 
         // Despawn old adornments
         for (adornment_entity, child_of) in &adornment_query {

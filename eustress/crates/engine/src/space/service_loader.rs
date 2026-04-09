@@ -234,6 +234,7 @@ pub fn spawn_service(
             archivable: true,
             id: 0,
             ai: false,
+                uuid: String::new(),
         },
         service_component,
         super::file_loader::LoadedFromFile {
@@ -286,6 +287,7 @@ pub fn spawn_service_as_ui_root(
             archivable: true,
             id: 0,
             ai: false,
+                uuid: String::new(),
         },
         service_component,
         super::file_loader::LoadedFromFile {

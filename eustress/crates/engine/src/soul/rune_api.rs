@@ -11,7 +11,8 @@ use std::collections::HashMap;
 // Re-export the common runtime for external use
 pub use eustress_common::soul::rune_runtime::{
     RuneRuntimeState, RuneModuleRegistry, ScriptSource,
-    run_script_init, run_script_update, cleanup_scripts as cleanup_scripts_on_stop,
+    run_script_init, run_script_ready, run_script_update,
+    run_script_exit, cleanup_scripts as cleanup_scripts_on_stop,
 };
 
 /// Rune script execution engine (legacy compat)

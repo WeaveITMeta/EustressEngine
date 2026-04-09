@@ -42,6 +42,11 @@ pub struct GuiElementDisplay {
     pub text_align: String,
     pub image_path: String,
     pub class_type: String,
+    /// Mouse filter mode (Godot-style):
+    /// - "stop" (default): consumes mouse events, blocks 3D selection behind
+    /// - "pass": receives events but passes them through
+    /// - "ignore": transparent to mouse, events go straight through
+    pub mouse_filter: String,
 }
 
 /// Marker for BillboardGui entities — rendered as 3D quads facing the camera.
@@ -346,6 +351,7 @@ fn update_billboard_textures(
                     text_align: "center".to_string(),
                     image_path: String::new(),
                     class_type: "billboardgui".to_string(),
+                    mouse_filter: "stop".to_string(),
                 };
                 atlas.render_element_to_slot(slot, &placeholder);
             }

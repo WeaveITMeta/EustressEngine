@@ -359,10 +359,15 @@ pub fn process_history_events(
     mut undo_events: MessageReader<UndoCommandEvent>,
     mut redo_events: MessageReader<RedoCommandEvent>,
     mut history_events: MessageReader<HistoryActionEvent>,
-    mut history: ResMut<CommandHistory>,
+    history: Option<ResMut<CommandHistory>>,
     selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
 ) {
+    // Early exit if no events — avoids touching history (which triggers change detection)
+    if undo_events.is_empty() && redo_events.is_empty() && history_events.is_empty() {
+        return;
+    }
+    let Some(mut history) = history else { return };
     let sel_mgr = selection_sync.as_ref().map(|s| s.0.clone());
 
     for _ in undo_events.read() {

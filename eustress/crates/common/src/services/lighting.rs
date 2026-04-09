@@ -94,10 +94,10 @@ impl Default for LightingService {
             outdoor_ambient: [0.5, 0.55, 0.6, 1.0],
             
             // Fog
-            fog_color: [0.8, 0.85, 0.9, 1.0],
-            fog_start: 100.0,
-            fog_end: 500.0,
-            fog_enabled: false,
+            fog_color: [0.7, 0.8, 0.9, 1.0],
+            fog_start: 500.0,
+            fog_end: 2000.0,
+            fog_enabled: true,
             
             // Sun
             sun_color: [1.0, 0.98, 0.95, 1.0],

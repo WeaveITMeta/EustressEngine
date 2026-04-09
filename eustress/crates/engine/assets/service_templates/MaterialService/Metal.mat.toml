@@ -1,0 +1,15 @@
+[material]
+name = "Metal"
+preset = "Metal"
+description = "Metal surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 1.0
+roughness = 0.3
+reflectance = 0.6
+
+[textures]
+base_color = "materials/textures/metal_base_color.png"
+normal = "materials/textures/metal_normal.png"
+metallic_roughness = "materials/textures/metal_metallic_roughness.png"

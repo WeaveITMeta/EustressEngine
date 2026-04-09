@@ -509,8 +509,14 @@ pub struct ExplorerDragSelect {
 pub struct SlintUIFocus {
     /// True if mouse is over any Slint UI panel (Explorer, Properties, etc.)
     pub has_focus: bool,
+    /// True if mouse is over a ScreenGui element in the viewport (buttons, labels, etc.)
+    pub gui_element_hit: bool,
+    /// True if any text input field has keyboard focus (blocks game key shortcuts)
+    pub text_input_focused: bool,
     /// Last known cursor position over UI
     pub last_ui_position: Option<Vec2>,
+    /// Which entity currently has keyboard focus (for FocusManager pattern)
+    pub focused_entity: Option<Entity>,
 }
 
 #[derive(Resource)]

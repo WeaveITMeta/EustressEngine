@@ -1,0 +1,15 @@
+[material]
+name = "DiamondPlate"
+preset = "DiamondPlate"
+description = "DiamondPlate surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.95
+roughness = 0.3
+reflectance = 0.7
+
+[textures]
+base_color = "materials/textures/diamond_plate_base_color.png"
+normal = "materials/textures/diamond_plate_normal.png"
+metallic_roughness = "materials/textures/diamond_plate_metallic_roughness.png"

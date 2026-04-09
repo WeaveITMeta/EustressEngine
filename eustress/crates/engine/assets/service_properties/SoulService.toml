@@ -1,0 +1,17 @@
+# SoulService Service Properties
+# Manages Rune VM scripts and Soul execution
+
+[Data]
+Name = { type = "string", value = "SoulService", readonly = true }
+ClassName = { type = "string", value = "SoulService", readonly = true }
+
+[Execution]
+EnableAI = { type = "bool", value = true, description = "Enable Soul script compiling via AI API" }
+
+[Security]
+SandboxEnabled = { type = "bool", value = true, description = "Enable sandboxed execution" }
+AllowFileSystemAccess = { type = "bool", value = false, description = "Allow scripts to access filesystem" }
+AllowNetworkAccess = { type = "bool", value = false, description = "Allow scripts to make network requests" }
+
+[Description]
+Description = { type = "string", value = "SoulService manages Rune VM script execution with sandboxing and resource limits", readonly = true }

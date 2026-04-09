@@ -1,0 +1,15 @@
+[material]
+name = "Sand"
+preset = "Sand"
+description = "Sand surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.98
+reflectance = 0.08
+
+[textures]
+base_color = "materials/textures/sand_base_color.png"
+normal = "materials/textures/sand_normal.png"
+metallic_roughness = "materials/textures/sand_metallic_roughness.png"

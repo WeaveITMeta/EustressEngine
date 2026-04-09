@@ -152,6 +152,7 @@ pub fn spawn_baseplate(
         archivable: true,
         id: 1,
         ai: false,
+            uuid: String::new(),
     };
     
     // Create BasePart component for part properties
@@ -216,6 +217,7 @@ pub fn spawn_welcome_cube(
         archivable: true,
         id: 2,
         ai: false,
+            uuid: String::new(),
     };
     
     // Create BasePart component for part properties
@@ -316,9 +318,10 @@ fn spawn_scene_entity(
                 class_name: ClassName::Part,
                 archivable: entity.archivable,
                 id: entity.id,
+                uuid: String::new(),
                 ai: entity.ai,
             };
-            
+
             // Create BasePart component for part properties
             let base_part = BasePart {
                 size,

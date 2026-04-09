@@ -471,6 +471,7 @@ fn handle_file_created(
                     archivable: true,
                     id: 0,
                     ai: false,
+                uuid: String::new(),
                 },
                 eustress_common::default_scene::PartEntityMarker {
                     part_id: name.clone(),
@@ -513,6 +514,7 @@ fn handle_file_created(
                             archivable: true,
                             id: 0,
                             ai: false,
+                uuid: String::new(),
                         },
                         crate::soul::SoulScriptData {
                             source,
@@ -629,6 +631,7 @@ fn handle_file_created(
                             archivable: true,
                             id: 0,
                             ai: false,
+                uuid: String::new(),
                         },
                         display,
                         Node { display: Display::None, ..default() },

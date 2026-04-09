@@ -1,0 +1,17 @@
+# Chat Service Properties
+# Manages in-game chat and communication
+
+[Data]
+Name = { type = "string", value = "Chat", readonly = true }
+ClassName = { type = "string", value = "Chat", readonly = true }
+
+[Behavior]
+BubbleChatEnabled = { type = "bool", value = true, description = "Enable bubble chat above player heads" }
+LoadDefaultChat = { type = "bool", value = true, description = "Load default chat UI" }
+# AAA We will need default chat UI made in Class object toml files for Slint Game UI in the top left corner with modular components for an entire chat window with space at the bottom to speak with enter to send.
+
+[Filtering]
+FilteringEnabled = { type = "bool", value = true, description = "Enable chat filtering" }
+
+[Description]
+Description = { type = "string", value = "Chat service manages in-game text communication between players", readonly = true }

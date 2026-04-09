@@ -1,0 +1,11 @@
+[material]
+name = "Neon"
+preset = "Neon"
+description = "Self-illuminating neon — no textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.1
+reflectance = 0.0
+emissive = [2.0, 2.0, 2.0]

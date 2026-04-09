@@ -655,6 +655,7 @@ async function handleKycUpload(request, env, cors) {
   }), { expirationTtl: 86400 * 30 }); // 30 day TTL for pending
 
   return json({
+    verification_id: `kyc-${sessionId}-${side}`,
     session_id: sessionId, side, status: 'uploaded',
     r2_key: objectKey, hash: hashHex,
   }, 200, cors);

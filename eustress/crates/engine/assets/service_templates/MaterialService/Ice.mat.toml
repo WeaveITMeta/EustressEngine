@@ -1,0 +1,15 @@
+[material]
+name = "Ice"
+preset = "Ice"
+description = "Ice surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.08
+reflectance = 0.88
+
+[textures]
+base_color = "materials/textures/ice_base_color.png"
+normal = "materials/textures/ice_normal.png"
+metallic_roughness = "materials/textures/ice_metallic_roughness.png"

@@ -856,6 +856,29 @@ fn ensure_space_integrity(space_root: &Path) {
         }
     }
 
+    // Ensure MaterialService has default material .mat.toml files
+    let mat_dir = space_root.join("MaterialService");
+    if mat_dir.exists() {
+        let mat_template_dir = svc_template_dir.join("MaterialService");
+        if mat_template_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&mat_template_dir) {
+                for entry in entries.flatten() {
+                    let fname = entry.file_name();
+                    let fname_str = fname.to_string_lossy();
+                    if fname_str.ends_with(".mat.toml") {
+                        let dest = mat_dir.join(&fname);
+                        if !dest.exists() {
+                            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                                let _ = std::fs::write(&dest, &content);
+                                repaired += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Ensure simulation.toml exists
     let sim_path = space_root.join("simulation.toml");
     if !sim_path.exists() {

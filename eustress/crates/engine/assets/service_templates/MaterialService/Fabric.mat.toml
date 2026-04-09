@@ -1,0 +1,15 @@
+[material]
+name = "Fabric"
+preset = "Fabric"
+description = "Fabric surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.5
+reflectance = 0.5
+
+[textures]
+base_color = "materials/textures/fabric_base_color.png"
+normal = "materials/textures/fabric_normal.png"
+metallic_roughness = "materials/textures/fabric_metallic_roughness.png"

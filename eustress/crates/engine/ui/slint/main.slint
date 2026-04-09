@@ -778,7 +778,7 @@ export component StudioWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: "Universes";
+                                    text: "Explorer";
                                     color: root.left-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
@@ -820,7 +820,7 @@ export component StudioWindow inherits Window {
                                 }
 
                                 Text {
-                                    text: "Explorer";
+                                    text: "Universes";
                                     color: root.left-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
                                     font-size: 12px;
                                     horizontal-alignment: center;
@@ -925,7 +925,7 @@ export component StudioWindow inherits Window {
                         clip: true;
                         background: Theme.panel-background;
                         
-                        if root.left-tab-index == 2: ExplorerPanel {
+                        if root.left-tab-index == 0: ExplorerPanel {
                             tree-nodes: root.tree-nodes;
                             on-select-node(id, node-type) => { root.select-node(id, node-type); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
@@ -982,7 +982,7 @@ export component StudioWindow inherits Window {
                             on-category-changed(cat) => { root.asset-category-changed(cat); }
                         }
                         
-                        if root.left-tab-index == 0: UniverseBrowser {
+                        if root.left-tab-index == 2: UniverseBrowser {
                             universe-items: root.universe-items;
                             active-space-path: root.active-space-path;
                             space-selected(path) => { root.space-selected(path); }

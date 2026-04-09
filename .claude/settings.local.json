@@ -28,7 +28,19 @@
       "Bash(stripe products:*)",
       "Bash(stripe prices:*)",
       "Bash(npx wrangler:*)",
-      "Read(//c/Users/miksu/Documents/Eustress/Universe1/spaces/Space1/StarterGui/BatteryHUD/**)"
+      "Read(//c/Users/miksu/Documents/Eustress/Universe1/spaces/Space1/StarterGui/BatteryHUD/**)",
+      "Bash(grep -n \"ReplicationPriority\\\\|struct.*Priority\" /e/Workspace/EustressEngine/eustress/crates/engine/src/play_server/*.rs)",
+      "Bash(grep -n \"struct PlayerInput\\\\|struct.*ClientInput\" /e/Workspace/EustressEngine/eustress/crates/engine/src/play_server/*.rs)",
+      "Bash(find /e/Workspace/EustressEngine -type f -name \"*.rs\" -exec grep -l \"ActiveRecording\\\\|SimulationRecording\" {} \\\\;)",
+      "Bash(cargo build:*)",
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.godotengine.org)",
+      "Bash(gh api:*)",
+      "Bash(grep -n \"component IconButton\\\\|export component IconButton\" /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*.slint)",
+      "Bash(ls \"E:\\\\Workspace\\\\EustressEngine\\\\infrastructure\\\\cloudflare/\"*/jurisdictions.json)",
+      "Bash(trunk build:*)",
+      "WebFetch(domain:bevy.org)"
     ]
   }
 }

@@ -1,0 +1,32 @@
+# Workspace Service Properties
+# The root container for all 3D content in the simulation
+
+[Data]
+Name = { type = "string", value = "Workspace", readonly = true }
+ClassName = { type = "string", value = "Workspace", readonly = true }
+
+[Behavior]
+AllowThirdPartySales = { type = "bool", value = false, description = "Allow third-party sales in this workspace" }
+
+[Physics]
+Gravity = { type = "float", value = 196.2, description = "Workspace gravity in studs/s²" }
+FallenPartsDestroyHeight = { type = "float", value = -500.0, description = "Y position where parts are destroyed" }
+GlobalWind = { type = "Vector3", value = [0.0, 0.0, 0.0], description = "Global wind direction and speed" }
+
+[Appearance]
+AmbientColor = { type = "Color3", value = [0.5, 0.5, 0.5], description = "Ambient light color" }
+OutdoorAmbient = { type = "Color3", value = [0.5, 0.5, 0.5], description = "Outdoor ambient light" }
+Brightness = { type = "float", value = 2.0, description = "Global brightness multiplier" }
+ColorCorrection_Saturation = { type = "float", value = 0.0, description = "Color saturation adjustment" }
+ColorCorrection_Contrast = { type = "float", value = 0.0, description = "Color contrast adjustment" }
+ColorCorrection_Brightness = { type = "float", value = 0.0, description = "Color brightness adjustment" }
+
+[Terrain] # AAA This will be in the terrain object.
+TerrainWaterWaveSize = { type = "float", value = 0.15, description = "Water wave size" }
+TerrainWaterWaveSpeed = { type = "float", value = 10.0, description = "Water wave speed" }
+TerrainWaterReflectance = { type = "float", value = 1.0, description = "Water reflectance" }
+TerrainWaterTransparency = { type = "float", value = 0.3, description = "Water transparency" }
+
+[Simulation]
+SignalBehavior = { type = "enum", value = "Default", options = ["Default", "Immediate", "Deferred"], description = "Signal firing behavior" }
+TouchesUseCollisionGroups = { type = "bool", value = false, description = "Use collision groups for touch detection" }

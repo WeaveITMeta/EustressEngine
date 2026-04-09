@@ -1,0 +1,15 @@
+[material]
+name = "Granite"
+preset = "Granite"
+description = "Granite surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.55
+reflectance = 0.35
+
+[textures]
+base_color = "materials/textures/granite_base_color.png"
+normal = "materials/textures/granite_normal.png"
+metallic_roughness = "materials/textures/granite_metallic_roughness.png"

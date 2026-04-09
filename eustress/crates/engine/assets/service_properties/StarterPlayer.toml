@@ -1,0 +1,30 @@
+# StarterPlayer Service Properties
+# Defines default player character and camera settings
+
+[Data]
+Name = { type = "string", value = "StarterPlayer", readonly = true }
+ClassName = { type = "string", value = "StarterPlayer", readonly = true }
+
+[Character]
+AutoJumpEnabled = { type = "bool", value = true, description = "Enable auto-jump when walking into obstacles on mobile" }
+CharacterJumpHeight = { type = "float", value = 7.2, description = "Jump height in studs" }
+CharacterJumpPower = { type = "float", value = 50.0, description = "Jump power (deprecated, use JumpHeight)" }
+CharacterMaxSlopeAngle = { type = "float", value = 89.0, description = "Maximum slope angle the character can walk on" }
+CharacterUseJumpPower = { type = "bool", value = false, description = "Use JumpPower instead of JumpHeight" }
+CharacterWalkSpeed = { type = "float", value = 16.0, description = "Walk speed in studs/second" }
+HealthDisplayDistance = { type = "float", value = 100.0, description = "Distance at which health bars are visible" }
+NameDisplayDistance = { type = "float", value = 100.0, description = "Distance at which name tags are visible" }
+
+[Camera]
+CameraMaxZoomDistance = { type = "float", value = 128.0, description = "Maximum camera zoom distance" }
+CameraMinZoomDistance = { type = "float", value = 0.5, description = "Minimum camera zoom distance" }
+CameraMode = { type = "enum", value = "Classic", options = ["Classic", "LockFirstPerson"], description = "Camera mode" }
+DevCameraOcclusionMode = { type = "enum", value = "Zoom", options = ["Zoom", "Invisicam"], description = "Camera occlusion behavior" }
+DevComputerCameraMovementMode = { type = "enum", value = "UserChoice", options = ["UserChoice", "Classic", "Follow", "Orbital", "CameraToggle"], description = "Computer camera movement mode" }
+DevTouchCameraMovementMode = { type = "enum", value = "UserChoice", options = ["UserChoice", "Classic", "Follow", "Orbital"], description = "Touch camera movement mode" }
+EnableMouseLockOption = { type = "bool", value = true, description = "Allow players to lock mouse" }
+
+[Loading]
+LoadCharacterAppearance = { type = "bool", value = true, description = "Load player character appearance from profile" }
+LoadCharacterLayeredClothing = { type = "enum", value = "Default", options = ["Default", "Disabled", "Enabled"], description = "Load layered clothing" }
+UserEmotesEnabled = { type = "bool", value = true, description = "Enable player emotes" }

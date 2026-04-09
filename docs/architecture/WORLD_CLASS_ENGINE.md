@@ -621,6 +621,8 @@ impl NpcBrainPool {
 
 **The Symbolica × AI advantage**: Eustress uniquely can **derive physics laws symbolically** and use them as features for ONNX models. An NPC that reasons about thermodynamics (temperature affects powder charge affects bullet speed) is impossible in UE5 without hardcoded lookup tables. In Eustress, Symbolica generates the exact formula and the NPC's ONNX model receives physically meaningful inputs.
 
+This means we can use ONNX inference to lookup properties of other objects that may affect our object, for example temperature spreading throughout a system will be microseconds to calculate using the 2nd Law of Thermodynamics.
+
 ---
 
 ## 10. Rust Advantage Matrix

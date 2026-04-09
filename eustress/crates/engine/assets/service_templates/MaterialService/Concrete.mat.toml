@@ -1,0 +1,15 @@
+[material]
+name = "Concrete"
+preset = "Concrete"
+description = "Concrete surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.5
+reflectance = 0.5
+
+[textures]
+base_color = "materials/textures/concrete_base_color.png"
+normal = "materials/textures/concrete_normal.png"
+metallic_roughness = "materials/textures/concrete_metallic_roughness.png"

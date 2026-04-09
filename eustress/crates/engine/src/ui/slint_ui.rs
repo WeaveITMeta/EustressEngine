@@ -1091,8 +1091,9 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
             // Publish dialog state sync (for camera blocking)
             .add_systems(Update, sync_publish_dialog_state.after(SlintSystems::Drain))
-            // Bridge: viewport click → SelectionManager → UnifiedExplorerState (runs first)
-            .add_systems(Update, sync_viewport_selection_to_explorer)
+            // Bridge: viewport click → SelectionManager → UnifiedExplorerState
+            // Must run AFTER part_selection_system and SlintSystems::Drain
+            .add_systems(Update, sync_viewport_selection_to_explorer.after(SlintSystems::Drain))
             // Unified explorer sync: entities + filesystem (throttled internally)
             .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
             // Properties sync (throttled internally)
@@ -2136,9 +2137,15 @@ fn update_slint_ui_focus(
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<super::ViewportBounds>>,
     mut ui_focus: ResMut<super::SlintUIFocus>,
+    gui_elements: Query<&eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+    slint_context: Option<NonSend<SlintUiState>>,
 ) {
+    // Track text input focus from Slint (blocks keyboard shortcuts while typing)
+    ui_focus.text_input_focused = slint_context.as_ref()
+        .map(|ctx| ctx.window.get_any_input_has_focus())
+        .unwrap_or(false);
+
     let Some(vb) = viewport_bounds.as_deref() else {
-        // No viewport bounds yet — assume UI doesn't have focus
         ui_focus.has_focus = false;
         return;
     };
@@ -2170,6 +2177,33 @@ fn update_slint_ui_focus(
     // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
     ui_focus.has_focus = !in_viewport;
     ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
+
+    // Check if cursor is over any visible ScreenGui element (buttons, labels, frames)
+    // These are rendered inside the viewport but should consume clicks.
+    ui_focus.gui_element_hit = false;
+    if in_viewport {
+        // Convert cursor to viewport-local coordinates
+        let vp_x = cursor_pos.x - vb.x;
+        let vp_y = cursor_pos.y - vb.y;
+
+        for gui in &gui_elements {
+            if !gui.visible { continue; }
+            // "ignore" filter — completely transparent to mouse
+            if gui.mouse_filter == "ignore" { continue; }
+            // GuiElementDisplay has x, y, width, height in viewport pixels
+            let gx = gui.x;
+            let gy = gui.y;
+            let gw = gui.width;
+            let gh = gui.height;
+            if gw > 0.0 && gh > 0.0 && vp_x >= gx && vp_x <= gx + gw && vp_y >= gy && vp_y <= gy + gh {
+                // "stop" (default) consumes the event; "pass" lets it through
+                if gui.mouse_filter != "pass" {
+                    ui_focus.gui_element_hit = true;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Try to restore auth session on startup
@@ -2315,7 +2349,7 @@ struct DrainResources<'w> {
     tab_manager: Option<ResMut<'w, super::center_tabs::CenterTabManager>>,
     file_registry: Option<ResMut<'w, crate::space::SpaceFileRegistry>>,
     /// Shared selection state — updated on Explorer node clicks so F-to-focus works
-    selection_manager: Option<Res<'w, BevySelectionManager>>,
+    selection_manager: Option<Res<'w, crate::rendering::BevySelectionManager>>,
     /// Workshop pipeline resource for cancel/pause/resume actions
     workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
     /// Material registry for resolving material names on spawned parts
@@ -4438,6 +4472,7 @@ fn drain_slint_actions(
                                     archivable: true,
                                     id: 0,
                                     ai: false,
+                uuid: String::new(),
                                 },
                                 crate::space::file_loader::LoadedFromFile {
                                     path: dir_path.clone(),
@@ -4772,6 +4807,7 @@ fn drain_slint_actions(
                                     archivable: true,
                                     id: 0,
                                     ai: false,
+                uuid: String::new(),
                                 },
                                 crate::space::file_loader::LoadedFromFile {
                                     path: dir_path.clone(),
@@ -5958,14 +5994,26 @@ fn sync_axis_gizmo_to_slint(
 ///   - sync_properties_to_slint reads the correct entity for the Properties panel
 ///
 /// Runs every frame (no throttle) so selection feels instant.
+/// Uses generation tracking to skip work when SelectionManager hasn't changed.
 fn sync_viewport_selection_to_explorer(
-    selection_manager: Option<Res<BevySelectionManager>>,
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     explorer_state: Option<ResMut<UnifiedExplorerState>>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    mut last_sel_gen: Local<u64>,
 ) {
     let Some(sel_mgr) = selection_manager else { return };
+    let mgr = sel_mgr.0.read();
+    let current_gen = mgr.generation();
+
+    // Skip if SelectionManager hasn't changed since last check
+    if current_gen == *last_sel_gen {
+        return;
+    }
+    *last_sel_gen = current_gen;
+
+    let selected_ids = mgr.get_selected();
+    drop(mgr);
     let Some(mut explorer_state) = explorer_state else { return };
-    let selected_ids = sel_mgr.0.read().get_selected();
 
     // Compute the new SelectedItem from the SelectionManager state
     let new_selected = if selected_ids.is_empty() {
@@ -5992,6 +6040,7 @@ fn sync_viewport_selection_to_explorer(
         _ => true,
     };
     if changed {
+        info!("[sel-bridge] Selection changed: {:?} → {:?}", explorer_state.selected, new_selected);
         explorer_state.selected = new_selected;
         explorer_state.needs_immediate_sync = true;
     }

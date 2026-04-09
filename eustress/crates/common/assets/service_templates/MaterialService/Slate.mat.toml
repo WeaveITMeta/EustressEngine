@@ -1,0 +1,15 @@
+[material]
+name = "Slate"
+preset = "Slate"
+description = "Slate surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.65
+reflectance = 0.28
+
+[textures]
+base_color = "materials/textures/slate_base_color.png"
+normal = "materials/textures/slate_normal.png"
+metallic_roughness = "materials/textures/slate_metallic_roughness.png"

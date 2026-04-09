@@ -226,6 +226,67 @@ pub fn run_script_update(
     let _ = dt;
 }
 
+/// Call on_exit() on all scripts before cleanup. Mirrors Godot's _exit_tree().
+/// Run this when stopping play mode, BEFORE cleanup_scripts().
+pub fn run_script_exit(
+    runtime: Res<RuneRuntimeState>,
+) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        for (_idx, compiled) in runtime.compiled.iter() {
+            let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+            match vm.call(["on_exit"], ()) {
+                Ok(_) => {
+                    info!("📜 on_exit() called for '{}'", compiled.name);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("missing") && !msg.contains("not found") {
+                        warn!("⚠ on_exit() error in '{}': {}", compiled.name, msg);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Call on_ready() for scripts whose entity subtree is complete.
+/// Unlike on_init() which fires immediately, on_ready() waits one frame
+/// to ensure all ChildOf relationships are applied (deferred commands).
+/// Mirrors Godot's _ready().
+pub fn run_script_ready(
+    mut runtime: ResMut<RuneRuntimeState>,
+) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        let keys: Vec<u32> = runtime.compiled.keys().cloned().collect();
+        for idx in keys {
+            // on_ready fires one frame after on_init (initialized == true means init ran)
+            let init_done = runtime.initialized.get(&idx).copied().unwrap_or(false);
+            let ready_key = idx + 1_000_000; // Use offset key to track ready separately
+            let ready_done = runtime.initialized.get(&ready_key).copied().unwrap_or(false);
+
+            if init_done && !ready_done {
+                runtime.initialized.insert(ready_key, true);
+
+                let compiled = &runtime.compiled[&idx];
+                let mut vm = rune::Vm::new(compiled.context.clone(), compiled.unit.clone());
+                match vm.call(["on_ready"], ()) {
+                    Ok(_) => {
+                        info!("📜 on_ready() called for '{}'", compiled.name);
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if !msg.contains("missing") && !msg.contains("not found") {
+                            warn!("⚠ on_ready() error in '{}': {}", compiled.name, msg);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Clear all compiled scripts. Call when stopping play mode.
 pub fn cleanup_scripts(
     mut runtime: ResMut<RuneRuntimeState>,

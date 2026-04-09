@@ -1,0 +1,31 @@
+# Lighting Service Properties
+# Controls global lighting and atmospheric effects
+
+[Data]
+Name = { type = "string", value = "Lighting", readonly = true }
+ClassName = { type = "string", value = "Lighting", readonly = true }
+
+[Lighting]
+Ambient = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Ambient light color" }
+Brightness = { type = "float", value = 2.0, description = "Overall brightness" }
+ColorShift_Bottom = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Bottom color shift" }
+ColorShift_Top = { type = "Color3", value = [0.0, 0.0, 0.0], description = "Top color shift" }
+OutdoorAmbient = { type = "Color3", value = [0.5, 0.5, 0.5], description = "Outdoor ambient color" }
+ShadowSoftness = { type = "float", value = 0.2, description = "Shadow edge softness" }
+EnvironmentDiffuseScale = { type = "float", value = 1.0, description = "Environment diffuse lighting scale" }
+EnvironmentSpecularScale = { type = "float", value = 1.0, description = "Environment specular lighting scale" }
+
+[Time]
+ClockTime = { type = "float", value = 14.0, description = "Time of day (0-24 hours)" }
+TimeOfDay = { type = "string", value = "14:00:00", description = "Time of day string" }
+GeographicLatitude = { type = "float", value = 41.73, description = "Geographic latitude for sun position" }
+
+[Atmosphere] # AAA This will be in the atmosphere.toml object, not in lighting itself.
+FogColor = { type = "Color3", value = [0.75, 0.75, 0.75], description = "Fog color" }
+FogEnd = { type = "float", value = 100000.0, description = "Fog end distance" }
+FogStart = { type = "float", value = 0.0, description = "Fog start distance" }
+
+[Effects]
+GlobalShadows = { type = "bool", value = true, description = "Enable global shadows" }
+Technology = { type = "enum", value = "Default", options = ["Default"], description = "Lighting technology" }
+ExposureCompensation = { type = "float", value = 0.0, description = "Exposure compensation" }

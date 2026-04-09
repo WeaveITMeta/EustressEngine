@@ -1,0 +1,15 @@
+[material]
+name = "Grass"
+preset = "Grass"
+description = "Grass surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.95
+reflectance = 0.1
+
+[textures]
+base_color = "materials/textures/grass_base_color.png"
+normal = "materials/textures/grass_normal.png"
+metallic_roughness = "materials/textures/grass_metallic_roughness.png"

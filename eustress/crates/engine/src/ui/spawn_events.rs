@@ -49,6 +49,7 @@ pub fn handle_spawn_part_events(
     selection_manager: Option<Res<BevySelectionManager>>,
     mut camera_query: Query<&mut EustressCamera>,
     play_mode_state: Option<Res<State<PlayModeState>>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     let Some(mut notifications) = notifications else { return };
@@ -150,6 +151,40 @@ pub fn handle_spawn_part_events(
             info!("📷 Camera focused on new {} at {:?}", part_name, actual_position);
         }
         
+        // Auto-save TOML for the new part (file-system-first: entity exists on disk immediately)
+        if !is_playing {
+            if let Some(ref sr) = space_root {
+                let workspace_dir = sr.0.join("Workspace");
+                let _ = std::fs::create_dir_all(&workspace_dir);
+                let toml_filename = format!("{}.part.toml", part_name);
+                let toml_path = workspace_dir.join(&toml_filename);
+                // Avoid overwriting existing files — append entity index
+                let final_path = if toml_path.exists() {
+                    workspace_dir.join(format!("{}_{}.part.toml", part_name, spawned_entity.index()))
+                } else {
+                    toml_path
+                };
+                // Write minimal TOML definition
+                let toml_content = format!(
+                    "[asset]\nmesh = \"{}\"\nscene = \"Scene0\"\n\n[transform]\nposition = [{:.4}, {:.4}, {:.4}]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [{:.4}, {:.4}, {:.4}]\n\n[properties]\ncolor = [128, 128, 128, 255]\ntransparency = 0.0\nanchored = false\ncan_collide = true\ncast_shadow = true\nreflectance = 0.0\nmaterial = \"Plastic\"\nlocked = false\n\n[metadata]\nclass_name = \"Part\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n",
+                    crate::spawn::part_type_to_glb_path(&event.part_type),
+                    actual_position.x, actual_position.y, actual_position.z,
+                    size.x, size.y, size.z,
+                    chrono::Utc::now().to_rfc3339(),
+                    chrono::Utc::now().to_rfc3339(),
+                );
+                if let Err(e) = std::fs::write(&final_path, &toml_content) {
+                    warn!("Failed to auto-save part TOML: {}", e);
+                } else {
+                    // Register the file so file_loader tracks it
+                    commands.entity(spawned_entity).insert(
+                        crate::space::instance_loader::InstanceFile { toml_path: final_path.clone() }
+                    );
+                    info!("💾 Auto-saved {:?}", final_path.file_name().unwrap_or_default());
+                }
+            }
+        }
+
         notifications.success(format!("Added {} (selected)", part_name));
         info!("✨ Spawned {} at {:?}, entity: {:?}", part_name, actual_position, spawned_entity);
     }

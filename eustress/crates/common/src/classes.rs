@@ -61,6 +61,9 @@ impl PartType {
     }
 }
 
+/// Default texture repeat: no tiling
+pub fn texture_repeat_default() -> [f32; 2] { [1.0, 1.0] }
+
 /// Eustress Material enum (PBR rendering presets)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect)]
 pub enum Material {
@@ -494,6 +497,11 @@ pub struct Instance {
     
     /// Unique entity ID (maps to Bevy Entity internally)
     pub id: u32,
+
+    /// Stable UUID persisted across sessions (for cross-reference and networking)
+    /// Generated on first save, preserved across loads/restarts.
+    #[serde(default)]
+    pub uuid: String,
     
     /// AI training opt-in flag (default: false)
     /// When true, this entity is included in SpatialVortex training data exports
@@ -508,6 +516,7 @@ impl Default for Instance {
             class_name: ClassName::Instance,
             archivable: true,
             id: 0,
+            uuid: String::new(),
             ai: false,
         }
     }
@@ -572,7 +581,13 @@ pub struct BasePart {
     /// Mirror-like reflectance 0-1 (Eustress "Reflectance")
     /// Bevy: StandardMaterial.reflectance
     pub reflectance: f32,
-    
+
+    /// Texture repeat scale [U, V] — how many times the texture tiles across the surface
+    /// Bevy: StandardMaterial.uv_transform = Affine2::from_scale(Vec2::new(u, v))
+    /// Default [1.0, 1.0] = no repeat. [2.0, 2.0] = tile 2x in each direction.
+    #[serde(default = "crate::classes::texture_repeat_default")]
+    pub texture_repeat: [f32; 2],
+
     // === Physics/Collision ===
     /// Immovable (Eustress "Anchored")
     /// Bevy: RigidBody::Fixed vs Dynamic
@@ -644,6 +659,7 @@ impl Default for BasePart {
             mass: 900.0,
             locked: false,
             deformation: false,
+            texture_repeat: [1.0, 1.0],
         }
     }
 }
@@ -1368,21 +1384,26 @@ impl Default for EustressCamera {
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressPointLight {
-    /// Strength (Eustress "Brightness")
+    /// Intensity in lumens (Eustress "Brightness")
     /// Bevy: PointLight.intensity
     pub brightness: f32,
-    
+
     /// Hue (Eustress "Color")
     /// Bevy: PointLight.color
     pub color: Color,
-    
+
     /// Falloff distance (Eustress "Range")
     /// Bevy: PointLight.range
     pub range: f32,
-    
+
+    /// Spherical area light radius — larger radius = softer shadows and wider illumination
+    /// Bevy: PointLight.radius
+    #[serde(default)]
+    pub radius: f32,
+
     /// Cast shadows (Eustress "Shadows")
     pub shadows: bool,
-    
+
     /// Optional light texture/cookie (Bevy 0.17+: PointLightTexture)
     /// Asset path to a cubemap texture that modulates light intensity.
     /// Used for artistic effects like stained glass, gobos, or patterned shadows.
@@ -1394,9 +1415,10 @@ pub struct EustressPointLight {
 impl Default for EustressPointLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0,
+            brightness: 100000.0, // Lumens — physically based (bright indoor light)
             color: Color::WHITE,
             range: 60.0,
+            radius: 0.0, // Point source by default, increase for area light
             shadows: true,
             texture: None,
         }
@@ -1426,10 +1448,10 @@ pub struct EustressSpotLight {
 impl Default for EustressSpotLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0,
+            brightness: 40000.0, // Lumens — physically based (matches Bevy examples)
             color: Color::WHITE,
             range: 60.0,
-            angle: 90.0,
+            angle: 45.0, // Degrees — typical spotlight cone
             shadows: true,
             texture: None,
         }

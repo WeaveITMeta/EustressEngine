@@ -9,7 +9,7 @@
 
 ```powershell
 cd eustress
-cargo run -p eustress-engine
+cargo run --release -p eustress-engine --bin eustress-engine
 ```
 
 First build takes ~5–10 minutes (Bevy 0.18 + Slint UI). Subsequent builds are incremental (~30s).

@@ -1,0 +1,15 @@
+[material]
+name = "Wood"
+preset = "Wood"
+description = "Wood surface with PBR textures"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.5
+reflectance = 0.5
+
+[textures]
+base_color = "materials/textures/wood_base_color.png"
+normal = "materials/textures/wood_normal.png"
+metallic_roughness = "materials/textures/wood_metallic_roughness.png"

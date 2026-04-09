@@ -1540,20 +1540,26 @@ impl Plugin for PlayModePlugin {
             .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
             .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
-            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop)
+            // on_exit() on all scripts before cleanup (Godot-style _exit_tree)
+            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::run_script_exit)
+            .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop
+                .after(crate::soul::rune_api::run_script_exit))
             .add_systems(OnEnter(PlayModeState::Editing), restore_gui_on_stop)
 
             // Rune script execution during play mode:
             // 1. Populate thread-locals from ECS (sim values, entity snapshots)
             // 2. Run on_init() for newly compiled scripts
-            // 3. Run on_update(dt) each frame
-            // 4. Clear thread-locals
+            // 3. Run on_ready() one frame after on_init (subtree complete)
+            // 4. Run on_update(dt) each frame
+            // 5. Clear thread-locals
             .add_systems(Update, (
                 crate::soul::rune_api::prepare_script_bindings,
                 crate::soul::rune_api::run_script_init
                     .after(crate::soul::rune_api::prepare_script_bindings),
-                crate::soul::rune_api::run_script_update
+                crate::soul::rune_api::run_script_ready
                     .after(crate::soul::rune_api::run_script_init),
+                crate::soul::rune_api::run_script_update
+                    .after(crate::soul::rune_api::run_script_ready),
                 crate::soul::rune_api::cleanup_script_bindings
                     .after(crate::soul::rune_api::run_script_update),
                 crate::soul::rune_api::drain_script_logs_to_output

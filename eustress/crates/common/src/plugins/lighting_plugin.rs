@@ -168,6 +168,7 @@ fn setup_lighting(
             class_name: ClassName::Star,
             archivable: true,
             ai: false,
+            uuid: String::new(),
             id: 0,
         },
         Name::new("Sun"),
@@ -191,6 +192,7 @@ fn setup_lighting(
             class_name: ClassName::Moon,
             archivable: true,
             ai: false,
+            uuid: String::new(),
             id: 0,
         },
         Name::new("Moon"),
@@ -205,29 +207,34 @@ fn setup_lighting(
 /// Update sun position and properties based on LightingService
 /// Includes real-time shadow softness control
 fn update_sun_position(
-    mut lighting: ResMut<LightingService>,
+    lighting: Option<ResMut<LightingService>>,
     mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
     time: Res<Time>,
 ) {
-    // Advance time of day in real-time if enabled
-    // Default cycle: 1 full day = 24 real minutes (1 game-hour per real-minute)
+    let Some(mut lighting) = lighting else { return };
+
+    // Only mutate LightingService when cycle is active — avoids marking it
+    // as changed every frame, which would trigger skybox regeneration.
     if lighting.cycle_enabled {
         let day_length_secs = lighting.day_length_minutes * 60.0;
         if day_length_secs > 0.0 {
             lighting.time_of_day += time.delta_secs() / day_length_secs;
             if lighting.time_of_day > 1.0 { lighting.time_of_day -= 1.0; }
         }
+    } else {
+        // When cycle is off, skip the mutable borrow — read-only access
+        // doesn't trigger Bevy change detection.
+        lighting.bypass_change_detection();
     }
 
     if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
         sun_light.color = arr_to_color(lighting.sun_color);
 
-        // Sun intensity varies with elevation (dimmer at sunrise/sunset)
         let sun_dir = lighting.sun_direction();
         let elevation = sun_dir.y;
-        let intensity_factor = elevation.max(0.0).powf(0.4); // Smooth falloff
+        let intensity_factor = elevation.max(0.0).powf(0.4);
         sun_light.illuminance = lighting.sun_intensity * intensity_factor;
-        sun_light.shadows_enabled = elevation > 0.05; // No shadows when sun below horizon
+        sun_light.shadows_enabled = elevation > 0.05;
 
         let sun_distance = 100.0;
         sun_transform.translation = sun_dir * sun_distance;
@@ -315,7 +322,7 @@ fn update_exposure_compensation(
 /// Affects ALL entities: BaseParts, Terrain, Models, etc.
 fn update_fog_settings(
     lighting: Res<LightingService>,
-    mut camera_query: Query<(Entity, Option<&mut DistanceFog>), With<Camera3d>>,
+    mut camera_query: Query<(Entity, &Camera, Option<&mut DistanceFog>), With<Camera3d>>,
     mut commands: Commands,
 ) {
     // Only update when lighting changes
@@ -323,7 +330,9 @@ fn update_fog_settings(
         return;
     }
     
-    for (entity, fog) in camera_query.iter_mut() {
+    for (entity, camera, fog) in camera_query.iter_mut() {
+        // Only apply fog to the main 3D camera, not Slint overlay or other cameras
+        if camera.order != 0 { continue; }
         if lighting.fog_enabled {
             let fog_color = Color::srgba(
                 lighting.fog_color[0],
@@ -512,6 +521,30 @@ pub fn create_procedural_skybox_with_sun(
                     }
                 }
 
+                // Stars — only visible at night (sun well below horizon)
+                let pixel_faces_sky = ny > 0.0;
+                let sun_below_horizon = sun_dir.y < -0.05;
+                if sun_below_horizon && pixel_faces_sky {
+                    // Hash function for uniform distribution across the sphere.
+                    // Uses multiple rounds of fract(sin(dot(...))) for pseudo-random coverage.
+                    let h1 = (nx * 127.1 + ny * 311.7 + nz * 74.7).sin() * 43758.5453;
+                    let star_seed = h1.fract().abs();
+                    let h2 = (nx * 269.5 + ny * 183.3 + nz * 421.1).sin() * 28947.7231;
+                    let star_seed2 = h2.fract().abs();
+
+                    // ~0.4% of sky pixels become stars
+                    if star_seed > 0.996 {
+                        let night_factor = (-sun_dir.y - 0.05).clamp(0.0, 0.3) * 3.3;
+                        let twinkle = 0.5 + 0.5 * star_seed2;
+                        let star_brightness = night_factor * twinkle;
+                        // Color variation: blue-white to warm yellow
+                        let warmth = star_seed2;
+                        r = r + star_brightness * (0.85 + warmth * 0.15);
+                        g = g + star_brightness * (0.88 + (1.0 - warmth) * 0.12);
+                        b = b + star_brightness * (0.95 + warmth * 0.05);
+                    }
+                }
+
                 data.push((r.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push((g.clamp(0.0, 1.0) * 255.0) as u8);
                 data.push((b.clamp(0.0, 1.0) * 255.0) as u8);
@@ -587,6 +620,9 @@ fn attach_skybox_to_cameras(
                 rotation: Quat::IDENTITY,
                 affects_lightmapped_mesh_diffuse: false,
             },
+            // SSAO requires Msaa::Off which conflicts with MSAA anti-aliasing.
+            // MSAA is more important for visual quality, so SSAO is disabled.
+            // bevy::pbr::ScreenSpaceAmbientOcclusion::default(),
             SkyboxAttached, // Mark as processed
         ));
     }
@@ -713,8 +749,12 @@ fn regenerate_skybox_on_sun_change(
     mut skybox_handle: ResMut<SkyboxHandle>,
     mut camera_query: Query<&mut Skybox, With<Camera3d>>,
 ) {
-    // Rebuild when SunClass changes (time of day, latitude, etc.) or LightingService changes
-    if changed_sun_query.is_empty() && !lighting.is_changed() {
+    // Rebuild when SunClass changes or LightingService changes.
+    // Throttle to every 60 frames (~1 second) to avoid regenerating 512x512x6 cubemap every frame.
+    static REGEN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let frame = REGEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let has_changes = !changed_sun_query.is_empty() || lighting.is_changed();
+    if !has_changes || frame % 60 != 0 {
         return;
     }
     
