@@ -422,19 +422,12 @@ impl Clipboard {
         self.copied_entity_ids.iter().any(|id| current_selection.contains(id))
     }
     
-    /// Get entities for pasting (cloned)
-    pub fn paste(&self) -> Vec<ClipboardEntity> {
-        self.entities.clone()
-    }
-    
-    /// Get paste offset for current paste operation
+    /// Get paste offset for current paste operation.
+    /// Stacks pasted entities above the original by entity height.
     pub fn get_paste_offset(&self) -> Vec3 {
-        // Place pasted entity directly above the original (stacking on Y).
-        // First paste: offset by average entity height so it sits on top with no gap.
-        // Subsequent pastes: stack further up.
         let avg_height = self.entities.iter()
             .filter_map(|e| e.properties.get("size").and_then(|v| v.as_array()))
-            .map(|a| a.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32)
+            .map(|a| a.get(1).and_then(|v: &serde_json::Value| v.as_f64()).unwrap_or(1.0) as f32)
             .next()
             .unwrap_or(1.0);
         let y_offset = avg_height * (self.paste_count as f32 + 1.0);
@@ -685,7 +678,7 @@ pub fn handle_paste_event(
             if let Some(id) = spawned_id {
                 created_ids.push(id);
 
-                // Create TOML file on disk for pasted entity
+                // Create TOML file on disk for pasted entity (file-system-first)
                 if let Some(ref ws_dir) = workspace_dir {
                     let pos = Vec3::new(
                         entity_data.position[0] + offset.x,
@@ -695,22 +688,34 @@ pub fn handle_paste_event(
                     let copy_name = format!("{}_copy", entity_data.name);
                     let toml_filename = format!("{}.glb.toml", copy_name);
                     let toml_path = ws_dir.join(&toml_filename);
-                    // Build instance definition from clipboard data
-                    let mut instance_def = crate::space::instance_loader::InstanceDefinition::default();
-                    instance_def.instance.name = copy_name;
-                    instance_def.instance.class_name = entity_data.class.clone();
-                    instance_def.transform = crate::space::instance_loader::TransformData {
-                        position: [pos.x, pos.y, pos.z],
-                        rotation: entity_data.rotation,
-                        scale: entity_data.scale,
+                    // Convert euler degrees → quaternion for TOML (rotation stored as [x,y,z] degrees)
+                    let rot_quat = Quat::from_euler(
+                        EulerRot::XYZ,
+                        entity_data.rotation[0].to_radians(),
+                        entity_data.rotation[1].to_radians(),
+                        entity_data.rotation[2].to_radians(),
+                    );
+                    let instance_def = crate::space::instance_loader::InstanceDefinition {
+                        asset: Some(crate::space::instance_loader::AssetReference {
+                            mesh: format!("parts/block.glb"),
+                            scene: "Scene0".to_string(),
+                        }),
+                        transform: crate::space::instance_loader::TransformData {
+                            position: [pos.x, pos.y, pos.z],
+                            rotation: [rot_quat.x, rot_quat.y, rot_quat.z, rot_quat.w],
+                            scale: entity_data.scale,
+                        },
+                        properties: Default::default(),
+                        metadata: crate::space::instance_loader::InstanceMetadata {
+                            class_name: entity_data.class.clone(),
+                            archivable: true,
+                            created: chrono::Utc::now().to_rfc3339(),
+                            last_modified: chrono::Utc::now().to_rfc3339(),
+                        },
+                        material: None, thermodynamic: None, electrochemical: None,
+                        ui: None, attributes: None, tags: None, parameters: None,
+                        extra: Default::default(),
                     };
-                    if let Some(size) = entity_data.properties.get("size").and_then(|v| v.as_array()) {
-                        instance_def.properties.size = [
-                            size.get(0).and_then(|v| v.as_f64()).unwrap_or(4.0) as f32,
-                            size.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                            size.get(2).and_then(|v| v.as_f64()).unwrap_or(2.0) as f32,
-                        ];
-                    }
                     if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
                         warn!("Failed to write paste TOML: {}", e);
                     }

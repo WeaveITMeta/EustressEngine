@@ -4228,7 +4228,7 @@ fn drain_slint_actions(
                         }
 
                         // Sync Lighting properties to LightingService resource for real-time updates
-                        if service.name == "Lighting" {
+                        if service.class_name == "Lighting" {
                             if let Some(ref mut lighting) = res.lighting {
                                 match key.as_str() {
                                     "Brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
@@ -6098,11 +6098,7 @@ fn sync_viewport_selection_to_explorer(
                     let cn = inst.class_name;
                     use eustress_common::classes::ClassName;
                     if matches!(cn, ClassName::Workspace | ClassName::Lighting |
-                        ClassName::StarterGui | ClassName::StarterPlayer |
-                        ClassName::ReplicatedStorage | ClassName::ServerScriptService |
-                        ClassName::ServerStorage | ClassName::Teams |
-                        ClassName::SoundService | ClassName::Chat |
-                        ClassName::Players | ClassName::Terrain) {
+                        ClassName::Terrain | ClassName::Team | ClassName::Sound) {
                         explorer_state.expanded_services.insert(inst.name.clone());
                     }
                 }

@@ -539,6 +539,8 @@ impl ClassId {
             ClassName::GridSensor => ClassId::Instance,
             ClassName::AlignmentGuide => ClassId::Instance,
             ClassName::SnapIndicator => ClassId::Instance,
+            ClassName::Material => ClassId::Instance,
+            ClassName::Image => ClassId::Instance,
         }
     }
     
