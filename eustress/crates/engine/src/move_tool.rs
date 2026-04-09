@@ -144,12 +144,16 @@ fn camera_scale_factor(camera_pos: Vec3, target: Vec3, fov_radians: f32) -> f32 
 fn draw_move_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<MoveToolState>,
+    studio_state: Res<crate::ui::StudioState>,
     query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
     child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
-    if !state.active || query.is_empty() {
+    // Draw Move gizmos when Move tool is active OR Select tool is active (Roblox UX:
+    // selecting an object immediately shows transform handles for visual feedback).
+    let show = state.active || studio_state.current_tool == crate::ui::Tool::Select;
+    if !show || query.is_empty() {
         return;
     }
 

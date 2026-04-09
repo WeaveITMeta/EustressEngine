@@ -255,15 +255,14 @@ fn auto_save_settings(
     }
 }
 
-/// Configure gizmos - tool handles should render on top
+/// Configure grid gizmos — normal depth testing so grid renders at ground level
 fn setup_grid_gizmo_config(
     mut config_store: ResMut<GizmoConfigStore>,
 ) {
     let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    
-    // Set depth_bias to render gizmos (tool handles, selection boxes) on top of objects
-    // This ensures Move/Scale/Rotate handles are always visible
-    config.depth_bias = -1.0;
+    // depth_bias = 0.0: normal depth testing. Grid lines at y=0.01 render
+    // on the ground plane. Positive = towards camera in Bevy 0.18 reversed-Z.
+    config.depth_bias = 0.0;
 }
 
 /// Draw grid overlay in viewport - follows camera on X/Z plane
