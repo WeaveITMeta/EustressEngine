@@ -158,24 +158,33 @@ impl Plugin for StudioPluginSystem {
     }
 }
 
-/// Advance the simulation clock each frame and sync with LightingService
+/// Advance the simulation clock each frame and sync with LightingService.
+/// IMPORTANT: Only writes to LightingService when the value actually changes
+/// to avoid marking it as changed every frame (triggers 512x512x6 skybox rebuild).
 fn advance_sim_clock(
     time: Res<Time>,
     mut clock: ResMut<SimClock>,
-    mut lighting: ResMut<eustress_common::services::LightingService>,
+    lighting: Option<ResMut<eustress_common::services::LightingService>>,
 ) {
     clock.tick(time.delta_secs());
-    
-    // Sync SimClock with LightingService time
-    // SimClock.current is in seconds, convert to time_of_day (0.0-1.0 = 24 hours)
-    // Use modulo to wrap around days
-    let sim_hours = (clock.current / 3600.0) % 24.0;
-    let time_of_day = sim_hours / 24.0;
-    
+
+    let Some(mut lighting) = lighting else { return };
+
     // Only update if simulation is running (not paused)
     if !clock.paused && clock.speed > 0.0 {
-        lighting.time_of_day = time_of_day as f32;
-        lighting.update_clock_time();
+        let sim_hours = (clock.current / 3600.0) % 24.0;
+        let new_tod = (sim_hours / 24.0) as f32;
+        // Only write when value changes meaningfully (avoids marking LightingService
+        // changed every frame → skybox regeneration every 60 frames = FPS stutter)
+        if (lighting.time_of_day - new_tod).abs() > 0.0001 {
+            lighting.time_of_day = new_tod;
+            lighting.update_clock_time();
+        } else {
+            lighting.bypass_change_detection();
+        }
+    } else {
+        // Not running — don't mark LightingService as changed
+        lighting.bypass_change_detection();
     }
 }
 
