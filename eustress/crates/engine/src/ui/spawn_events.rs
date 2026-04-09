@@ -178,7 +178,11 @@ pub fn handle_spawn_part_events(
                 } else {
                     // Register the file so file_loader tracks it
                     commands.entity(spawned_entity).insert(
-                        crate::space::instance_loader::InstanceFile { toml_path: final_path.clone() }
+                        crate::space::instance_loader::InstanceFile {
+                            toml_path: final_path.clone(),
+                            mesh_path: std::path::PathBuf::from(crate::spawn::part_type_to_glb_path(&event.part_type)),
+                            name: part_name.to_string(),
+                        }
                     );
                     info!("💾 Auto-saved {:?}", final_path.file_name().unwrap_or_default());
                 }

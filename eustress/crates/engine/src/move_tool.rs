@@ -65,6 +65,7 @@ impl Default for MoveToolState {
             drag_start_pos: Vec2::ZERO,
             free_drag: false,
             dragged_entity: None,
+            hovered_axis: None,
         }
     }
 }
