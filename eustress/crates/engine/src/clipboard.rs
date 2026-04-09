@@ -422,18 +422,12 @@ impl Clipboard {
         self.copied_entity_ids.iter().any(|id| current_selection.contains(id))
     }
     
-    /// Get paste offset for current paste operation.
-    /// Stacks pasted entities above the original by entity height.
+    /// Get paste offset for current paste operation
     pub fn get_paste_offset(&self) -> Vec3 {
-        let avg_height = self.entities.iter()
-            .filter_map(|e| e.properties.get("size").and_then(|v| v.as_array()))
-            .map(|a| a.get(1).and_then(|v: &serde_json::Value| v.as_f64()).unwrap_or(1.0) as f32)
-            .next()
-            .unwrap_or(1.0);
-        let y_offset = avg_height * (self.paste_count as f32 + 1.0);
-        Vec3::new(0.0, y_offset, 0.0)
+        let offset = self.paste_count as f32 * 2.0;
+        Vec3::new(offset, 0.0, offset)
     }
-    
+
     /// Increment paste counter
     pub fn increment_paste_count(&mut self) {
         self.paste_count += 1;
