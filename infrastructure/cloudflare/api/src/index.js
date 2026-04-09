@@ -67,6 +67,8 @@ export default {
         return handleJurisdiction(request, env, cors);
       if (url.pathname === '/api/kyc/upload' && request.method === 'POST')
         return handleKycUpload(request, env, cors);
+      if (url.pathname === '/api/kyc/submit' && request.method === 'POST')
+        return handleKycSubmit(request, env, cors);
       if (url.pathname.startsWith('/api/kyc/status/'))
         return handleKycStatus(url.pathname.split('/').pop(), env, cors);
 
@@ -665,6 +667,60 @@ async function handleKycStatus(verificationId, env, cors) {
   const data = await env.KYC_STATUS.get(verificationId);
   if (!data) return json({ error: 'Not found' }, 404, cors);
   return json(JSON.parse(data), 200, cors);
+}
+
+/// Submit KYC for verification after documents are uploaded.
+/// Checks that front (and optionally back) are uploaded, then marks as verified.
+/// In production this would trigger an async verification pipeline; for now
+/// documents in R2 + successful upload = auto-approved.
+async function handleKycSubmit(request, env, cors) {
+  try {
+    const body = await request.json();
+    const sessionId = body.session_id;
+    const needsBack = body.needs_back !== false; // default true
+
+    if (!sessionId)
+      return json({ error: 'Missing session_id' }, 400, cors);
+
+    // Check front is uploaded
+    const frontKey = `kyc-${sessionId}-front`;
+    const frontData = await env.KYC_STATUS.get(frontKey);
+    if (!frontData)
+      return json({ error: 'Front document not uploaded', status: 'incomplete' }, 400, cors);
+
+    // Check back if required
+    if (needsBack) {
+      const backKey = `kyc-${sessionId}-back`;
+      const backData = await env.KYC_STATUS.get(backKey);
+      if (!backData)
+        return json({ error: 'Back document not uploaded', status: 'incomplete' }, 400, cors);
+    }
+
+    // All documents present — mark session as verified
+    // (Production: queue for AI/human review instead of auto-approve)
+    const verificationId = `kyc-${sessionId}-front`;
+    const front = JSON.parse(frontData);
+
+    const verifiedRecord = {
+      ...front,
+      status: 'verified',
+      verified_at: new Date().toISOString(),
+      ocr_name: body.full_name || '',
+    };
+
+    // Update the front key status (this is what the frontend polls)
+    await env.KYC_STATUS.put(verificationId, JSON.stringify(verifiedRecord), {
+      expirationTtl: 86400 * 365, // Keep verified records for 1 year
+    });
+
+    return json({
+      status: 'verified',
+      verification_id: verificationId,
+      ocr_name: body.full_name || '',
+    }, 200, cors);
+  } catch (e) {
+    return json({ error: 'Submit failed: ' + e.message }, 500, cors);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

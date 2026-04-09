@@ -511,23 +511,24 @@ pub fn LoginPage() -> impl IntoView {
                                                             let birthday = reg_birthday.get();
                                                             let uname = reg_username.get();
                                                             let sess = kyc_session_id.get();
+                                                            let needs_back = reg_id_needs_back.get();
                                                             kyc_status_text.set("Uploading document...".to_string());
                                                             kyc_verified.set(false);
                                                             kyc_rejected.set(false);
                                                             spawn_local(async move {
                                                                 match upload_id_document(&file, "front", &id_type, &id_number, &birthday, &uname, &sess).await {
-                                                                    Ok(resp) => {
+                                                                    Ok(_resp) => {
                                                                         reg_id_front_uploaded.set(true);
-                                                                        kyc_status_text.set("Verifying your identity...".to_string());
-                                                                        // Start polling for verification result
-                                                                        poll_kyc_status(
-                                                                            resp.verification_id,
-                                                                            kyc_status_text,
-                                                                            kyc_verified_name,
-                                                                            kyc_verified,
-                                                                            kyc_rejected,
-                                                                            kyc_reject_reason,
-                                                                        ).await;
+                                                                        // If no back needed (passport), submit for verification now
+                                                                        if !needs_back {
+                                                                            kyc_status_text.set("Submitting for verification...".to_string());
+                                                                            submit_kyc_verification(
+                                                                                sess.clone(), false, uname.clone(),
+                                                                                kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason,
+                                                                            ).await;
+                                                                        } else {
+                                                                            kyc_status_text.set("Front uploaded — now upload back side".to_string());
+                                                                        }
                                                                     }
                                                                     Err(e) => {
                                                                         error.set(Some(format!("Upload failed: {}", e)));
@@ -580,7 +581,15 @@ pub fn LoginPage() -> impl IntoView {
                                                             let sess = kyc_session_id.get();
                                                             spawn_local(async move {
                                                                 match upload_id_document(&file, "back", &id_type, &id_number, &birthday, &uname, &sess).await {
-                                                                    Ok(_) => reg_id_back_uploaded.set(true),
+                                                                    Ok(_) => {
+                                                                        reg_id_back_uploaded.set(true);
+                                                                        // Both sides uploaded — submit for verification
+                                                                        kyc_status_text.set("Submitting for verification...".to_string());
+                                                                        submit_kyc_verification(
+                                                                            sess.clone(), true, uname.clone(),
+                                                                            kyc_status_text, kyc_verified_name, kyc_verified, kyc_rejected, kyc_reject_reason,
+                                                                        ).await;
+                                                                    }
                                                                     Err(e) => {
                                                                         error.set(Some(format!("Back upload failed: {}", e)));
                                                                         reg_id_back_uploaded.set(false);
@@ -881,6 +890,63 @@ async fn upload_id_document(
     } else {
         let text = resp.text().await.unwrap_or_default();
         Err(format!("Upload error ({}): {}", resp.status(), text))
+    }
+}
+
+/// Submit uploaded documents for verification and handle the result.
+/// Calls /api/kyc/submit which checks documents are present and marks verified.
+async fn submit_kyc_verification(
+    session_id: String,
+    needs_back: bool,
+    full_name: String,
+    status_signal: RwSignal<String>,
+    verified_name_signal: RwSignal<String>,
+    kyc_verified_signal: RwSignal<bool>,
+    kyc_rejected_signal: RwSignal<bool>,
+    reject_reason_signal: RwSignal<String>,
+) {
+    let api_url = "https://api.eustress.dev";
+    let url = format!("{}/api/kyc/submit", api_url);
+
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "needs_back": needs_back,
+        "full_name": full_name,
+    });
+
+    match gloo_net::http::Request::post(&url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .unwrap()
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let text = resp.text().await.unwrap_or_default();
+            if resp.status() == 200 {
+                if let Ok(result) = serde_json::from_str::<KycStatusResponse>(&text) {
+                    if result.status == "verified" {
+                        let name = result.ocr_name.unwrap_or_default();
+                        let display = if name.is_empty() { "you".to_string() } else { name.clone() };
+                        status_signal.set(format!("Verified as {}", display));
+                        verified_name_signal.set(name);
+                        kyc_verified_signal.set(true);
+                        return;
+                    }
+                }
+                // Unexpected status — fall back to polling
+                let vid = format!("kyc-{}-front", session_id);
+                poll_kyc_status(vid, status_signal, verified_name_signal, kyc_verified_signal, kyc_rejected_signal, reject_reason_signal).await;
+            } else {
+                status_signal.set(format!("Verification error: {}", text));
+                reject_reason_signal.set(text);
+                kyc_rejected_signal.set(true);
+            }
+        }
+        Err(e) => {
+            status_signal.set(format!("Network error: {}", e));
+            kyc_rejected_signal.set(true);
+        }
     }
 }
 
