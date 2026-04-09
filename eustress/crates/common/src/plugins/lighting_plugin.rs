@@ -499,7 +499,7 @@ pub fn create_procedural_skybox_with_sun(
                 // Moon disc — opposite side from sun, only when sun is low/below horizon
                 {
                     let moon_dir = -sun_dir; // Simplified: moon opposite sun
-                    let moon_radius = sun_angular_radius.to_radians() * 0.9; // Slightly smaller than sun
+                    let moon_radius = sun_angular_radius * 0.9; // Slightly smaller than sun (already radians)
                     let dot = nx * moon_dir.x + ny * moon_dir.y + nz * moon_dir.z;
                     let angle = dot.clamp(-1.0, 1.0).acos();
 

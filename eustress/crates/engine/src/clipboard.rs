@@ -429,8 +429,15 @@ impl Clipboard {
     
     /// Get paste offset for current paste operation
     pub fn get_paste_offset(&self) -> Vec3 {
-        // Offset each paste by 2 units upward (Y axis only)
-        let y_offset = self.paste_count as f32 * 2.0;
+        // Place pasted entity directly above the original (stacking on Y).
+        // First paste: offset by average entity height so it sits on top with no gap.
+        // Subsequent pastes: stack further up.
+        let avg_height = self.entities.iter()
+            .filter_map(|e| e.properties.get("size").and_then(|v| v.as_array()))
+            .map(|a| a.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32)
+            .next()
+            .unwrap_or(1.0);
+        let y_offset = avg_height * (self.paste_count as f32 + 1.0);
         Vec3::new(0.0, y_offset, 0.0)
     }
     
@@ -629,6 +636,7 @@ pub fn handle_paste_event(
     current_scene: Option<Res<CurrentScenePath>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut paste_completed: MessageWriter<PasteCompletedEvent>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         if clipboard.is_empty() {
@@ -662,7 +670,8 @@ pub fn handle_paste_event(
         
         let mut created_ids = Vec::new();
         
-        // Spawn entities from clipboard
+        // Spawn entities from clipboard and create TOML files (file-system-first)
+        let workspace_dir = space_root.as_ref().map(|sr| sr.0.join("Workspace"));
         for entity_data in &clipboard.entities {
             let spawned_id = spawn_entity_from_data(
                 &mut commands,
@@ -672,9 +681,40 @@ pub fn handle_paste_event(
                 entity_data,
                 offset,
             );
-            
+
             if let Some(id) = spawned_id {
                 created_ids.push(id);
+
+                // Create TOML file on disk for pasted entity
+                if let Some(ref ws_dir) = workspace_dir {
+                    let pos = Vec3::new(
+                        entity_data.position[0] + offset.x,
+                        entity_data.position[1] + offset.y,
+                        entity_data.position[2] + offset.z,
+                    );
+                    let copy_name = format!("{}_copy", entity_data.name);
+                    let toml_filename = format!("{}.glb.toml", copy_name);
+                    let toml_path = ws_dir.join(&toml_filename);
+                    // Build instance definition from clipboard data
+                    let mut instance_def = crate::space::instance_loader::InstanceDefinition::default();
+                    instance_def.instance.name = copy_name;
+                    instance_def.instance.class_name = entity_data.class.clone();
+                    instance_def.transform = crate::space::instance_loader::TransformData {
+                        position: [pos.x, pos.y, pos.z],
+                        rotation: entity_data.rotation,
+                        scale: entity_data.scale,
+                    };
+                    if let Some(size) = entity_data.properties.get("size").and_then(|v| v.as_array()) {
+                        instance_def.properties.size = [
+                            size.get(0).and_then(|v| v.as_f64()).unwrap_or(4.0) as f32,
+                            size.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                            size.get(2).and_then(|v| v.as_f64()).unwrap_or(2.0) as f32,
+                        ];
+                    }
+                    if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
+                        warn!("Failed to write paste TOML: {}", e);
+                    }
+                }
             }
         }
         

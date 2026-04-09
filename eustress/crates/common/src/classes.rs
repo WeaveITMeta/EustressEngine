@@ -253,6 +253,9 @@ pub enum ClassName {
     GridSensor,              // Dynamic corner indicator for smart snapping
     AlignmentGuide,          // Visual line showing edge/center alignment
     SnapIndicator,           // Ghost preview showing snapped position
+    // Asset Classes (file-system-first)
+    Material,                // .mat.toml material definition
+    Image,                   // .png/.jpg texture image asset
 }
 
 impl ClassName {
@@ -348,6 +351,8 @@ impl ClassName {
             ClassName::GridSensor => "GridSensor",
             ClassName::AlignmentGuide => "AlignmentGuide",
             ClassName::SnapIndicator => "SnapIndicator",
+            ClassName::Material => "Material",
+            ClassName::Image => "Image",
         }
     }
     
@@ -448,6 +453,8 @@ impl ClassName {
             "GridSensor" => Ok(ClassName::GridSensor),
             "AlignmentGuide" => Ok(ClassName::AlignmentGuide),
             "SnapIndicator" => Ok(ClassName::SnapIndicator),
+            "Material" => Ok(ClassName::Material),
+            "Image" => Ok(ClassName::Image),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }

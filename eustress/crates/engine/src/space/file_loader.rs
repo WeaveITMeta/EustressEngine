@@ -675,6 +675,11 @@ pub fn spawn_file_entry(
                         file_meta.path.clone(),
                         &definition,
                     );
+                    commands.entity(e).insert(LoadedFromFile {
+                        path: file_meta.path.clone(),
+                        file_type: file_meta.file_type,
+                        service: file_meta.service.clone(),
+                    });
                     registry.register(file_meta.path.clone(), e, file_meta.clone());
                     info!("🎨 Loaded material '{}' from {:?}", mat_name, file_meta.path);
                     e
@@ -686,58 +691,31 @@ pub fn spawn_file_entry(
             }
         }
 
+        FileType::Png => {
+            // Spawn Image class entity for PNG files (textures in MaterialService)
+            let img_name = file_meta.path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Image".to_string());
+            commands.spawn((
+                eustress_common::classes::Instance {
+                    name: img_name.clone(),
+                    class_name: eustress_common::classes::ClassName::Image,
+                    archivable: true,
+                    id: 0,
+                    ..Default::default()
+                },
+                LoadedFromFile {
+                    path: file_meta.path.clone(),
+                    file_type: file_meta.file_type,
+                    service: file_meta.service.clone(),
+                },
+                Name::new(img_name),
+            )).id()
+        }
+
         FileType::Ogg | FileType::Mp3 | FileType::Wav | FileType::Flac => {
             info!("🔊 Audio file discovered: {:?} (loader not yet implemented)", file_meta.path);
             return None;
-        }
-
-        FileType::Material => {
-            // Load .mat.toml into MaterialRegistry and spawn a marker entity
-            match super::material_loader::load_material_definition(&file_meta.path) {
-                Ok(mat_def) => {
-                    let mat_name = mat_def.material.name.clone();
-                    // Build StandardMaterial from definition and register
-                    let mat_toml_dir = file_meta.path.parent().unwrap_or(Path::new("."));
-                    let std_mat = super::material_loader::build_standard_material(
-                        &mat_def, asset_server, mat_toml_dir, space_path,
-                    );
-                    let mat_handle = materials.add(std_mat);
-                    material_registry.insert(
-                        mat_name.clone(),
-                        mat_handle,
-                        mat_def.clone(),
-                        file_meta.path.clone(),
-                    );
-
-                    // Spawn a marker entity so it appears in the Explorer under MaterialService
-                    let e = commands.spawn((
-                        eustress_common::classes::Instance {
-                            name: mat_name.clone(),
-                            class_name: eustress_common::classes::ClassName::Instance,
-                            archivable: true,
-                            id: 0,
-                            ..Default::default()
-                        },
-                        super::material_loader::MaterialDefinitionComponent {
-                            name: mat_name.clone(),
-                            source_path: file_meta.path.clone(),
-                        },
-                        LoadedFromFile {
-                            path: file_meta.path.clone(),
-                            file_type: file_meta.file_type,
-                            service: file_meta.service.clone(),
-                        },
-                        Name::new(mat_name.clone()),
-                    )).id();
-                    registry.register(file_meta.path.clone(), e, file_meta.clone());
-                    info!("🎨 Loaded material '{}' from {:?}", mat_name, file_meta.path);
-                    e
-                }
-                Err(err) => {
-                    error!("❌ Failed to load material {:?}: {}", file_meta.path, err);
-                    return None;
-                }
-            }
         }
 
         _ => {
@@ -938,9 +916,17 @@ pub fn spawn_directory_entry(
         )).id()
     } else {
         // Regular Folder / Model — 3D entity
+        // Capitalize first letter of folder names for display (e.g. "textures" → "Textures")
+        let display_name = {
+            let mut chars = dir_meta.name.chars();
+            match chars.next() {
+                None => dir_meta.name.clone(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        };
         commands.spawn((
             eustress_common::classes::Instance {
-                name: dir_meta.name.clone(),
+                name: display_name.clone(),
                 class_name,
                 archivable: true,
                 id: 0,
@@ -952,7 +938,7 @@ pub fn spawn_directory_entry(
                 file_type: FileType::Directory,
                 service: dir_meta.service.clone(),
             },
-            Name::new(dir_meta.name.clone()),
+            Name::new(display_name),
             Transform::default(),
             Visibility::default(),
         )).id()

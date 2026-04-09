@@ -2376,6 +2376,8 @@ struct DrainResources<'w> {
     change_queue: Option<Res<'w, eustress_common::change_queue::ChangeQueue>>,
     /// Forge orchestration state
     forge_state: Option<ResMut<'w, crate::forge::ForgeState>>,
+    /// Lighting service for real-time property sync
+    lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
 }
 
 /// Perform Ed25519 challenge-response auth against the API.
@@ -3904,6 +3906,16 @@ fn drain_slint_actions(
                 let selected_entity = res.explorer_state.as_ref().and_then(|es| {
                     match &es.selected {
                         SelectedItem::Entity(e) => Some(*e),
+                        // When a Service is selected, find its entity by name
+                        SelectedItem::Service(service_name) => {
+                            queries.instances.iter().find_map(|(entity, inst)| {
+                                if inst.name == *service_name {
+                                    Some(entity)
+                                } else {
+                                    None
+                                }
+                            })
+                        }
                         _ => None,
                     }
                 });
@@ -4202,6 +4214,27 @@ fn drain_slint_actions(
                                 }
                             } else if let Some(ref mut out) = res.output {
                                 out.info(format!("💾 Saved {} to {:?}", key, service.toml_path.file_name().unwrap_or_default()));
+                            }
+                        }
+
+                        // Sync Lighting properties to LightingService resource for real-time updates
+                        if service.name == "Lighting" {
+                            if let Some(ref mut lighting) = res.lighting {
+                                match key.as_str() {
+                                    "Brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
+                                    "ClockTime" => { lighting.clock_time = val.clone(); }
+                                    "GeographicLatitude" => { if let Ok(v) = val.parse::<f32>() { lighting.geographic_latitude = v; } }
+                                    "GlobalShadows" => { lighting.shadows_enabled = val == "true"; }
+                                    "FogEnabled" => { lighting.fog_enabled = val == "true"; }
+                                    "FogStart" => { if let Ok(v) = val.parse::<f32>() { lighting.fog_start = v; } }
+                                    "FogEnd" => { if let Ok(v) = val.parse::<f32>() { lighting.fog_end = v; } }
+                                    "SunIntensity" => { if let Ok(v) = val.parse::<f32>() { lighting.sun_intensity = v; } }
+                                    "SunAngularRadius" => { if let Ok(v) = val.parse::<f32>() { lighting.sun_angular_radius = v; } }
+                                    "ExposureCompensation" => { if let Ok(v) = val.parse::<f32>() { lighting.exposure_compensation = v; } }
+                                    "CycleEnabled" => { lighting.cycle_enabled = val == "true"; }
+                                    "DayLengthMinutes" => { if let Ok(v) = val.parse::<f32>() { lighting.day_length_minutes = v; } }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -5999,6 +6032,7 @@ fn sync_viewport_selection_to_explorer(
     selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     explorer_state: Option<ResMut<UnifiedExplorerState>>,
     instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    child_of_query: Query<&ChildOf>,
     mut last_sel_gen: Local<u64>,
 ) {
     let Some(sel_mgr) = selection_manager else { return };
@@ -6041,6 +6075,31 @@ fn sync_viewport_selection_to_explorer(
     };
     if changed {
         info!("[sel-bridge] Selection changed: {:?} → {:?}", explorer_state.selected, new_selected);
+
+        // Auto-expand all ancestors so the selected entity is visible in the tree.
+        // Walk up the ChildOf chain and insert each parent into expanded_entities.
+        if let SelectedItem::Entity(entity) = &new_selected {
+            let mut current = *entity;
+            while let Ok(child_of) = child_of_query.get(current) {
+                let parent = child_of.parent();
+                explorer_state.expanded_entities.insert(parent);
+                // Also expand the service header if the parent is a service root
+                if let Ok((_, inst)) = instances.get(parent) {
+                    let cn = inst.class_name;
+                    use eustress_common::classes::ClassName;
+                    if matches!(cn, ClassName::Workspace | ClassName::Lighting |
+                        ClassName::StarterGui | ClassName::StarterPlayer |
+                        ClassName::ReplicatedStorage | ClassName::ServerScriptService |
+                        ClassName::ServerStorage | ClassName::Teams |
+                        ClassName::SoundService | ClassName::Chat |
+                        ClassName::Players | ClassName::Terrain) {
+                        explorer_state.expanded_services.insert(inst.name.clone());
+                    }
+                }
+                current = parent;
+            }
+        }
+
         explorer_state.selected = new_selected;
         explorer_state.needs_immediate_sync = true;
     }
@@ -8589,6 +8648,9 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::ChunkedWorld => "instance",
         // Media UI — fallback
         ClassName::VideoFrame | ClassName::DocumentFrame | ClassName::WebFrame => "instance",
+        // Asset classes
+        ClassName::Material => "palette",
+        ClassName::Image => "imagelabel",
         _ => "instance",
     }
 }

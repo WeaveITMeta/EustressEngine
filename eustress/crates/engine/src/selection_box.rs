@@ -199,8 +199,13 @@ fn spawn_selection_adornments(
     let Some(mats) = materials else { return };
     if query.is_empty() { return; }
 
-    for (entity, _, base_part, part) in &query {
-        let size = base_part.map(|bp| bp.size).unwrap_or(Vec3::ONE);
+    for (entity, global_transform, base_part, part) in &query {
+        // Use BasePart.size if available, otherwise fall back to Transform.scale
+        // (GLB/mesh entities use Transform.scale for sizing, not BasePart)
+        let size = base_part.map(|bp| bp.size).unwrap_or_else(|| {
+            let t = global_transform.compute_transform();
+            t.scale
+        });
         let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
         // Get or create wireframe mesh
@@ -256,12 +261,15 @@ fn spawn_hover_adornments(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
-    query: Query<(Entity, Option<&BasePart>, Option<&Part>), (Added<Hovered>, Without<Selected>)>,
+    query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), (Added<Hovered>, Without<Selected>)>,
 ) {
     let Some(mats) = materials else { return };
 
-    for (entity, base_part, part) in &query {
-        let size = base_part.map(|bp| bp.size).unwrap_or(Vec3::ONE);
+    for (entity, global_transform, base_part, part) in &query {
+        let size = base_part.map(|bp| bp.size).unwrap_or_else(|| {
+            let t = global_transform.compute_transform();
+            t.scale
+        });
         let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
         let wireframe_handle = get_or_create_wireframe(

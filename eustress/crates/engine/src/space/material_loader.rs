@@ -450,6 +450,13 @@ pub fn spawn_material_entity(
 
     commands.spawn((
         Name::new(name.clone()),
+        eustress_common::classes::Instance {
+            name: name.clone(),
+            class_name: eustress_common::classes::ClassName::Material,
+            archivable: true,
+            id: 0,
+            ..Default::default()
+        },
         MaterialDefinitionComponent {
             name,
             source_path: path,
