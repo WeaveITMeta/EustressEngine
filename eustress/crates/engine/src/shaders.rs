@@ -22,7 +22,8 @@ pub struct SunDiscMarker;
 #[derive(Component)]
 pub struct MoonDiscMarker;
 
-/// Custom material for the sun/moon disc fragment shader
+/// Custom material for the sun/moon disc fragment shader.
+/// phase_angle < 0 = sun (no phase), >= 0 = moon (0=full, PI=new).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct SunDiscMaterial {
     #[uniform(0)]
@@ -36,7 +37,7 @@ pub struct SunDiscMaterial {
     #[uniform(0)]
     pub intensity: f32,
     #[uniform(0)]
-    pub _padding: f32,
+    pub phase_angle: f32,
 }
 
 impl MaterialExtension for SunDiscMaterial {
@@ -82,10 +83,10 @@ fn spawn_sun_disc(
         extension: SunDiscMaterial {
             color: LinearRgba::new(1.0, 0.98, 0.92, 1.0),
             corona_color: LinearRgba::new(1.0, 0.9, 0.7, 1.0),
-            disc_radius: 0.3,   // Disc fills 30% of the quad
-            corona_radius: 0.8, // Corona extends to 80%
-            intensity: 2.0,     // HDR brightness
-            _padding: 0.0,
+            disc_radius: 0.3,
+            corona_radius: 0.8,
+            intensity: 2.0,
+            phase_angle: -1.0, // Negative = sun (no phase rendering)
         },
     });
 
@@ -115,7 +116,7 @@ fn spawn_sun_disc(
             disc_radius: 0.35,
             corona_radius: 0.7,
             intensity: 0.8,
-            _padding: 0.0,
+            phase_angle: 0.0, // Updated each frame from Moon.phase_angle()
         },
     });
 
@@ -137,26 +138,26 @@ fn spawn_sun_disc(
 /// and orient them to face the camera.
 fn sync_sun_disc_transforms(
     camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<SunDiscMarker>, Without<MoonDiscMarker>)>,
-    sun_class: Query<&eustress_common::classes::SunClass, With<eustress_common::plugins::lighting_plugin::SunMarker>>,
+    sun_class: Query<&eustress_common::classes::Sun, With<eustress_common::plugins::lighting_plugin::SunMarker>>,
+    moon_class: Query<&eustress_common::classes::Moon, With<eustress_common::plugins::lighting_plugin::MoonMarker>>,
     mut sun_disc: Query<&mut Transform, (With<SunDiscMarker>, Without<MoonDiscMarker>)>,
-    mut moon_disc: Query<&mut Transform, (With<MoonDiscMarker>, Without<SunDiscMarker>)>,
+    mut moon_disc: Query<(&mut Transform, &MeshMaterial3d<SunMaterial>), (With<MoonDiscMarker>, Without<SunDiscMarker>)>,
+    mut sun_materials: ResMut<Assets<SunMaterial>>,
 ) {
     let Some(camera_gt) = camera_query.iter().find(|_| true) else { return };
     let cam_pos = camera_gt.translation();
 
-    // Get sun direction from SunClass (same source as skybox)
-    let sun_dir = sun_class.iter().next()
+    let sun_data = sun_class.iter().next();
+    let sun_dir = sun_data
         .map(|sc| sc.direction())
         .unwrap_or(Vec3::new(0.3, 0.8, 0.2).normalize());
 
-    let sky_distance = 500.0; // Far enough to be behind all geometry
+    let sky_distance = 500.0;
 
-    // Sun disc — position along sun direction, face camera
+    // Sun disc
     if let Ok(mut sun_t) = sun_disc.single_mut() {
         sun_t.translation = cam_pos + sun_dir * sky_distance;
         sun_t.look_at(cam_pos, Vec3::Y);
-        // Hide when sun is below horizon
-        // (scale to zero rather than visibility toggle to avoid Bevy visibility propagation cost)
         if sun_dir.y < -0.02 {
             sun_t.scale = Vec3::ZERO;
         } else {
@@ -164,15 +165,32 @@ fn sync_sun_disc_transforms(
         }
     }
 
-    // Moon disc — simplified opposite of sun
-    let moon_dir = (-sun_dir).normalize();
-    if let Ok(mut moon_t) = moon_disc.single_mut() {
+    // Moon disc — realistic orbital position + phase
+    let moon_data = moon_class.iter().next();
+    let moon_dir = match (moon_data, sun_data) {
+        (Some(moon), Some(sun)) => moon.direction_realistic(sun),
+        _ => (-sun_dir).normalize(),
+    };
+    if let Ok((mut moon_t, moon_mat_handle)) = moon_disc.single_mut() {
         moon_t.translation = cam_pos + moon_dir * sky_distance;
         moon_t.look_at(cam_pos, Vec3::Y);
         if moon_dir.y < -0.02 {
             moon_t.scale = Vec3::ZERO;
         } else {
             moon_t.scale = Vec3::splat(8.0);
+        }
+
+        // Update phase angle in the material each frame
+        if let Some(moon) = moon_data {
+            if let Some(mat) = sun_materials.get_mut(&moon_mat_handle.0) {
+                let new_phase = moon.phase_angle();
+                if (mat.extension.phase_angle - new_phase).abs() > 0.01 {
+                    mat.extension.phase_angle = new_phase;
+                }
+                // Scale intensity by illumination fraction
+                let illumination = moon.illumination();
+                mat.extension.intensity = 0.5 + illumination * 0.5;
+            }
         }
     }
 }
