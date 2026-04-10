@@ -216,6 +216,8 @@ fn main() {
         .add_plugins(MaterialSyncPlugin)
         // Shared lighting
         .add_plugins(SharedLightingPlugin)
+        // Analytical sun/moon disc shader (resolution-independent, replaces cubemap baking)
+        .add_plugins(shaders::SunDiscPlugin)
         // Default scene
         .add_plugins(DefaultScenePlugin)
         // Automatic .txt to .toml converter (file system workaround)

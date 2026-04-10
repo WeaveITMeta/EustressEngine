@@ -208,7 +208,7 @@ fn setup_lighting(
 /// Includes real-time shadow softness control
 fn update_sun_position(
     lighting: Option<ResMut<LightingService>>,
-    mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
+    mut sun_query: Query<(&mut DirectionalLight, &mut Transform, Option<&SunClass>), With<SunMarker>>,
     time: Res<Time>,
 ) {
     let Some(mut lighting) = lighting else { return };
@@ -222,15 +222,19 @@ fn update_sun_position(
             if lighting.time_of_day > 1.0 { lighting.time_of_day -= 1.0; }
         }
     } else {
-        // When cycle is off, skip the mutable borrow — read-only access
-        // doesn't trigger Bevy change detection.
         lighting.bypass_change_detection();
     }
 
-    if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
-        sun_light.color = arr_to_color(lighting.sun_color);
+    if let Ok((mut sun_light, mut sun_transform, sun_class)) = sun_query.single_mut() {
+        // Use SunClass direction if available (proper solar math with latitude),
+        // otherwise fall back to LightingService's simple formula.
+        // This ensures the DirectionalLight aligns with the skybox sun disc.
+        let sun_dir = sun_class.map(|sc| sc.direction())
+            .unwrap_or_else(|| lighting.sun_direction());
 
-        let sun_dir = lighting.sun_direction();
+        sun_light.color = arr_to_color(
+            sun_class.map(|sc| sc.current_color()).unwrap_or(lighting.sun_color)
+        );
         let elevation = sun_dir.y;
         let intensity_factor = elevation.max(0.0).powf(0.4);
         sun_light.illuminance = lighting.sun_intensity * intensity_factor;
@@ -396,7 +400,7 @@ pub fn create_procedural_skybox_with_sun(
     lighting: &LightingService,
     sun_dir_override: Option<Vec3>,
 ) -> Handle<Image> {
-    const SIZE: u32 = 512;
+    const SIZE: u32 = 1024;
     
     // AAA sky palette
     let zenith: [f32; 3] = [0.16, 0.32, 0.75];      // Deep blue zenith
@@ -467,59 +471,9 @@ pub fn create_procedural_skybox_with_sun(
                     )
                 };
                 
-                // Sun disc + corona glow (only above horizon)
-                if ny > -0.1 {
-                    // Angle between this pixel direction and sun direction (dot product of unit vectors)
-                    let dot = nx * sun_dir.x + ny * sun_dir.y + nz * sun_dir.z;
-                    let angle = dot.clamp(-1.0, 1.0).acos(); // radians from sun center
-                    
-                    if angle < sun_angular_radius {
-                        // Inside sun disc — bright white-yellow core
-                        let core_t = 1.0 - (angle / sun_angular_radius);
-                        let core_t = core_t * core_t; // Brighter center
-                        r = sun_color[0] * 0.95 + 0.05 * core_t;
-                        g = sun_color[1] * 0.95 + 0.05 * core_t;
-                        b = sun_color[2] * 0.90 + 0.10 * core_t;
-                        // Clamp to near-white for the disc
-                        r = r.max(0.98);
-                        g = g.max(0.95);
-                        b = b.max(0.85);
-                    } else if angle < corona_radius {
-                        // Corona glow — soft falloff around the sun
-                        let corona_t = 1.0 - ((angle - sun_angular_radius) / (corona_radius - sun_angular_radius));
-                        let corona_t = corona_t * corona_t * corona_t; // Cubic falloff for soft glow
-                        let glow_strength = corona_t * 0.6;
-                        // Warm glow blended over sky
-                        r = r + (sun_color[0] - r) * glow_strength;
-                        g = g + (sun_color[1] * 0.9 - g) * glow_strength;
-                        b = b + (sun_color[2] * 0.7 - b) * glow_strength * 0.5;
-                    }
-                }
-
-                // Moon disc — opposite side from sun, only when sun is low/below horizon
-                {
-                    let moon_dir = -sun_dir; // Simplified: moon opposite sun
-                    let moon_radius = sun_angular_radius * 0.9; // Slightly smaller than sun (already radians)
-                    let dot = nx * moon_dir.x + ny * moon_dir.y + nz * moon_dir.z;
-                    let angle = dot.clamp(-1.0, 1.0).acos();
-
-                    if angle < moon_radius && ny > -0.05 {
-                        // Moon disc — pale silver
-                        let t = 1.0 - (angle / moon_radius);
-                        let brightness = 0.7 + 0.3 * t * t;
-                        r = brightness * 0.85;
-                        g = brightness * 0.87;
-                        b = brightness * 0.92;
-                    } else if angle < moon_radius * 3.0 && ny > -0.05 {
-                        // Subtle moon glow
-                        let glow_t = 1.0 - ((angle - moon_radius) / (moon_radius * 2.0));
-                        let glow_t = glow_t * glow_t * glow_t;
-                        let glow = glow_t * 0.15;
-                        r = r + (0.85 - r) * glow;
-                        g = g + (0.87 - g) * glow;
-                        b = b + (0.92 - b) * glow;
-                    }
-                }
+                // Sun/Moon discs are rendered by the analytical SunDiscShader
+                // (resolution-independent, pixel-perfect at any distance).
+                // Cubemap only contains sky gradient + stars.
 
                 // Stars — only visible at night (sun well below horizon)
                 let pixel_faces_sky = ny > 0.0;
