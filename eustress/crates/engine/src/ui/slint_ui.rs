@@ -243,6 +243,7 @@ pub enum SlintAction {
     AddService,                   // (+) button — open add-service dialog
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
+    Deselect,                     // Click on empty space — clear selection
     
     // History panel
     HistoryJumpTo(i32),
@@ -1298,7 +1299,9 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_expand_all(move || q.push(SlintAction::ExpandAll));
     let q = queue.clone();
     ui.on_collapse_all(move || q.push(SlintAction::CollapseAll));
-    
+    let q = queue.clone();
+    ui.on_deselect(move || q.push(SlintAction::Deselect));
+
     // Properties
     let q = queue.clone();
     ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
@@ -3878,7 +3881,18 @@ fn drain_slint_actions(
                     es.dirty = true;
                 }
             }
-            
+
+            SlintAction::Deselect => {
+                // Clear selection in both Explorer and 3D viewport
+                if let Some(ref mut es) = res.explorer_state {
+                    es.selected = SelectedItem::None;
+                    es.needs_immediate_sync = true;
+                }
+                if let Some(ref sel) = res.selection_manager {
+                    sel.0.write().clear();
+                }
+            }
+
             // Properties section collapse/expand toggle
             SlintAction::SectionToggle(category) => {
                 if let Some(ref mut s) = res.state {

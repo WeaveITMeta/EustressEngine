@@ -487,6 +487,7 @@ export component StudioWindow inherits Window {
     callback add-service();  // (+) button — add a new service to the Space
     callback expand-all();   // Expand all explorer tree nodes
     callback collapse-all(); // Collapse all explorer tree nodes
+    callback deselect();     // Click on empty space — clear selection
     
     // Properties
     callback property-changed(string, string);
@@ -934,6 +935,7 @@ export component StudioWindow inherits Window {
                             on-add-service() => { root.add-service(); }
                             on-expand-all() => { root.expand-all(); }
                             on-collapse-all() => { root.collapse-all(); }
+                            on-deselect() => { root.deselect(); }
                             on-context-menu(x, y, node-id, node-type) => {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;

@@ -48,6 +48,7 @@ export component ExplorerPanel inherits Rectangle {
     callback on-add-service();  // (+) button to add a new service
     callback on-expand-all();   // Expand all tree nodes
     callback on-collapse-all(); // Collapse all tree nodes
+    callback on-deselect();     // Click on empty space deselects
     
     background: Theme.panel-background;
     
@@ -203,11 +204,20 @@ export component ExplorerPanel inherits Rectangle {
                     selected: node.selected;
                     show: node.visible;
                     
-                    clicked => { 
+                    clicked => {
                         root.on-select-node(node.id, node.node-type);
                     }
                     double-clicked => {
-                        root.on-open-node(node.id, node.node-type);
+                        // Double-click expands/collapses expandable nodes, opens leaf nodes
+                        if node.expandable {
+                            if node.expanded {
+                                root.on-collapse-node(node.id, node.node-type);
+                            } else {
+                                root.on-expand-node(node.id, node.node-type);
+                            }
+                        } else {
+                            root.on-open-node(node.id, node.node-type);
+                        }
                     }
                     toggle-expanded => {
                         if node.expanded {
@@ -217,6 +227,17 @@ export component ExplorerPanel inherits Rectangle {
                         }
                     }
                     context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
+                }
+
+                // Empty space fill — click to deselect
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 100px;
+                    background: transparent;
+                    TouchArea {
+                        clicked => { root.on-deselect(); }
+                        scroll-event(e) => { return reject; }
+                    }
                 }
             }
         }
