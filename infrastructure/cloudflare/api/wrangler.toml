@@ -63,5 +63,10 @@ bucket_name = "eustress-simulations"
 [triggers]
 crons = ["0 0 * * *"]
 
+# Email Workers — send identity backup emails from identity@eustress.dev
+# Requires Email Routing enabled on eustress.dev in Cloudflare dashboard
+[[send_email]]
+name = "EMAIL"
+
 [vars]
 FORK_ID = "eustress.dev"

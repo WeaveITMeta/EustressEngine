@@ -1,0 +1,19 @@
+{
+  "name": "api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "js-base64": "^3.7.8",
+    "mime-db": "^1.52.0",
+    "mime-types": "^2.1.35",
+    "mimetext": "^3.0.28"
+  }
+}

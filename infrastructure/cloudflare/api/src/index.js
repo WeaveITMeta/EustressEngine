@@ -404,7 +404,7 @@ async function handleVerify(request, env, cors) {
   return json({ token, user: publicUser(user) }, 200, cors);
 }
 
-// ── Identity Backup Email ───────────────────────────────────────────────────
+// ── Identity Backup Email (Cloudflare Email Workers) ────────────────────────
 async function handleEmailIdentityBackup(request, env, cors) {
   const body = await request.json();
   const { email, username, toml_content } = body;
@@ -414,37 +414,26 @@ async function handleEmailIdentityBackup(request, env, cors) {
   if (!toml_content || toml_content.length < 50)
     return json({ error: 'Invalid TOML content' }, 400, cors);
 
-  // Use Cloudflare Email Workers (MailChannels API — free for Workers)
-  const htmlBody = `
-<!DOCTYPE html>
+  const htmlBody = `<!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
   <div style="max-width:600px;margin:0 auto;padding:40px 20px;">
     <div style="background:#161b22;border-radius:12px;border:1px solid #30363d;overflow:hidden;">
-      <!-- Header -->
       <div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);padding:32px;text-align:center;">
         <h1 style="margin:0;color:#f0f6fc;font-size:24px;font-weight:700;">Eustress Identity Backup</h1>
         <p style="margin:8px 0 0;color:#8b949e;font-size:14px;">Your Ed25519 keypair — keep this safe</p>
       </div>
-      <!-- Body -->
       <div style="padding:24px 32px;">
-        <p style="color:#f0f6fc;font-size:14px;margin:0 0 16px;">
-          Hello <strong>${username || 'Creator'}</strong>,
-        </p>
+        <p style="color:#f0f6fc;font-size:14px;margin:0 0 16px;">Hello <strong>${username || 'Creator'}</strong>,</p>
         <p style="color:#8b949e;font-size:14px;margin:0 0 24px;">
           Below is your <code style="background:#21262d;padding:2px 6px;border-radius:4px;color:#79c0ff;">eustress-${username || 'identity'}.toml</code> file.
           This is your permanent Eustress identity — it contains your Ed25519 private key.
           Store it securely and never share it.
         </p>
-        <!-- TOML Content -->
         <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;margin:0 0 24px;">
           <pre style="margin:0;color:#c9d1d9;font-size:12px;font-family:'SF Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all;">${toml_content.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
         </div>
-        <!-- Instructions -->
         <div style="background:#1a2a3a;border:1px solid #2a3a4a;border-radius:8px;padding:16px;margin:0 0 24px;">
           <p style="color:#8ab4f8;font-size:13px;margin:0 0 8px;font-weight:600;">How to use this backup:</p>
           <ol style="color:#8ab4f8;font-size:12px;margin:0;padding-left:20px;line-height:1.8;">
@@ -457,19 +446,34 @@ async function handleEmailIdentityBackup(request, env, cors) {
           ⚠ Never share your private_key with anyone. Eustress staff will never ask for it.
         </p>
       </div>
-      <!-- Footer -->
       <div style="background:#0d1117;padding:16px 32px;text-align:center;border-top:1px solid #30363d;">
-        <p style="color:#484f58;font-size:11px;margin:0;">
-          Eustress Engine — Build, simulate, earn.
-        </p>
+        <p style="color:#484f58;font-size:11px;margin:0;">Eustress Engine — Build, simulate, earn.</p>
       </div>
     </div>
   </div>
 </body>
 </html>`;
 
+  const plainText = `Eustress Identity Backup for ${username}\n\nSave the following as eustress-${username}.toml:\n\n${toml_content}\n\nNever share your private_key with anyone.`;
+
   try {
-    // Send via MailChannels (free for Cloudflare Workers)
+    // Cloudflare Email Workers — native send_email binding
+    if (env.EMAIL) {
+      const { EmailMessage } = await import('cloudflare:email');
+      const { createMimeMessage } = await import('mimetext');
+      const msg = createMimeMessage();
+      msg.setSender({ name: 'Eustress Identity', addr: 'identity@eustress.dev' });
+      msg.setRecipient(email);
+      msg.setSubject(`Your Eustress Identity Backup — ${username || 'Creator'}`);
+      msg.addMessage({ contentType: 'text/html', data: htmlBody });
+      msg.addMessage({ contentType: 'text/plain', data: plainText });
+
+      const message = new EmailMessage('identity@eustress.dev', email, msg.asRaw());
+      await env.EMAIL.send(message);
+      return json({ ok: true, message: 'Backup emailed via Cloudflare Email' }, 200, cors);
+    }
+
+    // Fallback: MailChannels (legacy, may require API key)
     const emailResp = await fetch('https://api.mailchannels.net/tx/v1/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -479,7 +483,7 @@ async function handleEmailIdentityBackup(request, env, cors) {
         subject: `Your Eustress Identity Backup — ${username || 'Creator'}`,
         content: [
           { type: 'text/html', value: htmlBody },
-          { type: 'text/plain', value: `Eustress Identity Backup for ${username}\n\nSave the following as identity.toml:\n\n${toml_content}\n\nNever share your private_key.` },
+          { type: 'text/plain', value: plainText },
         ],
       }),
     });
@@ -493,7 +497,7 @@ async function handleEmailIdentityBackup(request, env, cors) {
     return json({ error: 'Email delivery failed', detail: errText }, 502, cors);
   } catch (e) {
     console.error('Email send error:', e);
-    return json({ error: 'Email service unavailable' }, 503, cors);
+    return json({ error: 'Email service error: ' + e.message }, 503, cors);
   }
 }
 
