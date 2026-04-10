@@ -95,6 +95,8 @@ pub struct PlayModeRuntime {
     pub camera_distance: f32,
     /// Physics enabled during play
     pub physics_enabled: bool,
+    /// Saved time_of_day from LightingService before play started
+    pub saved_time_of_day: Option<f32>,
 }
 
 impl PlayModeRuntime {

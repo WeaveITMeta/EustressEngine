@@ -42,31 +42,30 @@ component HelpIcon inherits Rectangle {
     height: 18px;
     visible: show-help-icons && description != "";
 
-    // Tooltip popup — shown on hover
-    if tip-area.has-hover && description != "": Rectangle {
-        // Position above-right of the icon
+    // Tooltip popup — uses PopupWindow so it renders above all panels
+    help-popup := PopupWindow {
         x: 20px;
         y: -6px;
-        width: min(240px, description.character-count * 7px + 16px);
-        height: 28px;
-        z: 1000;
-        background: #1a1a2e;
-        border-radius: 4px;
-        border-width: 1px;
-        border-color: learn-url != "" ? Theme.accent-blue : #444444;
-        drop-shadow-blur: 6px;
-        drop-shadow-color: #00000080;
+        width: min(300px, max(120px, description.character-count * 6.5px + 20px));
+        height: tip-text.preferred-height + 12px;
 
-        Text {
-            x: 8px;
-            y: 0px;
-            width: parent.width - 16px;
-            height: parent.height;
-            text: description;
-            color: Theme.text-primary;
-            font-size: 10px;
-            vertical-alignment: center;
-            overflow: elide;
+        Rectangle {
+            background: Theme.panel-background;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: learn-url != "" ? Theme.accent-blue : Theme.border-color;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000060;
+
+            tip-text := Text {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                text: description;
+                color: Theme.text-primary;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
         }
     }
 
@@ -75,6 +74,11 @@ component HelpIcon inherits Rectangle {
         clicked => {
             if root.learn-url != "" {
                 root.open-learn-url(root.learn-url);
+            }
+        }
+        moved => {
+            if self.has-hover && root.description != "" {
+                help-popup.show();
             }
         }
     }

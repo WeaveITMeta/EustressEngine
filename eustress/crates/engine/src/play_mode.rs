@@ -620,6 +620,7 @@ fn handle_start_play(
     mut cursor_options: Query<&mut CursorOptions, With<Window>>,
     cameras: Query<(Entity, &Transform), With<Camera3d>>,
     spawn_locations: Query<(&Transform, &SpawnLocation)>,
+    lighting: Option<Res<eustress_common::services::LightingService>>,
     snapshot_query: Query<(
         Entity,
         Option<&Transform>,
@@ -659,6 +660,9 @@ fn handle_start_play(
             play_mode.editor_camera = Some(cam_entity);
             runtime.editor_camera_transform = Some(*cam_transform);
         }
+
+        // Save lighting time_of_day so it can be restored on stop
+        runtime.saved_time_of_day = lighting.as_ref().map(|l| l.time_of_day);
         
         // Create comprehensive world snapshot
         let mut snapshot = WorldSnapshot::new(0, "Play Start");
@@ -864,6 +868,8 @@ fn handle_stop_play(
     spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
     all_entities: Query<Entity, With<Instance>>,
     play_mode_entities: Query<Entity, Or<(With<PlayModeCharacter>, With<PlayModeCamera>)>>,
+    mut lighting: Option<ResMut<eustress_common::services::LightingService>>,
+    mut sim_clock: Option<ResMut<crate::studio_plugins::api::SimClock>>,
 ) {
     if !studio_state.stop_requested { return; }
     studio_state.stop_requested = false;
@@ -1073,12 +1079,27 @@ fn handle_stop_play(
         }
         
         // Clear snapshot stack and runtime state
+        // Restore lighting time_of_day to pre-play value
+        if let (Some(saved_tod), Some(ref mut lighting)) = (runtime.saved_time_of_day, &mut lighting) {
+            lighting.time_of_day = saved_tod;
+            lighting.update_clock_time();
+            info!("☀ Restored time_of_day to {:.3}", saved_tod);
+        }
+
+        // Reset sim clock so it doesn't carry over to next play session
+        if let Some(ref mut clock) = sim_clock {
+            clock.current = 0.0;
+            clock.real_elapsed = 0.0;
+            clock.sim_elapsed = 0.0;
+            clock.frame_count = 0;
+        }
+
         snapshot_stack.clear();
         play_mode.world_snapshot = None;
         play_mode.started_at = None;
         play_mode.serialized_scene = None;
         runtime.clear();
-        
+
         next_state.set(PlayModeState::Editing);
     }
 }
@@ -1892,17 +1913,17 @@ pub struct SpawnedDuringPlayMode;
 fn activate_physics_for_unanchored_parts(
     mut commands: Commands,
     mut physics_time: ResMut<Time<Physics>>,
-    parts_query: Query<(Entity, &BasePart), (With<Part>, Without<PlayModeCharacter>)>,
+    parts_query: Query<(Entity, &BasePart, Option<&avian3d::prelude::Collider>), (With<Part>, Without<PlayModeCharacter>)>,
 ) {
-    // Ensure physics simulation is running
     physics_time.unpause();
     info!("⚡ Physics simulation started");
-    
+
     let mut activated_count = 0;
-    
-    for (entity, basepart) in parts_query.iter() {
-        // Only activate physics for unanchored parts
-        if !basepart.anchored {
+
+    for (entity, basepart, collider) in parts_query.iter() {
+        // Only activate physics for unanchored parts that have a Collider.
+        // Parts without colliders (custom GLB meshes) would get NaN mass → corruption.
+        if !basepart.anchored && collider.is_some() {
             commands.entity(entity)
                 .insert(RigidBody::Dynamic)
                 .insert(PlayModePhysicsActivated);

@@ -208,13 +208,12 @@ fn setup_lighting(
 /// Includes real-time shadow softness control
 fn update_sun_position(
     lighting: Option<ResMut<LightingService>>,
-    mut sun_query: Query<(&mut DirectionalLight, &mut Transform, Option<&SunClass>), With<SunMarker>>,
+    mut sun_query: Query<(&mut DirectionalLight, &mut Transform), With<SunMarker>>,
+    sun_class_query: Query<&SunClass, With<SunMarker>>,
     time: Res<Time>,
 ) {
     let Some(mut lighting) = lighting else { return };
 
-    // Only mutate LightingService when cycle is active — avoids marking it
-    // as changed every frame, which would trigger skybox regeneration.
     if lighting.cycle_enabled {
         let day_length_secs = lighting.day_length_minutes * 60.0;
         if day_length_secs > 0.0 {
@@ -225,16 +224,14 @@ fn update_sun_position(
         lighting.bypass_change_detection();
     }
 
-    if let Ok((mut sun_light, mut sun_transform, sun_class)) = sun_query.single_mut() {
+    if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
         // Use SunClass direction if available (proper solar math with latitude),
         // otherwise fall back to LightingService's simple formula.
-        // This ensures the DirectionalLight aligns with the skybox sun disc.
-        let sun_dir = sun_class.map(|sc| sc.direction())
+        let sun_dir = sun_class_query.iter().next()
+            .map(|sc| sc.direction())
             .unwrap_or_else(|| lighting.sun_direction());
 
-        sun_light.color = arr_to_color(
-            sun_class.map(|sc| sc.current_color()).unwrap_or(lighting.sun_color)
-        );
+        sun_light.color = arr_to_color(lighting.sun_color);
         let elevation = sun_dir.y;
         let intensity_factor = elevation.max(0.0).powf(0.4);
         sun_light.illuminance = lighting.sun_intensity * intensity_factor;

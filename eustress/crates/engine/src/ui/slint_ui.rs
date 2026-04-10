@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 
 // Slint software renderer imports
 use slint::platform::software_renderer::PremultipliedRgbaColor;
-use slint::{LogicalPosition, PhysicalSize};
+use slint::{LogicalPosition, PhysicalSize, Model};
 use slint::platform::WindowEvent;
 
 use crate::commands::{SelectionManager, TransformManager};
@@ -244,6 +244,10 @@ pub enum SlintAction {
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
     Deselect,                     // Click on empty space — clear selection
+    ExplorerNavigateUp,           // Arrow up in Explorer tree
+    ExplorerNavigateDown,         // Arrow down in Explorer tree
+    ExplorerNavigateCollapse,     // Arrow left — collapse current node
+    ExplorerNavigateExpand,       // Arrow right — expand current node
     
     // History panel
     HistoryJumpTo(i32),
@@ -1301,6 +1305,14 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_collapse_all(move || q.push(SlintAction::CollapseAll));
     let q = queue.clone();
     ui.on_deselect(move || q.push(SlintAction::Deselect));
+    let q = queue.clone();
+    ui.on_explorer_navigate_up(move || q.push(SlintAction::ExplorerNavigateUp));
+    let q = queue.clone();
+    ui.on_explorer_navigate_down(move || q.push(SlintAction::ExplorerNavigateDown));
+    let q = queue.clone();
+    ui.on_explorer_navigate_collapse(move || q.push(SlintAction::ExplorerNavigateCollapse));
+    let q = queue.clone();
+    ui.on_explorer_navigate_expand(move || q.push(SlintAction::ExplorerNavigateExpand));
 
     // Properties
     let q = queue.clone();
@@ -2206,7 +2218,7 @@ fn update_slint_ui_focus(
                     ui_focus.gui_element_hit = true;
                     // If left mouse just pressed on a TextButton, record its name for script dispatch
                     if mouse.just_pressed(bevy::input::mouse::MouseButton::Left)
-                        && gui.class_type == "TextButton"
+                        && gui.class_type == "textbutton"
                     {
                         let btn_name = instance.map(|i| i.name.clone()).unwrap_or_default();
                         info!("🖱️ ScreenGui button clicked: '{}'", btn_name);
@@ -2312,6 +2324,8 @@ struct DrainEventWriters<'w> {
     menu_events: MessageWriter<'w, MenuActionEvent>,
     undo_events: MessageWriter<'w, crate::commands::UndoCommandEvent>,
     redo_events: MessageWriter<'w, crate::commands::RedoCommandEvent>,
+    undo_action_events: MessageWriter<'w, crate::undo::UndoEvent>,
+    redo_action_events: MessageWriter<'w, crate::undo::RedoEvent>,
     history_events: MessageWriter<'w, crate::commands::HistoryActionEvent>,
     exit_events: MessageWriter<'w, bevy::app::AppExit>,
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
@@ -2751,8 +2765,14 @@ fn drain_slint_actions(
             SlintAction::Publish(request) => { events.file_events.write(FileEvent::Publish(request)); }
             
             // Edit operations → MenuActionEvent
-            SlintAction::Undo => { events.undo_events.write(crate::commands::UndoCommandEvent); }
-            SlintAction::Redo => { events.redo_events.write(crate::commands::RedoCommandEvent); }
+            SlintAction::Undo => {
+                events.undo_events.write(crate::commands::UndoCommandEvent);
+                events.undo_action_events.write(crate::undo::UndoEvent);
+            }
+            SlintAction::Redo => {
+                events.redo_events.write(crate::commands::RedoCommandEvent);
+                events.redo_action_events.write(crate::undo::RedoEvent);
+            }
             SlintAction::HistoryJumpTo(id) => { events.history_events.write(crate::commands::HistoryActionEvent::JumpTo(id)); }
             SlintAction::HistoryClear => { events.history_events.write(crate::commands::HistoryActionEvent::Clear); }
             SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
@@ -3671,6 +3691,7 @@ fn drain_slint_actions(
                                 known.iter().find(|n| service_name_to_id(n) == id).map(|n| n.to_string())
                             });
                             es.selected = name.map(SelectedItem::Service).unwrap_or(SelectedItem::None);
+                            es.needs_immediate_sync = true;
                             // Clear entity selection — service nodes are not focusable parts
                             if let Some(ref sel_mgr) = res.selection_manager {
                                 sel_mgr.0.write().clear();
@@ -3879,6 +3900,95 @@ fn drain_slint_actions(
                     es.expanded_services.clear();
                     es.expanded_dirs.clear();
                     es.dirty = true;
+                }
+            }
+
+            SlintAction::ExplorerNavigateUp | SlintAction::ExplorerNavigateDown => {
+                if let Some(ref mut es) = res.explorer_state {
+                    // Build list of visible node IDs in order
+                    let ui_ref = ui.as_ref();
+                    if let Some(ui_ref) = ui_ref {
+                        let nodes = ui_ref.get_tree_nodes();
+                        let visible_ids: Vec<(i32, String)> = (0..nodes.row_count())
+                            .filter_map(|i| {
+                                let node = nodes.row_data(i)?;
+                                if node.visible { Some((node.id, node.node_type.to_string())) } else { None }
+                            })
+                            .collect();
+
+                        // Find current selected index
+                        let current_idx = visible_ids.iter().position(|(id, nt)| {
+                            match &es.selected {
+                                SelectedItem::Entity(e) => {
+                                    es.entity_id_cache.get(id).map(|cached| *cached == *e).unwrap_or(false)
+                                }
+                                SelectedItem::Service(name) => {
+                                    *id < 0 && *nt == "entity" // Service nodes have negative IDs
+                                }
+                                _ => false,
+                            }
+                        });
+
+                        let new_idx = match &action {
+                            SlintAction::ExplorerNavigateUp => {
+                                current_idx.map(|i| if i > 0 { i - 1 } else { 0 }).unwrap_or(0)
+                            }
+                            SlintAction::ExplorerNavigateDown => {
+                                current_idx.map(|i| (i + 1).min(visible_ids.len().saturating_sub(1)))
+                                    .unwrap_or(0)
+                            }
+                            _ => unreachable!(),
+                        };
+
+                        if let Some((id, node_type)) = visible_ids.get(new_idx) {
+                            // Reuse SelectNode logic
+                            if *id < 0 {
+                                // Service node
+                                let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                    "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                    "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                    "MaterialService","AdornmentService"];
+                                if let Some(name) = known.iter().find(|n| service_name_to_id(n) == *id) {
+                                    es.selected = SelectedItem::Service(name.to_string());
+                                }
+                            } else if let Some(entity) = es.entity_id_cache.get(id).copied() {
+                                es.selected = SelectedItem::Entity(entity);
+                                if let Some(ref sel_mgr) = res.selection_manager {
+                                    let sm = sel_mgr.0.write();
+                                    sm.clear();
+                                    let eid = format!("{}v{}", entity.index(), entity.generation());
+                                    sm.select(eid);
+                                }
+                            }
+                            es.needs_immediate_sync = true;
+                        }
+                    }
+                }
+            }
+
+            SlintAction::ExplorerNavigateCollapse => {
+                // Collapse currently selected node
+                if let Some(ref mut es) = res.explorer_state {
+                    if let SelectedItem::Entity(entity) = &es.selected {
+                        es.expanded_entities.remove(entity);
+                        es.needs_immediate_sync = true;
+                    } else if let SelectedItem::Service(name) = &es.selected {
+                        es.expanded_services.remove(name);
+                        es.needs_immediate_sync = true;
+                    }
+                }
+            }
+
+            SlintAction::ExplorerNavigateExpand => {
+                // Expand currently selected node
+                if let Some(ref mut es) = res.explorer_state {
+                    if let SelectedItem::Entity(entity) = &es.selected {
+                        es.expanded_entities.insert(*entity);
+                        es.needs_immediate_sync = true;
+                    } else if let SelectedItem::Service(name) = &es.selected {
+                        es.expanded_services.insert(name.clone());
+                        es.needs_immediate_sync = true;
+                    }
                 }
             }
 
@@ -4149,8 +4259,18 @@ fn drain_slint_actions(
                     if let Ok(instance_file) = queries.instance_files.get(entity) {
                         match crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
                             Ok(mut def) => {
+                                // Sync current in-memory transform to the definition before writing,
+                                // so property edits don't overwrite the transform with stale disk values.
+                                if let Ok(t) = queries.transforms.get(entity) {
+                                    def.transform.position = [t.translation.x, t.translation.y, t.translation.z];
+                                    def.transform.rotation = [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w];
+                                    def.transform.scale = [t.scale.x, t.scale.y, t.scale.z];
+                                }
+                                // BasePart.size is stored via transform.scale in the TOML,
+                                // already synced above from Transform component.
+
                                 let changed = update_toml_property(&mut def, &key, &val);
-                                
+
                                 if changed {
                                     def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
                                     
@@ -4246,7 +4366,26 @@ fn drain_slint_actions(
                             if let Some(ref mut lighting) = res.lighting {
                                 match key.as_str() {
                                     "Brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
-                                    "ClockTime" => { lighting.clock_time = val.clone(); }
+                                    "ClockTime" => {
+                                        // ClockTime = "HH:MM:SS" format → parse to time_of_day
+                                        let parts: Vec<&str> = val.split(':').collect();
+                                        let h: f32 = parts.get(0).and_then(|s| s.trim().parse().ok()).unwrap_or(12.0);
+                                        let m: f32 = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+                                        let s: f32 = parts.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+                                        let hours = h + m / 60.0 + s / 3600.0;
+                                        lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
+                                        lighting.clock_time = val.clone();
+                                    }
+                                    "TimeOfDay" => {
+                                        // TimeOfDay = plain number (hours, e.g. 14.5 = 2:30pm)
+                                        if let Ok(hours) = val.parse::<f32>() {
+                                            lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
+                                            let h = hours as u32 % 24;
+                                            let m = ((hours % 1.0) * 60.0) as u32;
+                                            let sec = (((hours * 60.0) % 1.0) * 60.0) as u32;
+                                            lighting.clock_time = format!("{:02}:{:02}:{:02}", h, m, sec);
+                                        }
+                                    }
                                     "GeographicLatitude" => { if let Ok(v) = val.parse::<f32>() { lighting.geographic_latitude = v; } }
                                     "GlobalShadows" => { lighting.shadows_enabled = val == "true"; }
                                     "FogEnabled" => { lighting.fog_enabled = val == "true"; }
@@ -5947,40 +6086,37 @@ fn update_ui_performance(
     perf.update(time.delta_secs());
 }
 
-/// Sync CommandHistory state to the Slint HistoryPanel.
-/// Only rebuilds when history changes (generation tracking).
+/// Sync UndoStack state to the Slint HistoryPanel.
+/// Shows all undoable actions (transforms, deletes, etc.).
 fn sync_history_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
-    history: Option<Res<crate::commands::CommandHistory>>,
+    undo_stack: Option<Res<crate::undo::UndoStack>>,
 ) {
     let Some(ref context) = slint_context else { return };
-    let Some(ref history) = history else { return };
+    let Some(ref undo_stack) = undo_stack else { return };
 
-    // Only sync when CommandHistory actually changed
-    if !history.is_changed() {
+    if !undo_stack.is_changed() {
         return;
     }
 
     let ui = &context.window;
 
-    // Check if right panel is showing History tab (index 1)
     let right_tab = ui.get_right_tab_index();
     if right_tab != 1 {
         return;
     }
 
-    // Build snapshot from CommandHistory
-    let (entries, current_index) = history.snapshot();
+    let current_index = undo_stack.current_index();
+    let actions = undo_stack.history();
 
-    // Push to Slint
-    let slint_entries: Vec<HistoryEntry> = entries.iter().map(|e| {
+    let slint_entries: Vec<HistoryEntry> = actions.iter().enumerate().map(|(i, action)| {
         HistoryEntry {
-            id: e.id,
-            action: e.action.clone().into(),
-            description: e.description.clone().into(),
-            timestamp: e.timestamp.clone().into(),
-            is_current: e.is_current,
-            can_undo: (e.id as usize) < current_index,
+            id: i as i32,
+            action: action.description().into(),
+            description: action.description().into(),
+            timestamp: slint::SharedString::default(),
+            is_current: i == current_index.saturating_sub(1),
+            can_undo: i < current_index,
         }
     }).collect();
 
@@ -6073,9 +6209,14 @@ fn sync_viewport_selection_to_explorer(
     drop(mgr);
     let Some(mut explorer_state) = explorer_state else { return };
 
-    // Compute the new SelectedItem from the SelectionManager state
+    // Compute the new SelectedItem from the SelectionManager state.
+    // When SelectionManager is empty, only clear if the current selection is an Entity.
+    // Don't overwrite Service/File selections (which clear SM intentionally).
     let new_selected = if selected_ids.is_empty() {
-        SelectedItem::None
+        match &explorer_state.selected {
+            SelectedItem::Entity(_) => SelectedItem::None,
+            other => other.clone(), // Keep Service/File/None as-is
+        }
     } else {
         // Try to find the first selected entity by matching the id string
         // format "index v generation" (e.g. "42v0") produced by entity_to_id_string()
@@ -6144,6 +6285,8 @@ fn sync_unified_explorer_to_slint(
     terrain_chunks: Query<(Entity, &eustress_common::terrain::Chunk)>,
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
+    // Selection manager for multi-select highlighting in tree
+    selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
 ) {
     let Some(mut explorer_state) = explorer_state else { return };
 
@@ -6172,7 +6315,12 @@ fn sync_unified_explorer_to_slint(
     use super::file_icons;
     
     let mut tree_nodes: Vec<TreeNode> = Vec::new();
-    
+
+    // Build set of all selected entity IDs for multi-select highlighting
+    let selected_entity_ids: std::collections::HashSet<String> = selection_sync.as_ref()
+        .map(|sm| sm.0.read().get_selected().into_iter().collect())
+        .unwrap_or_default();
+
     // ================================================================
     // Part 1: Build ECS entity nodes (services + children)
     // ================================================================
@@ -6372,13 +6520,17 @@ fn sync_unified_explorer_to_slint(
                 }))
                 .unwrap_or(false);
 
-            // Assign a stable sequential i32 ID (avoids u64 truncation to i32)
-            let entity_id = *next_id;
+            // Stable entity ID: derive from entity bits so IDs survive tree rebuilds.
+            // This prevents double-click race conditions where the first click triggers
+            // a rebuild that invalidates the sequential ID before the open action fires.
+            let entity_id = (entity.to_bits() & 0x7FFF_FFFF) as i32; // Positive, deterministic
             entity_id_cache.insert(entity_id, entity);
-            *next_id += 1;
 
             let is_expanded = expanded_entities.contains(&entity);
-            let is_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == entity);
+            // Multi-select: check both the primary SelectedItem AND the full SelectionManager set
+            let entity_id_str = format!("{}v{}", entity.index(), entity.generation());
+            let is_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == entity)
+                || selected_entity_ids.contains(&entity_id_str);
 
             // Use ServiceComponent icon if available, otherwise fall back to class icon
             let icon = if let Ok(service) = service_components.get(entity) {
@@ -7214,21 +7366,40 @@ fn sync_properties_to_slint(
         if d.properties {
             d.properties = false;
             studio_state.last_properties_hash = 0;
+            studio_state.last_selection_hash = 0;
             studio_state.frames_since_selection_change = 0;
         }
     }
 
-    // Detect selection changes to trigger immediate sync
-    let current_selected = match &explorer_state.selected {
-        SelectedItem::Entity(e) => Some(*e),
-        _ => None,
+    // Detect selection changes to trigger immediate sync.
+    // Hash ALL selection variants (Entity, Service, File, None) so switching
+    // between any two always triggers a rebuild.
+    let selection_hash: u64 = match &explorer_state.selected {
+        SelectedItem::Entity(e) => 1 + e.to_bits(),
+        SelectedItem::Service(name) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            name.hash(&mut h);
+            0x8000_0000_0000_0000 | h.finish()
+        }
+        SelectedItem::File(path) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            path.hash(&mut h);
+            0x4000_0000_0000_0000 | h.finish()
+        }
+        SelectedItem::None => 0,
     };
 
-    let selection_changed = current_selected != studio_state.last_selected_entity;
+    let selection_changed = selection_hash != studio_state.last_selection_hash;
     if selection_changed {
-        studio_state.last_selected_entity = current_selected;
+        studio_state.last_selected_entity = match &explorer_state.selected {
+            SelectedItem::Entity(e) => Some(*e),
+            _ => None,
+        };
         studio_state.frames_since_selection_change = 0;
-        studio_state.last_properties_hash = 0; // Force rebuild on selection change
+        studio_state.last_selection_hash = selection_hash;
+        studio_state.last_properties_hash = 0; // Force content rebuild
     } else {
         studio_state.frames_since_selection_change += 1;
     }
@@ -8210,7 +8381,17 @@ fn build_service_properties(
                                     toml::Value::Integer(i) => Some(i.to_string()),
                                     toml::Value::Float(f) => Some(f.to_string()),
                                     toml::Value::Boolean(b) => Some(b.to_string()),
-                                    toml::Value::Array(arr) => Some(format!("{:?}", arr)),
+                                    toml::Value::Array(arr) => {
+                                        // Format arrays as clean comma-separated values
+                                        let parts: Vec<String> = arr.iter().map(|v| match v {
+                                            toml::Value::Float(f) => format!("{:.2}", f),
+                                            toml::Value::Integer(i) => i.to_string(),
+                                            toml::Value::Boolean(b) => b.to_string(),
+                                            toml::Value::String(s) => s.clone(),
+                                            other => format!("{}", other),
+                                        }).collect();
+                                        Some(parts.join(", "))
+                                    }
                                     _ => None,
                                 })
                                 .unwrap_or_default();
@@ -8557,8 +8738,9 @@ fn sync_center_tabs_to_slint(
     // Sync editor content + line numbers to Slint when a script or code tab is active.
     // Skip during deferred tab switch — content is pushed in Frame N+3 instead.
     let script_dirty = state.script_content_dirty;
-    if script_dirty { state.script_content_dirty = false; }
     let in_deferred = state.tabs_deferred_frames > 0;
+    // Don't consume the dirty flag during deferral — wait until we can actually apply it
+    if !in_deferred && script_dirty { state.script_content_dirty = false; }
     if !in_deferred && (tab_type == "script" || tab_type == "code") && script_dirty {
         let language = if state.active_center_tab > 0 {
             let idx = (state.active_center_tab - 1) as usize;
@@ -8669,7 +8851,7 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         // Media UI — fallback
         ClassName::VideoFrame | ClassName::DocumentFrame | ClassName::WebFrame => "instance",
         // Asset classes
-        ClassName::Material => "palette",
+        ClassName::Material => "materialservice",
         ClassName::Image => "imagelabel",
         _ => "instance",
     }

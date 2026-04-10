@@ -212,24 +212,33 @@ component GroupDivider inherits Rectangle {
 component DropdownItem inherits Rectangle {
     in property <string> label: "";
     in property <string> shortcut: "";
+    in property <image> icon;
     in property <bool> enabled: true;
     callback clicked();
-    
+
     height: 24px;
     background: item-touch.has-hover && root.enabled ? Theme.button-hover : transparent;
     opacity: root.enabled ? 1.0 : 0.4;
-    
+
     item-touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
-    
+
     HorizontalLayout {
-        padding-left: 10px;
+        padding-left: 8px;
         padding-right: 10px;
-        spacing: 12px;
-        
+        spacing: 6px;
+
+        Image {
+            width: 16px;
+            height: 16px;
+            source: root.icon;
+            image-fit: contain;
+            vertical-alignment: center;
+        }
+
         Text {
             horizontal-stretch: 1;
             text: root.label;
@@ -238,7 +247,7 @@ component DropdownItem inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        
+
         if root.shortcut != "": Text {
             text: root.shortcut;
             color: Theme.text-secondary;
@@ -606,59 +615,58 @@ export component Ribbon inherits Rectangle {
                                     width: 240px;
                                     
                                     DropdownHeader { label: "PRIMITIVES"; }
-                                    DropdownItem { label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
-                                    DropdownItem { label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
-                                    DropdownItem { label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
-                                    DropdownItem { label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
-                                    DropdownItem { label: "UnionOperation"; clicked => { root.on-menu-action("insert:unionoperation"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Part (Block)"; clicked => { root.on-menu-action("insert:part"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Sphere"; clicked => { root.on-menu-action("insert:sphere"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Cylinder"; clicked => { root.on-menu-action("insert:cylinder"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/part.svg"); label: "Wedge"; clicked => { root.on-menu-action("insert:wedge"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "STRUCTURE"; }
-                                    DropdownItem { label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
-                                    DropdownItem { label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
-                                    DropdownItem { label: "SpawnLocation"; clicked => { root.on-menu-action("insert:spawnlocation"); } }
-                                    DropdownItem { label: "Seat"; clicked => { root.on-menu-action("insert:seat"); } }
-                                    DropdownItem { label: "VehicleSeat"; clicked => { root.on-menu-action("insert:vehicleseat"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/model.svg"); label: "Model"; clicked => { root.on-menu-action("insert:model"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/folder.svg"); label: "Folder"; clicked => { root.on-menu-action("insert:folder"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "SpawnLocation"; clicked => { root.on-menu-action("insert:spawnlocation"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "Seat"; clicked => { root.on-menu-action("insert:seat"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/spawnlocation.svg"); label: "VehicleSeat"; clicked => { root.on-menu-action("insert:vehicleseat"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "SCRIPTING"; }
-                                    DropdownItem { label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
-                                    DropdownItem { label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
-                                    DropdownItem { label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/script.svg"); label: "Script"; clicked => { root.on-menu-action("insert:script"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/localscript.svg"); label: "LocalScript"; clicked => { root.on-menu-action("insert:localscript"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/modulescript.svg"); label: "ModuleScript"; clicked => { root.on-menu-action("insert:modulescript"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "CONSTRAINTS"; }
-                                    DropdownItem { label: "Attachment"; clicked => { root.on-menu-action("insert:attachment"); } }
-                                    DropdownItem { label: "WeldConstraint"; clicked => { root.on-menu-action("insert:weldconstraint"); } }
-                                    DropdownItem { label: "Motor6D"; clicked => { root.on-menu-action("insert:motor6d"); } }
-                                    DropdownItem { label: "Beam"; clicked => { root.on-menu-action("insert:beam"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/attachment.svg"); label: "Attachment"; clicked => { root.on-menu-action("insert:attachment"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/weldconstraint.svg"); label: "WeldConstraint"; clicked => { root.on-menu-action("insert:weldconstraint"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/motor6d.svg"); label: "Motor6D"; clicked => { root.on-menu-action("insert:motor6d"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/beam.svg"); label: "Beam"; clicked => { root.on-menu-action("insert:beam"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "EFFECTS"; }
-                                    DropdownItem { label: "ParticleEmitter"; clicked => { root.on-menu-action("insert:particleemitter"); } }
-                                    DropdownItem { label: "Decal"; clicked => { root.on-menu-action("insert:decal"); } }
-                                    DropdownItem { label: "Sound"; clicked => { root.on-menu-action("insert:sound"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/particleemitter.svg"); label: "ParticleEmitter"; clicked => { root.on-menu-action("insert:particleemitter"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/decal.svg"); label: "Decal"; clicked => { root.on-menu-action("insert:decal"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/sound.svg"); label: "Sound"; clicked => { root.on-menu-action("insert:sound"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "LIGHTING"; }
-                                    DropdownItem { label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
-                                    DropdownItem { label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
-                                    DropdownItem { label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/pointlight.svg"); label: "PointLight"; clicked => { root.on-menu-action("insert:pointlight"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/spotlight.svg"); label: "SpotLight"; clicked => { root.on-menu-action("insert:spotlight"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/surfacelight.svg"); label: "SurfaceLight"; clicked => { root.on-menu-action("insert:surfacelight"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "UI - CONTAINERS"; }
-                                    DropdownItem { label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
-                                    DropdownItem { label: "BillboardGui"; clicked => { root.on-menu-action("insert:billboardgui"); } }
-                                    DropdownItem { label: "SurfaceGui"; clicked => { root.on-menu-action("insert:surfacegui"); } }
-                                    DropdownItem { label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
-                                    DropdownItem { label: "ScrollingFrame"; clicked => { root.on-menu-action("insert:scrollingframe"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/screengui.svg"); label: "ScreenGui"; clicked => { root.on-menu-action("insert:screengui"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/billboardgui.svg"); label: "BillboardGui"; clicked => { root.on-menu-action("insert:billboardgui"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/surfacegui.svg"); label: "SurfaceGui"; clicked => { root.on-menu-action("insert:surfacegui"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/frame.svg"); label: "Frame"; clicked => { root.on-menu-action("insert:frame"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/scrollingframe.svg"); label: "ScrollingFrame"; clicked => { root.on-menu-action("insert:scrollingframe"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "UI - DISPLAY"; }
-                                    DropdownItem { label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
-                                    DropdownItem { label: "ImageLabel"; clicked => { root.on-menu-action("insert:imagelabel"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/textlabel.svg"); label: "TextLabel"; clicked => { root.on-menu-action("insert:textlabel"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/imagelabel.svg"); label: "ImageLabel"; clicked => { root.on-menu-action("insert:imagelabel"); } }
                                     DropdownSeparator {}
                                     DropdownHeader { label: "UI - INTERACTIVE"; }
-                                    DropdownItem { label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
-                                    DropdownItem { label: "ImageButton"; clicked => { root.on-menu-action("insert:imagebutton"); } }
-                                    DropdownItem { label: "TextBox"; clicked => { root.on-menu-action("insert:textbox"); } }
-                                    DropdownItem { label: "ViewportFrame"; clicked => { root.on-menu-action("insert:viewportframe"); } }
-                                    DropdownItem { label: "VideoFrame"; clicked => { root.on-menu-action("insert:videoframe"); } }
-                                    DropdownItem { label: "DocumentFrame"; clicked => { root.on-menu-action("insert:documentframe"); } }
-                                    DropdownItem { label: "WebFrame"; clicked => { root.on-menu-action("insert:webframe"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/textbutton.svg"); label: "TextButton"; clicked => { root.on-menu-action("insert:textbutton"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/imagebutton.svg"); label: "ImageButton"; clicked => { root.on-menu-action("insert:imagebutton"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/textbox.svg"); label: "TextBox"; clicked => { root.on-menu-action("insert:textbox"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/viewportframe.svg"); label: "ViewportFrame"; clicked => { root.on-menu-action("insert:viewportframe"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "VideoFrame"; clicked => { root.on-menu-action("insert:videoframe"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "DocumentFrame"; clicked => { root.on-menu-action("insert:documentframe"); } }
+                                    DropdownItem { icon: @image-url("../../assets/icons/instance.svg"); label: "WebFrame"; clicked => { root.on-menu-action("insert:webframe"); } }
                                 }
                             }
                         }

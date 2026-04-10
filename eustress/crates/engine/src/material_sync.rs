@@ -18,15 +18,36 @@ impl Plugin for MaterialSyncPlugin {
 fn sync_basepart_to_material(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
     query: Query<(
-        Entity, 
-        &BasePart, 
-        &MeshMaterial3d<StandardMaterial>, 
+        Entity,
+        &BasePart,
+        &MeshMaterial3d<StandardMaterial>,
         Option<&NotShadowCaster>,
         Option<&TransmittedShadowReceiver>,
     ), Changed<BasePart>>,
 ) {
     for (entity, basepart, material_handle, has_no_shadow, has_transmission) in query.iter() {
+        // If the MaterialRegistry has a pre-built material with textures for this
+        // preset name, swap the handle entirely (gets textures on all faces).
+        let mat_name = format!("{:?}", basepart.material);
+        if let Some(ref registry) = material_registry {
+            if let Some(registry_handle) = registry.get(&mat_name) {
+                // Clone the registry material so we can tint it with the part's color
+                if let Some(base_mat) = materials.get(&registry_handle) {
+                    let mut cloned = base_mat.clone();
+                    let alpha = 1.0 - basepart.transparency.clamp(0.0, 1.0);
+                    cloned.base_color = basepart.color.with_alpha(alpha);
+                    if basepart.transparency > 0.0 {
+                        cloned.alpha_mode = AlphaMode::Blend;
+                    }
+                    let new_handle = materials.add(cloned);
+                    commands.entity(entity).insert(MeshMaterial3d(new_handle));
+                    continue; // Skip the fallback property-only sync below
+                }
+            }
+        }
+
         if let Some(material) = materials.get_mut(&material_handle.0) {
             // Sync Color and Transparency
             let alpha = 1.0 - basepart.transparency.clamp(0.0, 1.0);

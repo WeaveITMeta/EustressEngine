@@ -49,6 +49,10 @@ export component ExplorerPanel inherits Rectangle {
     callback on-expand-all();   // Expand all tree nodes
     callback on-collapse-all(); // Collapse all tree nodes
     callback on-deselect();     // Click on empty space deselects
+    callback navigate-up();     // Arrow up — select previous visible node
+    callback navigate-down();   // Arrow down — select next visible node
+    callback navigate-collapse(); // Arrow left — collapse current node
+    callback navigate-expand();   // Arrow right — expand current node
     
     background: Theme.panel-background;
     
@@ -183,18 +187,24 @@ export component ExplorerPanel inherits Rectangle {
             }
         }
         
-        // Entity tree (vertical scroll only — no horizontal scrollbar)
-        ScrollView {
+        // Entity tree with keyboard navigation
+        explorer-keys := FocusScope {
             vertical-stretch: 1;
+
+            key-pressed(event) => {
+                if event.text == Key.UpArrow   { root.navigate-up();       return accept; }
+                if event.text == Key.DownArrow  { root.navigate-down();     return accept; }
+                if event.text == Key.LeftArrow  { root.navigate-collapse(); return accept; }
+                if event.text == Key.RightArrow { root.navigate-expand();   return accept; }
+                return reject;
+            }
+
+        ScrollView {
             horizontal-scrollbar-policy: always-off;
-            
+
             VerticalLayout {
                 spacing: 0px;
-                
-                // ============================================================
-                // Unified tree: ECS entities + filesystem nodes
-                // Rendered from single flat list with depth values
-                // ============================================================
+
                 for node in root.tree-nodes: TreeItem {
                     depth: node.depth;
                     icon: node.icon;
@@ -208,7 +218,9 @@ export component ExplorerPanel inherits Rectangle {
                         root.on-select-node(node.id, node.node-type);
                     }
                     double-clicked => {
-                        // Double-click expands/collapses expandable nodes, opens leaf nodes
+                        // Select first so the node is highlighted
+                        root.on-select-node(node.id, node.node-type);
+                        // Then expand/collapse or open
                         if node.expandable {
                             if node.expanded {
                                 root.on-collapse-node(node.id, node.node-type);
@@ -241,5 +253,6 @@ export component ExplorerPanel inherits Rectangle {
                 }
             }
         }
+        } // close FocusScope
     }
 }

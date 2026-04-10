@@ -268,6 +268,7 @@ fn handle_move_interaction(
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     spatial_query: SpatialQuery,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
 ) {
     if !state.active { return; }
 
@@ -417,7 +418,13 @@ fn handle_move_interaction(
             }
         } else if state.free_drag {
             // Free drag — surface snapping (same as select tool)
-            let selected_entities: Vec<Entity> = query.iter().map(|(e, ..)| e).collect();
+            // Exclude selected entities AND their children (adornments) from raycast
+            let mut selected_entities: Vec<Entity> = query.iter().map(|(e, ..)| e).collect();
+            for parent in selected_entities.clone() {
+                if let Ok(children) = children_query.get(parent) {
+                    selected_entities.extend(children.iter());
+                }
+            }
 
             let surface_hit = find_surface_with_physics(&spatial_query, &ray, &selected_entities)
                 .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
@@ -440,13 +447,13 @@ fn handle_move_interaction(
 
             let target_pos = if let Some((hit_point, hit_normal, _)) = surface_hit {
                 let offset = calculate_surface_offset(&leader_size, &leader_rot, &hit_normal);
-                hit_point + hit_normal * (offset + 0.005)
+                hit_point + hit_normal * offset
             } else {
                 // Fallback: drag on horizontal plane
                 if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, Vec3::Y) {
                     let ground = ray.origin + *ray.direction * t;
                     let offset = calculate_surface_offset(&leader_size, &leader_rot, &Vec3::Y);
-                    Vec3::new(ground.x, offset + 0.005, ground.z)
+                    Vec3::new(ground.x, offset, ground.z)
                 } else {
                     leader_initial
                 }
@@ -494,6 +501,18 @@ fn handle_move_interaction(
 
             if !old_transforms.is_empty() {
                 undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
+            }
+
+            // Write updated transforms back to TOML (file-system-first persistence)
+            for (entity, _, transform, _) in query.iter() {
+                if let Ok(inst_file) = instance_files.get(entity) {
+                    if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                        def.transform.position = [transform.translation.x, transform.translation.y, transform.translation.z];
+                        def.transform.rotation = [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w];
+                        def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+                        let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
+                    }
+                }
             }
         }
 

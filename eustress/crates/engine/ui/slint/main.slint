@@ -375,6 +375,13 @@ export component StudioWindow inherits Window {
     out property <float> viewport-x: viewport-sizer.absolute-position.x / 1px;
     out property <float> viewport-y: viewport-sizer.absolute-position.y / 1px;
     
+    // Box selection overlay (set by Bevy during drag-to-select)
+    in property <bool> box-select-visible: false;
+    in property <float> box-select-x: 0;
+    in property <float> box-select-y: 0;
+    in property <float> box-select-w: 0;
+    in property <float> box-select-h: 0;
+
     // Viewport image (set by Bevy with rendered 3D scene)
     in-out property <image> viewport-image;
     
@@ -488,6 +495,10 @@ export component StudioWindow inherits Window {
     callback expand-all();   // Expand all explorer tree nodes
     callback collapse-all(); // Collapse all explorer tree nodes
     callback deselect();     // Click on empty space — clear selection
+    callback explorer-navigate-up();       // Arrow up in Explorer
+    callback explorer-navigate-down();     // Arrow down in Explorer
+    callback explorer-navigate-collapse(); // Arrow left — collapse node
+    callback explorer-navigate-expand();   // Arrow right — expand node
     
     // Properties
     callback property-changed(string, string);
@@ -936,6 +947,10 @@ export component StudioWindow inherits Window {
                             on-expand-all() => { root.expand-all(); }
                             on-collapse-all() => { root.collapse-all(); }
                             on-deselect() => { root.deselect(); }
+                            navigate-up() => { root.explorer-navigate-up(); }
+                            navigate-down() => { root.explorer-navigate-down(); }
+                            navigate-collapse() => { root.explorer-navigate-collapse(); }
+                            navigate-expand() => { root.explorer-navigate-expand(); }
                             on-context-menu(x, y, node-id, node-type) => {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;
@@ -1869,6 +1884,19 @@ export component StudioWindow inherits Window {
                         }
                     }
                 }
+                // ── Box Selection Overlay ──────────────────────────
+                // Renders on top of 3D viewport during drag-to-select
+                if root.box-select-visible: Rectangle {
+                    x: root.box-select-x * 1px;
+                    y: root.box-select-y * 1px;
+                    width: root.box-select-w * 1px;
+                    height: root.box-select-h * 1px;
+                    background: #59bbff26;
+                    border-width: 1px;
+                    border-color: #59bbffcc;
+                    border-radius: 1px;
+                }
+
                 } // close viewport-sizer
                 }
             }

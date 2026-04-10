@@ -13,6 +13,12 @@ use eustress_common::simulation::{
 
 use crate::play_mode::PlayModeState;
 
+/// Bevy Resource mirror of SIM_VALUES thread-local.
+/// Written by `publish_echem_to_sim_values` (Update), read by `record_and_stream_watchpoints` (PostUpdate).
+/// Avoids thread-local cross-thread visibility issues in Bevy's multi-threaded executor.
+#[derive(Resource, Default)]
+pub struct SimValuesResource(pub std::collections::HashMap<String, f64>);
+
 /// Core simulation plugin providing tick-based time compression
 #[derive(Default)]
 pub struct SimulationPlugin;
@@ -21,6 +27,7 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SimulationClock>()
             .init_resource::<SimulationState>()
+            .init_resource::<SimValuesResource>()
             .init_resource::<WatchPointRegistry>()
             .init_resource::<BreakPointRegistry>()
             .init_resource::<ActiveRecording>()
@@ -286,22 +293,22 @@ fn record_and_stream_watchpoints(
     mut recording: ResMut<ActiveRecording>,
     mut breakpoints: ResMut<BreakPointRegistry>,
     mut sim_state: ResMut<SimulationState>,
+    sim_values_res: Res<SimValuesResource>,
     #[cfg(feature = "streaming")]
     change_queue: Option<Res<eustress_common::change_queue::ChangeQueue>>,
 ) {
     let sim_time = clock.simulation_time_s;
     let tick = clock.tick_count;
 
-    // Read current sim values from the thread-local (populated by prepare_script_bindings)
-    let sim_values: std::collections::HashMap<String, f64> =
-        crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| sv.borrow().clone());
+    // Read from Bevy Resource (cross-thread safe, populated by publish_echem_to_sim_values)
+    let sim_values = &sim_values_res.0;
 
     if sim_values.is_empty() {
         return;
     }
 
     // Record each value into its watchpoint
-    for (key, value) in &sim_values {
+    for (key, value) in sim_values.iter() {
         watchpoints.record(key, *value, sim_time, tick);
 
         // Also feed into active recording time series
@@ -321,7 +328,7 @@ fn record_and_stream_watchpoints(
     }
 
     // Check breakpoints
-    let triggered = breakpoints.check_all(&sim_values);
+    let triggered = breakpoints.check_all(sim_values);
     for bp_name in &triggered {
         info!("🛑 Breakpoint '{}' triggered at tick {} (sim_time={:.2}s)", bp_name, tick, sim_time);
         sim_state.hit_breakpoint(bp_name);
@@ -329,9 +336,8 @@ fn record_and_stream_watchpoints(
         // Record breakpoint event in active recording
         if recording.enabled {
             if let Some(ref mut rec) = recording.recording {
-                let mut data = std::collections::HashMap::new();
-                // Snapshot all current values at breakpoint time
-                for (k, v) in &sim_values {
+                let mut data: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+                for (k, v) in sim_values.iter() {
                     data.insert(k.clone(), *v);
                 }
                 rec.add_event(eustress_common::simulation::SimulationEvent {

@@ -44,25 +44,38 @@ impl Plugin for ElectrochemistryPlugin {
 /// so Rune scripts (battery_hud.rune) and watchpoints can read them.
 fn publish_echem_to_sim_values(
     query: Query<(&ElectrochemicalState, Option<&ThermodynamicState>)>,
+    mut sim_res: ResMut<crate::simulation::plugin::SimValuesResource>,
 ) {
-    // Use the first cell found (single-cell demo). Multi-cell would need indexing.
     let Some((echem, thermo)) = query.iter().next() else { return };
 
+    let temp_c = thermo.map(|t| t.temperature - 273.15).unwrap_or(25.0);
+
+    // Build values map
+    let values = [
+        ("battery.voltage", echem.terminal_voltage as f64),
+        ("battery.current", echem.current as f64),
+        ("battery.soc", echem.soc as f64),
+        ("battery.power", (echem.terminal_voltage * echem.current) as f64),
+        ("battery.c_rate", echem.c_rate as f64),
+        ("battery.dendrite_risk", echem.dendrite_risk as f64),
+        ("battery.capacity_retention", echem.capacity_retention as f64),
+        ("battery.cycle_count", echem.cycle_count as f64),
+        ("battery.heat_generation", echem.heat_generation as f64),
+        ("battery.temperature_c", temp_c as f64),
+    ];
+
+    // Write to thread-local (for Rune scripts on same thread)
     crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
         let mut sv = sv.borrow_mut();
-        sv.insert("battery.voltage".into(), echem.terminal_voltage as f64);
-        sv.insert("battery.current".into(), echem.current as f64);
-        sv.insert("battery.soc".into(), echem.soc as f64);
-        sv.insert("battery.power".into(), (echem.terminal_voltage * echem.current) as f64);
-        sv.insert("battery.c_rate".into(), echem.c_rate as f64);
-        sv.insert("battery.dendrite_risk".into(), echem.dendrite_risk as f64);
-        sv.insert("battery.capacity_retention".into(), echem.capacity_retention as f64);
-        sv.insert("battery.cycle_count".into(), echem.cycle_count as f64);
-        sv.insert("battery.heat_generation".into(), echem.heat_generation as f64);
-        // Temperature from ThermodynamicState (Kelvin → Celsius)
-        let temp_c = thermo.map(|t| t.temperature - 273.15).unwrap_or(25.0);
-        sv.insert("battery.temperature_c".into(), temp_c as f64);
+        for (k, v) in &values {
+            sv.insert(k.to_string(), *v);
+        }
     });
+
+    // Write to Bevy Resource (for recording system on any thread)
+    for (k, v) in &values {
+        sim_res.0.insert(k.to_string(), *v);
+    }
 }
 
 /// Set a default 0.5C discharge current on play start so the demo shows

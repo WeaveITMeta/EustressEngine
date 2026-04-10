@@ -23,7 +23,7 @@ use crate::classes::{BasePart, Part, PartType};
 // ============================================================================
 
 /// Scale factor for wireframe mesh (slightly larger than part to avoid z-fight)
-const WIREFRAME_SCALE: f32 = 1.03;
+const WIREFRAME_SCALE: f32 = 1.01;
 
 /// Selection outline color (Eustress blue)
 const SELECTION_COLOR: Color = Color::srgb(0.0, 0.6, 1.0);
@@ -312,14 +312,14 @@ fn update_changed_adornments(
     mut meshes: ResMut<Assets<Mesh>>,
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
-    changed_parts: Query<(Entity, &BasePart, &Part), (With<Selected>, Changed<Part>)>,
+    changed_parts: Query<(Entity, &BasePart, Option<&Part>), (With<Selected>, Or<(Changed<Part>, Changed<BasePart>)>)>,
     adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
 ) {
     let Some(mats) = materials else { return };
 
     for (part_entity, base_part, part) in &changed_parts {
         let size = base_part.size;
-        let shape = shape_kind(part.shape);
+        let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
         // Despawn old adornments
         for (adornment_entity, child_of) in &adornment_query {

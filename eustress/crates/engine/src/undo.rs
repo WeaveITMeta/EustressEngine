@@ -9,7 +9,7 @@ use crate::parts::{PartData, PartType};
 use crate::rendering::BevyPartManager;
 
 /// Maximum number of undo/redo actions to keep
-const MAX_HISTORY_SIZE: usize = 50;
+const MAX_HISTORY_SIZE: usize = 100;
 
 /// Action types that can be undone/redone
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +184,13 @@ pub enum Action {
         /// Entity bits and their new state (translation, size)
         new_states: Vec<(u64, [f32; 3], [f32; 3])>,
     },
+
+    /// Delete entities — files moved to .eustress/trash/ for recovery.
+    /// Undo moves them back and triggers a space reload.
+    TrashEntities {
+        /// (original_path, trash_path) pairs
+        paths: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    },
 }
 
 /// Snapshot of a property value for undo/redo
@@ -229,6 +236,7 @@ impl Action {
             Action::RemoveTag { tag, .. } => format!("Remove tag '{}'", tag),
             Action::TransformEntities { old_transforms, .. } => format!("Transform {} objects", old_transforms.len()),
             Action::ScaleEntities { old_states, .. } => format!("Scale {} objects", old_states.len()),
+            Action::TrashEntities { paths, .. } => format!("Delete {} objects", paths.len()),
         }
     }
 }
@@ -290,6 +298,16 @@ impl UndoStack {
         }
     }
     
+    /// Get the current undo index
+    pub fn current_index(&self) -> usize {
+        self.current_index
+    }
+
+    /// Get a reference to the history deque
+    pub fn history(&self) -> &VecDeque<Action> {
+        &self.history
+    }
+
     /// Clear the entire history
     pub fn clear(&mut self) {
         self.history.clear();
@@ -553,8 +571,23 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
+        Action::TrashEntities { paths } => {
+            // Undo delete: move files back from trash to original location
+            for (original_path, trash_path) in paths {
+                if trash_path.exists() {
+                    // Ensure parent directory exists
+                    if let Some(parent) = original_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::rename(trash_path, original_path) {
+                        Ok(_) => info!("↶ Restored {:?} from trash", original_path.file_name().unwrap_or_default()),
+                        Err(e) => warn!("Failed to restore {:?}: {}", original_path, e),
+                    }
+                }
+            }
+            // The file watcher will detect the restored files and respawn entities
+        }
         _ => {
-            // TODO: Implement other action types as needed
             warn!("Undo not yet implemented for: {}", action.description());
         }
     }
@@ -693,8 +726,19 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
+        Action::TrashEntities { paths } => {
+            // Redo delete: move files back to trash
+            for (original_path, trash_path) in paths {
+                if original_path.exists() {
+                    if let Some(parent) = trash_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::rename(original_path, trash_path);
+                    info!("↷ Re-trashed {:?}", original_path.file_name().unwrap_or_default());
+                }
+            }
+        }
         _ => {
-            // TODO: Implement other action types as needed
             warn!("Redo not yet implemented for: {}", action.description());
         }
     }

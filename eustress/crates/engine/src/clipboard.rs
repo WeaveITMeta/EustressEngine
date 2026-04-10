@@ -10,7 +10,7 @@ use crate::classes::{
     BillboardGui, TextLabel,
 };
 use crate::serialization::scene::CurrentScenePath;
-use crate::ui::BevySelectionManager;
+use crate::rendering::BevySelectionManager;
 
 // ============================================================================
 // Clipboard Serialization Types
@@ -315,18 +315,22 @@ impl EditorClipboard {
             .unwrap_or_else(|| "Untitled".to_string())
     }
     
-    /// Get paste offset for current paste operation
+    /// Get paste offset — places copy directly above the original.
+    /// Uses the entity's Y size so parts stack flush with no gap.
     pub fn get_paste_offset(&self) -> Vec3 {
-        // Offset each paste by 2 units in X and Z
-        let offset = self.paste_count as f32 * 2.0;
-        Vec3::new(offset, 0.0, offset)
+        let height = self.entities.iter()
+            .filter_map(|e| e.properties.get("size").and_then(|v| v.as_array()))
+            .map(|a: &Vec<serde_json::Value>| a.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32)
+            .next()
+            .unwrap_or(1.0);
+        Vec3::new(0.0, height * (self.paste_count as f32 + 1.0), 0.0)
     }
-    
+
     /// Increment paste counter
     pub fn increment_paste_count(&mut self) {
         self.paste_count += 1;
     }
-    
+
     /// Reset paste counter (called after new copy)
     pub fn reset_paste_count(&mut self) {
         self.paste_count = 0;
@@ -624,6 +628,7 @@ pub fn handle_paste_event(
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut paste_completed: MessageWriter<PasteCompletedEvent>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    selection_manager: Option<Res<BevySelectionManager>>,
 ) {
     for event in events.read() {
         if clipboard.is_empty() {
@@ -657,8 +662,7 @@ pub fn handle_paste_event(
         
         let mut created_ids = Vec::new();
         
-        // Spawn entities from clipboard and create TOML files (file-system-first)
-        let workspace_dir = space_root.as_ref().map(|sr| sr.0.join("Workspace"));
+        // Spawn entities from clipboard
         for entity_data in &clipboard.entities {
             let spawned_id = spawn_entity_from_data(
                 &mut commands,
@@ -671,49 +675,6 @@ pub fn handle_paste_event(
 
             if let Some(id) = spawned_id {
                 created_ids.push(id);
-
-                // Create TOML file on disk for pasted entity (file-system-first)
-                if let Some(ref ws_dir) = workspace_dir {
-                    let pos = Vec3::new(
-                        entity_data.position[0] + offset.x,
-                        entity_data.position[1] + offset.y,
-                        entity_data.position[2] + offset.z,
-                    );
-                    let copy_name = format!("{}_copy", entity_data.name);
-                    let toml_filename = format!("{}.glb.toml", copy_name);
-                    let toml_path = ws_dir.join(&toml_filename);
-                    // Convert euler degrees → quaternion for TOML (rotation stored as [x,y,z] degrees)
-                    let rot_quat = Quat::from_euler(
-                        EulerRot::XYZ,
-                        entity_data.rotation[0].to_radians(),
-                        entity_data.rotation[1].to_radians(),
-                        entity_data.rotation[2].to_radians(),
-                    );
-                    let instance_def = crate::space::instance_loader::InstanceDefinition {
-                        asset: Some(crate::space::instance_loader::AssetReference {
-                            mesh: format!("parts/block.glb"),
-                            scene: "Scene0".to_string(),
-                        }),
-                        transform: crate::space::instance_loader::TransformData {
-                            position: [pos.x, pos.y, pos.z],
-                            rotation: [rot_quat.x, rot_quat.y, rot_quat.z, rot_quat.w],
-                            scale: entity_data.scale,
-                        },
-                        properties: Default::default(),
-                        metadata: crate::space::instance_loader::InstanceMetadata {
-                            class_name: entity_data.class.clone(),
-                            archivable: true,
-                            created: chrono::Utc::now().to_rfc3339(),
-                            last_modified: chrono::Utc::now().to_rfc3339(),
-                        },
-                        material: None, thermodynamic: None, electrochemical: None,
-                        ui: None, attributes: None, tags: None, parameters: None,
-                        extra: Default::default(),
-                    };
-                    if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
-                        warn!("Failed to write paste TOML: {}", e);
-                    }
-                }
             }
         }
         
@@ -729,8 +690,19 @@ pub fn handle_paste_event(
         
         notifications.info(format!("Pasted {} object(s)", clipboard.entities.len()));
         
-        // If this was a cut, clear the clipboard
+        // If this was a cut, delete the original entities and clear clipboard
         if clipboard.is_cut {
+            for entity_id in &clipboard.copied_entity_ids {
+                if let Some(entity) = crate::entity_utils::id_string_to_entity(entity_id) {
+                    if commands.get_entity(entity).is_ok() {
+                        commands.entity(entity).despawn();
+                    }
+                }
+            }
+            // Clear selection (originals are gone)
+            if let Some(ref sel) = selection_manager {
+                sel.0.write().clear();
+            }
             clipboard.clear();
         }
     }
@@ -876,9 +848,6 @@ pub fn render_cross_scene_modal(
 /// This bridges the keybinding (Ctrl+V) path to the actual paste logic.
 pub fn consume_pending_paste(
     mut studio_state: ResMut<crate::ui::StudioState>,
-    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
-    spatial_query: avian3d::prelude::SpatialQuery,
     mut paste_events: MessageWriter<PasteEvent>,
 ) {
     if !studio_state.pending_paste {
@@ -886,43 +855,12 @@ pub fn consume_pending_paste(
     }
     studio_state.pending_paste = false;
 
-    // Try to get cursor position and camera for raycast
-    let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
-    let camera_data = cameras.iter().find(|(c, _)| c.order == 0);
-
-    let target_position = match (cursor_pos, camera_data) {
-        (Some(cursor), Some((camera, cam_transform))) => {
-            if let Ok(ray) = camera.viewport_to_world(cam_transform, cursor) {
-                // First try physics raycast to find a surface under the cursor
-                let physics_hit = crate::math_utils::find_surface_with_physics(
-                    &spatial_query,
-                    &ray,
-                    &[], // Don't exclude any entities for paste placement
-                );
-
-                if let Some((hit_point, normal, _entity)) = physics_hit {
-                    // Place on the surface, offset half the default part height (0.5) along the normal
-                    Some(hit_point + normal * 0.5)
-                } else {
-                    // Fallback: intersect with ground plane (Y=0)
-                    crate::math_utils::ray_plane_intersection(
-                        ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y,
-                    ).map(|t| {
-                        let hit = ray.origin + *ray.direction * t;
-                        // Small Y offset to avoid z-fighting
-                        hit + Vec3::new(0.0, 0.5, 0.0)
-                    })
-                }
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
+    // Ctrl+V paste: place above original using clipboard offset (no raycast).
+    // get_paste_offset() returns Y offset based on entity height.
 
     paste_events.write(PasteEvent {
         mode: PasteMode::Normal,
-        target_position,
+        target_position: None,
     });
 }
 
@@ -943,10 +881,10 @@ impl Plugin for ClipboardPlugin {
             .add_message::<DuplicateEvent>()
             .add_message::<PasteCompletedEvent>()
             .add_systems(Update, (
-                consume_pending_paste,
-                handle_copy_event,
-                handle_paste_event,
                 handle_duplicate_event,
+                handle_copy_event.after(handle_duplicate_event),
+                consume_pending_paste.after(handle_copy_event),
+                handle_paste_event.after(consume_pending_paste),
                 render_cross_scene_modal,
             ));
     }

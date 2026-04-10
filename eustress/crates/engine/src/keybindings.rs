@@ -55,6 +55,10 @@ pub enum Action {
     SnapMode2,      // 0.2 unit snapping (2 key)
     SnapModeOff,    // No snapping (3 key)
     
+    // Nudge (+ / -)
+    NudgeUp,        // Move selection up by one grid unit (= / + key)
+    NudgeDown,      // Move selection down by one grid unit (- key)
+
     // Quick Rotation
     RotateY90,      // Rotate 90° on Y axis (Ctrl+R)
     TiltZ90,        // Tilt 90° on Z axis (Ctrl+T)
@@ -104,9 +108,11 @@ impl Action {
             Action::ViewFront => "Front View",
             Action::ViewSideLeft => "Left Side View",
             Action::ViewSideRight => "Right Side View",
-            Action::SnapMode1 => "Snap Mode: 1.96133m (Space Grade)",
-            Action::SnapMode2 => "Snap Mode: 0.392266m (Fine)",
+            Action::SnapMode1 => "Snap Mode: 1m",
+            Action::SnapMode2 => "Snap Mode: 0.2m",
             Action::SnapModeOff => "Snap Mode: Off",
+            Action::NudgeUp => "Nudge Up",
+            Action::NudgeDown => "Nudge Down",
             Action::RotateY90 => "Rotate 90° (Y Axis)",
             Action::TiltZ90 => "Tilt 90° (Z Axis)",
             Action::StartServer => "Start Server",
@@ -242,6 +248,8 @@ impl Default for KeyBindings {
         bindings.insert(Action::SnapMode1, KeyBinding::new(KeyCode::Digit1));    // 1 for 1 unit snapping
         bindings.insert(Action::SnapMode2, KeyBinding::new(KeyCode::Digit2));    // 2 for 0.2 unit snapping
         bindings.insert(Action::SnapModeOff, KeyBinding::new(KeyCode::Digit3));  // 3 for no snapping
+        bindings.insert(Action::NudgeUp, KeyBinding::new(KeyCode::Equal));      // + (=/+ key)
+        bindings.insert(Action::NudgeDown, KeyBinding::new(KeyCode::Minus));    // - key
         
         // Quick rotation shortcuts
         bindings.insert(Action::RotateY90, KeyBinding::new(KeyCode::KeyR).with_ctrl()); // Ctrl+R to rotate 90° on Y
@@ -297,10 +305,12 @@ impl Plugin for KeyBindingsPlugin {
         // Try to load saved bindings, otherwise use defaults
         let bindings = KeyBindings::load().unwrap_or_default();
         app.insert_resource(bindings)
+            .init_resource::<NudgeTimer>()
             .add_systems(Update, (
                 dispatch_keyboard_shortcuts,
-                handle_menu_action_events,
-            ).chain());
+                handle_menu_action_events.after(dispatch_keyboard_shortcuts),
+                handle_nudge_keys,
+            ));
     }
 }
 
@@ -349,8 +359,8 @@ fn dispatch_keyboard_shortcuts(
         return;
     }
 
-    // Backspace or Delete — direct check (bypass bindings for reliability)
-    if keys.just_pressed(KeyCode::Backspace) || keys.just_pressed(KeyCode::Delete) {
+    // Delete key only — Backspace is reserved for text editing
+    if keys.just_pressed(KeyCode::Delete) {
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         if !ctrl && !alt {
@@ -373,6 +383,7 @@ fn dispatch_keyboard_shortcuts(
         Action::ViewPerspectiveToggle, Action::ViewTop, Action::ViewFront,
         Action::ViewSideLeft, Action::ViewSideRight,
         Action::SnapMode1, Action::SnapMode2, Action::SnapModeOff,
+        Action::NudgeUp, Action::NudgeDown,
         Action::RotateY90, Action::TiltZ90,
         Action::StartServer, Action::ToggleNetworkPanel,
         Action::CSGNegate, Action::CSGUnion, Action::CSGIntersect, Action::CSGSeparate,
@@ -398,22 +409,34 @@ fn handle_menu_action_events(
     mut events: MessageReader<crate::ui::MenuActionEvent>,
     mut commands: Commands,
     studio_state: Option<ResMut<crate::ui::StudioState>>,
-    mut undo_events: MessageWriter<crate::commands::UndoCommandEvent>,
-    mut redo_events: MessageWriter<crate::commands::RedoCommandEvent>,
-    mut frame_events: MessageWriter<crate::camera_controller::FrameSelectionEvent>,
-    // Read selection directly from SelectionSyncManager to avoid ordering dependency
-    // on sync_selection_boxes (which adds SelectionBox component one frame later).
+    // Event writers bundled as tuple (keeps total param count ≤ 16)
+    mut event_writers: (
+        MessageWriter<crate::commands::UndoCommandEvent>,
+        MessageWriter<crate::commands::RedoCommandEvent>,
+        MessageWriter<crate::camera_controller::FrameSelectionEvent>,
+        MessageWriter<crate::clipboard::CopyEvent>,
+        MessageWriter<crate::clipboard::DuplicateEvent>,
+        MessageWriter<crate::undo::UndoEvent>,
+        MessageWriter<crate::undo::RedoEvent>,
+    ),
     selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
-    // Query all entities that could be selected — look up by stable ID at delete/focus time.
     entity_query: Query<(Entity, Option<&GlobalTransform>, Option<&eustress_common::classes::BasePart>),
         Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
-    // Query Instance to detect Camera class deletion for camera respawn.
     instance_query: Query<&eustress_common::classes::Instance>,
-    // Query InstanceFile to delete TOML from disk when entity is deleted
     instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
     mut file_registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
-    mut copy_events: MessageWriter<crate::clipboard::CopyEvent>,
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
+    mut editor_settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
 ) {
+    let (
+        ref mut undo_events,
+        ref mut redo_events,
+        ref mut frame_events,
+        ref mut copy_events,
+        ref mut duplicate_events,
+        ref mut undo_action_events,
+        ref mut redo_action_events,
+    ) = event_writers;
     let Some(mut studio_state) = studio_state else { return };
 
     for event in events.read() {
@@ -424,9 +447,17 @@ fn handle_menu_action_events(
             Action::ScaleTool  => { studio_state.current_tool = crate::ui::Tool::Scale; }
             Action::RotateTool => { studio_state.current_tool = crate::ui::Tool::Rotate; }
 
-            // Undo/Redo
-            Action::Undo => { undo_events.write(crate::commands::UndoCommandEvent); }
-            Action::Redo => { redo_events.write(crate::commands::RedoCommandEvent); }
+            // Undo/Redo — fire both event types:
+            // UndoCommandEvent → CommandHistory (selection undo)
+            // UndoEvent → UndoStack (transform undo)
+            Action::Undo => {
+                undo_events.write(crate::commands::UndoCommandEvent);
+                undo_action_events.write(crate::undo::UndoEvent);
+            }
+            Action::Redo => {
+                redo_events.write(crate::commands::RedoCommandEvent);
+                redo_action_events.write(crate::undo::RedoEvent);
+            }
 
             // View panel toggles
             Action::ToggleExplorer   => { studio_state.show_explorer = !studio_state.show_explorer; }
@@ -485,9 +516,22 @@ fn handle_menu_action_events(
             }
 
             // Snapping
-            Action::SnapMode1 | Action::SnapMode2 | Action::SnapModeOff => {
-                // Snapping is handled by editor_settings; these events are consumed
-                // by the editor_settings system if it listens for them.
+            Action::SnapMode1 => {
+                if let Some(ref mut es) = editor_settings {
+                    es.snap_size = 1.0;
+                    es.snap_enabled = true;
+                }
+            }
+            Action::SnapMode2 => {
+                if let Some(ref mut es) = editor_settings {
+                    es.snap_size = 0.2;
+                    es.snap_enabled = true;
+                }
+            }
+            Action::SnapModeOff => {
+                if let Some(ref mut es) = editor_settings {
+                    es.snap_enabled = false;
+                }
             }
 
             // Delete selected entities; respawn default camera at origin if Camera class deleted
@@ -504,36 +548,36 @@ fn handle_menu_action_events(
                     info!("🗑️ Delete: nothing selected");
                 } else {
                     let mut camera_deleted = false;
+                    let mut trashed_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+
                     for (entity, _, _) in entity_query.iter() {
                         let id = format!("{}v{}", entity.index(), entity.generation());
                         if !selected_ids.contains(&id) { continue; }
-                        // Check if this is a Camera class entity before despawning
                         if instance_query.get(entity)
                             .map(|inst| inst.class_name == eustress_common::classes::ClassName::Camera)
                             .unwrap_or(false)
                         {
                             camera_deleted = true;
                         }
-                        // Move TOML file to .eustress/trash/ (recoverable delete)
-                        // On undo, the file can be moved back from trash
+                        // Move TOML to .eustress/trash/ (recoverable via undo)
                         if let Ok(inst_file) = instance_file_query.get(entity) {
                             let toml_path = inst_file.toml_path.clone();
                             if toml_path.exists() {
-                                // Create trash directory next to the Space root
-                                if let Some(space_dir) = toml_path.ancestors().find(|p| p.join("_service.toml").exists() || p.join("simulation.toml").exists()) {
-                                    let trash_dir = space_dir.join(".eustress").join("trash");
-                                    let _ = std::fs::create_dir_all(&trash_dir);
-                                    let trash_path = trash_dir.join(toml_path.file_name().unwrap_or_default());
-                                    if let Err(e) = std::fs::rename(&toml_path, &trash_path) {
-                                        // Fallback: hard delete if move fails
-                                        let _ = std::fs::remove_file(&toml_path);
-                                        warn!("🗑️ Hard deleted {:?} (move to trash failed: {})", toml_path, e);
-                                    } else {
+                                let trash_dir = toml_path.parent()
+                                    .and_then(|p| p.parent())
+                                    .unwrap_or(toml_path.parent().unwrap_or(std::path::Path::new(".")))
+                                    .join(".eustress").join("trash");
+                                let _ = std::fs::create_dir_all(&trash_dir);
+                                let trash_path = trash_dir.join(toml_path.file_name().unwrap_or_default());
+                                match std::fs::rename(&toml_path, &trash_path) {
+                                    Ok(_) => {
+                                        trashed_paths.push((toml_path.clone(), trash_path));
                                         info!("🗑️ Moved {:?} to trash", toml_path.file_name().unwrap_or_default());
                                     }
-                                } else {
-                                    let _ = std::fs::remove_file(&toml_path);
-                                    info!("🗑️ Deleted TOML file {:?}", toml_path);
+                                    Err(_) => {
+                                        let _ = std::fs::remove_file(&toml_path);
+                                        info!("🗑️ Deleted {:?}", toml_path.file_name().unwrap_or_default());
+                                    }
                                 }
                             }
                             if let Some(ref mut registry) = file_registry {
@@ -543,6 +587,12 @@ fn handle_menu_action_events(
                         commands.entity(entity).despawn();
                         info!("🗑️ Deleted entity {:?} ({})", entity, id);
                     }
+
+                    // Push to undo stack so Ctrl+Z can restore
+                    if !trashed_paths.is_empty() {
+                        undo_stack.push(crate::undo::Action::TrashEntities { paths: trashed_paths });
+                    }
+
                     // Clear selection after delete
                     if let Some(ref sm) = selection_manager {
                         sm.0.write().clear();
@@ -576,8 +626,100 @@ fn handle_menu_action_events(
                 }
             }
 
+            // Select All (Ctrl+A) — select all unlocked BasePart entities
+            Action::SelectAll => {
+                if let Some(ref sel_mgr) = selection_manager {
+                    let sm = sel_mgr.0.write();
+                    sm.clear();
+                    for (entity, _, bp) in entity_query.iter() {
+                        // Only select entities that have BasePart (actual 3D parts)
+                        let Some(bp) = bp else { continue; };
+                        // Skip locked parts
+                        if bp.locked { continue; }
+                        // Skip adornments
+                        if instance_query.get(entity)
+                            .map(|i| i.class_name.is_adornment())
+                            .unwrap_or(false) { continue; }
+                        let id = format!("{}v{}", entity.index(), entity.generation());
+                        sm.add_to_selection(id);
+                    }
+                }
+            }
+
+            // Duplicate (Ctrl+D) — copy + paste in place
+            Action::Duplicate => {
+                duplicate_events.write(crate::clipboard::DuplicateEvent);
+            }
+
             // Other actions are consumed by their respective systems
             _ => {}
         }
+    }
+}
+
+// ============================================================================
+// Nudge System — +/- keys move selection up/down by grid unit
+// ============================================================================
+
+/// Timer for nudge repeat rate (one step per 0.15s when held)
+#[derive(Resource, Default)]
+struct NudgeTimer {
+    up_timer: f32,
+    down_timer: f32,
+}
+
+const NUDGE_REPEAT_SECS: f32 = 0.15;
+
+fn handle_nudge_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut timer: ResMut<NudgeTimer>,
+    settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    mut selected: Query<&mut Transform, With<crate::selection_box::Selected>>,
+) {
+    // Block when text input focused
+    if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) { return; }
+
+    let snap = settings.as_ref().map(|s| if s.snap_enabled { s.snap_size } else { 1.0 }).unwrap_or(1.0);
+
+    // + key (Equal) = nudge up
+    if keys.pressed(KeyCode::Equal) {
+        if keys.just_pressed(KeyCode::Equal) {
+            timer.up_timer = 0.0;
+            for mut t in selected.iter_mut() {
+                t.translation.y += snap;
+            }
+        } else {
+            timer.up_timer += time.delta_secs();
+            if timer.up_timer >= NUDGE_REPEAT_SECS {
+                timer.up_timer -= NUDGE_REPEAT_SECS;
+                for mut t in selected.iter_mut() {
+                    t.translation.y += snap;
+                }
+            }
+        }
+    } else {
+        timer.up_timer = 0.0;
+    }
+
+    // - key (Minus) = nudge down
+    if keys.pressed(KeyCode::Minus) {
+        if keys.just_pressed(KeyCode::Minus) {
+            timer.down_timer = 0.0;
+            for mut t in selected.iter_mut() {
+                t.translation.y -= snap;
+            }
+        } else {
+            timer.down_timer += time.delta_secs();
+            if timer.down_timer >= NUDGE_REPEAT_SECS {
+                timer.down_timer -= NUDGE_REPEAT_SECS;
+                for mut t in selected.iter_mut() {
+                    t.translation.y -= snap;
+                }
+            }
+        }
+    } else {
+        timer.down_timer = 0.0;
     }
 }

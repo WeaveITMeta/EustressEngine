@@ -83,7 +83,7 @@ def generate_wedge_glb():
     # Normal is perpendicular to the slope: normalize(-1, 0, 1) = (-0.707, 0, 0.707)
     import math
     slope_normal = (-1.0 / math.sqrt(2), 0.0, 1.0 / math.sqrt(2))
-    add_quad(bl_front_right, tl_front_right, tl_back_left, bl_back_left, slope_normal)
+    add_quad(bl_back_left, tl_back_left, tl_front_right, bl_front_right, slope_normal)
     
     # Convert to binary buffers
     vertex_data = b''.join(struct.pack('<fff', *v) for v in vertices)

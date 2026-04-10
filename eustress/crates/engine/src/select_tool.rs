@@ -114,10 +114,12 @@ impl Plugin for SelectToolPlugin {
             .init_resource::<BoxSelectionState>()
             .add_systems(Update, (
                 handle_select_drag,
-                handle_box_selection,
-                render_box_selection,
-                debug_drag_gizmos,
-            ).chain());
+                handle_box_selection.after(handle_select_drag),
+                debug_drag_gizmos.after(handle_box_selection),
+            ))
+            // render_box_selection uses NonSend<SlintUiState> — must run separately
+            // to avoid blocking the chain on main thread exclusivity
+            .add_systems(Update, render_box_selection.after(handle_box_selection));
     }
 }
 
@@ -175,6 +177,8 @@ fn handle_select_drag(
     settings_and_undo: (Res<crate::editor_settings::EditorSettings>, ResMut<crate::undo::UndoStack>),
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
+    // For writing transform back to TOML after drag
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
 ) {
     let Some(studio_state) = studio_state else { return };
     let (mouse, keys) = input;
@@ -369,9 +373,17 @@ fn handle_select_drag(
         if state.drag_started {
             if let Some(dragged_entity) = state.dragged_entity {
                 // Get list of selected entities to exclude from raycasting
-                let excluded_entities: Vec<Entity> = selected_query.iter()
+                let mut excluded_entities: Vec<Entity> = selected_query.iter()
                     .map(|(e, _, _, _, _, _)| e)
                     .collect();
+                // Also exclude children of selected entities (selection adornments, etc.)
+                // to prevent wireframe meshes from interfering with surface raycasting
+                let parent_list = excluded_entities.clone();
+                for parent in &parent_list {
+                    if let Ok(children) = children_query.get(*parent) {
+                        excluded_entities.extend(children.iter());
+                    }
+                }
 
                 // Retrieve leader initial state
                 let initial_leader_pos = state.initial_positions.get(&dragged_entity).cloned().unwrap_or(Vec3::ZERO);
@@ -401,8 +413,8 @@ fn handle_select_drag(
                     // Calculate offset using the ORIGINAL rotation (not aligned)
                     let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
                     
-                    // Target position for the Leader's center - sit on surface
-                    hit_point + hit_normal * (offset + 0.01)
+                    // Target position for the Leader's center - flush against surface
+                    hit_point + hit_normal * offset
                 } else {
                     // NO SURFACE HIT - Drag on Ground Plane (Y=0)
                     state.debug_hit_point = None;
@@ -412,7 +424,7 @@ fn handle_select_drag(
                          let ground_pos = ray.origin + *ray.direction * t;
                          // Calculate offset using original rotation
                          let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
-                         ground_pos + Vec3::new(0.0, offset + 0.01, 0.0)
+                         ground_pos + Vec3::new(0.0, offset, 0.0)
                     } else {
                         // Fallback: Use intersection with horizontal plane at leader's initial height
                          if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, initial_leader_pos, Vec3::Y) {
@@ -523,8 +535,20 @@ fn handle_select_drag(
                     new_transforms,
                 });
             }
+
+            // Write updated transforms back to TOML (file-system-first persistence)
+            for (entity, transform, _, _, _, _) in selected_query.iter() {
+                if let Ok(inst_file) = instance_files.get(entity) {
+                    if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                        def.transform.position = [transform.translation.x, transform.translation.y, transform.translation.z];
+                        def.transform.rotation = [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w];
+                        def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+                        let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
+                    }
+                }
+            }
         }
-        
+
         state.dragging = false;
         state.drag_started = false;
         state.dragged_entity = None;
@@ -646,8 +670,13 @@ fn handle_select_drag(
                 })
                 .collect();
             
-            // Get list of selected entities to exclude from raycast (ALL selected)
-            let excluded_entities: Vec<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
+            // Exclude selected entities AND their children (adornments) from raycast
+            let mut excluded_entities: Vec<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
+            for parent in excluded_entities.clone() {
+                if let Ok(children) = children_query.get(parent) {
+                    excluded_entities.extend(children.iter());
+                }
+            }
             
             let mut _snapped_count = 0;
             for (entity, current_pos, size) in entities_data {
@@ -897,62 +926,40 @@ fn handle_box_selection(
 }
 
 /// System to render the box selection rectangle using Bevy gizmos
+/// Sync box selection state to Slint overlay properties.
+/// The rectangle is rendered by Slint inside the viewport-sizer, on top of
+/// the 3D scene but below studio panels.
 fn render_box_selection(
     box_state: Res<BoxSelectionState>,
-    mut gizmos: Gizmos,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    slint_context: Option<NonSend<crate::ui::slint_ui::SlintUiState>>,
 ) {
+    let Some(ctx) = slint_context else { return };
+    let ui = &ctx.window;
+
     if !box_state.active {
+        ui.set_box_select_visible(false);
         return;
     }
-    
-    let Ok(window) = windows.single() else { return; };
-    let window_size: Vec2 = window.physical_size().as_vec2();
-    
-    // Convert screen space to NDC (Normalized Device Coordinates)
-    // Screen space: (0,0) = top-left, (width, height) = bottom-right
-    // NDC: (-1, -1) = bottom-left, (1, 1) = top-right
-    let start_ndc = Vec2::new(
-        (box_state.start_pos.x / window_size.x) * 2.0 - 1.0,
-        1.0 - (box_state.start_pos.y / window_size.y) * 2.0,
-    );
-    let current_ndc = Vec2::new(
-        (box_state.current_pos.x / window_size.x) * 2.0 - 1.0,
-        1.0 - (box_state.current_pos.y / window_size.y) * 2.0,
-    );
-    
-    // Calculate rectangle corners in NDC
-    let min_x = start_ndc.x.min(current_ndc.x);
-    let max_x = start_ndc.x.max(current_ndc.x);
-    let min_y = start_ndc.y.min(current_ndc.y);
-    let max_y = start_ndc.y.max(current_ndc.y);
-    
-    // Draw rectangle outline in 2D screen space using gizmos
-    // Use a bright cyan color for the selection box (Roblox-style)
-    let selection_color = Color::srgba(0.35, 0.75, 1.0, 0.8);
-    let fill_color = Color::srgba(0.35, 0.75, 1.0, 0.15);
-    
-    // Draw filled rectangle (semi-transparent)
-    gizmos.rect_2d(
-        Isometry2d::from_translation(Vec2::new(
-            (min_x + max_x) * 0.5,
-            (min_y + max_y) * 0.5,
-        )),
-        Vec2::new(max_x - min_x, max_y - min_y),
-        fill_color,
-    );
-    
-    // Draw outline (solid)
-    let corners = [
-        Vec2::new(min_x, min_y),
-        Vec2::new(max_x, min_y),
-        Vec2::new(max_x, max_y),
-        Vec2::new(min_x, max_y),
-    ];
-    
-    for i in 0..4 {
-        let start = corners[i];
-        let end = corners[(i + 1) % 4];
-        gizmos.line_2d(start, end, selection_color);
-    }
+
+    // cursor_position() returns logical pixels; viewport-sizer position is also
+    // logical (set via get_viewport_x/y * scale in sync_bevy_to_slint).
+    // Subtract viewport offset to get coordinates relative to viewport-sizer.
+    let vp_x = ui.get_viewport_x();
+    let vp_y = ui.get_viewport_y();
+
+    let x1 = box_state.start_pos.x - vp_x;
+    let y1 = box_state.start_pos.y - vp_y;
+    let x2 = box_state.current_pos.x - vp_x;
+    let y2 = box_state.current_pos.y - vp_y;
+
+    let min_x = x1.min(x2);
+    let min_y = y1.min(y2);
+    let w = (x2 - x1).abs();
+    let h = (y2 - y1).abs();
+
+    ui.set_box_select_visible(true);
+    ui.set_box_select_x(min_x);
+    ui.set_box_select_y(min_y);
+    ui.set_box_select_w(w);
+    ui.set_box_select_h(h);
 }

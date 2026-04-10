@@ -36,6 +36,7 @@ pub fn part_selection_system(
     rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    spatial_query: avian3d::prelude::SpatialQuery,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     let move_active = move_state.as_ref().map(|s| s.active).unwrap_or(false);
@@ -117,8 +118,9 @@ pub fn part_selection_system(
     };
     
     // Raycast against all part entities
-    // Tuple: (part_id, distance, entity, parent_entity_if_model)
     let mut closest_hit: Option<(String, f32, Entity, Option<Entity>)> = None;
+    // Map entity → (part_id, parent_model) built during the filter loop below
+    let mut entity_part_ids: std::collections::HashMap<Entity, (String, Option<Entity>)> = std::collections::HashMap::new();
     
     // PRIORITY CHECK: Check if we are clicking on a tool handle BEFORE checking for part hits
     // This ensures handles are always clickable even if a part is behind them
@@ -294,35 +296,52 @@ pub fn part_selection_system(
             }
         }
         
-        // Get part transform
-        let part_transform = transform.compute_transform();
-        let part_position = part_transform.translation;
-        let part_rotation = part_transform.rotation;
-        
-        // Use BasePart.size if available, otherwise fall back to transform scale
-        let part_size = basepart.map(|bp| bp.size).unwrap_or(part_transform.scale);
-        
-        // Use precise OBB (Oriented Bounding Box) intersection
-        if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, part_position, part_size, part_rotation) {
-            // Check if this entity has a parent that is a Model
-            let parent_model = child_of.and_then(|c| {
-                let parent_entity = c.parent();
-                // Check if parent is a Model
-                if let Ok(parent_instance) = parent_query.get(parent_entity) {
-                    if parent_instance.class_name == crate::classes::ClassName::Model {
-                        return Some(parent_entity);
-                    }
+        // Store part_id + parent model info for lookup after physics raycast
+        entity_part_ids.insert(entity, (part_id, child_of.and_then(|c| {
+            let parent_entity = c.parent();
+            if let Ok(parent_instance) = parent_query.get(parent_entity) {
+                if parent_instance.class_name == crate::classes::ClassName::Model {
+                    return Some(parent_entity);
                 }
-                None
-            });
-            
-            // Keep track of closest hit
-            if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
-                closest_hit = Some((part_id, distance, entity, parent_model));
+            }
+            None
+        })));
+    }
+
+    // Physics-first raycast: use Avian3d colliders for precise hit detection.
+    {
+        use avian3d::prelude::SpatialQueryFilter;
+        if let Ok(dir) = Dir3::new(*ray.direction) {
+            let hits = spatial_query.ray_hits(ray.origin, dir, 10000.0, 20, true, &SpatialQueryFilter::default());
+            for hit in hits {
+                if let Some((part_id, parent_model)) = entity_part_ids.get(&hit.entity) {
+                    let distance = hit.distance;
+                    if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
+                        closest_hit = Some((part_id.clone(), distance, hit.entity, *parent_model));
+                    }
+                    break;
+                }
             }
         }
     }
-    
+
+    // OBB fallback: if physics raycast missed (entity has no Collider),
+    // test all selectable entities with oriented bounding box intersection.
+    if closest_hit.is_none() {
+        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in part_entities_query.iter() {
+            if !entity_part_ids.contains_key(&entity) { continue; }
+            let t = transform.compute_transform();
+            let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
+            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, t.translation, size, t.rotation) {
+                if let Some((part_id, parent_model)) = entity_part_ids.get(&entity) {
+                    if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
+                        closest_hit = Some((part_id.clone(), distance, entity, *parent_model));
+                    }
+                }
+            }
+        }
+    }
+
     // Update selection
     if let Some((part_id, distance, _hit_entity, parent_model)) = closest_hit {
         info!("[select] hit part_id='{}' dist={:.2}", part_id, distance);

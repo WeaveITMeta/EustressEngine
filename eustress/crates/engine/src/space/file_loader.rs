@@ -168,8 +168,8 @@ impl FileType {
             // StarterGui: GUI elements spawn as UI entities
             (Self::GuiElement | Self::Toml, "StarterGui") => true,
             
-            // MaterialService: Material definitions spawn as material entities
-            (Self::Material, "MaterialService") => true,
+            // MaterialService: Material definitions + texture images
+            (Self::Material | Self::Png | Self::Jpg, "MaterialService") => true,
 
             // AdornmentService: Adornment definition TOMLs spawn as adornment entities
             (Self::Toml, "AdornmentService") => true,
@@ -278,11 +278,15 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
         let path = entry.path();
 
         if path.is_dir() {
-            // Recurse — build a Directory entry whose children are its contents
             let name = path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Unknown")
                 .to_string();
+
+            // Skip hidden/system directories (.eustress, .git, node_modules, target)
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
             let children = scan_dir_entries(&path, service);
             entries.push(FileMetadata {
                 path: path.clone(),

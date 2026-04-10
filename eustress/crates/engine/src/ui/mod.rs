@@ -288,6 +288,7 @@ pub struct StudioState {
     pub collapsed_sections: std::collections::HashSet<String>,
     pub last_properties_hash: u64,
     pub last_selected_entity: Option<Entity>,
+    pub last_selection_hash: u64,
     pub frames_since_selection_change: u32,
     pub last_log_count: usize,
 }
@@ -368,6 +369,7 @@ impl Default for StudioState {
             collapsed_sections: std::collections::HashSet::new(),
             last_properties_hash: 0,
             last_selected_entity: None,
+            last_selection_hash: 0,
             frames_since_selection_change: 0,
             last_log_count: 0,
         }

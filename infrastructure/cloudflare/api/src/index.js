@@ -121,6 +121,8 @@ export default {
         return handleAdminRiskOverride(request, env, cors);
       if (url.pathname === '/api/admin/rescreen' && request.method === 'POST')
         return handleAdminRescreen(request, env, cors);
+      if (url.pathname === '/api/admin/delete-user' && request.method === 'POST')
+        return handleAdminDeleteUser(request, env, cors);
       if (url.pathname === '/api/admin/screening-report' && request.method === 'GET')
         return handleAdminScreeningReport(request, env, cors);
 
@@ -1807,6 +1809,34 @@ async function handleAdminRescreen(request, env, cors) {
     success: true, username, ...result,
     delta, previous_score: previousScore,
   }, 200, cors);
+}
+
+// Delete a user account — removes all KV entries so they can re-register
+async function handleAdminDeleteUser(request, env, cors) {
+  const { username } = await request.json();
+  if (!username) return json({ error: 'Username required' }, 400, cors);
+
+  // Look up user ID from username
+  const userId = await env.USERS.get(`username:${username}`);
+  if (!userId) return json({ error: 'User not found' }, 404, cors);
+
+  // Load user data to get public_key and id_hash for cleanup
+  const userData = await env.USERS.get(`user:${userId}`);
+  const user = userData ? JSON.parse(userData) : {};
+
+  // Delete all KV entries for this user
+  await env.USERS.delete(`user:${userId}`);
+  await env.USERS.delete(`username:${username}`);
+  if (user.public_key) await env.USERS.delete(`pubkey:${user.public_key}`);
+  if (user.id_hash) await env.USERS.delete(`idhash:${user.id_hash}`);
+
+  // Clean up social data
+  await env.SOCIAL.delete(`followers:${userId}`);
+  await env.SOCIAL.delete(`following:${userId}`);
+  await env.SOCIAL.delete(`favorites:${userId}`);
+  await env.SOCIAL.delete(`plays:${userId}`);
+
+  return json({ success: true, username, user_id: userId }, 200, cors);
 }
 
 // Get screening report — all users with risk scores

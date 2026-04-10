@@ -113,15 +113,14 @@ impl Default for AutoSaveState {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
-            // Space Grade Ready: 9.80665 / 5 = 1.96133m grid unit
-            snap_size: 1.96133,
+            snap_size: 1.0, // 1m default (press 1/2/3 to change)
             snap_enabled: true,
             collision_snap: false,
             surface_snap_enabled: true,
             angle_snap: 15.0,
             show_grid: true,
-            // Grid spacing based on SI standard gravity: 9.80665m
-            grid_size: 9.80665,
+            grid_size: 1.0, // 1m grid lines
+
             auto_save_interval: 300.0, // 5 minutes
             auto_save_enabled: true,
             saved_identities: Vec::new(),

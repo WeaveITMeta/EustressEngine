@@ -93,20 +93,27 @@ pub fn register_engine_rune_modules(
 /// System: compile all SoulScriptData entities when entering Playing state.
 /// Gathers script sources from ECS and delegates to common runtime.
 pub fn compile_scripts_on_play(
-    scripts: Query<(Entity, &Name, &super::SoulScriptData)>,
+    scripts: Query<(Entity, &Name, &super::SoulScriptData, Option<&crate::space::LoadedFromFile>)>,
     mut runtime: ResMut<RuneRuntimeState>,
     module_registry: Res<RuneModuleRegistry>,
 ) {
     let total_scripts = scripts.iter().count();
     let sources: Vec<ScriptSource> = scripts.iter()
-        .filter(|(_, name, data)| {
-            !data.source.is_empty()
-            && data.run_context == super::SoulRunContext::Rune
-            // Only compile actual .rune scripts, not .md/.txt files loaded as SoulScriptData
-            && !name.as_str().ends_with(".md")
-            && !name.as_str().ends_with(".txt")
+        .filter(|(_, _name, data, loaded)| {
+            if data.source.is_empty() { return false; }
+            if data.run_context != super::SoulRunContext::Rune { return false; }
+            // Only compile .rune and .soul files — skip .md, .txt, and anything else
+            if let Some(loaded) = loaded {
+                let ext = loaded.path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                matches!(ext, "rune" | "soul")
+            } else {
+                // No LoadedFromFile — in-memory script, compile it
+                true
+            }
         })
-        .map(|(entity, name, data)| ScriptSource {
+        .map(|(entity, name, data, _loaded)| ScriptSource {
             entity_index: entity.index().index(),
             name: name.as_str().to_string(),
             source: data.source.clone(),
@@ -148,6 +155,7 @@ static SCRIPT_LOG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 
 pub fn prepare_script_bindings(
     ecs_bindings: Option<Res<crate::ui::rune_ecs_bindings::ECSBindings>>,
+    sim_values_res: Option<Res<crate::simulation::plugin::SimValuesResource>>,
 ) {
     let frame = SCRIPT_LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -165,13 +173,26 @@ pub fn prepare_script_bindings(
                     }
                 });
 
-                // Log every ~1 second
                 if frame % 60 == 0 && count > 0 {
                     info!("🔗 Script bindings: {} sim values (frame {})", count, frame);
                 }
             }
         } else if frame % 300 == 0 {
             warn!("⚠ ECSBindings resource not found — scripts will read 0.0 for sim values");
+        }
+
+        // Also copy from SimValuesResource (populated by publish_echem_to_sim_values)
+        // into the thread-local so Rune scripts can read electrochemistry data
+        // regardless of which thread published it.
+        if let Some(ref svr) = sim_values_res {
+            if !svr.0.is_empty() {
+                super::rune_ecs_module::SIM_VALUES.with(|sv| {
+                    let mut sv = sv.borrow_mut();
+                    for (k, v) in svr.0.iter() {
+                        sv.insert(k.clone(), *v);
+                    }
+                });
+            }
         }
     }
 

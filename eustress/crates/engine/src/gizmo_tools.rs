@@ -58,14 +58,14 @@ fn diagnose_gizmos_once(
 
 /// Configure all gizmo groups on startup.
 ///
-/// Bevy 0.18 uses reversed-Z depth: **positive** depth_bias pushes gizmos
-/// towards the camera (renders on top), negative pushes them behind geometry.
+/// Bevy 0.18 reversed-Z: depth_bias 0.0 = normal depth test.
+/// Small positive values may clip against near plane. Use 0.0 for now.
 fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     // Transform tool gizmos — render on top of everything
     {
         let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
-        config.depth_bias = 1.0; // Always on top (positive = towards camera in reversed-Z)
-        config.line.width = 3.0;
+        config.depth_bias = 0.0;
+        config.line.width = 4.0;
         config.enabled = true;
     }
 
@@ -81,7 +81,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     {
         let (config, light_config) = config_store.config_mut::<bevy::gizmos::light::LightGizmoConfigGroup>();
         config.enabled = true;
-        config.depth_bias = 0.5; // Slightly on top so visible through geometry
+        config.depth_bias = 0.0;
         config.line.width = 1.5;
         light_config.draw_all = true;
         light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
