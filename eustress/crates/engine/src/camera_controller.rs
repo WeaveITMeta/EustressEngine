@@ -320,7 +320,7 @@ fn camera_view_input_system(
 ) {
     // Block view shortcuts when a text input has focus or overlay modal is open
     if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) { return; }
-    if crate::ui::slint_bridge::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) { return; }
+    if crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) { return; }
     
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     
@@ -599,7 +599,7 @@ fn eustress_camera_controls(
     // Block keyboard camera controls when a Slint text input has focus
     // (typing in Workshop chat, command bar, Properties, etc.)
     let ui_wants_keyboard = ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false)
-        || crate::ui::slint_bridge::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed);
+        || crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed);
     let ui_wants_pointer = false;
     
     // ALWAYS consume ALL mouse events to prevent buildup

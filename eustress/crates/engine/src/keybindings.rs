@@ -334,7 +334,7 @@ fn dispatch_keyboard_shortcuts(
             return;
         }
     }
-    if crate::ui::slint_bridge::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
+    if crate::ui::slint_ui::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
     let Some(mut studio_state) = studio_state else { return };

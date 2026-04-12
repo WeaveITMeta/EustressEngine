@@ -445,6 +445,11 @@ pub struct CenterTabData {
     pub loading: bool,
 }
 
+/// Atomic flag: true when the Slint overlay has input focus or a modal open.
+/// Written by the overlay thread (slint_main.rs timer), read by Bevy keyboard handlers.
+pub static OVERLAY_INPUT_FOCUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// API Reference filter state — drives the API Browser panel's search, category, and language filters.
 #[derive(Resource, Default)]
 pub struct ApiFilterState {

@@ -21,6 +21,7 @@ use crate::commands::{SelectionManager, TransformManager};
 // Slint UI with software renderer
 pub mod slint_ui;
 pub mod slint_native;
+pub mod slint_bridge;
 pub mod floating_windows;
 pub mod runtime_ui;
 pub mod rune_bindings;
@@ -492,6 +493,7 @@ pub struct ExplorerState {
 
 // ExplorerToggleEvent is defined in slint_ui module
 pub use slint_ui::ExplorerToggleEvent;
+pub use slint_ui::SlintSystems;
 
 #[derive(Resource, Default)]
 pub struct ExplorerCache {
