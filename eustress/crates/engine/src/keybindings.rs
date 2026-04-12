@@ -327,12 +327,15 @@ fn dispatch_keyboard_shortcuts(
     mut menu_events: MessageWriter<crate::ui::MenuActionEvent>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
-    // Block keyboard shortcuts when a text input has focus
-    // (typing in Properties, command bar, etc. shouldn't trigger Delete/Copy/etc.)
+    // Block keyboard shortcuts when a text input has focus or overlay modal is open
+    // (typing in Properties, Settings dialog, Workshop chat, etc.)
     if let Some(ref focus) = ui_focus {
         if focus.text_input_focused {
             return;
         }
+    }
+    if crate::ui::slint_bridge::OVERLAY_INPUT_FOCUSED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
     }
     let Some(mut studio_state) = studio_state else { return };
     let Some(bindings) = bindings else { return };

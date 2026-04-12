@@ -292,6 +292,11 @@ pub struct UniverseItemData {
 // Bridge Resources (Bevy side)
 // ============================================================================
 
+/// Atomic flag: true when the Slint overlay has input focus or a modal open.
+/// Written by the overlay thread, read by Bevy to suppress editor keyboard shortcuts.
+pub static OVERLAY_INPUT_FOCUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Thread-safe bridge for Bevy → Slint state transfer.
 /// Inserted as a Bevy Resource. Bevy sync systems lock and write.
 /// Slint main thread locks, takes snapshot, and applies to UI.

@@ -67,6 +67,14 @@ pub fn run_slint_overlay_loop(
             if snapshot.has_changes() {
                 apply_bridge_state(&ui, snapshot);
             }
+            // Report input focus state back to Bevy — suppresses editor keyboard
+            // shortcuts (Delete, Ctrl+A, WASD, etc.) when the overlay has focus
+            let has_focus = ui.get_any_input_has_focus()
+                || ui.get_show_settings_dialog()
+                || ui.get_show_exit_confirmation();
+            super::slint_bridge::OVERLAY_INPUT_FOCUSED.store(
+                has_focus, std::sync::atomic::Ordering::Relaxed
+            );
         }
     });
 
