@@ -359,6 +359,14 @@ export component TreeItem inherits Rectangle {
     callback toggle-expanded();
     callback context-menu(length, length);
 
+    // Modifier key state — set by parent FocusScope key tracking
+    in property <bool> ctrl-held: false;
+    in property <bool> shift-held: false;
+
+    // Internal: latched from pointer-event on mouse-down, read by clicked
+    property <bool> pe-ctrl: false;
+    property <bool> pe-shift: false;
+
     height: root.show ? 22px : 0px;
     visible: root.show;
     background: self.selected ? Theme.explorer-item-selected :
@@ -366,14 +374,21 @@ export component TreeItem inherits Rectangle {
 
     // Full-row touch area for selection and context menu
     row-touch := TouchArea {
-        // clicked fires without modifiers — use pointer-event for modifier detection
+        clicked => {
+            // Use pointer-event latched modifiers OR FocusScope tracked modifiers
+            root.clicked(root.pe-ctrl || root.ctrl-held, root.pe-shift || root.shift-held);
+            // Reset latched state
+            root.pe-ctrl = false;
+            root.pe-shift = false;
+        }
         double-clicked => { root.double-clicked(); }
         pointer-event(event) => {
-            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
-                root.clicked(event.modifiers.control, event.modifiers.shift);
+            // Latch modifier state on mouse-down so clicked handler can read it
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.pe-ctrl = event.modifiers.control;
+                root.pe-shift = event.modifiers.shift;
             }
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                // Use absolute position + local mouse offset for correct global coordinates
                 root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }

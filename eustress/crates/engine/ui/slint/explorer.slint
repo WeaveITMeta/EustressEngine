@@ -187,15 +187,26 @@ export component ExplorerPanel inherits Rectangle {
             }
         }
         
-        // Entity tree with keyboard navigation
+        // Entity tree with keyboard navigation + modifier tracking
         explorer-keys := FocusScope {
             vertical-stretch: 1;
 
+            // Track Ctrl/Shift state via key press/release for multi-select
+            property <bool> ctrl-held: false;
+            property <bool> shift-held: false;
+
             key-pressed(event) => {
+                if event.text == Key.Control { self.ctrl-held = true; return accept; }
+                if event.text == Key.Shift { self.shift-held = true; return accept; }
                 if event.text == Key.UpArrow   { root.navigate-up();       return accept; }
                 if event.text == Key.DownArrow  { root.navigate-down();     return accept; }
                 if event.text == Key.LeftArrow  { root.navigate-collapse(); return accept; }
                 if event.text == Key.RightArrow { root.navigate-expand();   return accept; }
+                return reject;
+            }
+            key-released(event) => {
+                if event.text == Key.Control { self.ctrl-held = false; return accept; }
+                if event.text == Key.Shift { self.shift-held = false; return accept; }
                 return reject;
             }
 
@@ -213,8 +224,11 @@ export component ExplorerPanel inherits Rectangle {
                     expanded: node.expanded;
                     selected: node.selected;
                     show: node.visible;
-                    
+                    ctrl-held: explorer-keys.ctrl-held;
+                    shift-held: explorer-keys.shift-held;
+
                     clicked(ctrl, shift) => {
+                        explorer-keys.focus();
                         root.on-select-node(node.id, node.node-type, ctrl, shift);
                     }
                     double-clicked => {
