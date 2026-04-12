@@ -451,6 +451,8 @@ fn handle_move_interaction(
             } else {
                 // Fallback: drag on horizontal plane
                 if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, Vec3::Y) {
+                    // Clamp t to prevent dragging into the sky producing infinity positions
+                    let t = t.min(2000.0);
                     let ground = ray.origin + *ray.direction * t;
                     let offset = calculate_surface_offset(&leader_size, &leader_rot, &Vec3::Y);
                     Vec3::new(ground.x, offset, ground.z)
@@ -458,6 +460,9 @@ fn handle_move_interaction(
                     leader_initial
                 }
             };
+
+            // Guard: reject NaN/infinity positions that crash the physics engine
+            let target_pos = if target_pos.is_finite() { target_pos } else { leader_initial };
 
             let final_target = if settings.snap_enabled {
                 snap_to_grid(target_pos, settings.snap_size)

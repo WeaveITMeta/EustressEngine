@@ -234,14 +234,16 @@ export component StudioWindow inherits Window {
     in-out property <int> workshop-tool-count: 0;
     in-out property <string> workshop-active-tool: "";
 
-    // API Reference Panel (browsable scripting API catalog)
+    // API Reference Panel (browsable scripting API catalog — opens as center tab)
     in property <[ApiEntryData]> api-entries: [];
     in property <[string]> api-categories: [];
     in-out property <int> api-total-count: 0;
     in-out property <int> api-filtered-count: 0;
     in-out property <string> api-selected-category: "All";
+    in-out property <string> api-language-filter: "All";
     callback api-search-changed(string);
     callback api-category-selected(string);
+    callback api-language-filter-changed(string);
     callback api-copy-example(string);
 
     // Scene name for exit confirmation
@@ -1886,7 +1888,7 @@ export component StudioWindow inherits Window {
                     // Parameters Editor (shown for "parameters" tab type)
                     if root.active-tab-type == "parameters": Rectangle {
                         background: Theme.panel-background;
-                        
+
                         VerticalLayout {
                             alignment: center;
                             Text {
@@ -1896,6 +1898,26 @@ export component StudioWindow inherits Window {
                                 horizontal-alignment: center;
                             }
                         }
+                    }
+
+                    // API Reference Browser (shown for "api" tab type)
+                    if root.active-tab-type == "api": ApiReferencePanel {
+                        entries: root.api-entries;
+                        categories: root.api-categories;
+                        total-count: root.api-total-count;
+                        filtered-count: root.api-filtered-count;
+                        selected-category: root.api-selected-category;
+
+                        search-changed(text) => { root.api-search-changed(text); }
+                        category-selected(cat) => {
+                            root.api-selected-category = cat;
+                            root.api-category-selected(cat);
+                        }
+                        language-filter-changed(lang) => {
+                            root.api-language-filter = lang;
+                            root.api-language-filter-changed(lang);
+                        }
+                        copy-example(ex) => { root.api-copy-example(ex); }
                     }
                 }
                 // ── Box Selection Overlay ──────────────────────────
@@ -2040,26 +2062,6 @@ export component StudioWindow inherits Window {
                                 }
                             }
 
-                            // Tab 4: API Reference
-                            Rectangle {
-                                horizontal-stretch: 1;
-                                background: root.right-tab-index == 4 ? Theme.panel-background : Theme.tab-inactive;
-                                border-top-left-radius: 4px;
-                                border-top-right-radius: 4px;
-
-                                TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.right-tab-index = 4; }
-                                }
-
-                                Text {
-                                    text: "API";
-                                    color: root.right-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                            }
                         }
                     }
                     
@@ -2123,21 +2125,6 @@ export component StudioWindow inherits Window {
                             on-execute-command(cmd) => { root.workshop-send-message(cmd); }
                         }
 
-                        // Tab 4: API Reference
-                        if root.right-tab-index == 4: ApiReferencePanel {
-                            entries: root.api-entries;
-                            categories: root.api-categories;
-                            total-count: root.api-total-count;
-                            filtered-count: root.api-filtered-count;
-                            selected-category: root.api-selected-category;
-
-                            search-changed(text) => { root.api-search-changed(text); }
-                            category-selected(cat) => {
-                                root.api-selected-category = cat;
-                                root.api-category-selected(cat);
-                            }
-                            copy-example(ex) => { root.api-copy-example(ex); }
-                        }
                     }
                 }
             }

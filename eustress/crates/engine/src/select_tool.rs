@@ -421,6 +421,7 @@ fn handle_select_drag(
                     state.debug_hit_normal = None;
 
                     if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y) {
+                         let t = t.min(2000.0);
                          let ground_pos = ray.origin + *ray.direction * t;
                          // Calculate offset using original rotation
                          let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
@@ -428,13 +429,17 @@ fn handle_select_drag(
                     } else {
                         // Fallback: Use intersection with horizontal plane at leader's initial height
                          if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, initial_leader_pos, Vec3::Y) {
+                             let t = t.min(2000.0);
                              ray.origin + *ray.direction * t
                          } else {
                              initial_leader_pos
                          }
                     }
                 };
-                
+
+                // Guard: reject NaN/infinity positions that crash the physics engine
+                let target_pos = if target_pos.is_finite() { target_pos } else { initial_leader_pos };
+
                 // No rotation change during drag
                 let rotation_delta = Quat::IDENTITY;
 

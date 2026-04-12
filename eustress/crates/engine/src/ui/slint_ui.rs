@@ -389,6 +389,7 @@ pub enum SlintAction {
     // API Reference panel
     ApiSearchChanged(String),
     ApiCategorySelected(String),
+    ApiLanguageFilterChanged(String),
     ApiCopyExample(String),
 
     // Universe browser
@@ -444,11 +445,12 @@ pub struct CenterTabData {
     pub loading: bool,
 }
 
-/// API Reference filter state — drives the API Browser panel's search and category filters.
+/// API Reference filter state — drives the API Browser panel's search, category, and language filters.
 #[derive(Resource, Default)]
 pub struct ApiFilterState {
     pub search_text: String,
     pub selected_category: String,
+    pub language_filter: String, // "All" | "Rune" | "Luau"
     pub dirty: bool,
 }
 
@@ -4491,6 +4493,12 @@ fn drain_slint_actions(
                     filter.dirty = true;
                 }
             }
+            SlintAction::ApiLanguageFilterChanged(lang) => {
+                if let Some(filter) = res.api_filter.as_mut() {
+                    filter.language_filter = lang;
+                    filter.dirty = true;
+                }
+            }
             SlintAction::ApiCopyExample(example) => {
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Copied: {}", example));
@@ -5197,8 +5205,33 @@ fn drain_slint_actions(
                             es.dirty = true;
                         }
                     } else if action == "help:api-browser" {
-                        // Handled by slint_main.rs overlay thread (sets right-tab-index directly)
-                        info!("Help: API Browser requested");
+                        // Open API Reference as a center tab (like script editor)
+                        if let Some(ref mut state) = res.state {
+                            // Check if an API tab is already open
+                            let existing = state.center_tabs.iter().position(|t| t.tab_type == "api");
+                            if let Some(idx) = existing {
+                                // Switch to existing API tab
+                                state.active_center_tab = idx as i32 + 1;
+                            } else {
+                                // Create new API tab
+                                state.center_tabs.push(CenterTabData {
+                                    entity_id: -2, // special ID for API browser
+                                    name: "API Reference".to_string(),
+                                    tab_type: "api".to_string(),
+                                    mode: String::new(),
+                                    url: String::new(),
+                                    dirty: false,
+                                    loading: false,
+                                });
+                                state.active_center_tab = state.center_tabs.len() as i32;
+                            }
+                            state.tabs_dirty = true;
+                        }
+                        // Mark filter dirty to push data on first display
+                        if let Some(filter) = res.api_filter.as_mut() {
+                            filter.dirty = true;
+                        }
+                        info!("Help: Opened API Browser center tab");
                     } else {
                         // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
                         if let Some(ref mut out) = res.output {
@@ -5817,9 +5850,17 @@ fn sync_api_reference_to_slint(
 
     let search = filter.search_text.to_lowercase();
     let cat_filter = &filter.selected_category;
+    let lang_filter = &filter.language_filter;
 
     // Filter entries
     let filtered: Vec<_> = catalog.entries.iter().filter(|e| {
+        // Language filter
+        if !lang_filter.is_empty() && lang_filter != "All" {
+            let lang_str = e.language.to_string();
+            if lang_str != *lang_filter && lang_str != "Both" {
+                return false;
+            }
+        }
         // Category filter
         if !cat_filter.is_empty() && cat_filter != "All" && e.category != *cat_filter {
             return false;

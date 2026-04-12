@@ -205,12 +205,12 @@ export component ApiReferencePanel inherits Rectangle {
     in property <int> total-count: 0;
     in property <int> filtered-count: 0;
     in property <string> selected-category: "All";
+    in-out property <string> language-filter: "All";
 
     // ---- Callbacks ----
     callback search-changed(string);
     callback category-selected(string);
     callback language-filter-changed(string);
-    callback status-filter-changed(string);
     callback copy-example(string);
 
     background: Theme.panel-background;
@@ -219,10 +219,7 @@ export component ApiReferencePanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // Header
-        PanelHeader { title: "API Reference"; }
-
-        // ---- Toolbar: search + filters ----
+        // ---- Toolbar: search + language filter + count ----
         Rectangle {
             height: 36px;
             background: Theme.header-background;
@@ -259,6 +256,88 @@ export component ApiReferencePanel inherits Rectangle {
 
                             edited => {
                                 root.search-changed(self.text);
+                            }
+                        }
+                    }
+                }
+
+                // Language filter: All | Rune | Luau
+                Rectangle {
+                    width: 140px;
+                    height: 28px;
+                    border-radius: 4px;
+                    background: #1a1a1a;
+
+                    HorizontalLayout {
+                        spacing: 0px;
+                        padding: 2px;
+
+                        // All
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 3px;
+                            background: root.language-filter == "All" ? #3a3a5a : transparent;
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.language-filter = "All";
+                                    root.language-filter-changed("All");
+                                }
+                            }
+
+                            Text {
+                                text: "All";
+                                color: root.language-filter == "All" ? Theme.text-primary : Theme.text-secondary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Rune
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 3px;
+                            background: root.language-filter == "Rune" ? #1a3a2a : transparent;
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.language-filter = "Rune";
+                                    root.language-filter-changed("Rune");
+                                }
+                            }
+
+                            Text {
+                                text: "Rune";
+                                color: root.language-filter == "Rune" ? #4caf50 : Theme.text-secondary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Luau
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 3px;
+                            background: root.language-filter == "Luau" ? #1a2a3a : transparent;
+
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.language-filter = "Luau";
+                                    root.language-filter-changed("Luau");
+                                }
+                            }
+
+                            Text {
+                                text: "Luau";
+                                color: root.language-filter == "Luau" ? #42a5f5 : Theme.text-secondary;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
                             }
                         }
                     }
