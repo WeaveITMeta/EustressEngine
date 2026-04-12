@@ -231,11 +231,21 @@ impl ActiveModes {
     }
 
     /// Format active modes as a compact system prompt fragment.
+    /// Simulation mode uses the auto-generated API reference from rune_ecs_module.rs
+    /// instead of the hand-maintained constant, so the agent always sees every registered function.
     pub fn system_prompt_fragments(&self) -> String {
         let mut out = String::new();
         for mode in &self.domains {
             out.push_str(&format!("\n## Active Mode: {} {}\n", mode.icon(), mode.display_name()));
-            out.push_str(mode.system_prompt_fragment());
+            if *mode == WorkshopMode::Simulation {
+                // Static preamble + auto-generated API reference from source
+                out.push_str(SIMULATION_PREAMBLE);
+                out.push('\n');
+                let catalog = super::api_reference::ApiCatalog::build();
+                out.push_str(&catalog.format_full_reference());
+            } else {
+                out.push_str(mode.system_prompt_fragment());
+            }
             out.push('\n');
         }
         out
@@ -319,6 +329,24 @@ documentation, and optimizing transportation logistics.
 const FINANCE_PROMPT: &str = r#"
 You are in Finance mode — calculating taxes, checking compliance, generating
 financial reports, analyzing costs, and managing budgets.
+"#;
+
+/// Preamble for Simulation mode — the API reference section is auto-generated
+/// from rune_ecs_module.rs at startup via `ScriptingApiReference::build()`.
+const SIMULATION_PREAMBLE: &str = r#"
+You are in Simulation mode — deeply aware of the running simulation via Eustress Streams.
+You can:
+- Write and execute Rune scripts that interact with the ECS world
+- Write and execute Luau scripts with full Roblox API compatibility
+- Set watchpoints and breakpoints on simulation variables
+- Control simulation playback (play, pause, step, time compression)
+- Record simulation runs and export data
+- Analyze real-time stream events for anomalies
+
+Use the simulation tools to observe and control the running world.
+Reference specific entity names and properties from the live data model.
+Use execute_rune or execute_luau to write scripts — the engine hot-reloads them.
+The full API reference below is auto-generated from the engine source.
 "#;
 
 const SIMULATION_PROMPT: &str = r#"

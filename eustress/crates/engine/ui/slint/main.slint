@@ -41,6 +41,7 @@ import { KeybindingsDialog } from "keybindings.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.slint";
+import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
 // ============================================================================
@@ -229,6 +230,19 @@ export component StudioWindow inherits Window {
     in-out property <int> workshop-total-artifacts: 0;
     in-out property <string> workshop-estimated-cost: "$0.00";
     in-out property <bool> workshop-api-key-valid: false;
+    in-out property <string> workshop-active-modes-text: "⚡ General";
+    in-out property <int> workshop-tool-count: 0;
+    in-out property <string> workshop-active-tool: "";
+
+    // API Reference Panel (browsable scripting API catalog)
+    in property <[ApiEntryData]> api-entries: [];
+    in property <[string]> api-categories: [];
+    in-out property <int> api-total-count: 0;
+    in-out property <int> api-filtered-count: 0;
+    in-out property <string> api-selected-category: "All";
+    callback api-search-changed(string);
+    callback api-category-selected(string);
+    callback api-copy-example(string);
 
     // Scene name for exit confirmation
     in-out property <string> scene-name: "Untitled";
@@ -486,7 +500,7 @@ export component StudioWindow inherits Window {
     callback stop();
     
     // Explorer (unified: entities + files)
-    callback select-node(int, string);
+    callback select-node(int, string, /* ctrl */ bool, /* shift */ bool);
     callback expand-node(int, string);
     callback collapse-node(int, string);
     callback open-node(int, string);
@@ -939,7 +953,7 @@ export component StudioWindow inherits Window {
                         
                         if root.left-tab-index == 0: ExplorerPanel {
                             tree-nodes: root.tree-nodes;
-                            on-select-node(id, node-type) => { root.select-node(id, node-type); }
+                            on-select-node(id, node-type, ctrl, shift) => { root.select-node(id, node-type, ctrl, shift); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
                             on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
                             on-open-node(id, node-type) => { root.open-node(id, node-type); }
@@ -2025,6 +2039,27 @@ export component StudioWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
+
+                            // Tab 4: API Reference
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                background: root.right-tab-index == 4 ? Theme.panel-background : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.right-tab-index = 4; }
+                                }
+
+                                Text {
+                                    text: "API";
+                                    color: root.right-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                         }
                     }
                     
@@ -2070,7 +2105,10 @@ export component StudioWindow inherits Window {
                             total-artifacts: root.workshop-total-artifacts;
                             estimated-cost: root.workshop-estimated-cost;
                             api-key-valid: root.workshop-api-key-valid;
-                            
+                            active-modes-text: root.workshop-active-modes-text;
+                            tool-count: root.workshop-tool-count;
+                            active-tool: root.workshop-active-tool;
+
                             on-send-message(text) => { root.workshop-send-message(text); }
                             on-approve-mcp(id) => { root.workshop-approve-mcp(id); }
                             on-skip-mcp(id) => { root.workshop-skip-mcp(id); }
@@ -2082,6 +2120,23 @@ export component StudioWindow inherits Window {
                             on-cancel-pipeline() => { root.workshop-cancel-pipeline(); }
                             on-configure-api() => { root.open-settings(); }
                             on-optimize-and-build() => { root.workshop-optimize-and-build(); }
+                            on-execute-command(cmd) => { root.workshop-send-message(cmd); }
+                        }
+
+                        // Tab 4: API Reference
+                        if root.right-tab-index == 4: ApiReferencePanel {
+                            entries: root.api-entries;
+                            categories: root.api-categories;
+                            total-count: root.api-total-count;
+                            filtered-count: root.api-filtered-count;
+                            selected-category: root.api-selected-category;
+
+                            search-changed(text) => { root.api-search-changed(text); }
+                            category-selected(cat) => {
+                                root.api-selected-category = cat;
+                                root.api-category-selected(cat);
+                            }
+                            copy-example(ex) => { root.api-copy-example(ex); }
                         }
                     }
                 }

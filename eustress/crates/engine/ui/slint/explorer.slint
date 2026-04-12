@@ -37,8 +37,8 @@ export component ExplorerPanel inherits Rectangle {
     in property <[TreeNode]> tree-nodes: [];
     in-out property <string> search-text: "";
     
-    // Callbacks
-    callback on-select-node(int, string);
+    // Callbacks — ctrl/shift booleans for multi-select
+    callback on-select-node(int, string, /* ctrl */ bool, /* shift */ bool);
     callback on-expand-node(int, string);
     callback on-collapse-node(int, string);
     callback on-open-node(int, string);
@@ -214,12 +214,12 @@ export component ExplorerPanel inherits Rectangle {
                     selected: node.selected;
                     show: node.visible;
                     
-                    clicked => {
-                        root.on-select-node(node.id, node.node-type);
+                    clicked(ctrl, shift) => {
+                        root.on-select-node(node.id, node.node-type, ctrl, shift);
                     }
                     double-clicked => {
                         // Select first so the node is highlighted
-                        root.on-select-node(node.id, node.node-type);
+                        root.on-select-node(node.id, node.node-type, false, false);
                         // Then expand/collapse or open
                         if node.expandable {
                             if node.expanded {

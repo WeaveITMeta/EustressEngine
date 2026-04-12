@@ -28,6 +28,7 @@ pub mod modes;
 pub mod tools;
 pub mod context;
 pub mod streams;
+pub mod api_reference;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,11 @@ use std::collections::HashMap;
 use crate::manufacturing::AllocationDecision;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// System set for workshop core systems (handle_send_message, handle_approve_mcp, etc.)
+/// Claude bridge and artifact generation systems run AFTER this set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SystemSet)]
+pub struct WorkshopCoreSystems;
 
 // ============================================================================
 // 1. Data Structures
@@ -1005,11 +1011,105 @@ fn handle_skip_mcp(
 ) {
     for event in events.read() {
         pipeline.update_mcp_status(event.message_id, McpCommandStatus::Skipped);
-        
-        // Find which step this MCP command belongs to and mark it skipped
-        // For now, advance conversation state
-        pipeline.add_system_message("Step skipped. Moving to next.".to_string(), 0.0);
+
+        // Find which step this MCP command belongs to by checking content for "step=" param
+        let step_idx = pipeline.messages.iter()
+            .find(|m| m.id == event.message_id)
+            .and_then(|msg| {
+                // Normalization MCP uses /mcp/ideation/normalize endpoint
+                if msg.mcp_endpoint.as_deref() == Some("/mcp/ideation/normalize") {
+                    return Some(0u32);
+                }
+                // Artifact steps embed "step={param}" in content
+                for idx in 1u32..=10 {
+                    if let Some(step) = artifact_gen::ArtifactStep::from_step_index(idx) {
+                        if msg.content.contains(&format!("step={}", step.step_param())) {
+                            return Some(idx);
+                        }
+                    }
+                }
+                None
+            });
+
+        if let Some(idx) = step_idx {
+            // Mark the step as skipped and clone the label before mutating
+            let label = pipeline.steps.get(idx as usize)
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| "step".to_string());
+            if let Some(step) = pipeline.steps.get_mut(idx as usize) {
+                step.status = StepStatus::Skipped;
+            }
+            pipeline.add_system_message(format!("{} skipped.", label), 0.0);
+
+            // Propose the next artifact step if there is one
+            let next_idx = idx + 1;
+            if let Some(next_step) = artifact_gen::ArtifactStep::from_step_index(next_idx) {
+                let next_label = pipeline.steps.get(next_idx as usize)
+                    .map(|s| s.label.clone())
+                    .unwrap_or_else(|| "next artifact".to_string());
+                let description = format!(
+                    "Generate {} (step={})\nEstimated cost: ~${:.2} (Sonnet)",
+                    next_label,
+                    next_step.step_param(),
+                    next_step.estimated_cost()
+                );
+                pipeline.add_mcp_command(
+                    description,
+                    "/mcp/ideation/brief".to_string(),
+                    "POST".to_string(),
+                    next_step.estimated_cost(),
+                );
+            } else if idx == 10 {
+                // Last step skipped — pipeline complete
+                pipeline.state = IdeationState::Complete;
+                pipeline.add_system_message(
+                    "All steps processed. Click \"Optimize & Build\" to hand off to Systems 1-8.".to_string(),
+                    0.0,
+                );
+            }
+        } else {
+            pipeline.add_system_message("Step skipped.".to_string(), 0.0);
+        }
+
         info!("Workshop: MCP command {} skipped", event.message_id);
+    }
+}
+
+/// Process MCP command edits — acknowledge the request (full edit UI is future work)
+fn handle_edit_mcp(
+    mut events: MessageReader<WorkshopEditMcpEvent>,
+    mut pipeline: ResMut<IdeationPipeline>,
+) {
+    for event in events.read() {
+        pipeline.add_system_message(
+            "MCP command editing is not yet supported. You can skip and re-run with different parameters.".to_string(),
+            0.0,
+        );
+        info!("Workshop: MCP command {} edit requested (not yet implemented)", event.message_id);
+    }
+}
+
+/// Open an artifact file or its containing directory
+fn handle_open_artifact(
+    mut events: MessageReader<WorkshopOpenArtifactEvent>,
+) {
+    for event in events.read() {
+        let path = std::path::Path::new(&event.path);
+        if path.exists() {
+            if let Err(e) = open::that(&event.path) {
+                warn!("Workshop: Failed to open artifact {:?}: {}", event.path, e);
+            }
+        } else {
+            // Try opening the parent directory
+            if let Some(parent) = path.parent() {
+                if parent.exists() {
+                    if let Err(e) = open::that(parent) {
+                        warn!("Workshop: Failed to open directory {:?}: {}", parent, e);
+                    }
+                }
+            }
+            warn!("Workshop: Artifact path does not exist: {:?}", event.path);
+        }
     }
 }
 
@@ -1053,12 +1153,6 @@ fn handle_claude_response(
             
             // Normalization response (step 0) — parse TOML, write to disk, propose patent
             Some(0) => {
-                // Update step status
-                if let Some(step) = pipeline.steps.get_mut(0) {
-                    step.status = StepStatus::Done;
-                    step.artifact_count += 1;
-                }
-                
                 // Parse the brief from Claude's TOML response
                 match normalizer::parse_brief_from_toml(&event.content) {
                     Ok(brief) => {
@@ -1068,11 +1162,23 @@ fn handle_claude_response(
                                 "Brief validation warnings: {}",
                                 validation_errors.join(", ")
                             ));
+                            // Validation failed — don't store invalid brief, revert to conversing
+                            if let Some(step) = pipeline.steps.get_mut(0) {
+                                step.status = StepStatus::Error;
+                            }
+                            pipeline.state = IdeationState::Conversing;
+                            continue;
                         }
-                        
+
+                        // Step 0 succeeded
+                        if let Some(step) = pipeline.steps.get_mut(0) {
+                            step.status = StepStatus::Done;
+                            step.artifact_count += 1;
+                        }
+
                         // Set product name from brief
                         pipeline.product_name = brief.product.name.clone();
-                        
+
                         // Write to disk — brief goes to Space/Workspace/{product}/
                         let output_dir = normalizer::product_output_dir(&space_root.0, &pipeline.product_name);
                         match normalizer::write_brief_to_disk(&output_dir, &brief) {
@@ -1092,10 +1198,10 @@ fn handle_claude_response(
                                 ));
                             }
                         }
-                        
+
                         // Store the brief in the pipeline
                         pipeline.brief = Some(brief);
-                        
+
                         // Advance state and propose the first artifact step (patent)
                         pipeline.state = IdeationState::GeneratingPatent;
                         pipeline.add_mcp_command(
@@ -1109,7 +1215,10 @@ fn handle_claude_response(
                         pipeline.add_error_message(format!(
                             "Failed to parse brief TOML: {}. The AI response may need retry.", e
                         ));
-                        // Revert to conversing so user can retry
+                        // Mark step as error and revert to conversing so user can retry
+                        if let Some(step) = pipeline.steps.get_mut(0) {
+                            step.status = StepStatus::Error;
+                        }
                         pipeline.state = IdeationState::Conversing;
                     }
                 }
@@ -1118,7 +1227,7 @@ fn handle_claude_response(
             // Artifact steps 1-6: file writing, artifact messages, and next-step
             // proposals are handled entirely by artifact_gen::handle_artifact_completion.
             // We intentionally do nothing here to avoid double-counting artifacts.
-            Some(step_idx) if step_idx >= 1 && step_idx <= 6 => {}
+            Some(step_idx) if step_idx >= 1 && step_idx <= 10 => {}
             
             // Unknown step index
             Some(idx) => {
@@ -1266,24 +1375,28 @@ impl Plugin for WorkshopPlugin {
             .add_message::<ClaudeResponseEvent>()
             .add_message::<ClaudeErrorEvent>()
             // Core systems: handle user actions → update pipeline state
+            // Must run AFTER SlintSystems::Drain so WorkshopSendMessageEvent etc. are available
             .add_systems(Update, (
                 handle_send_message,
                 handle_approve_mcp,
                 handle_skip_mcp,
+                handle_edit_mcp,
+                handle_open_artifact,
                 handle_claude_response,
                 handle_claude_error,
-            ))
+            ).chain().after(crate::ui::SlintSystems::Drain).in_set(WorkshopCoreSystems))
             // Claude bridge: dispatch async requests + poll responses
+            // Must run AFTER WorkshopCoreSystems so pipeline.state is updated before dispatch checks it
             .add_systems(Update, (
                 claude_bridge::dispatch_chat_request,
                 claude_bridge::dispatch_normalize_request,
                 claude_bridge::poll_claude_responses,
-            ))
+            ).after(WorkshopCoreSystems))
             // Artifact generation: dispatch per-step requests + handle completions
             .add_systems(Update, (
                 artifact_gen::dispatch_artifact_requests,
                 artifact_gen::handle_artifact_completion,
-            ))
+            ).after(WorkshopCoreSystems))
             // Autosave: check dirty flag each frame (cheap when not dirty)
             .add_systems(Update, autosave_conversation);
         

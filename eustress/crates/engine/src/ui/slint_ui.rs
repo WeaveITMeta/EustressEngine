@@ -235,7 +235,7 @@ pub enum SlintAction {
     ShowFind,
     
     // Explorer (unified: entities + files)
-    SelectNode(i32, String),      // (id, node_type: "entity"|"file")
+    SelectNode(i32, String, bool, bool), // (id, node_type, ctrl, shift)      // (id, node_type: "entity"|"file")
     ExpandNode(i32, String),      // (id, node_type)
     CollapseNode(i32, String),    // (id, node_type)
     OpenNode(i32, String),        // (id, node_type) — double-click to open
@@ -386,6 +386,11 @@ pub enum SlintAction {
     WorkshopCancelPipeline,
     WorkshopOptimizeAndBuild,
 
+    // API Reference panel
+    ApiSearchChanged(String),
+    ApiCategorySelected(String),
+    ApiCopyExample(String),
+
     // Universe browser
     OpenSpacePath(String),
 }
@@ -425,119 +430,7 @@ impl SlintActionQueue {
 // UI State Resources — StudioState defined in ui/mod.rs (single source of truth)
 // ============================================================================
 
-// StudioState, OutputConsole, and CenterTabData definitions follow.
-// StudioState is imported from super (ui/mod.rs) to avoid duplication.
-// REMOVED: duplicate StudioState struct — was causing ALL buttons to fail
-// because drain_slint_actions wrote to this copy while tools read mod.rs copy.
-
-/* REMOVED: duplicate StudioState — see ui/mod.rs for the canonical definition
-pub struct StudioState {
-    pub show_explorer: bool,
-    pub show_properties: bool,
-    pub show_output: bool,
-    pub show_keybindings_window: bool,
-    pub show_terrain_editor: bool,
-    pub show_soul_settings_window: bool,
-    pub current_tool: Tool,
-    pub transform_mode: TransformMode,
-    
-    // Play mode controls
-    pub play_solo_requested: bool,
-    pub play_with_character_requested: bool,
-    pub pause_requested: bool,
-    pub stop_requested: bool,
-    
-    // Panel visibility
-    pub mindspace_panel_visible: bool,
-    pub secondary_panel_tab: SecondaryPanelTab,
-    
-    // Dialogs
-    pub show_publish_dialog: bool,
-    pub publish_mode: String, // "universe" or "space"
-    pub trigger_login: bool,
-    
-    // Paste mode
-    pub pending_paste: bool,
-    pub pending_file_action: Option<FileEvent>,
-    
-    // Network
-    pub show_network_panel: bool,
-    pub show_forge_connect_window: bool,
-    pub show_stress_test_window: bool,
-    pub synthetic_client_count: u32,
-    pub synthetic_clients_changed: bool,
-
-    
-    // Data windows
-    pub show_global_sources_window: bool,
-    pub show_domains_window: bool,
-    pub show_global_variables_window: bool,
-    pub quick_add_source_type: Option<String>,
-    
-    // Sync domain modal
-    pub show_sync_domain_modal: bool,
-    pub sync_domain_config: SyncDomainModalState,
-    
-    // Ribbon
-    pub ribbon_tab: RibbonTab,
-    pub visible_tabs: Vec<TabEntry>,
-    pub custom_tabs: Vec<CustomTab>,
-    pub tab_manager: RibbonTabManagerState,
-    
-    // Browser
-    pub browser_open_request: Option<(String, String)>,
-    
-    // Find/Settings
-    pub show_find_dialog: bool,
-    pub show_settings_window: bool,
-    
-    // Exit confirmation
-    pub has_unsaved_changes: bool,
-    pub show_exit_confirmation: bool,
-    
-    // MindSpace
-    pub mindspace_mode: MindSpaceMode,
-    pub mindspace_edit_buffer: String,
-    pub mindspace_font: eustress_common::classes::Font,
-    pub mindspace_font_size: f32,
-    
-    // Center tab management (Space1 + script/web tabs)
-    pub center_tabs: Vec<CenterTabData>,
-    pub active_center_tab: i32,          // 0 = Space1, 1+ = tab index
-    pub tabs_dirty: bool,                // Set when CenterTabManager updates tabs
-    pub tabs_deferred_frames: u8,        // Counts down deferred frames after tab change
-    pub pending_open_script: Option<(i32, String)>,
-    pub pending_open_web: Option<String>, // URL to open in new web tab
-    pub pending_close_tab: Option<i32>,
-    pub pending_build_entity: Option<Entity>,
-    pub pending_reorder: Option<(i32, i32)>, // (from, to)
-    pub script_editor_content: String,
-    pub script_content_dirty: bool,     // Set when user types; triggers line-number re-sync
-    pub script_highlight_lines: Vec<HighlightLine>,
-    
-    // Web browser state for active web tab
-    pub pending_web_navigate: Option<String>,
-    pub pending_web_back: bool,
-    pub pending_web_forward: bool,
-    pub pending_web_refresh: bool,
-
-    // Properties panel settings (from File > Settings)
-    pub show_help_icons: bool,
-    pub help_opens_in_tab: bool,
-    
-    // Properties panel — collapsed section categories
-    pub collapsed_sections: std::collections::HashSet<String>,
-    
-    // Properties panel — hash of last pushed model to avoid flickering hover on redundant pushes
-    pub last_properties_hash: u64,
-    // Properties panel — last selected entity to detect selection changes
-    pub last_selected_entity: Option<bevy::prelude::Entity>,
-    // Properties panel — frame counter since last selection change (delays sync to avoid flicker during editing)
-    pub frames_since_selection_change: u32,
-    // Output console — last log count to avoid rebuilding model on every sync
-    pub last_log_count: usize,
-}
-END OF REMOVED STUDIO STATE */
+// StudioState is imported from super (ui/mod.rs) — the canonical definition.
 
 /// Data for a single center tab (script or web)
 #[derive(Debug, Clone)]
@@ -551,86 +444,13 @@ pub struct CenterTabData {
     pub loading: bool,
 }
 
-/* REMOVED: duplicate Default for StudioState — see ui/mod.rs
-impl Default for StudioState {
-    fn default() -> Self {
-        Self {
-            show_explorer: true,
-            show_properties: true,
-            show_output: true,
-            show_keybindings_window: false,
-            show_terrain_editor: false,
-            show_soul_settings_window: false,
-            current_tool: Tool::Select,
-            transform_mode: TransformMode::World,
-            play_solo_requested: false,
-            play_with_character_requested: false,
-            pause_requested: false,
-            stop_requested: false,
-            mindspace_panel_visible: false,
-            secondary_panel_tab: SecondaryPanelTab::Terrain,
-            show_publish_dialog: false,
-            publish_mode: "universe".to_string(),
-            trigger_login: false,
-            pending_paste: false,
-            pending_file_action: None,
-            show_network_panel: false,
-            show_forge_connect_window: false,
-            show_stress_test_window: false,
-            synthetic_client_count: 0,
-            synthetic_clients_changed: false,
-            show_global_sources_window: false,
-            show_domains_window: false,
-            show_global_variables_window: false,
-            quick_add_source_type: None,
-            show_sync_domain_modal: false,
-            sync_domain_config: SyncDomainModalState::default(),
-            ribbon_tab: RibbonTab::Home,
-            visible_tabs: vec![
-                TabEntry::BuiltIn { name: "Home".to_string() },
-                TabEntry::BuiltIn { name: "Model".to_string() },
-                TabEntry::BuiltIn { name: "Test".to_string() },
-                TabEntry::BuiltIn { name: "View".to_string() },
-                TabEntry::BuiltIn { name: "Plugins".to_string() },
-            ],
-            custom_tabs: Vec::new(),
-            tab_manager: RibbonTabManagerState::default(),
-            browser_open_request: None,
-            show_find_dialog: false,
-            show_settings_window: false,
-            has_unsaved_changes: false,
-            show_exit_confirmation: false,
-            mindspace_mode: MindSpaceMode::Edit,
-            mindspace_edit_buffer: String::new(),
-            mindspace_font: eustress_common::classes::Font::default(),
-            mindspace_font_size: 14.0,
-            center_tabs: Vec::new(),
-            active_center_tab: 0,
-            tabs_dirty: false,
-            tabs_deferred_frames: 0,
-            pending_open_script: None,
-            pending_open_web: None,
-            pending_build_entity: None,
-            pending_close_tab: None,
-            pending_reorder: None,
-            script_editor_content: String::new(),
-            script_content_dirty: false,
-            script_highlight_lines: Vec::new(),
-            pending_web_navigate: None,
-            pending_web_back: false,
-            pending_web_forward: false,
-            pending_web_refresh: false,
-            show_help_icons: true,
-            help_opens_in_tab: false,
-            collapsed_sections: std::collections::HashSet::new(),
-            last_properties_hash: 0,
-            last_selected_entity: None,
-            frames_since_selection_change: 0,
-            last_log_count: 0,
-        }
-    }
+/// API Reference filter state — drives the API Browser panel's search and category filters.
+#[derive(Resource, Default)]
+pub struct ApiFilterState {
+    pub search_text: String,
+    pub selected_category: String,
+    pub dirty: bool,
 }
-END OF REMOVED DEFAULT */
 
 /// Output console for logs
 #[derive(Resource, Default)]
@@ -779,6 +599,11 @@ pub struct UnifiedExplorerState {
     pub cached_dynamic_services: Vec<(String, String)>, // (name, icon_name)
     /// Whether explorer filesystem cache is stale (set by file watcher)
     pub explorer_fs_stale: bool,
+    /// Last clicked node ID — used for Shift+Click range selection
+    pub last_selected_node_id: Option<i32>,
+    /// Ordered list of visible node IDs (entity + file) as shown in the tree.
+    /// Populated during sync, used for Shift+Click range selection.
+    pub visible_node_order: Vec<i32>,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -1062,6 +887,9 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<LastWindowSize>()
             .init_resource::<super::center_tabs::CenterTabManager>()
             .init_resource::<AssetManagerState>()
+            // API Reference: build catalog once at startup, init filter state
+            .insert_resource(crate::workshop::api_reference::ApiCatalog::build())
+            .init_resource::<ApiFilterState>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -1109,6 +937,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
+            // API Reference Panel sync: ApiCatalog + ApiFilterState → Slint
+            .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -1288,7 +1118,7 @@ fn setup_slint_overlay(world: &mut World) {
 
     // Explorer (unified: entities + files)
     let q = queue.clone();
-    ui.on_select_node(move |id, node_type| q.push(SlintAction::SelectNode(id, node_type.to_string())));
+    ui.on_select_node(move |id, node_type, ctrl, shift| q.push(SlintAction::SelectNode(id, node_type.to_string(), ctrl, shift)));
     let q = queue.clone();
     ui.on_expand_node(move |id, node_type| q.push(SlintAction::ExpandNode(id, node_type.to_string())));
     let q = queue.clone();
@@ -1540,27 +1370,9 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_force_exit(move || q.push(SlintAction::ForceExit));
     
-    // Workshop Panel (System 0: Ideation)
-    let q = queue.clone();
-    ui.on_workshop_send_message(move |text| q.push(SlintAction::WorkshopSendMessage(text.to_string())));
-    let q = queue.clone();
-    ui.on_workshop_approve_mcp(move |id| q.push(SlintAction::WorkshopApproveMcp(id)));
-    let q = queue.clone();
-    ui.on_workshop_skip_mcp(move |id| q.push(SlintAction::WorkshopSkipMcp(id)));
-    let q = queue.clone();
-    ui.on_workshop_edit_mcp(move |id| q.push(SlintAction::WorkshopEditMcp(id)));
-    let q = queue.clone();
-    ui.on_workshop_open_artifact(move |path| q.push(SlintAction::WorkshopOpenArtifact(path.to_string())));
-    let q = queue.clone();
-    ui.on_workshop_start_pipeline(move || q.push(SlintAction::WorkshopStartPipeline));
-    let q = queue.clone();
-    ui.on_workshop_pause_pipeline(move || q.push(SlintAction::WorkshopPausePipeline));
-    let q = queue.clone();
-    ui.on_workshop_resume_pipeline(move || q.push(SlintAction::WorkshopResumePipeline));
-    let q = queue.clone();
-    ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
-    let q = queue.clone();
-    ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
+    // Workshop Panel callbacks are wired in slint_main.rs (overlay thread).
+    // Do NOT duplicate them here — both push to the same SlintActionQueue,
+    // which would cause every action to fire twice (double Claude API calls).
 
     // Universe browser
     let q = queue.clone();
@@ -2405,6 +2217,8 @@ struct DrainResources<'w> {
     forge_state: Option<ResMut<'w, crate::forge::ForgeState>>,
     /// Lighting service for real-time property sync
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
+    /// API Reference filter state (search, category, language, status)
+    api_filter: Option<ResMut<'w, ApiFilterState>>,
 }
 
 /// Perform Ed25519 challenge-response auth against the API.
@@ -3666,69 +3480,106 @@ fn drain_slint_actions(
             }
             
             // Explorer actions — unified node handling (entities + files)
-            SlintAction::SelectNode(id, node_type) => {
+            SlintAction::SelectNode(id, node_type, ctrl, shift) => {
                 if let Some(ref mut es) = res.explorer_state {
-                    if node_type == "entity" {
-                        if id < 0 {
-                            // Negative IDs are service header nodes from make_service_node().
-                            // Reconstruct the service name by matching against known service name lengths.
-                            // Service names are stored in class_name on the TreeNode; we recover them
-                            // by scanning service_components for entities whose name matches the ID.
-                            let service_name = queries.service_components.iter()
-                                .find_map(|sc| {
-                                    if service_name_to_id(&sc.class_name) == id {
-                                        Some(sc.class_name.clone())
-                                    } else {
-                                        None
+                    // ── Shift+Click: range select ──
+                    if shift {
+                        if let (Some(anchor_id), Some(ref sel_mgr)) = (es.last_selected_node_id, &res.selection_manager) {
+                            let order = &es.visible_node_order;
+                            let anchor_pos = order.iter().position(|&n| n == anchor_id);
+                            let target_pos = order.iter().position(|&n| n == id);
+                            if let (Some(a), Some(b)) = (anchor_pos, target_pos) {
+                                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                                let mut sel = sel_mgr.0.write();
+                                sel.clear();
+                                for &range_id in &order[start..=end] {
+                                    if range_id > 0 { // entity nodes only (positive IDs)
+                                        if let Some(entity) = es.entity_id_cache.get(&range_id).copied() {
+                                            let id_str = format!("{}v{}", entity.index(), entity.generation());
+                                            sel.add_to_selection(id_str);
+                                        }
                                     }
-                                });
-                            // Fallback: look up known service names by their hash ID
-                            let name = service_name.or_else(|| {
-                                let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
-                                    "StarterPlayer","ReplicatedStorage","ServerStorage",
-                                    "ServerScriptService","SoulService","SoundService","Teams","Chat",
-                                    "MaterialService","AdornmentService"];
-                                known.iter().find(|n| service_name_to_id(n) == id).map(|n| n.to_string())
-                            });
-                            es.selected = name.map(SelectedItem::Service).unwrap_or(SelectedItem::None);
-                            es.needs_immediate_sync = true;
-                            // Clear entity selection — service nodes are not focusable parts
-                            if let Some(ref sel_mgr) = res.selection_manager {
-                                sel_mgr.0.write().clear();
+                                }
+                                // Set primary selection to the clicked item
+                                if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                                    es.selected = SelectedItem::Entity(entity);
+                                }
                             }
-                        } else {
-                            // Positive ID — look up Entity from stable sequential ID cache
+                        }
+                        // Don't update last_selected_node_id on shift-click (anchor stays)
+                        es.needs_immediate_sync = true;
+                    }
+                    // ── Ctrl+Click: toggle selection ──
+                    else if ctrl {
+                        if node_type == "entity" && id > 0 {
                             if let Some(entity) = es.entity_id_cache.get(&id).copied() {
-                                // Accept entity if it has Instance component OR if it's a terrain entity
-                                let is_valid = queries.instances.get(entity).is_ok() 
+                                let is_valid = queries.instances.get(entity).is_ok()
                                     || queries.terrain_roots.get(entity).is_ok()
                                     || queries.terrain_chunks.get(entity).is_ok();
-                                
                                 if is_valid {
-                                    es.selected = SelectedItem::Entity(entity);
-                                    
-                                    // Also update BevySelectionManager so FocusSelection (F key)
-                                    // can read the correct entity bounds from SelectionSyncManager.
                                     if let Some(ref sel_mgr) = res.selection_manager {
                                         let id_str = format!("{}v{}", entity.index(), entity.generation());
-                                        sel_mgr.0.write().select(id_str);
+                                        sel_mgr.0.write().toggle_selection(id_str);
+                                    }
+                                    es.selected = SelectedItem::Entity(entity);
+                                }
+                            }
+                        }
+                        es.last_selected_node_id = Some(id);
+                        es.needs_immediate_sync = true;
+                    }
+                    // ── Normal click: single select ──
+                    else {
+                        if node_type == "entity" {
+                            if id < 0 {
+                                // Service header node
+                                let service_name = queries.service_components.iter()
+                                    .find_map(|sc| {
+                                        if service_name_to_id(&sc.class_name) == id {
+                                            Some(sc.class_name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                let name = service_name.or_else(|| {
+                                    let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                        "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                        "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                        "MaterialService","AdornmentService"];
+                                    known.iter().find(|n| service_name_to_id(n) == id).map(|n| n.to_string())
+                                });
+                                es.selected = name.map(SelectedItem::Service).unwrap_or(SelectedItem::None);
+                                if let Some(ref sel_mgr) = res.selection_manager {
+                                    sel_mgr.0.write().clear();
+                                }
+                            } else {
+                                if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                                    let is_valid = queries.instances.get(entity).is_ok()
+                                        || queries.terrain_roots.get(entity).is_ok()
+                                        || queries.terrain_chunks.get(entity).is_ok();
+                                    if is_valid {
+                                        es.selected = SelectedItem::Entity(entity);
+                                        if let Some(ref sel_mgr) = res.selection_manager {
+                                            let id_str = format!("{}v{}", entity.index(), entity.generation());
+                                            sel_mgr.0.write().select(id_str);
+                                        }
+                                    } else {
+                                        es.selected = SelectedItem::None;
                                     }
                                 } else {
                                     es.selected = SelectedItem::None;
                                 }
+                            }
+                        } else {
+                            if let Some(path) = es.file_path_cache.get(&id).cloned() {
+                                es.selected = SelectedItem::File(path);
                             } else {
                                 es.selected = SelectedItem::None;
                             }
                         }
-                    } else {
-                        // File node — look up path by hash ID from file_path_cache
-                        if let Some(path) = es.file_path_cache.get(&id).cloned() {
-                            es.selected = SelectedItem::File(path);
-                        } else {
-                            es.selected = SelectedItem::None;
-                        }
+                        es.last_selected_node_id = Some(id);
+                        es.needs_immediate_sync = true;
                     }
-                    es.needs_immediate_sync = true;
                 }
             }
             SlintAction::ExpandNode(id, node_type) => {
@@ -3967,28 +3818,26 @@ fn drain_slint_actions(
             }
 
             SlintAction::ExplorerNavigateCollapse => {
-                // Collapse currently selected node
                 if let Some(ref mut es) = res.explorer_state {
-                    if let SelectedItem::Entity(entity) = &es.selected {
-                        es.expanded_entities.remove(entity);
-                        es.needs_immediate_sync = true;
-                    } else if let SelectedItem::Service(name) = &es.selected {
-                        es.expanded_services.remove(name);
-                        es.needs_immediate_sync = true;
+                    let sel = es.selected.clone();
+                    match sel {
+                        SelectedItem::Entity(entity) => { es.expanded_entities.remove(&entity); }
+                        SelectedItem::Service(name) => { es.expanded_services.remove(&name); }
+                        _ => {}
                     }
+                    es.needs_immediate_sync = true;
                 }
             }
 
             SlintAction::ExplorerNavigateExpand => {
-                // Expand currently selected node
                 if let Some(ref mut es) = res.explorer_state {
-                    if let SelectedItem::Entity(entity) = &es.selected {
-                        es.expanded_entities.insert(*entity);
-                        es.needs_immediate_sync = true;
-                    } else if let SelectedItem::Service(name) = &es.selected {
-                        es.expanded_services.insert(name.clone());
-                        es.needs_immediate_sync = true;
+                    let sel = es.selected.clone();
+                    match sel {
+                        SelectedItem::Entity(entity) => { es.expanded_entities.insert(entity); }
+                        SelectedItem::Service(name) => { es.expanded_services.insert(name); }
+                        _ => {}
                     }
+                    es.needs_immediate_sync = true;
                 }
             }
 
@@ -4627,6 +4476,26 @@ fn drain_slint_actions(
                 }
             }
             
+            // API Reference panel actions
+            SlintAction::ApiSearchChanged(text) => {
+                if let Some(filter) = res.api_filter.as_mut() {
+                    filter.search_text = text;
+                    filter.dirty = true;
+                }
+            }
+            SlintAction::ApiCategorySelected(cat) => {
+                if let Some(filter) = res.api_filter.as_mut() {
+                    filter.selected_category = cat;
+                    filter.dirty = true;
+                }
+            }
+            SlintAction::ApiCopyExample(example) => {
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Copied: {}", example));
+                }
+                info!("API Reference: Example copied — {}", example);
+            }
+
             // Toolbox insertion - file-system-first: create .glb.toml → spawn inline
             SlintAction::InsertPart(part_type_str) => {
                 // ── Model / Folder: create directory with _instance.toml ──
@@ -5325,6 +5194,9 @@ fn drain_slint_actions(
                         if let Some(ref mut es) = res.explorer_state {
                             es.dirty = true;
                         }
+                    } else if action == "help:api-browser" {
+                        // Handled by slint_main.rs overlay thread (sets right-tab-index directly)
+                        info!("Help: API Browser requested");
                     } else {
                         // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
                         if let Some(ref mut out) = res.output {
@@ -5860,6 +5732,7 @@ fn sync_workshop_to_slint(
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    tool_registry: Option<Res<crate::workshop::tools::ToolRegistry>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
@@ -5891,7 +5764,7 @@ fn sync_workshop_to_slint(
             mcp_method: msg.mcp_method.clone().unwrap_or_default().into(),
             mcp_status: msg.mcp_status.as_ref()
                 .map(|s| s.to_slint_string().to_string())
-                .unwrap_or_default()
+                .unwrap_or_else(|| if msg.role == crate::workshop::MessageRole::Mcp { "pending".to_string() } else { String::new() })
                 .into(),
             artifact_path: msg.artifact_path.as_ref()
                 .map(|p| p.display().to_string())
@@ -5917,6 +5790,79 @@ fn sync_workshop_to_slint(
     }).collect();
     let steps_model = std::rc::Rc::new(slint::VecModel::from(steps));
     ui.set_workshop_pipeline_steps(slint::ModelRc::from(steps_model));
+
+    // Sync tool count from registry
+    if let Some(registry) = tool_registry {
+        ui.set_workshop_tool_count(registry.tool_count() as i32);
+    }
+}
+
+/// Sync API Reference catalog to Slint panel. Runs when filter state changes.
+fn sync_api_reference_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    catalog: Option<Res<crate::workshop::api_reference::ApiCatalog>>,
+    mut filter: Option<ResMut<ApiFilterState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(catalog) = catalog else { return };
+    let Some(ref mut filter) = filter else { return };
+
+    // Only re-push when filter changed or catalog just loaded
+    if !filter.dirty && !catalog.is_changed() { return; }
+    filter.dirty = false;
+
+    let ui = &slint_context.window;
+
+    let search = filter.search_text.to_lowercase();
+    let cat_filter = &filter.selected_category;
+
+    // Filter entries
+    let filtered: Vec<_> = catalog.entries.iter().filter(|e| {
+        // Category filter
+        if !cat_filter.is_empty() && cat_filter != "All" && e.category != *cat_filter {
+            return false;
+        }
+        // Search filter
+        if !search.is_empty() {
+            let name_match = e.name.to_lowercase().contains(&search);
+            let doc_match = e.doc.to_lowercase().contains(&search);
+            let cat_match = e.category.to_lowercase().contains(&search);
+            if !name_match && !doc_match && !cat_match { return false; }
+        }
+        true
+    }).collect();
+
+    // Build Slint model
+    let entries: Vec<ApiEntryData> = filtered.iter().map(|e| {
+        let params_str = e.params.iter()
+            .map(|p| format!("{}: {}", p.name, p.typ))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ApiEntryData {
+            name: e.name.clone().into(),
+            params: params_str.into(),
+            return_type: e.return_type.clone().into(),
+            doc: e.doc.clone().into(),
+            category: e.category.clone().into(),
+            language: e.language.to_string().into(),
+            status: e.status.to_string().into(),
+            status_icon: e.status.icon().to_string().into(),
+            example: e.example.clone().into(),
+        }
+    }).collect();
+
+    let categories: Vec<slint::SharedString> = catalog.categories.iter()
+        .map(|c| c.clone().into())
+        .collect();
+
+    ui.set_api_total_count(catalog.entries.len() as i32);
+    ui.set_api_filtered_count(entries.len() as i32);
+
+    let entries_model = std::rc::Rc::new(slint::VecModel::from(entries));
+    ui.set_api_entries(slint::ModelRc::from(entries_model));
+
+    let cats_model = std::rc::Rc::new(slint::VecModel::from(categories));
+    ui.set_api_categories(slint::ModelRc::from(cats_model));
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -6998,7 +6944,13 @@ fn sync_unified_explorer_to_slint(
             node.visible = name_lower.contains(&query);
         }
     }
-    
+
+    // Capture visible node order for Shift+Click range selection
+    explorer_state.visible_node_order = tree_nodes.iter()
+        .filter(|n| n.visible)
+        .map(|n| n.id)
+        .collect();
+
     // Hash-based change detection: only push to Slint when the model data actually
     // changes. Re-pushing an identical model destroys and recreates all `for` loop
     // items in Slint, which resets hover state and causes visible flickering.
@@ -7015,7 +6967,7 @@ fn sync_unified_explorer_to_slint(
         node.node_type.hash(&mut hasher);
     }
     let new_hash = hasher.finish();
-    
+
     if new_hash != explorer_state.last_tree_hash {
         explorer_state.last_tree_hash = new_hash;
         let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));

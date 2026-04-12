@@ -141,7 +141,7 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_remove_sim_output_binding(move |i| q.push(SlintAction::RemoveSimOutputBinding(i)));
 
     // Explorer (unified: entities + files)
-    let q = queue.clone(); ui.on_select_node(move |id, node_type| q.push(SlintAction::SelectNode(id, node_type.to_string())));
+    let q = queue.clone(); ui.on_select_node(move |id, node_type, ctrl, shift| q.push(SlintAction::SelectNode(id, node_type.to_string(), ctrl, shift)));
     let q = queue.clone(); ui.on_expand_node(move |id, node_type| q.push(SlintAction::ExpandNode(id, node_type.to_string())));
     let q = queue.clone(); ui.on_collapse_node(move |id, node_type| q.push(SlintAction::CollapseNode(id, node_type.to_string())));
     let q = queue.clone(); ui.on_open_node(move |id, node_type| q.push(SlintAction::OpenNode(id, node_type.to_string())));
@@ -165,8 +165,19 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     // Toolbox part insertion
     let q = queue.clone(); ui.on_insert_part(move |part_type| q.push(SlintAction::InsertPart(part_type.to_string())));
 
-    // Ribbon menu actions
-    let q = queue.clone(); ui.on_menu_action(move |action| q.push(SlintAction::MenuAction(action.to_string())));
+    // Ribbon menu actions (help:api-browser handled locally to set tab index directly)
+    let q = queue.clone();
+    let ui_weak_menu = ui.as_weak();
+    ui.on_menu_action(move |action| {
+        if action.as_str() == "help:api-browser" {
+            if let Some(ui) = ui_weak_menu.upgrade() {
+                ui.set_right_tab_index(4);
+                // Ensure the right panel is visible
+                ui.set_show_properties(true);
+            }
+        }
+        q.push(SlintAction::MenuAction(action.to_string()));
+    });
 
     // Context menu
     let q = queue.clone(); ui.on_context_action(move |action| q.push(SlintAction::ContextAction(action.to_string())));
@@ -266,6 +277,11 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_workshop_resume_pipeline(move || q.push(SlintAction::WorkshopResumePipeline));
     let q = queue.clone(); ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
     let q = queue.clone(); ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
+
+    // API Reference panel
+    let q = queue.clone(); ui.on_api_search_changed(move |text| q.push(SlintAction::ApiSearchChanged(text.to_string())));
+    let q = queue.clone(); ui.on_api_category_selected(move |cat| q.push(SlintAction::ApiCategorySelected(cat.to_string())));
+    let q = queue.clone(); ui.on_api_copy_example(move |ex| q.push(SlintAction::ApiCopyExample(ex.to_string())));
 }
 
 /// Apply a BridgeState snapshot to the StudioWindow.

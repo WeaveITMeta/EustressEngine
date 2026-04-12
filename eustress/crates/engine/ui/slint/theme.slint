@@ -354,21 +354,24 @@ export component TreeItem inherits Rectangle {
     in property <bool> selected: false;
     in property <bool> show: true;
     
-    callback clicked();
+    callback clicked(/* ctrl */ bool, /* shift */ bool);
     callback double-clicked();
     callback toggle-expanded();
     callback context-menu(length, length);
-    
+
     height: root.show ? 22px : 0px;
     visible: root.show;
-    background: self.selected ? Theme.explorer-item-selected : 
+    background: self.selected ? Theme.explorer-item-selected :
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
-    
+
     // Full-row touch area for selection and context menu
     row-touch := TouchArea {
-        clicked => { root.clicked(); }
+        // clicked fires without modifiers — use pointer-event for modifier detection
         double-clicked => { root.double-clicked(); }
         pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                root.clicked(event.modifiers.control, event.modifiers.shift);
+            }
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
                 // Use absolute position + local mouse offset for correct global coordinates
                 root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);

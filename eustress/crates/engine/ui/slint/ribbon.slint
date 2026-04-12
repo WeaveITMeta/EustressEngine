@@ -1021,7 +1021,8 @@ export component Ribbon inherits Rectangle {
                                 
                                 DropdownHeader { label: "DOCUMENTATION"; }
                                 DropdownItem { label: "Documentation"; clicked => { root.on-open-url("https://docs.eustress.dev"); } }
-                                DropdownItem { label: "API Reference"; clicked => { root.on-open-url("https://docs.eustress.dev/api"); } }
+                                DropdownItem { label: "API Browser"; clicked => { root.on-menu-action("help:api-browser"); } }
+                                DropdownItem { label: "API Reference (Web)"; clicked => { root.on-open-url("https://docs.eustress.dev/api"); } }
                                 DropdownItem { label: "Tutorials"; clicked => { root.on-open-url("https://docs.eustress.dev/tutorials"); } }
                                 DropdownItem { label: "Soul Scripting Guide"; clicked => { root.on-open-url("https://docs.eustress.dev/soul"); } }
                                 DropdownSeparator {}

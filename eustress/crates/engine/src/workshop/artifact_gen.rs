@@ -589,8 +589,12 @@ pub fn dispatch_artifact_requests(
         let client = crate::soul::ClaudeClient::new(config);
         let result = client.call_api_for_workshop(&prompt, &system_prompt);
 
-        if let Ok(mut lock) = result_clone.lock() {
-            *lock = Some(result);
+        match result_clone.lock() {
+            Ok(mut lock) => *lock = Some(result),
+            Err(poisoned) => {
+                tracing::error!("Workshop: Mutex poisoned in artifact thread, recovering");
+                *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
+            }
         }
     });
 
@@ -632,7 +636,7 @@ pub fn handle_artifact_completion(
     for event in events.read() {
         // Only handle artifact step responses (step_index 1-8)
         let step_idx = match event.step_index {
-            Some(idx) if idx >= 1 && idx <= 8 => idx,
+            Some(idx) if idx >= 1 && idx <= 10 => idx,
             _ => continue,
         };
 
@@ -719,6 +723,12 @@ pub fn handle_artifact_completion(
                 path
             }
         };
+
+        // Mark step as done and update artifact count
+        if let Some(pipeline_step) = pipeline.steps.get_mut(step_idx as usize) {
+            pipeline_step.status = super::StepStatus::Done;
+            pipeline_step.artifact_count += 1;
+        }
 
         // Add artifact message to the conversation
         pipeline.add_artifact_message(

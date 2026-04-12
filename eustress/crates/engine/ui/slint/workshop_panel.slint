@@ -5,7 +5,7 @@
 // Table of Contents:
 //   1. Data Structures — ChatMessage, MCP command card, pipeline step
 //   2. ChatBubble — message display (user, system, MCP command, approval gate)
-//   3. MpcCommandCard — inline MCP endpoint display with approve/edit/skip
+//   3. MCPCommandCard — inline MCP endpoint display with approve/edit/skip
 //   4. PipelineStep — compact step status indicator
 //   5. WorkshopPanel — main panel with chat scroll, input, pipeline sidebar
 // ============================================================================
@@ -615,7 +615,9 @@ export component WorkshopPanel inherits Rectangle {
 
                             example1-touch := TouchArea {
                                 mouse-cursor: pointer;
-                                clicked => { root.input-text = "Solid-state sodium-sulfur battery, 15k cycle life, 900 Wh/kg"; }
+                                clicked => {
+                                    root.on-send-message("Solid-state sodium-sulfur battery, 15k cycle life, 900 Wh/kg");
+                                }
                             }
 
                             Text {
@@ -635,7 +637,9 @@ export component WorkshopPanel inherits Rectangle {
 
                             example2-touch := TouchArea {
                                 mouse-cursor: pointer;
-                                clicked => { root.input-text = "Gravity drive using Element 115 stable island isotope"; }
+                                clicked => {
+                                    root.on-send-message("Gravity drive using Element 115 stable island isotope");
+                                }
                             }
 
                             Text {

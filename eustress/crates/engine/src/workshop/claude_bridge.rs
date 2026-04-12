@@ -143,12 +143,16 @@ pub fn dispatch_chat_request(
     std::thread::spawn(move || {
         let client = crate::soul::ClaudeClient::new(config);
         let result = client.call_api_for_workshop(&prompt, WORKSHOP_SYSTEM_PROMPT);
-        
-        if let Ok(mut lock) = result_clone.lock() {
-            *lock = Some(result);
+
+        match result_clone.lock() {
+            Ok(mut lock) => *lock = Some(result),
+            Err(poisoned) => {
+                tracing::error!("Workshop: Mutex poisoned in chat thread, recovering");
+                *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
+            }
         }
     });
-    
+
     // Track the in-flight request
     tasks.in_flight.push(InFlightRequest::new(
         result_container,
@@ -215,11 +219,15 @@ pub fn dispatch_normalize_request(
             normalizer::NORMALIZER_SYSTEM_PROMPT,
         );
         
-        if let Ok(mut lock) = result_clone.lock() {
-            *lock = Some(result);
+        match result_clone.lock() {
+            Ok(mut lock) => *lock = Some(result),
+            Err(poisoned) => {
+                tracing::error!("Workshop: Mutex poisoned in normalize thread, recovering");
+                *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
+            }
         }
     });
-    
+
     // Track the in-flight request
     tasks.in_flight.push(InFlightRequest::new(
         result_container,

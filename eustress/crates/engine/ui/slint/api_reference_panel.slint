@@ -1,0 +1,354 @@
+// ============================================================================
+// Eustress Engine Studio - API Reference Panel
+// Browsable, searchable catalog of Rune + Luau scripting APIs.
+// Single source of truth — same data serves the Workshop agent and web docs.
+//
+// Table of Contents:
+//   1. Data Structures — ApiEntryData
+//   2. ApiFnCard — individual function display card
+//   3. CategoryItem — sidebar category button
+//   4. ApiReferencePanel — main panel with search, sidebar, function list
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, LineEdit } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// ============================================================================
+// 1. Data Structures
+// ============================================================================
+
+export struct ApiEntryData {
+    name: string,
+    params: string,           // formatted: "entity_name: &str, x: f64, y: f64, z: f64"
+    return-type: string,      // "f64", "bool", "(x, y, z)", ""
+    doc: string,              // one-line description
+    category: string,         // "Entity Operations", "Physics", "Camera", etc.
+    language: string,         // "Rune" | "Luau" | "Both"
+    status: string,           // "implemented" | "partial" | "not-started" | "n/a" | "extension"
+    status-icon: string,      // "check" | "partial" | "cross" | "dash" | "diamond"
+    example: string,          // call signature: "part_set_position(name, x, y, z)"
+}
+
+// ============================================================================
+// 2. ApiFnCard — individual function display
+// ============================================================================
+
+component ApiFnCard inherits Rectangle {
+    in property <ApiEntryData> entry;
+    callback copy-example(string);
+
+    height: card-layout.preferred-height + 16px;
+    background: card-touch.has-hover ? #2a2a3a : transparent;
+    border-radius: 4px;
+
+    card-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.copy-example(root.entry.example); }
+    }
+
+    card-layout := VerticalLayout {
+        padding: 8px;
+        spacing: 3px;
+
+        // Row 1: name + signature + status badge
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+
+            // Function name
+            Text {
+                text: root.entry.name;
+                color: #7cc5f0;
+                font-size: 13px;
+                font-weight: 600;
+                font-family: "Cascadia Code, Consolas, monospace";
+                vertical-alignment: center;
+            }
+
+            // Signature (params -> return)
+            Text {
+                text: root.entry.return-type != "" ?
+                    "(" + root.entry.params + ") -> " + root.entry.return-type :
+                    "(" + root.entry.params + ")";
+                color: Theme.text-secondary;
+                font-size: 11px;
+                font-family: "Cascadia Code, Consolas, monospace";
+                vertical-alignment: center;
+            }
+
+            // Spacer
+            Rectangle { horizontal-stretch: 1; }
+
+            // Status dot
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                y: (parent.height - self.height) / 2;
+                background: root.entry.status == "implemented" ? #4caf50 :
+                            root.entry.status == "partial" ? #ff9800 :
+                            root.entry.status == "extension" ? #2196f3 :
+                            root.entry.status == "n/a" ? #666666 :
+                            #e53935;
+            }
+        }
+
+        // Row 2: doc text
+        if root.entry.doc != "": Text {
+            text: root.entry.doc;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+
+        // Row 3: language badge
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+
+            Rectangle {
+                width: lang-text.preferred-width + 10px;
+                height: 16px;
+                border-radius: 3px;
+                background: root.entry.language == "Rune" ? #1a3a2a :
+                            root.entry.language == "Luau" ? #1a2a3a :
+                            #2a2a1a;
+
+                lang-text := Text {
+                    text: root.entry.language;
+                    color: root.entry.language == "Rune" ? #4caf50 :
+                           root.entry.language == "Luau" ? #42a5f5 :
+                           #ffb74d;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Category badge
+            Rectangle {
+                width: cat-text.preferred-width + 10px;
+                height: 16px;
+                border-radius: 3px;
+                background: #1a1a2a;
+
+                cat-text := Text {
+                    text: root.entry.category;
+                    color: #888;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. CategoryItem — sidebar button
+// ============================================================================
+
+component CategoryItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <int> count: 0;
+    callback clicked();
+
+    height: 26px;
+    background: root.selected ? #2a2a4a : (cat-touch.has-hover ? #2a2a3a : transparent);
+    border-radius: 4px;
+
+    cat-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        if root.count > 0: Rectangle {
+            width: count-text.preferred-width + 8px;
+            height: 16px;
+            border-radius: 3px;
+            background: #2a2a2a;
+            y: (parent.height - self.height) / 2;
+
+            count-text := Text {
+                text: root.count;
+                color: Theme.text-secondary;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 4. ApiReferencePanel — main component
+// ============================================================================
+
+export component ApiReferencePanel inherits Rectangle {
+    // ---- Data ----
+    in property <[ApiEntryData]> entries: [];
+    in property <[string]> categories: [];
+    in property <int> total-count: 0;
+    in property <int> filtered-count: 0;
+    in property <string> selected-category: "All";
+
+    // ---- Callbacks ----
+    callback search-changed(string);
+    callback category-selected(string);
+    callback language-filter-changed(string);
+    callback status-filter-changed(string);
+    callback copy-example(string);
+
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // Header
+        PanelHeader { title: "API Reference"; }
+
+        // ---- Toolbar: search + filters ----
+        Rectangle {
+            height: 36px;
+            background: Theme.header-background;
+
+            HorizontalLayout {
+                padding: 4px;
+                spacing: 4px;
+
+                // Search input
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 4px;
+                    background: #1a1a1a;
+                    border-width: 1px;
+                    border-color: #3a3a3a;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: "\u{1F50D}";
+                            font-size: 11px;
+                            color: #666;
+                            vertical-alignment: center;
+                            width: 18px;
+                        }
+
+                        search-input := TextInput {
+                            font-size: 12px;
+                            color: Theme.text-primary;
+                            horizontal-stretch: 1;
+                            single-line: true;
+
+                            edited => {
+                                root.search-changed(self.text);
+                            }
+                        }
+                    }
+                }
+
+                // Count display
+                Rectangle {
+                    width: count-label.preferred-width + 12px;
+
+                    count-label := Text {
+                        text: root.filtered-count + " / " + root.total-count;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ---- Content: sidebar + function list ----
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+
+            // Category sidebar
+            Rectangle {
+                width: 140px;
+                background: #1a1a1e;
+                border-width: 0px;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 2px;
+
+                        // "All" category
+                        CategoryItem {
+                            label: "All";
+                            selected: root.selected-category == "All";
+                            count: root.total-count;
+                            clicked => { root.category-selected("All"); }
+                        }
+
+                        // Dynamic categories
+                        for cat in root.categories: CategoryItem {
+                            label: cat;
+                            selected: root.selected-category == cat;
+                            clicked => { root.category-selected(cat); }
+                        }
+                    }
+                }
+            }
+
+            // Separator
+            Rectangle {
+                width: 1px;
+                background: #333;
+            }
+
+            // Function list
+            Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+
+                if root.entries.length == 0: Rectangle {
+                    VerticalLayout {
+                        alignment: center;
+
+                        Text {
+                            text: "No functions match your search";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                if root.entries.length > 0: ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 1px;
+
+                        for entry in root.entries: ApiFnCard {
+                            entry: entry;
+                            copy-example(ex) => { root.copy-example(ex); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
