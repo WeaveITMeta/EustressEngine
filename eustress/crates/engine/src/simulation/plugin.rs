@@ -75,13 +75,14 @@ fn on_play_stop(
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
-    sim_clock.reset();
-    sim_state.reset();
-    watchpoints.reset_all();
-    breakpoints.reset_all();
-    
-    // Stop and auto-export recording if active
+    // Stop and auto-export recording BEFORE resetting clock (clock.reset() zeros tick_count)
     if recording.enabled {
+        // Write final clock state into recording metadata before stopping
+        if let Some(ref mut rec) = recording.recording {
+            rec.metadata.total_ticks = sim_clock.tick_count;
+            rec.metadata.simulation_duration_s = sim_clock.simulation_time_s;
+            rec.metadata.wall_duration_s = sim_clock.wall_time_s;
+        }
         if let Some(rec) = recording.stop() {
             let ticks = rec.metadata.total_ticks;
             let sim_duration = rec.metadata.simulation_duration_s;
@@ -138,6 +139,12 @@ fn on_play_stop(
             }
         }
     }
+
+    // Reset AFTER recording is saved — so tick_count and sim_time are preserved in the export
+    sim_clock.reset();
+    sim_state.reset();
+    watchpoints.reset_all();
+    breakpoints.reset_all();
 
     info!("⏹ Simulation stopped and reset");
 }
