@@ -629,6 +629,8 @@ impl Default for UnifiedExplorerState {
             cached_terrain_file_count: 0,
             cached_dynamic_services: Vec::new(),
             explorer_fs_stale: true,
+            last_selected_node_id: None,
+            visible_node_order: Vec::new(),
         }
     }
 }
