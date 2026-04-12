@@ -358,16 +358,17 @@ export component ApiReferencePanel inherits Rectangle {
             }
         }
 
-        // ---- Content: sidebar + function list ----
-        HorizontalLayout {
+        // ---- Content: resizable sidebar + function list ----
+        Rectangle {
             vertical-stretch: 1;
-            spacing: 0px;
 
-            // Category sidebar
-            Rectangle {
-                width: 140px;
+            // Category sidebar (resizable via drag handle)
+            sidebar := Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 160px;
+                height: parent.height;
                 background: #1a1a1e;
-                border-width: 0px;
 
                 ScrollView {
                     VerticalLayout {
@@ -392,15 +393,28 @@ export component ApiReferencePanel inherits Rectangle {
                 }
             }
 
-            // Separator
+            // Drag handle to resize sidebar
             Rectangle {
-                width: 1px;
-                background: #333;
+                x: sidebar.width;
+                y: 0px;
+                width: 5px;
+                height: parent.height;
+                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : #333;
+
+                splitter-touch := TouchArea {
+                    mouse-cursor: col-resize;
+                    moved => {
+                        sidebar.width = max(80px, min(parent.width * 0.4, sidebar.width + self.mouse-x - self.pressed-x));
+                    }
+                }
             }
 
             // Function list
             Rectangle {
-                horizontal-stretch: 1;
+                x: sidebar.width + 5px;
+                y: 0px;
+                width: parent.width - sidebar.width - 5px;
+                height: parent.height;
                 clip: true;
 
                 if root.entries.length == 0: Rectangle {
