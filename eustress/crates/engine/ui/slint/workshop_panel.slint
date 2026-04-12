@@ -30,6 +30,17 @@ export struct ChatMessage {
     artifact-type: string,  // For role="artifact": "patent" | "sota" | "requirements" | "mesh" | "toml" | "readme" | "catalog"
 }
 
+// Past conversation summary for history browser
+export struct ConversationSummary {
+    session-id: string,
+    product-name: string,     // e.g. "V-Cell 4680" or "Untitled"
+    state: string,            // "idle" | "running" | "complete" etc.
+    message-count: int,
+    cost: string,             // formatted: "$1.23"
+    last-active: string,      // formatted date: "Apr 11, 2026"
+    preview: string,          // first user message (truncated)
+}
+
 // Pipeline step status for the compact sidebar
 export struct PipelineStepData {
     index: int,
@@ -396,6 +407,11 @@ export component WorkshopPanel inherits Rectangle {
     in property <int> tool-count: 0;
     in property <string> active-tool: "";          // currently executing tool name (empty = idle)
 
+    // Conversation history
+    in property <[ConversationSummary]> past-conversations: [];
+    in-out property <bool> show-history-modal: false;
+    in-out property <string> history-search: "";
+
     // ---- Callbacks ----
     callback on-send-message(string);               // User sends a message
     callback on-approve-mcp(int);                   // User approves an MCP command by message id
@@ -409,6 +425,8 @@ export component WorkshopPanel inherits Rectangle {
     callback on-configure-api();                    // Open Soul Settings for API key
     callback on-optimize-and-build();               // Hand off to Systems 1-8
     callback on-execute-command(string);             // Command bar executed (Rune, /run workflow, etc.)
+    callback on-load-conversation(string);           // Load a past conversation by session ID
+    callback on-new-conversation();                  // Start a new conversation
 
     background: Theme.panel-background;
 
@@ -416,9 +434,71 @@ export component WorkshopPanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // Header
-        PanelHeader {
-            title: "Workshop";
+        // Header with conversation history button
+        Rectangle {
+            height: 28px;
+            background: Theme.header-background;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 4px;
+                spacing: 4px;
+
+                Text {
+                    text: "Workshop";
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                // New conversation button
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: new-conv-touch.has-hover ? Theme.button-hover : transparent;
+                    y: (parent.height - self.height) / 2;
+
+                    new-conv-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-new-conversation(); }
+                    }
+
+                    Text {
+                        text: "+";
+                        color: Theme.text-secondary;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // History button
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: hist-touch.has-hover ? Theme.button-hover : transparent;
+                    y: (parent.height - self.height) / 2;
+
+                    hist-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.show-history-modal = true; }
+                    }
+
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/history.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
         }
 
         // API key warning (if not configured)
@@ -726,9 +806,9 @@ export component WorkshopPanel inherits Rectangle {
             }
         }
 
-        // Input area (always visible)
+        // Input area (always visible, dynamic height)
         Rectangle {
-            height: 64px;
+            min-height: 80px;
             background: Theme.background-secondary;
 
             // Top separator
@@ -740,14 +820,14 @@ export component WorkshopPanel inherits Rectangle {
 
             VerticalLayout {
                 padding: 8px;
-                spacing: 4px;
+                spacing: 6px;
 
-                // ── Active modes (AI-inferred, passive display) ──
+                // ── Mode bar + tool count — vertically centered row ──
                 HorizontalLayout {
-                    height: 22px;
-                    spacing: 4px;
+                    height: 20px;
+                    spacing: 6px;
+                    alignment: start;
 
-                    // Mode badges (set by AI based on conversation context)
                     Text {
                         text: root.active-modes-text;
                         color: Theme.text-secondary;
@@ -757,7 +837,6 @@ export component WorkshopPanel inherits Rectangle {
                         horizontal-stretch: 1;
                     }
 
-                    // Active tool indicator
                     if root.active-tool != "": Text {
                         text: "⟳ " + root.active-tool;
                         color: #4caf50;
@@ -765,7 +844,6 @@ export component WorkshopPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
 
-                    // Tool count
                     if root.active-tool == "" && root.tool-count > 0: Text {
                         text: root.tool-count + " tools";
                         color: Theme.text-secondary;
@@ -774,82 +852,28 @@ export component WorkshopPanel inherits Rectangle {
                     }
                 }
 
-                // ── Command bar (Rune / workflow execution) ──
-                HorizontalLayout {
-                    height: 26px;
-                    spacing: 4px;
-
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        background: Theme.background-tertiary;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: cmd-input.has-focus ? Theme.accent-blue : #2a2a2a;
-
-                        cmd-input := TextInput {
-                            x: 8px;
-                            width: parent.width - 16px;
-                            height: parent.height;
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            text <=> root.command-text;
-                            single-line: true;
-
-                            accepted => {
-                                if root.command-text != "" {
-                                    root.on-execute-command(root.command-text);
-                                    root.command-text = "";
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        width: 50px;
-                        height: 24px;
-                        background: root.command-text != "" ? (exec-touch.has-hover ? #2d7d46 : #1a5a2a) : #1a1a2a;
-                        border-radius: 4px;
-
-                        exec-touch := TouchArea {
-                            mouse-cursor: root.command-text != "" ? pointer : default;
-                            enabled: root.command-text != "";
-                            clicked => {
-                                root.on-execute-command(root.command-text);
-                                root.command-text = "";
-                            }
-                        }
-
-                        Text {
-                            text: "Run";
-                            color: root.command-text != "" ? white : Theme.text-disabled;
-                            font-size: 10px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                // ── Chat input ──
+                // ── Chat input (multi-line, dynamic height) ──
                 HorizontalLayout {
                     spacing: 6px;
 
-                    // Text input
                     Rectangle {
                         horizontal-stretch: 1;
+                        min-height: 40px;
                         background: Theme.background-tertiary;
-                        border-radius: 6px;
+                        border-radius: 8px;
                         border-width: 1px;
                         border-color: input-area.has-focus ? Theme.accent-blue : Theme.border-color;
 
                         input-area := TextInput {
                             x: 10px;
+                            y: 8px;
                             width: parent.width - 20px;
-                            height: parent.height;
+                            height: parent.height - 16px;
                             color: Theme.text-primary;
                             font-size: 12px;
                             text <=> root.input-text;
-                            single-line: true;
+                            single-line: false;
+                            wrap: word-wrap;
 
                             accepted => {
                                 if root.input-text != "" {
@@ -860,12 +884,13 @@ export component WorkshopPanel inherits Rectangle {
                         }
                     }
 
-                    // Send button
+                    // Send button (arrow-up icon)
                     Rectangle {
                         width: 36px;
                         height: 36px;
+                        y: parent.height - self.height;
                         background: root.input-text != "" ? (send-touch.has-hover ? #2d7d46 : Theme.button-primary) : Theme.button-background;
-                        border-radius: 6px;
+                        border-radius: 8px;
 
                         send-touch := TouchArea {
                             mouse-cursor: root.input-text != "" ? pointer : default;
@@ -879,12 +904,227 @@ export component WorkshopPanel inherits Rectangle {
                         Image {
                             width: 16px;
                             height: 16px;
-                            source: @image-url("../../assets/icons/ui/play.svg");
+                            source: @image-url("../../assets/icons/ui/send.svg");
                             image-fit: contain;
                             colorize: root.input-text != "" ? white : Theme.text-disabled;
                             horizontal-alignment: center;
                             vertical-alignment: center;
-                            // Rotated to point upward (send arrow)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Conversation History Modal ──
+    if root.show-history-modal: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000060;
+
+        TouchArea {
+            clicked => { root.show-history-modal = false; }
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(parent.width - 40px, 500px);
+            height: min(parent.height - 60px, 450px);
+            background: Theme.panel-background;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: #00000080;
+
+            // Absorb clicks on the modal itself
+            TouchArea {
+                scroll-event(event) => { return accept; }
+            }
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                // Modal header
+                Rectangle {
+                    height: 44px;
+                    background: Theme.header-background;
+                    border-top-left-radius: 10px;
+                    border-top-right-radius: 10px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: "Conversations";
+                            color: Theme.text-primary;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        // Close button
+                        Rectangle {
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 4px;
+                            background: hist-close-touch.has-hover ? #3a3a3a : transparent;
+                            y: (parent.height - self.height) / 2;
+
+                            hist-close-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.show-history-modal = false; }
+                            }
+
+                            Image {
+                                width: 12px;
+                                height: 12px;
+                                source: @image-url("../../assets/icons/ui/close.svg");
+                                image-fit: contain;
+                                colorize: Theme.text-secondary;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // Search bar
+                Rectangle {
+                    height: 36px;
+                    background: Theme.header-background;
+
+                    HorizontalLayout {
+                        padding: 6px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            border-radius: 6px;
+                            background: #1a1a1a;
+                            border-width: 1px;
+                            border-color: #3a3a3a;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+
+                                Text {
+                                    text: "\u{1F50D}";
+                                    font-size: 11px;
+                                    color: #666;
+                                    vertical-alignment: center;
+                                    width: 18px;
+                                }
+
+                                hist-search-input := TextInput {
+                                    font-size: 12px;
+                                    color: Theme.text-primary;
+                                    horizontal-stretch: 1;
+                                    single-line: true;
+                                    text <=> root.history-search;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Separator
+                Rectangle { height: 1px; background: Theme.border-color; }
+
+                // Conversation list
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 8px;
+                        spacing: 4px;
+
+                        for conv in root.past-conversations: Rectangle {
+                            height: 64px;
+                            border-radius: 6px;
+                            background: conv-touch.has-hover ? #2a2a3a : #1e1e2a;
+
+                            conv-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.on-load-conversation(conv.session-id);
+                                    root.show-history-modal = false;
+                                }
+                            }
+
+                            VerticalLayout {
+                                padding: 10px;
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 4px;
+
+                                // Title row: name + date
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: conv.product-name != "" ? conv.product-name : "New Conversation";
+                                        color: Theme.text-primary;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        text: conv.last-active;
+                                        color: Theme.text-secondary;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Preview + metadata
+                                HorizontalLayout {
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: conv.preview;
+                                        color: Theme.text-secondary;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Text {
+                                        text: conv.message-count + " msgs";
+                                        color: #666;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    if conv.cost != "$0.00": Text {
+                                        text: conv.cost;
+                                        color: #666;
+                                        font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.past-conversations.length == 0: Rectangle {
+                            height: 60px;
+
+                            Text {
+                                text: "No past conversations";
+                                color: Theme.text-secondary;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }

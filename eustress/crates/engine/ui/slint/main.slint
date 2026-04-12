@@ -40,7 +40,7 @@ import { DataSourcesDialog } from "data_sources.slint";
 import { KeybindingsDialog } from "keybindings.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
-import { WorkshopPanel, ChatMessage, PipelineStepData } from "workshop_panel.slint";
+import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
@@ -613,6 +613,8 @@ export component StudioWindow inherits Window {
     callback workshop-resume-pipeline();
     callback workshop-cancel-pipeline();
     callback workshop-optimize-and-build();
+    callback workshop-load-conversation(string);
+    callback workshop-new-conversation();
 
     // Settings / Panels
     callback open-settings();
@@ -2123,6 +2125,8 @@ export component StudioWindow inherits Window {
                             on-configure-api() => { root.open-settings(); }
                             on-optimize-and-build() => { root.workshop-optimize-and-build(); }
                             on-execute-command(cmd) => { root.workshop-send-message(cmd); }
+                            on-load-conversation(id) => { root.workshop-load-conversation(id); }
+                            on-new-conversation() => { root.workshop-new-conversation(); }
                         }
 
                     }
