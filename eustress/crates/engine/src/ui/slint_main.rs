@@ -476,6 +476,30 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
         let model = std::rc::Rc::new(slint::VecModel::from(slint_tabs));
         ui.set_center_tabs(slint::ModelRc::from(model));
     }
+
+    // API Reference
+    if let Some(total) = state.api_total_count { ui.set_api_total_count(total); }
+    if let Some(filtered) = state.api_filtered_count { ui.set_api_filtered_count(filtered); }
+    if let Some(entries) = state.api_entries {
+        let slint_entries: Vec<ApiEntryData> = entries.into_iter().map(|e| ApiEntryData {
+            name: e.name.into(),
+            params: e.params.into(),
+            return_type: e.return_type.into(),
+            doc: e.doc.into(),
+            category: e.category.into(),
+            language: e.language.into(),
+            status: e.status.into(),
+            status_icon: e.status_icon.into(),
+            example: e.example.into(),
+        }).collect();
+        let model = std::rc::Rc::new(slint::VecModel::from(slint_entries));
+        ui.set_api_entries(slint::ModelRc::from(model));
+    }
+    if let Some(cats) = state.api_categories {
+        let slint_cats: Vec<slint::SharedString> = cats.into_iter().map(|c| c.into()).collect();
+        let model = std::rc::Rc::new(slint::VecModel::from(slint_cats));
+        ui.set_api_categories(slint::ModelRc::from(model));
+    }
 }
 
 /// Load an SVG icon from the assets/icons directory by name.

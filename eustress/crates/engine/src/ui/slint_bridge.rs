@@ -132,6 +132,12 @@ pub struct BridgeState {
     pub show_universe_browser: Option<bool>,
     pub universe_items: Option<Vec<UniverseItemData>>,
     pub active_space_path: Option<String>,
+
+    // ---- API Reference ----
+    pub api_entries: Option<Vec<ApiEntryBridgeData>>,
+    pub api_categories: Option<Vec<String>>,
+    pub api_total_count: Option<i32>,
+    pub api_filtered_count: Option<i32>,
 }
 
 impl BridgeState {
@@ -249,6 +255,20 @@ pub struct WorkshopStepData {
     pub name: String,
     pub status: String,
     pub description: String,
+}
+
+/// API Reference entry data (thread-safe mirror of Slint ApiEntryData)
+#[derive(Clone, Debug)]
+pub struct ApiEntryBridgeData {
+    pub name: String,
+    pub params: String,
+    pub return_type: String,
+    pub doc: String,
+    pub category: String,
+    pub language: String,
+    pub status: String,
+    pub status_icon: String,
+    pub example: String,
 }
 
 /// One Space entry inside a UniverseItemData

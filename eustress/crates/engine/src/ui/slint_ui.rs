@@ -5205,27 +5205,9 @@ fn drain_slint_actions(
                             es.dirty = true;
                         }
                     } else if action == "help:api-browser" {
-                        // Open API Reference as a center tab (like script editor)
-                        if let Some(ref mut state) = res.state {
-                            // Check if an API tab is already open
-                            let existing = state.center_tabs.iter().position(|t| t.tab_type == "api");
-                            if let Some(idx) = existing {
-                                // Switch to existing API tab
-                                state.active_center_tab = idx as i32 + 1;
-                            } else {
-                                // Create new API tab
-                                state.center_tabs.push(CenterTabData {
-                                    entity_id: -2, // special ID for API browser
-                                    name: "API Reference".to_string(),
-                                    tab_type: "api".to_string(),
-                                    mode: String::new(),
-                                    url: String::new(),
-                                    dirty: false,
-                                    loading: false,
-                                });
-                                state.active_center_tab = state.center_tabs.len() as i32;
-                            }
-                            state.tabs_dirty = true;
+                        // Open API Reference as a center tab via CenterTabManager
+                        if let Some(ref mut mgr) = res.tab_manager {
+                            mgr.open_api_browser();
                         }
                         // Mark filter dirty to push data on first display
                         if let Some(filter) = res.api_filter.as_mut() {
@@ -5833,20 +5815,19 @@ fn sync_workshop_to_slint(
 }
 
 /// Sync API Reference catalog to Slint panel. Runs when filter state changes.
+/// Sync API Reference catalog to the SlintBridge (Bevy → overlay thread).
 fn sync_api_reference_to_slint(
-    slint_context: Option<NonSend<SlintUiState>>,
     catalog: Option<Res<crate::workshop::api_reference::ApiCatalog>>,
     mut filter: Option<ResMut<ApiFilterState>>,
+    bridge: Option<Res<super::slint_bridge::SlintBridge>>,
 ) {
-    let Some(slint_context) = slint_context else { return };
     let Some(catalog) = catalog else { return };
     let Some(ref mut filter) = filter else { return };
+    let Some(bridge) = bridge else { return };
 
     // Only re-push when filter changed or catalog just loaded
     if !filter.dirty && !catalog.is_changed() { return; }
     filter.dirty = false;
-
-    let ui = &slint_context.window;
 
     let search = filter.search_text.to_lowercase();
     let cat_filter = &filter.selected_category;
@@ -5875,37 +5856,36 @@ fn sync_api_reference_to_slint(
         true
     }).collect();
 
-    // Build Slint model
-    let entries: Vec<ApiEntryData> = filtered.iter().map(|e| {
+    // Build bridge data
+    use super::slint_bridge::ApiEntryBridgeData;
+    let entries: Vec<ApiEntryBridgeData> = filtered.iter().map(|e| {
         let params_str = e.params.iter()
             .map(|p| format!("{}: {}", p.name, p.typ))
             .collect::<Vec<_>>()
             .join(", ");
-        ApiEntryData {
-            name: e.name.clone().into(),
-            params: params_str.into(),
-            return_type: e.return_type.clone().into(),
-            doc: e.doc.clone().into(),
-            category: e.category.clone().into(),
-            language: e.language.to_string().into(),
-            status: e.status.to_string().into(),
-            status_icon: e.status.icon().to_string().into(),
-            example: e.example.clone().into(),
+        ApiEntryBridgeData {
+            name: e.name.clone(),
+            params: params_str,
+            return_type: e.return_type.clone(),
+            doc: e.doc.clone(),
+            category: e.category.clone(),
+            language: e.language.to_string(),
+            status: e.status.to_string(),
+            status_icon: e.status.icon().to_string(),
+            example: e.example.clone(),
         }
     }).collect();
 
-    let categories: Vec<slint::SharedString> = catalog.categories.iter()
-        .map(|c| c.clone().into())
-        .collect();
+    let categories: Vec<String> = catalog.categories.clone();
+    let total = catalog.entries.len() as i32;
+    let filtered_count = entries.len() as i32;
 
-    ui.set_api_total_count(catalog.entries.len() as i32);
-    ui.set_api_filtered_count(entries.len() as i32);
-
-    let entries_model = std::rc::Rc::new(slint::VecModel::from(entries));
-    ui.set_api_entries(slint::ModelRc::from(entries_model));
-
-    let cats_model = std::rc::Rc::new(slint::VecModel::from(categories));
-    ui.set_api_categories(slint::ModelRc::from(cats_model));
+    // Write to bridge — overlay thread will apply on next timer tick
+    let mut state = bridge.lock();
+    state.api_entries = Some(entries);
+    state.api_categories = Some(categories);
+    state.api_total_count = Some(total);
+    state.api_filtered_count = Some(filtered_count);
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)

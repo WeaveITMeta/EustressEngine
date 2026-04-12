@@ -62,6 +62,8 @@ pub enum CenterTabType {
     VideoPlayer,
     /// Web browser tab (Wry WebView)
     WebBrowser,
+    /// API Reference browser
+    ApiBrowser,
 }
 
 /// Document sub-types for the Document tab
@@ -95,6 +97,7 @@ impl CenterTabType {
             CenterTabType::ImageViewer => "image",
             CenterTabType::VideoPlayer => "video",
             CenterTabType::WebBrowser => "web",
+            CenterTabType::ApiBrowser => "api",
         }
     }
 
@@ -116,6 +119,7 @@ impl CenterTabType {
             CenterTabType::ImageViewer => "image",
             CenterTabType::VideoPlayer => "video",
             CenterTabType::WebBrowser => "globe",
+            CenterTabType::ApiBrowser => "code",
         }
     }
 }
@@ -314,6 +318,30 @@ impl CenterTabManager {
     }
 
     /// Close a tab by index (cannot close Scene tab at index 0)
+    /// Open or focus the API Reference browser tab.
+    pub fn open_api_browser(&mut self) -> usize {
+        // Check if already open
+        if let Some(idx) = self.tabs.iter().position(|t| t.tab_type == CenterTabType::ApiBrowser) {
+            self.active_tab = idx;
+            self.focus_only = true;
+            self.dirty = true;
+            return idx;
+        }
+        let id = self.next_id();
+        self.push_tab(CenterTabEntry {
+            id,
+            name: "API Reference".to_string(),
+            tab_type: CenterTabType::ApiBrowser,
+            entity: None,
+            file_path: None,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: String::new(),
+        })
+    }
+
     pub fn close_tab(&mut self, index: usize) {
         if index == 0 || index >= self.tabs.len() {
             return;
