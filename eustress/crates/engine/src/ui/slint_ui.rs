@@ -1705,9 +1705,30 @@ fn sync_gui_elements_to_slint(
         offset
     }
 
-    // Collect and sort by z_order
+    // Check if an entity or any ancestor has visible=false (hidden ScreenGui)
+    fn is_ancestor_hidden(
+        entity: Entity,
+        gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
+    ) -> bool {
+        let Ok((_, display, parent)) = gui_query.get(entity) else { return false };
+        if !display.visible && display.class_type == "screengui" { return true; }
+        if let Some(child_of) = parent {
+            return is_ancestor_hidden(child_of.parent(), gui_query);
+        }
+        false
+    }
+
+    // Collect, filter hidden ScreenGui descendants, and sort by z_order
     let mut elements: Vec<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)> =
-        gui_query.iter().map(|(e, d, _)| (e, d)).collect();
+        gui_query.iter()
+            .filter(|(e, d, _)| {
+                // Skip the ScreenGui display element itself (zero-size container)
+                if d.class_type == "screengui" { return false; }
+                // Skip children of hidden ScreenGuis
+                !is_ancestor_hidden(*e, &gui_query)
+            })
+            .map(|(e, d, _)| (e, d))
+            .collect();
     elements.sort_by_key(|(_, e)| e.z_order);
 
     let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {

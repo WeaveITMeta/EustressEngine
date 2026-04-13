@@ -859,8 +859,15 @@ pub fn spawn_directory_entry(
     );
 
     let folder_entity = if is_screen_gui {
-        // ScreenGui: fullscreen UI root
-        commands.spawn((
+        // ScreenGui: fullscreen UI root — read enabled/visible from _instance.toml
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let screen_gui_visible = if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+            gui_def.gui.visible
+        } else {
+            true // default: visible
+        };
+
+        let mut entity_cmds = commands.spawn((
             eustress_common::classes::Instance {
                 name: dir_meta.name.clone(),
                 class_name,
@@ -876,7 +883,24 @@ pub fn spawn_directory_entry(
             },
             Name::new(dir_meta.name.clone()),
             Node { display: Display::None, ..default() },
-        )).id()
+            // GuiElementDisplay with visible flag — children inherit this for rendering
+            eustress_common::gui::billboard_renderer::GuiElementDisplay {
+                x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+                z_order: 0, visible: screen_gui_visible, clip_children: false,
+                scroll_x: 0.0, scroll_y: 0.0,
+                bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
+                corner_radius: 0.0,
+                text: String::new(), text_color: [1.0; 4],
+                font_size: 14.0, text_align: "center".to_string(),
+                image_path: String::new(),
+                class_type: "screengui".to_string(),
+                mouse_filter: "ignore".to_string(),
+            },
+        ));
+        if !screen_gui_visible {
+            info!("📋 ScreenGui '{}' loaded as hidden (enabled=false)", dir_meta.name);
+        }
+        entity_cmds.id()
     } else if is_gui_container {
         // Frame/ScrollingFrame directory — load GUI properties from _instance.toml
         // and attach GuiElementDisplay so it renders through Slint overlay
