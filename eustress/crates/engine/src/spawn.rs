@@ -671,26 +671,35 @@ pub fn spawn_billboard_gui(
     gui: BillboardGui,
 ) -> Entity {
     let name = instance.name.clone();
-    
+
     // Position offset from parent
     let offset = Vec3::new(gui.units_offset[0], gui.units_offset[1], gui.units_offset[2]);
-    
-    // BillboardGui needs Transform for 3D positioning relative to parent
-    // The actual UI rendering happens via billboard_gui.rs render_billboard_gui_egui system
+
     commands.spawn((
         Transform::from_translation(offset),
         Visibility::default(),
         instance,
+        // Billboard renderer marker with size/distance for atlas + quad spawning
+        eustress_common::gui::billboard_renderer::BillboardGuiMarker {
+            size: gui.size,
+            max_distance: gui.max_distance,
+            always_on_top: gui.always_on_top,
+        },
+        // Adornee tracking
+        BillboardAdornee { target_name: None, target_entity: gui.adornee },
         gui,
         Name::new(name),
-        // Marker for billboard rendering system
-        BillboardGuiMarker,
     )).id()
 }
 
-/// Marker component for BillboardGui entities (for rendering system queries)
+/// Tracks the adornee target for a BillboardGui — positions the billboard above its target.
 #[derive(Component, Default)]
-pub struct BillboardGuiMarker;
+pub struct BillboardAdornee {
+    /// Target entity name (resolved on first frame via name lookup)
+    pub target_name: Option<String>,
+    /// Resolved target entity
+    pub target_entity: Option<Entity>,
+}
 
 /// Spawn a SurfaceGui entity (UI rendered on a part's surface)
 /// Maps to: Custom render-to-texture (requires parent BasePart)
@@ -807,15 +816,54 @@ pub fn spawn_text_label(
     label: TextLabel,
 ) -> Entity {
     let name = instance.name.clone();
-    
-    // TextLabel stores all properties in the component itself
-    // The rendering system (billboard_gui.rs or UI system) reads these properties
-    // and renders appropriately based on parent type
+
+    // Build GuiElementDisplay for billboard renderer (CPU text rasterization)
+    let gui_display = eustress_common::gui::billboard_renderer::GuiElementDisplay {
+        x: label.position[0] * label.size[0],  // UDim2 scale → pixels
+        y: label.position[1] * label.size[1],
+        width: label.size[0],
+        height: label.size[1],
+        z_order: label.z_index,
+        visible: label.visible,
+        clip_children: label.clips_descendants,
+        scroll_x: 0.0, scroll_y: 0.0,
+        bg_color: [
+            label.background_color3[0],
+            label.background_color3[1],
+            label.background_color3[2],
+            1.0 - label.background_transparency,
+        ],
+        border_size: label.border_size_pixel as f32,
+        border_color: [
+            label.border_color3[0],
+            label.border_color3[1],
+            label.border_color3[2],
+            1.0,
+        ],
+        corner_radius: 0.0,
+        text: label.text.clone(),
+        text_color: [
+            label.text_color3[0],
+            label.text_color3[1],
+            label.text_color3[2],
+            1.0 - label.text_transparency,
+        ],
+        font_size: label.font_size,
+        text_align: match label.text_x_alignment {
+            crate::classes::TextXAlignment::Left => "left".to_string(),
+            crate::classes::TextXAlignment::Center => "center".to_string(),
+            crate::classes::TextXAlignment::Right => "right".to_string(),
+        },
+        image_path: String::new(),
+        class_type: "textlabel".to_string(),
+        mouse_filter: "stop".to_string(),
+    };
+
     commands.spawn((
         instance,
         label,
+        gui_display,
         Name::new(name),
-        // Marker for text label queries
         TextLabelMarker,
     )).id()
 }

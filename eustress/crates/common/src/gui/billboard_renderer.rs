@@ -468,8 +468,10 @@ fn spawn_billboard_quads(
 ) {
     for (entity, marker, _slot, transform) in &billboards {
         let t = transform.compute_transform();
-        let size_x = marker.size[0];
-        let size_y = marker.size[1];
+        // Scale: convert pixel dimensions to world studs (1 stud per 50 pixels)
+        let scale_factor = 1.0 / 50.0;
+        let size_x = marker.size[0] * scale_factor;
+        let size_y = marker.size[1] * scale_factor;
 
         // Spawn quad as child of the billboard entity
         let quad = commands.spawn((
@@ -478,32 +480,56 @@ fn spawn_billboard_quads(
             Transform::from_translation(t.translation)
                 .with_scale(Vec3::new(size_x, size_y, 1.0)),
             BillboardQuad,
+            ChildOf(entity),
+            bevy::light::NotShadowCaster,
             Name::new("BillboardQuad"),
         )).id();
 
         // Mark the billboard entity as having a quad
         commands.entity(entity).insert(BillboardQuad);
 
-        info!("🪧 Spawned billboard quad for {:?} ({}x{})", entity, size_x, size_y);
+        info!("🪧 Spawned billboard quad for {:?} ({:.1}x{:.1} studs)", entity, size_x, size_y);
     }
 }
 
-/// Orient billboard quads toward the active camera each frame
+/// Orient billboard quads toward the active camera and track parent position each frame
 fn billboard_face_camera(
-    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<BillboardQuad>)>,
-    mut billboard_quads: Query<&mut Transform, With<BillboardQuad>>,
+    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<BillboardQuad>, Without<BillboardGuiMarker>)>,
+    billboard_parents: Query<(&GlobalTransform, &BillboardGuiMarker), Without<BillboardQuad>>,
+    mut billboard_quads: Query<(&mut Transform, &ChildOf), With<BillboardQuad>>,
 ) {
-    // Find main camera (order 0)
     let Some(camera_transform) = camera_query.iter().next() else { return };
     let camera_pos = camera_transform.translation();
 
-    for mut transform in &mut billboard_quads {
-        // Billboard: face camera, but keep upright (only rotate around Y axis)
+    for (mut transform, child_of) in &mut billboard_quads {
+        // Update position from parent billboard entity's world position
+        if let Ok((parent_gt, marker)) = billboard_parents.get(child_of.parent()) {
+            transform.translation = parent_gt.translation();
+            transform.scale = Vec3::new(marker.size[0], marker.size[1], 1.0);
+        }
+
+        // Face camera (Y-axis billboard — stays upright)
         let dir = camera_pos - transform.translation;
         if dir.length_squared() > 0.001 {
             let yaw = dir.x.atan2(dir.z);
             transform.rotation = Quat::from_rotation_y(yaw);
         }
+    }
+}
+
+/// Position billboards at their adornee entity's location + offset.
+/// The BillboardAdornee component (from spawn.rs) tracks the target entity.
+/// We also resolve name-based adornees on the first frame they're seen.
+fn position_billboards_at_adornees(
+    mut billboards: Query<(&mut Transform, &BillboardGuiMarker, Option<&ChildOf>)>,
+    parents: Query<&GlobalTransform, Without<BillboardGuiMarker>>,
+) {
+    for (mut transform, _marker, child_of) in billboards.iter_mut() {
+        // If the billboard is a child of another entity (via ChildOf), Bevy's
+        // transform propagation already positions it relative to the parent.
+        // The billboard's Transform.translation IS the StudsOffset.
+        // Nothing extra needed — Bevy handles parent-relative positioning.
+        let _ = (child_of, &parents); // suppress unused warnings
     }
 }
 

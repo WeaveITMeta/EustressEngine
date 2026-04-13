@@ -243,6 +243,9 @@ fn handle_plugin_action_events(
     selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
     mut studio_state: ResMut<crate::ui::StudioState>,
     instance_query: Query<(Entity, &crate::classes::Instance)>,
+    billboard_query: Query<&crate::classes::BillboardGui>,
+    text_label_query: Query<&crate::classes::TextLabel>,
+    children_query: Query<&Children>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
@@ -370,13 +373,80 @@ fn handle_plugin_action_events(
             "mindspace:remove_label" => {
                 // Get selected entity and remove its BillboardGui children
                 let selected_ids = selection_manager.0.read().get_selected();
-                
+
                 if selected_ids.is_empty() {
                     notifications.warning("Select an entity first to remove its label");
                     continue;
                 }
-                
+
                 notifications.info("Remove label not yet implemented");
+            }
+            "mindspace:save" => {
+                // Save all BillboardGui entities to TOML on disk
+                let space_root = crate::space::default_space_root();
+                let starter_gui = space_root.join("StarterGui");
+                let _ = std::fs::create_dir_all(&starter_gui);
+                let mut saved = 0usize;
+
+                for (entity, instance) in instance_query.iter() {
+                    if instance.class_name != ClassName::BillboardGui { continue; }
+
+                    // Create folder: StarterGui/{name}/
+                    let safe_name = instance.name.replace(' ', "_");
+                    let bb_dir = starter_gui.join(&safe_name);
+                    let _ = std::fs::create_dir_all(&bb_dir);
+
+                    // Write _instance.toml
+                    let billboard_gui = billboard_query.get(entity);
+                    let (size, offset, max_dist, aot) = if let Ok(bg) = billboard_gui {
+                        (bg.size, bg.units_offset, bg.max_distance, bg.always_on_top)
+                    } else {
+                        ([200.0, 100.0], [0.0, 2.0, 0.0], 100.0, false)
+                    };
+
+                    let instance_toml = format!(
+                        "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\n\n[gui]\nsize = [{}, {}]\nposition = [{}, {}, {}]\nvisible = true\nalways_on_top = {}\nmax_distance = {}\n",
+                        size[0], size[1], offset[0], offset[1], offset[2], aot, max_dist
+                    );
+                    let _ = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml);
+
+                    // Write child TextLabels as .textlabel.toml files
+                    if let Ok(children) = children_query.get(entity) {
+                        for &child in children.iter() {
+                            if let Ok(text_label) = text_label_query.get(child) {
+                                let child_instance = instance_query.get(child);
+                                let label_name = child_instance.map(|(_, i)| i.name.clone())
+                                    .unwrap_or_else(|_| "Label".to_string());
+                                let safe_label = label_name.replace(' ', "_");
+                                let label_toml = format!(
+                                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [{}, {}]\nbackground_color = [{}, {}, {}, {}]\nborder_size = {}\nvisible = {}\nz_index = {}\n\n[text]\ntext = \"{}\"\ntext_color = [{}, {}, {}, {}]\nfont_size = {}\ntext_x_alignment = \"{}\"\ntext_y_alignment = \"center\"\n",
+                                    text_label.size[0], text_label.size[1],
+                                    text_label.background_color3[0], text_label.background_color3[1], text_label.background_color3[2], 1.0 - text_label.background_transparency,
+                                    text_label.border_size_pixel,
+                                    text_label.visible,
+                                    text_label.z_index,
+                                    text_label.text.replace('"', "\\\""),
+                                    text_label.text_color3[0], text_label.text_color3[1], text_label.text_color3[2], 1.0 - text_label.text_transparency,
+                                    text_label.font_size,
+                                    match text_label.text_x_alignment {
+                                        crate::classes::TextXAlignment::Left => "left",
+                                        crate::classes::TextXAlignment::Center => "center",
+                                        crate::classes::TextXAlignment::Right => "right",
+                                    },
+                                );
+                                let _ = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_label)), &label_toml);
+                            }
+                        }
+                    }
+                    saved += 1;
+                }
+
+                if saved > 0 {
+                    notifications.success(format!("Saved {} BillboardGui(s) to StarterGui/", saved));
+                    info!("💾 MindSpace: Saved {} BillboardGuis to disk", saved);
+                } else {
+                    notifications.info("No BillboardGui entities to save");
+                }
             }
             "mindspace:set_source" => {
                 notifications.info("Set source for connection");
