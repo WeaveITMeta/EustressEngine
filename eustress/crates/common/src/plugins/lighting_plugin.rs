@@ -10,9 +10,9 @@
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{Atmosphere as BevyAtmosphere, DistanceFog, FogFalloff};
 use bevy::core_pipeline::Skybox;
-use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight};
+use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight, SunDisk};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
@@ -145,6 +145,7 @@ fn setup_lighting(
     .build();
 
     // Sun — uses RAW_SUNLIGHT illuminance for physically correct atmosphere scattering
+    // SunDisk renders the visible sun disc in Bevy's Atmosphere shader
     let sun_dir = lighting.sun_direction();
     let sun_class = SunClass::default();
     commands.spawn((
@@ -155,6 +156,10 @@ fn setup_lighting(
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             ..default()
+        },
+        SunDisk {
+            angular_size: sun_class.angular_size.to_radians(),
+            intensity: 1.0,
         },
         Transform::from_translation(sun_dir * 100.0)
             .looking_at(Vec3::ZERO, Vec3::Y),
@@ -625,15 +630,18 @@ fn apply_atmosphere_to_cameras(
     }
 }
 
-/// Apply atmosphere settings to a camera entity
-/// Note: Bevy's Atmosphere component was removed; using fog + skybox as substitute
+/// Apply Bevy's built-in Atmosphere to a camera entity.
+/// The Atmosphere shader renders raymarched sky + sun disc (via SunDisk on DirectionalLight).
 fn apply_atmosphere_settings(
     commands: &mut Commands,
     camera_entity: Entity,
     _atmosphere: &EustressAtmosphere,
 ) {
-    // Mark as processed so we don't re-apply every frame
-    commands.entity(camera_entity).insert(AtmosphereApplied);
+    commands.entity(camera_entity).insert((
+        BevyAtmosphere::EARTH,
+        AtmosphereApplied,
+    ));
+    info!("🌍 Applied Bevy Atmosphere to camera {:?}", camera_entity);
 }
 
 /// Update atmosphere effects
@@ -734,11 +742,18 @@ fn regenerate_skybox_on_sun_change(
     }
 }
 
-/// Sync Sun class angular_size property
-/// Note: SunDisk component was removed from Bevy; angular size is tracked in SunClass only
-fn sync_sun_class_to_sundisk() {
-    // SunDisk was removed from Bevy — angular size is stored in SunClass
-    // and used for skybox/atmosphere calculations directly
+/// Sync Sun class angular_size property to SunDisk component in real-time
+fn sync_sun_class_to_sundisk(
+    mut sun_query: Query<(&SunClass, &mut SunDisk), Changed<SunClass>>,
+) {
+    for (sun_class, mut sun_disk) in sun_query.iter_mut() {
+        let new_angular_size = sun_class.angular_size.to_radians();
+        if (sun_disk.angular_size - new_angular_size).abs() > 0.001 {
+            sun_disk.angular_size = new_angular_size;
+            info!("☀️ Sun angular_size synced: {:.1}° → {:.4} rad",
+                  sun_class.angular_size, new_angular_size);
+        }
+    }
 }
 
 /// Sync LightingService.clock_time to Sun.time_of_day for day/night cycle
