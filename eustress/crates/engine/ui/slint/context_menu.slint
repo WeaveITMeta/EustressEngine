@@ -1,9 +1,9 @@
 // ============================================================================
 // Eustress Engine Studio - Context Menu
-// Right-click context menu
+// Right-click context menu with proper positioning and scrollable submenus
 // ============================================================================
 
-import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // Menu item data
@@ -16,43 +16,40 @@ export struct MenuItem {
     separator-after: bool,
 }
 
+// ── Menu Item Row ─────────────────────────────────────────────────────────
+
 component MenuItemRow inherits Rectangle {
     in property <string> label: "";
     in property <string> shortcut: "";
     in property <image> icon;
     in property <bool> enabled: true;
-    
+
     callback clicked();
-    
-    height: 28px;
-    background: self.enabled && touch.has-hover ? Theme.explorer-item-hover : transparent;
-    opacity: self.enabled ? 1.0 : 0.5;
-    
+
+    height: 26px;
+    background: self.enabled && touch.has-hover ? #2a2d3a : transparent;
+    border-radius: 3px;
+
     touch := TouchArea {
         enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
         clicked => { root.clicked(); }
     }
-    
-    HorizontalBox {
+
+    HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
         spacing: 8px;
-        
-        // Icon (centered vertically with text)
-        Rectangle {
-            width: 20px;
-            height: 100%;
-            Image {
-                x: 2px;
-                y: (parent.height - self.height) / 2;
-                width: 16px;
-                height: 16px;
-                source: root.icon;
-                image-fit: contain;
-            }
+
+        Image {
+            width: 14px;
+            height: 14px;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.enabled ? Theme.text-secondary : Theme.text-disabled;
+            vertical-alignment: center;
         }
-        
-        // Label
+
         Text {
             horizontal-stretch: 1;
             text: root.label;
@@ -60,273 +57,231 @@ component MenuItemRow inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
         }
-        
-        // Shortcut
+
         if root.shortcut != "": Text {
             text: root.shortcut;
-            color: Theme.text-secondary;
-            font-size: 11px;
+            color: #555;
+            font-size: 10px;
             vertical-alignment: center;
         }
     }
 }
 
-// Section header for insert submenu
-component InsertHeader inherits Rectangle {
+// ── Separator ─────────────────────────────────────────────────────────────
+
+component MenuSeparator inherits Rectangle {
+    height: 5px;
+
+    Rectangle {
+        y: 2px;
+        height: 1px;
+        x: 8px;
+        width: parent.width - 16px;
+        background: #333;
+    }
+}
+
+// ── Section Header ────────────────────────────────────────────────────────
+
+component MenuHeader inherits Rectangle {
     in property <string> label: "";
-    height: 20px;
-    
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        
-        Text {
-            text: root.label;
-            color: Theme.text-secondary;
-            font-size: 9px;
-            font-weight: 700;
-            vertical-alignment: center;
-            letter-spacing: 0.5px;
-        }
+    height: 22px;
+
+    Text {
+        x: 10px;
+        text: root.label;
+        color: #666;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        vertical-alignment: center;
     }
 }
 
-// Insert submenu item
+// ── Insert Item (compact) ─────────────────────────────────────────────────
+
 component InsertItem inherits Rectangle {
     in property <string> label: "";
     callback clicked();
-    
+
     height: 24px;
-    background: item-touch.has-hover ? Theme.explorer-item-hover : transparent;
-    
+    background: item-touch.has-hover ? #2a2d3a : transparent;
+    border-radius: 3px;
+
     item-touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => { root.clicked(); }
     }
-    
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 8px;
-        
-        Text {
-            text: root.label;
-            color: Theme.text-primary;
-            font-size: 11px;
-            vertical-alignment: center;
-        }
+
+    Text {
+        x: 10px;
+        text: root.label;
+        color: Theme.text-primary;
+        font-size: 11px;
+        vertical-alignment: center;
     }
 }
 
-// Thin separator for insert submenu
-component InsertSeparator inherits Rectangle {
-    height: 1px;
-    background: Theme.border-color;
-}
+// ============================================================================
+// Context Menu — main component
+// ============================================================================
 
 export component ContextMenu inherits Rectangle {
-    // Properties
     in property <[MenuItem]> items: [];
-    
-    // State: whether insert submenu is shown
+
     property <bool> show-insert-submenu: false;
-    
-    // Callbacks
+
     callback on-action(string);
     callback on-close();
-    
-    // Explicit height computed from item count so Slint commits to a concrete
-    // size before layout — prevents the menu from being clipped by panel bounds.
-    // Default (entity) menu: 10 items × 28px + 3 separators × 1px + 8px padding = 291px
-    // Dynamic items menu: items.length × 28px + separator rows + 8px padding
-    out property <length> computed-height: root.items.length == 0
-        ? (root.show-insert-submenu ? 600px : 291px)
-        : (root.items.length * 28px + 8px);
 
     width: 220px;
-    clip: false;
-    background: Theme.dialog-background;
-    border-radius: 4px;
+    height: self.preferred-height;
+    max-height: 500px;
+    clip: true;
+    background: #1e1f2e;
+    border-radius: 6px;
     border-width: 1px;
-    border-color: Theme.border-color;
-    drop-shadow-blur: 8px;
-    drop-shadow-color: Theme.shadow-color;
-    
-    VerticalLayout {
-        padding-top: 4px;
-        padding-bottom: 4px;
-        spacing: 0px;
-        alignment: start;
+    border-color: #333;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: #000000a0;
 
-        // Default items if none provided
-        if root.items.length == 0 && !root.show-insert-submenu: VerticalLayout {
-            spacing: 0px;
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/cut.svg");
-                label: "Cut";
-                shortcut: "Ctrl+X";
-                clicked => { root.on-action("cut"); }
+    // Absorb clicks on the menu body
+    TouchArea {
+        scroll-event(event) => { return accept; }
+    }
+
+    ScrollView {
+        VerticalLayout {
+            padding: 4px;
+            spacing: 1px;
+
+            // ── Dynamic items (file menu) ──
+            if root.items.length > 0 && !root.show-insert-submenu: VerticalLayout {
+                spacing: 1px;
+
+                for item in root.items: VerticalLayout {
+                    spacing: 0px;
+
+                    MenuItemRow {
+                        icon: item.icon;
+                        label: item.label;
+                        shortcut: item.shortcut;
+                        enabled: item.enabled;
+                        clicked => { root.on-action(item.id); }
+                    }
+
+                    if item.separator-after: MenuSeparator {}
+                }
             }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/copy.svg");
-                label: "Copy";
-                shortcut: "Ctrl+C";
-                clicked => { root.on-action("copy"); }
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/paste.svg");
-                label: "Paste";
-                shortcut: "Ctrl+V";
-                clicked => { root.on-action("paste"); }
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/duplicate.svg");
-                label: "Duplicate";
-                shortcut: "Ctrl+D";
-                clicked => { root.on-action("duplicate"); }
-            }
-            
-            Rectangle {
-                height: 1px;
-                background: Theme.border-color;
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/delete.svg");
-                label: "Delete";
-                shortcut: "Del";
-                clicked => { root.on-action("delete"); }
-            }
-            
-            Rectangle {
-                height: 1px;
-                background: Theme.border-color;
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/rename.svg");
-                label: "Rename";
-                shortcut: "F2";
-                clicked => { root.on-action("rename"); }
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/group.svg");
-                label: "Group";
-                shortcut: "Ctrl+G";
-                clicked => { root.on-action("group"); }
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/ungroup.svg");
-                label: "Ungroup";
-                shortcut: "Ctrl+Shift+G";
-                clicked => { root.on-action("ungroup"); }
-            }
-            
-            Rectangle {
-                height: 1px;
-                background: Theme.border-color;
-            }
-            
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/plus.svg");
-                label: "Insert Object...";
-                clicked => { root.show-insert-submenu = true; }
-            }
-        }
-        
-        // Insert Object submenu (replaces main menu when active)
-        if root.items.length == 0 && root.show-insert-submenu: VerticalLayout {
-            spacing: 0px;
-            
-            // Back button
-            MenuItemRow {
-                icon: @image-url("../../assets/icons/ui/close.svg");
-                label: "← Back";
-                clicked => { root.show-insert-submenu = false; }
-            }
-            
-            Rectangle { height: 1px; background: Theme.border-color; }
-            
-            InsertHeader { label: "PRIMITIVES"; }
-            InsertItem { label: "Part (Block)"; clicked => { root.on-action("insert:part"); } }
-            InsertItem { label: "Sphere"; clicked => { root.on-action("insert:sphere"); } }
-            InsertItem { label: "Cylinder"; clicked => { root.on-action("insert:cylinder"); } }
-            InsertItem { label: "Wedge"; clicked => { root.on-action("insert:wedge"); } }
-            InsertItem { label: "MeshPart"; clicked => { root.on-action("insert:meshpart"); } }
-            InsertItem { label: "UnionOperation"; clicked => { root.on-action("insert:unionoperation"); } }
-            InsertSeparator {}
-            InsertHeader { label: "STRUCTURE"; }
-            InsertItem { label: "Model"; clicked => { root.on-action("insert:model"); } }
-            InsertItem { label: "Folder"; clicked => { root.on-action("insert:folder"); } }
-            InsertItem { label: "SpawnLocation"; clicked => { root.on-action("insert:spawnlocation"); } }
-            InsertItem { label: "Seat"; clicked => { root.on-action("insert:seat"); } }
-            InsertItem { label: "VehicleSeat"; clicked => { root.on-action("insert:vehicleseat"); } }
-            InsertSeparator {}
-            InsertHeader { label: "SCRIPTING"; }
-            InsertItem { label: "Script"; clicked => { root.on-action("insert:script"); } }
-            InsertItem { label: "LocalScript"; clicked => { root.on-action("insert:localscript"); } }
-            InsertItem { label: "ModuleScript"; clicked => { root.on-action("insert:modulescript"); } }
-            InsertSeparator {}
-            InsertHeader { label: "CONSTRAINTS"; }
-            InsertItem { label: "Attachment"; clicked => { root.on-action("insert:attachment"); } }
-            InsertItem { label: "WeldConstraint"; clicked => { root.on-action("insert:weldconstraint"); } }
-            InsertItem { label: "Motor6D"; clicked => { root.on-action("insert:motor6d"); } }
-            InsertItem { label: "Beam"; clicked => { root.on-action("insert:beam"); } }
-            InsertSeparator {}
-            InsertHeader { label: "EFFECTS"; }
-            InsertItem { label: "ParticleEmitter"; clicked => { root.on-action("insert:particleemitter"); } }
-            InsertItem { label: "Decal"; clicked => { root.on-action("insert:decal"); } }
-            InsertItem { label: "Sound"; clicked => { root.on-action("insert:sound"); } }
-            InsertSeparator {}
-            InsertHeader { label: "LIGHTING"; }
-            InsertItem { label: "PointLight"; clicked => { root.on-action("insert:pointlight"); } }
-            InsertItem { label: "SpotLight"; clicked => { root.on-action("insert:spotlight"); } }
-            InsertItem { label: "SurfaceLight"; clicked => { root.on-action("insert:surfacelight"); } }
-            InsertSeparator {}
-            InsertHeader { label: "UI - CONTAINERS"; }
-            InsertItem { label: "ScreenGui"; clicked => { root.on-action("insert:screengui"); } }
-            InsertItem { label: "BillboardGui"; clicked => { root.on-action("insert:billboardgui"); } }
-            InsertItem { label: "SurfaceGui"; clicked => { root.on-action("insert:surfacegui"); } }
-            InsertItem { label: "Frame"; clicked => { root.on-action("insert:frame"); } }
-            InsertItem { label: "ScrollingFrame"; clicked => { root.on-action("insert:scrollingframe"); } }
-            InsertSeparator {}
-            InsertHeader { label: "UI - DISPLAY"; }
-            InsertItem { label: "TextLabel"; clicked => { root.on-action("insert:textlabel"); } }
-            InsertItem { label: "ImageLabel"; clicked => { root.on-action("insert:imagelabel"); } }
-            InsertSeparator {}
-            InsertHeader { label: "UI - INTERACTIVE"; }
-            InsertItem { label: "TextButton"; clicked => { root.on-action("insert:textbutton"); } }
-            InsertItem { label: "ImageButton"; clicked => { root.on-action("insert:imagebutton"); } }
-            InsertItem { label: "TextBox"; clicked => { root.on-action("insert:textbox"); } }
-            InsertItem { label: "ViewportFrame"; clicked => { root.on-action("insert:viewportframe"); } }
-            InsertItem { label: "VideoFrame"; clicked => { root.on-action("insert:videoframe"); } }
-            InsertItem { label: "DocumentFrame"; clicked => { root.on-action("insert:documentframe"); } }
-            InsertItem { label: "WebFrame"; clicked => { root.on-action("insert:webframe"); } }
-        }
-        
-        // Dynamic items
-        if root.items.length > 0: VerticalLayout {
-            spacing: 0px;
-            
-            for item in root.items: VerticalLayout {
-                spacing: 0px;
-                
+
+            // ── Default entity menu ──
+            if root.items.length == 0 && !root.show-insert-submenu: VerticalLayout {
+                spacing: 1px;
+
                 MenuItemRow {
-                    icon: item.icon;
-                    label: item.label;
-                    shortcut: item.shortcut;
-                    enabled: item.enabled;
-                    clicked => { root.on-action(item.id); }
+                    icon: @image-url("../../assets/icons/ui/cut.svg");
+                    label: "Cut"; shortcut: "Ctrl+X";
+                    clicked => { root.on-action("cut"); }
                 }
-                
-                if item.separator-after: Rectangle {
-                    height: 1px;
-                    background: Theme.border-color;
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/copy.svg");
+                    label: "Copy"; shortcut: "Ctrl+C";
+                    clicked => { root.on-action("copy"); }
                 }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/paste.svg");
+                    label: "Paste"; shortcut: "Ctrl+V";
+                    clicked => { root.on-action("paste"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/duplicate.svg");
+                    label: "Duplicate"; shortcut: "Ctrl+D";
+                    clicked => { root.on-action("duplicate"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/delete.svg");
+                    label: "Delete"; shortcut: "Del";
+                    clicked => { root.on-action("delete"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/rename.svg");
+                    label: "Rename"; shortcut: "F2";
+                    clicked => { root.on-action("rename"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/group.svg");
+                    label: "Group"; shortcut: "Ctrl+G";
+                    clicked => { root.on-action("group"); }
+                }
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/ungroup.svg");
+                    label: "Ungroup"; shortcut: "Ctrl+Shift+G";
+                    clicked => { root.on-action("ungroup"); }
+                }
+
+                MenuSeparator {}
+
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/plus.svg");
+                    label: "Insert Object...";
+                    clicked => { root.show-insert-submenu = true; }
+                }
+            }
+
+            // ── Insert Object submenu (scrollable) ──
+            if root.show-insert-submenu: VerticalLayout {
+                spacing: 1px;
+
+                // Back button
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/arrow-left.svg");
+                    label: "Back";
+                    clicked => { root.show-insert-submenu = false; }
+                }
+                MenuSeparator {}
+
+                MenuHeader { label: "PRIMITIVES"; }
+                InsertItem { label: "Part (Block)"; clicked => { root.on-action("insert:part"); } }
+                InsertItem { label: "Sphere"; clicked => { root.on-action("insert:sphere"); } }
+                InsertItem { label: "Cylinder"; clicked => { root.on-action("insert:cylinder"); } }
+                InsertItem { label: "Wedge"; clicked => { root.on-action("insert:wedge"); } }
+                InsertItem { label: "Cone"; clicked => { root.on-action("insert:cone"); } }
+
+                MenuSeparator {}
+                MenuHeader { label: "STRUCTURE"; }
+                InsertItem { label: "Model"; clicked => { root.on-action("insert:model"); } }
+                InsertItem { label: "Folder"; clicked => { root.on-action("insert:folder"); } }
+                InsertItem { label: "SpawnLocation"; clicked => { root.on-action("insert:spawnlocation"); } }
+
+                MenuSeparator {}
+                MenuHeader { label: "SCRIPTING"; }
+                InsertItem { label: "Script"; clicked => { root.on-action("insert:script"); } }
+                InsertItem { label: "LocalScript"; clicked => { root.on-action("insert:localscript"); } }
+                InsertItem { label: "ModuleScript"; clicked => { root.on-action("insert:modulescript"); } }
+
+                MenuSeparator {}
+                MenuHeader { label: "UI"; }
+                InsertItem { label: "ScreenGui"; clicked => { root.on-action("insert:screengui"); } }
+                InsertItem { label: "BillboardGui"; clicked => { root.on-action("insert:billboardgui"); } }
+                InsertItem { label: "SurfaceGui"; clicked => { root.on-action("insert:surfacegui"); } }
+                InsertItem { label: "Frame"; clicked => { root.on-action("insert:frame"); } }
+                InsertItem { label: "TextLabel"; clicked => { root.on-action("insert:textlabel"); } }
+                InsertItem { label: "TextButton"; clicked => { root.on-action("insert:textbutton"); } }
+                InsertItem { label: "ImageLabel"; clicked => { root.on-action("insert:imagelabel"); } }
+
+                MenuSeparator {}
+                MenuHeader { label: "EFFECTS"; }
+                InsertItem { label: "PointLight"; clicked => { root.on-action("insert:pointlight"); } }
+                InsertItem { label: "SpotLight"; clicked => { root.on-action("insert:spotlight"); } }
+                InsertItem { label: "Sound"; clicked => { root.on-action("insert:sound"); } }
+                InsertItem { label: "ParticleEmitter"; clicked => { root.on-action("insert:particleemitter"); } }
+                InsertItem { label: "Beam"; clicked => { root.on-action("insert:beam"); } }
             }
         }
     }

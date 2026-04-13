@@ -2203,26 +2203,19 @@ export component StudioWindow inherits Window {
     // Context menu backdrop (click anywhere outside to dismiss)
     // Must be clip:false so the menu can overflow Explorer/Properties panel boundaries
     if root.show-context-menu: Rectangle {
-        x: 0px;
-        y: 0px;
         width: root.width;
         height: root.height;
         background: transparent;
-        clip: false;
-        
+
+        // Backdrop — click anywhere outside to dismiss
         TouchArea {
-            x: 0px;
-            y: 0px;
-            width: root.width;
-            height: root.height;
             clicked => { root.show-context-menu = false; }
         }
-        
-        ctx-menu := ContextMenu {
-            x: min(root.context-menu-x, root.width - 224px);
-            y: min(root.context-menu-y, root.height - self.computed-height);
-            width: 220px;
-            height: self.computed-height;
+
+        // Context menu — clamped to viewport bounds
+        ContextMenu {
+            x: min(root.context-menu-x, root.width - 228px);
+            y: min(max(root.context-menu-y, 4px), root.height - 320px);
             items: root.context-menu-items;
             on-action(action) => {
                 root.context-action(action);
