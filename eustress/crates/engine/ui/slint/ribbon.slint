@@ -966,9 +966,6 @@ export component Ribbon inherits Rectangle {
                                 padding-top: 4px;
                                 padding-bottom: 4px;
                                 
-                                DropdownHeader { label: "PANEL"; }
-                                DropdownItem { label: "Toggle Panel"; shortcut: "Ctrl+M"; clicked => { root.on-plugin-action("mindspace:toggle-panel"); } }
-                                DropdownSeparator {}
                                 DropdownHeader { label: "LABELS"; }
                                 DropdownItem { label: "Add Label"; shortcut: "Ctrl+L"; clicked => { root.on-plugin-action("mindspace:add-label"); } }
                                 DropdownItem { label: "Remove Label"; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
