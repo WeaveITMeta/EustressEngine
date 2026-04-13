@@ -5770,74 +5770,55 @@ fn publish_output_logs(
 
 /// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
 /// Only runs when the pipeline resource has actually changed (Bevy change detection).
+/// Sync Workshop panel state to the SlintBridge (Bevy → overlay thread).
 fn sync_workshop_to_slint(
-    slint_context: Option<NonSend<SlintUiState>>,
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     tool_registry: Option<Res<crate::workshop::tools::ToolRegistry>>,
+    bridge: Option<Res<super::slint_bridge::SlintBridge>>,
 ) {
-    let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
+    let Some(bridge) = bridge else { return };
     // Only sync when the pipeline resource was actually mutated this frame
     if !pipeline.is_changed() { return; }
-    let ui = &slint_context.window;
-    
-    // Push pipeline state string
-    ui.set_workshop_pipeline_state(pipeline.state_string().into());
-    ui.set_workshop_product_name(pipeline.product_name.clone().into());
-    ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
-    ui.set_workshop_estimated_cost(pipeline.format_cost().into());
-    
+
     // Check API key validity
     let api_key_valid = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
         _ => false,
     };
-    ui.set_workshop_api_key_valid(api_key_valid);
-    
-    // Push chat messages to Slint model
-    let messages: Vec<ChatMessage> = pipeline.messages.iter().map(|msg| {
-        ChatMessage {
-            id: msg.id as i32,
-            role: msg.role.to_slint_string().into(),
-            content: msg.content.clone().into(),
-            timestamp: msg.timestamp.clone().into(),
-            mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
-            mcp_method: msg.mcp_method.clone().unwrap_or_default().into(),
-            mcp_status: msg.mcp_status.as_ref()
-                .map(|s| s.to_slint_string().to_string())
-                .unwrap_or_else(|| if msg.role == crate::workshop::MessageRole::Mcp { "pending".to_string() } else { String::new() })
-                .into(),
-            artifact_path: msg.artifact_path.as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-                .into(),
-            artifact_type: msg.artifact_type.as_ref()
-                .map(|t| t.to_slint_string().to_string())
-                .unwrap_or_default()
-                .into(),
-        }
-    }).collect();
-    let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
-    ui.set_workshop_messages(slint::ModelRc::from(msg_model));
-    
-    // Push pipeline steps to Slint model
-    let steps: Vec<PipelineStepData> = pipeline.steps.iter().map(|step| {
-        PipelineStepData {
-            index: step.index as i32,
-            label: step.label.clone().into(),
-            status: step.status.to_slint_string().into(),
-            artifact_count: step.artifact_count as i32,
-        }
-    }).collect();
-    let steps_model = std::rc::Rc::new(slint::VecModel::from(steps));
-    ui.set_workshop_pipeline_steps(slint::ModelRc::from(steps_model));
 
-    // Sync tool count from registry
-    if let Some(registry) = tool_registry {
-        ui.set_workshop_tool_count(registry.tool_count() as i32);
-    }
+    // Build bridge message data
+    use super::slint_bridge::WorkshopMessageData;
+    let messages: Vec<WorkshopMessageData> = pipeline.messages.iter().map(|msg| {
+        WorkshopMessageData {
+            role: msg.role.to_slint_string().to_string(),
+            content: msg.content.clone(),
+            message_type: msg.mcp_endpoint.clone().unwrap_or_default(),
+            timestamp: msg.timestamp.clone(),
+        }
+    }).collect();
+
+    let steps: Vec<super::slint_bridge::WorkshopStepData> = pipeline.steps.iter().map(|step| {
+        super::slint_bridge::WorkshopStepData {
+            name: step.label.clone(),
+            status: step.status.to_slint_string().to_string(),
+            description: String::new(),
+        }
+    }).collect();
+
+    let tool_count = tool_registry.map(|r| r.tool_count() as i32).unwrap_or(0);
+
+    // Write to bridge — overlay thread will apply on next timer tick
+    let mut state = bridge.lock();
+    state.workshop_state = Some(pipeline.state_string().to_string());
+    state.workshop_product_name = Some(pipeline.product_name.clone());
+    state.workshop_artifact_count = Some(pipeline.artifacts.len() as i32);
+    state.workshop_estimated_cost = Some(pipeline.format_cost());
+    state.workshop_api_key_valid = Some(api_key_valid);
+    state.workshop_messages = Some(messages);
+    state.workshop_steps = Some(steps);
 }
 
 /// Sync API Reference catalog to Slint panel. Runs when filter state changes.

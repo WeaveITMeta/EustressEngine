@@ -984,11 +984,19 @@ fn handle_send_message(
             pipeline.state = IdeationState::Conversing;
             info!("Workshop: Started new ideation session {}", pipeline.session_id);
         }
-        
-        // For now: acknowledge receipt and queue Claude call
-        // The actual Claude bridge will be wired in the async task system
-        // For the initial skeleton, we add a system message indicating the AI will respond
+
         info!("Workshop: User message queued for Claude: {} chars", content.len());
+
+        // Check if the Claude bridge has dispatched — if not, the agentic loop
+        // isn't wired yet. Give the user feedback so they know the system received it.
+        // Once the agentic loop is implemented, this message will be replaced by
+        // the actual Claude response.
+        pipeline.add_system_message(
+            "Message received. The agentic tool-use loop is not yet connected — \
+             your message was recorded but Claude cannot respond yet. \
+             This will be wired in the Workshop architecture unification.".to_string(),
+            0.0,
+        );
     }
 }
 
