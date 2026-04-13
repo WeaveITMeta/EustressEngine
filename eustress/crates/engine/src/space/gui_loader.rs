@@ -74,9 +74,9 @@ pub struct GuiTomlMetadata {
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct GuiTomlProperties {
     #[serde(default)]
-    pub position: [f32; 2],
+    pub position: Vec<f32>,           // [x, y] for 2D GUI, [x, y, z] for BillboardGui offset
     #[serde(default = "default_size")]
-    pub size: [f32; 2],
+    pub size: Vec<f32>,               // [w, h]
     #[serde(default)]
     pub anchor_point: [f32; 2],
     #[serde(default = "default_bg_color")]
@@ -91,6 +91,13 @@ pub struct GuiTomlProperties {
     pub visible: bool,
     #[serde(default)]
     pub z_index: i32,
+    // BillboardGui-specific properties
+    #[serde(default)]
+    pub max_distance: Option<f32>,
+    #[serde(default)]
+    pub always_on_top: Option<bool>,
+    #[serde(default)]
+    pub adornee: Option<String>,
 }
 
 /// [text] section — text-specific properties for TextLabel, TextButton, TextBox
@@ -110,7 +117,7 @@ pub struct GuiTomlText {
     pub text_y_alignment: String,
 }
 
-fn default_size() -> [f32; 2] { [100.0, 30.0] }
+fn default_size() -> Vec<f32> { vec![100.0, 30.0] }
 fn default_bg_color() -> [f32; 4] { [0.2, 0.2, 0.2, 0.8] }
 fn default_border_color() -> [f32; 4] { [0.5, 0.5, 0.5, 1.0] }
 fn default_text_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
@@ -361,10 +368,10 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
     };
 
     GuiElementDisplay {
-        x: gui.position[0],
-        y: gui.position[1],
-        width: gui.size[0],
-        height: gui.size[1],
+        x: gui.position.get(0).copied().unwrap_or(0.0),
+        y: gui.position.get(1).copied().unwrap_or(0.0),
+        width: gui.size.get(0).copied().unwrap_or(100.0),
+        height: gui.size.get(1).copied().unwrap_or(30.0),
         z_order: gui.z_index,
         visible: gui.visible,
         clip_children: class_type == "scrollingframe",

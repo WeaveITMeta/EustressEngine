@@ -918,9 +918,52 @@ pub fn spawn_directory_entry(
             Node { display: Display::None, ..default() },
             gui_display,
         )).id()
+    } else if matches!(class_name, eustress_common::classes::ClassName::BillboardGui) {
+        // BillboardGui — 3D billboard entity (quad facing camera)
+        // Read size, max_distance, always_on_top from _instance.toml
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let (bb_size, bb_max_distance, bb_always_on_top, bb_offset) =
+            if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+                let g = &gui_def.gui;
+                let w = g.size.get(0).copied().unwrap_or(200.0);
+                let h = g.size.get(1).copied().unwrap_or(100.0);
+                let max_d = g.max_distance.unwrap_or(100.0);
+                let aot = g.always_on_top.unwrap_or(false);
+                let offset = if g.position.len() >= 3 {
+                    Vec3::new(g.position[0], g.position[1], g.position[2])
+                } else {
+                    Vec3::new(0.0, 2.0, 0.0)
+                };
+                ([w, h], max_d, aot, offset)
+            } else {
+                ([200.0f32, 100.0], 100.0, false, Vec3::new(0.0, 2.0, 0.0))
+            };
+
+        commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+                uuid: String::new(),
+            },
+            eustress_common::gui::billboard_renderer::BillboardGuiMarker {
+                size: bb_size,
+                max_distance: bb_max_distance,
+                always_on_top: bb_always_on_top,
+            },
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Transform::from_translation(bb_offset),
+            Visibility::default(),
+        )).id()
     } else {
         // Regular Folder / Model — 3D entity
-        // Capitalize first letter of folder names for display (e.g. "textures" → "Textures")
         let display_name = {
             let mut chars = dir_meta.name.chars();
             match chars.next() {

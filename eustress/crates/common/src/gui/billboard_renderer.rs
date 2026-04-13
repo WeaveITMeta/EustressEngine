@@ -18,6 +18,22 @@
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use std::sync::OnceLock;
+
+// ── Embedded Font ─────────────────────────────────────────────────────────────
+
+/// FiraMono subset (SIL Open Font License) — embedded at compile time.
+static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/FiraMono-subset.ttf");
+
+/// Lazily initialized fontdue font for CPU text rasterization.
+static FONT: OnceLock<fontdue::Font> = OnceLock::new();
+
+fn get_font() -> &'static fontdue::Font {
+    FONT.get_or_init(|| {
+        fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
+            .expect("Failed to load embedded billboard font")
+    })
+}
 
 /// GUI element display data — shared between ScreenGui (Slint) and BillboardGui (manual renderer).
 /// Stored as a Bevy component on each GUI entity (Frame, TextLabel, TextButton, etc.).
@@ -284,7 +300,69 @@ impl BillboardAtlas {
             }
         }
 
-        // TODO: CPU text rasterization via fontdue/ab_glyph for billboard text content
+        // CPU text rasterization via fontdue
+        if !element.text.is_empty() && ew > 0 && eh > 0 {
+            let font = get_font();
+            let font_size = element.font_size.max(6.0).min(64.0);
+            let tr = (element.text_color[0] * 255.0) as u8;
+            let tg = (element.text_color[1] * 255.0) as u8;
+            let tb = (element.text_color[2] * 255.0) as u8;
+            let ta = (element.text_color[3] * 255.0) as u8;
+
+            // Layout: measure total width, then position based on alignment
+            let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::new();
+            let mut total_width = 0.0f32;
+            for ch in element.text.chars() {
+                let (metrics, bitmap) = font.rasterize(ch, font_size);
+                total_width += metrics.advance_width;
+                glyphs.push((metrics, bitmap));
+            }
+
+            // Vertical centering: use font metrics
+            let line_height = font_size;
+            let y_start = match element.text_align.as_str() {
+                _ => ((eh as f32 - line_height) / 2.0).max(0.0) as usize, // center vertically
+            };
+
+            // Horizontal alignment
+            let x_start = match element.text_align.as_str() {
+                "left" => 2usize, // small padding
+                "right" => (ew as f32 - total_width - 2.0).max(0.0) as usize,
+                _ => ((ew as f32 - total_width) / 2.0).max(0.0) as usize, // center
+            };
+
+            let mut cursor_x = x_start as f32;
+            for (metrics, bitmap) in &glyphs {
+                let gx = (cursor_x + metrics.xmin as f32) as isize;
+                let gy = (y_start as f32 + (font_size - metrics.height as f32 - metrics.ymin as f32)) as isize;
+
+                for row in 0..metrics.height {
+                    for col in 0..metrics.width {
+                        let px = gx + col as isize;
+                        let py = gy + row as isize;
+                        if px < 0 || py < 0 || px >= ew as isize || py >= eh as isize {
+                            continue;
+                        }
+                        let coverage = bitmap[row * metrics.width + col];
+                        if coverage == 0 { continue; }
+
+                        let ax = origin_x as usize + ex + px as usize;
+                        let ay = origin_y as usize + ey + py as usize;
+                        let idx = (ay * atlas_w + ax) * 4;
+                        if idx + 3 >= self.pixels.len() { continue; }
+
+                        // Alpha-blend text over background
+                        let alpha = (coverage as u16 * ta as u16) / 255;
+                        let inv = 255 - alpha as u16;
+                        self.pixels[idx] = ((tr as u16 * alpha + self.pixels[idx] as u16 * inv) / 255) as u8;
+                        self.pixels[idx + 1] = ((tg as u16 * alpha + self.pixels[idx + 1] as u16 * inv) / 255) as u8;
+                        self.pixels[idx + 2] = ((tb as u16 * alpha + self.pixels[idx + 2] as u16 * inv) / 255) as u8;
+                        self.pixels[idx + 3] = (self.pixels[idx + 3] as u16 + alpha).min(255) as u8;
+                    }
+                }
+                cursor_x += metrics.advance_width;
+            }
+        }
 
         self.dirty = true;
     }

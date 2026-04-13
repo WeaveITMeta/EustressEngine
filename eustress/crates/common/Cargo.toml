@@ -43,6 +43,9 @@ crossbeam = "0.8"
 
 # Byte casting for GPU buffers
 bytemuck = { version = "1.14", features = ["derive"] }
+
+# CPU font rasterization for billboard GUI text
+fontdue = "0.9"
 # Slint UI renderer (optional — enabled by `gui` feature for in-game UI)
 slint = { workspace = true, optional = true }
 
