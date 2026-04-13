@@ -10,7 +10,7 @@
 //! - Realtime-filtered environment maps with AtmosphereEnvironmentMapLight
 
 use bevy::prelude::*;
-use bevy::pbr::{Atmosphere as BevyAtmosphere, DistanceFog, FogFalloff};
+use bevy::pbr::{Atmosphere as BevyAtmosphere, ScatteringMedium, DistanceFog, FogFalloff};
 use bevy::core_pipeline::Skybox;
 use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight, SunDisk};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
@@ -605,28 +605,30 @@ pub struct AtmosphereApplied;
 fn apply_atmosphere_to_cameras(
     mut commands: Commands,
     scene_atmosphere: Res<SceneAtmosphere>,
+    mut mediums: ResMut<Assets<ScatteringMedium>>,
     cameras_without_atmosphere: Query<
-        Entity, 
+        Entity,
         (With<Camera3d>, Without<AtmosphereApplied>)
     >,
     cameras_with_custom: Query<
-        (Entity, &EustressAtmosphere), 
+        (Entity, &EustressAtmosphere),
         (With<Camera3d>, Without<AtmosphereApplied>)
     >,
 ) {
+    // Create an Earth-like scattering medium (shared by all cameras)
+    let medium_handle = mediums.add(ScatteringMedium::earthlike(64, 64));
+
     // Apply custom atmosphere to cameras that have EustressAtmosphere component
     for (camera_entity, atmosphere) in cameras_with_custom.iter() {
-        apply_atmosphere_settings(&mut commands, camera_entity, atmosphere);
+        apply_atmosphere_settings(&mut commands, camera_entity, atmosphere, &medium_handle);
     }
-    
+
     // Apply scene atmosphere to cameras without custom atmosphere
     for camera_entity in cameras_without_atmosphere.iter() {
-        // Skip if already processed via custom atmosphere
         if cameras_with_custom.iter().any(|(e, _)| e == camera_entity) {
             continue;
         }
-        
-        apply_atmosphere_settings(&mut commands, camera_entity, &scene_atmosphere.atmosphere);
+        apply_atmosphere_settings(&mut commands, camera_entity, &scene_atmosphere.atmosphere, &medium_handle);
     }
 }
 
@@ -636,9 +638,10 @@ fn apply_atmosphere_settings(
     commands: &mut Commands,
     camera_entity: Entity,
     _atmosphere: &EustressAtmosphere,
+    medium_handle: &Handle<ScatteringMedium>,
 ) {
     commands.entity(camera_entity).insert((
-        BevyAtmosphere::EARTH,
+        BevyAtmosphere::earthlike(medium_handle.clone()),
         AtmosphereApplied,
     ));
     info!("🌍 Applied Bevy Atmosphere to camera {:?}", camera_entity);
