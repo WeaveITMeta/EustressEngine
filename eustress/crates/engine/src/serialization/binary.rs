@@ -541,6 +541,7 @@ impl ClassId {
             ClassName::SnapIndicator => ClassId::Instance,
             ClassName::Material => ClassId::Instance,
             ClassName::Image => ClassId::Instance,
+            ClassName::WorkshopConversation => ClassId::Instance,
         }
     }
     

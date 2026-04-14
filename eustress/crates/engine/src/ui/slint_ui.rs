@@ -3715,11 +3715,10 @@ fn drain_slint_actions(
                                         .unwrap_or("")
                                         .to_string();
                                     if !session_id.is_empty() {
-                                        // Switch to Workshop tab and load conversation
-                                        if let Some(ref mut s) = res.state {
-                                            s.right_tab_index = 3; // Workshop tab
+                                        // Load conversation in Workshop panel
+                                        if let Some(ref queue) = res.action_queue {
+                                            queue.push(SlintAction::WorkshopLoadConversation(session_id.clone()));
                                         }
-                                        pending_actions.push(SlintAction::WorkshopLoadConversation(session_id.clone()));
                                         if let Some(ref mut out) = res.output {
                                             out.info(format!("Opening conversation: {}", inst.name));
                                         }
