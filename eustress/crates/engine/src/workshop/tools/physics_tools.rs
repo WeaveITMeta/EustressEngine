@@ -57,6 +57,9 @@ impl ToolHandler for QueryMaterialTool {
             eustress_common::classes::Material::Glass => "Transparent glass, specular transmission, IOR 1.5",
             eustress_common::classes::Material::Neon => "Self-illuminating, emissive glow",
             eustress_common::classes::Material::Ice => "Translucent ice, very smooth",
+            eustress_common::classes::Material::Gold => "Pure gold, highly reflective, dense 19300 kg/m³",
+            eustress_common::classes::Material::Silver => "Polished silver, highest reflectance of any metal",
+            eustress_common::classes::Material::Bronze => "Copper-tin alloy, warm patina, medium roughness",
         };
 
         ToolResult {
