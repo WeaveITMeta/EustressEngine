@@ -920,6 +920,7 @@ pub fn spawn_instance(
         can_collide: instance.properties.can_collide,
         locked: instance.properties.locked,
         material: eustress_common::classes::Material::from_string(&instance.properties.material),
+        material_name: instance.properties.material.clone(),
         cframe: Transform::from(instance.transform.clone()),
         ..default()
     };

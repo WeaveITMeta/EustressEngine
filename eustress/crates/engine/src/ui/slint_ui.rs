@@ -4231,9 +4231,8 @@ fn drain_slint_actions(
                         }
                         "Material" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
-                                let new_mat = crate::classes::Material::from_string(&val);
-                                bp.material = new_mat;
-                                // MaterialSyncPlugin picks up Changed<BasePart> and updates StandardMaterial
+                                bp.material = crate::classes::Material::from_string(&val);
+                                bp.material_name = val.clone();
                             }
                         }
                         "Reflectance" => {

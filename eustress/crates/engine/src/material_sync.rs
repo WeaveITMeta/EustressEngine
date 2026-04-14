@@ -58,9 +58,14 @@ fn sync_basepart_to_material(
     ), Changed<BasePart>>,
 ) {
     for (entity, basepart, material_handle, has_no_shadow, has_transmission) in query.iter() {
-        // If the MaterialRegistry has a pre-built material with textures for this
-        // preset name, swap the handle entirely (gets textures on all faces).
-        let mat_name = format!("{:?}", basepart.material);
+        // Look up material by custom name first, then fall back to enum preset name.
+        // Custom materials (e.g. "BrushedMetal" from .mat.toml) use material_name.
+        // Built-in presets (Plastic, Metal, etc.) use the enum debug format.
+        let mat_name = if basepart.material_name.is_empty() {
+            format!("{:?}", basepart.material)
+        } else {
+            basepart.material_name.clone()
+        };
         if let Some(ref registry) = material_registry {
             if let Some(registry_handle) = registry.get(&mat_name) {
                 // Clone the registry material so we can tint it with the part's properties

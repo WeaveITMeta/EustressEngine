@@ -584,6 +584,10 @@ pub struct BasePart {
     /// Material preset (Eustress "Material" enum)
     /// Bevy: StandardMaterial variants with PBR params
     pub material: Material,
+    /// Custom material name from MaterialService (e.g. "BrushedMetal").
+    /// When non-empty, overrides the enum for registry lookup.
+    #[serde(default)]
+    pub material_name: String,
     
     /// Opacity 0-1 (Eustress "Transparency")
     /// Bevy: StandardMaterial.alpha_mode
@@ -655,6 +659,7 @@ impl Default for BasePart {
             pivot_offset: Transform::IDENTITY,
             color: Color::srgb(0.6, 0.6, 0.6), // Medium gray
             material: Material::Plastic,
+            material_name: String::new(),
             transparency: 0.0,
             reflectance: 0.0,
             anchored: false,
