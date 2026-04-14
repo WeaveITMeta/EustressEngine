@@ -6696,13 +6696,13 @@ fn sync_unified_explorer_to_slint(
     roots.sort_by(|a, b| {
         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        
-        // Pin Camera at the top
+
+        // Pin Camera at the top, tiebreak by entity index for stable ordering
         match (a_name, b_name) {
-            ("Camera", "Camera") => std::cmp::Ordering::Equal,
             ("Camera", _) => std::cmp::Ordering::Less,
             (_, "Camera") => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name),
+            _ => a_name.cmp(b_name)
+                .then_with(|| a.index().cmp(&b.index())),
         }
     });
     
@@ -6899,10 +6899,11 @@ fn sync_unified_explorer_to_slint(
                         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
                         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
                         match (a_name, b_name) {
-                            ("Camera", "Camera") => std::cmp::Ordering::Equal,
                             ("Camera", _) => std::cmp::Ordering::Less,
                             (_, "Camera") => std::cmp::Ordering::Greater,
-                            _ => a_name.cmp(b_name),
+                            _ => a_name.cmp(b_name)
+                                // Tiebreaker: entity index for deterministic order with same names
+                                .then_with(|| a.index().cmp(&b.index())),
                         }
                     });
                     for child in child_instances.into_iter().rev() {
@@ -6933,10 +6934,10 @@ fn sync_unified_explorer_to_slint(
         let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
         let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
         match (a_class, b_class) {
-            (eustress_common::classes::ClassName::Camera, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Equal,
             (eustress_common::classes::ClassName::Camera, _) => std::cmp::Ordering::Less,
             (_, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name),
+            _ => a_name.cmp(b_name)
+                .then_with(|| a.index().cmp(&b.index())),
         }
     });
 
