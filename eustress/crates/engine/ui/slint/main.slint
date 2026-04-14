@@ -25,7 +25,7 @@ import { PublishTreeNode } from "publish.slint";
 import { ContextMenu, MenuItem } from "context_menu.slint";
 import { Theme } from "theme.slint";
 // Dock layout system
-import { LayoutPresetSelector, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
+import { LayoutPresetSelector, LayoutDropdownMenu, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
 // New components for complete egui parity
 import { TerrainEditor } from "terrain_editor.slint";
 import { SettingsDialog } from "settings.slint";
@@ -364,6 +364,8 @@ export component StudioWindow inherits Window {
     // Layout presets
     in-out property <int> current-layout-preset: 0;
     in-out property <bool> show-layout-dropdown: false;
+    property <float> layout-dropdown-x: 0;
+    property <float> layout-dropdown-y: 0;
     
     // Theme settings
     in-out property <bool> show-theme-editor: false;
@@ -1644,25 +1646,13 @@ export component StudioWindow inherits Window {
                             x: 8px;
                             y: 8px;
                             current-preset-index: root.current-layout-preset;
-                            
-                            preset-selected(preset) => {
-                                root.show-explorer = preset.show-explorer;
-                                root.show-properties = preset.show-properties;
-                                root.show-output = preset.show-output;
-                                root.show-toolbox = preset.show-toolbox;
-                                root.show-assets = preset.show-assets;
-                                root.show-history = preset.show-history;
-                                root.show-soul-panel = preset.show-soul-panel;
-                                root.left-panel-width = preset.left-panel-width * 1px;
-                                root.right-panel-width = preset.right-panel-width * 1px;
-                                root.output-height = preset.output-height * 1px;
-                                root.left-tab-index = preset.left-tab-index;
-                                root.right-tab-index = preset.right-tab-index;
-                                root.apply-layout-preset(root.current-layout-preset);
+                            dropdown-open: root.show-layout-dropdown;
+
+                            request-open-dropdown(abs-x, abs-y) => {
+                                root.layout-dropdown-x = abs-x;
+                                root.layout-dropdown-y = abs-y;
+                                root.show-layout-dropdown = true;
                             }
-                            save-current-layout => { root.save-layout-to-file(); }
-                            load-layout-from-file => { root.load-layout-from-file(); }
-                            reset-to-factory => { root.reset-layout-to-default(); }
                         }
                         
                         // Performance Overlay (top-right)
@@ -2200,6 +2190,51 @@ export component StudioWindow inherits Window {
         y: 80px;
     }
     
+    // Layout dropdown overlay (click anywhere outside to dismiss)
+    if root.show-layout-dropdown: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: transparent;
+
+        // Backdrop — click anywhere outside to dismiss
+        TouchArea {
+            clicked => { root.show-layout-dropdown = false; }
+        }
+
+        LayoutDropdownMenu {
+            x: root.layout-dropdown-x * 1px;
+            y: root.layout-dropdown-y * 1px;
+            current-preset-index: root.current-layout-preset;
+
+            preset-selected(index, preset) => {
+                root.current-layout-preset = index;
+                root.show-explorer = preset.show-explorer;
+                root.show-properties = preset.show-properties;
+                root.show-output = preset.show-output;
+                root.show-toolbox = preset.show-toolbox;
+                root.show-assets = preset.show-assets;
+                root.show-history = preset.show-history;
+                root.show-soul-panel = preset.show-soul-panel;
+                root.left-panel-width = preset.left-panel-width * 1px;
+                root.right-panel-width = preset.right-panel-width * 1px;
+                root.output-height = preset.output-height * 1px;
+                root.left-tab-index = preset.left-tab-index;
+                root.right-tab-index = preset.right-tab-index;
+                root.apply-layout-preset(root.current-layout-preset);
+                root.show-layout-dropdown = false;
+            }
+            load-layout-from-file => {
+                root.load-layout-from-file();
+                root.show-layout-dropdown = false;
+            }
+            reset-to-factory => {
+                root.reset-layout-to-default();
+                root.show-layout-dropdown = false;
+            }
+            close => { root.show-layout-dropdown = false; }
+        }
+    }
+
     // Context menu backdrop (click anywhere outside to dismiss)
     // Must be clip:false so the menu can overflow Explorer/Properties panel boundaries
     if root.show-context-menu: Rectangle {

@@ -153,8 +153,8 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
     };
 
     let size = match class_name {
-        "ScreenGui" => [0.0, 0.0],     // ScreenGui is fullscreen, size is ignored
-        "Frame" | "ScrollingFrame" => [200.0, 150.0],
+        "ScreenGui" => vec![0.0, 0.0],     // ScreenGui is fullscreen, size is ignored
+        "Frame" | "ScrollingFrame" => vec![200.0, 150.0],
         _ => default_size(),
     };
 
@@ -173,7 +173,7 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             archivable: true,
         },
         gui: GuiTomlProperties {
-            position: [0.0, 0.0],
+            position: vec![0.0, 0.0],
             size,
             anchor_point: [0.0, 0.0],
             background_color: bg,
@@ -182,6 +182,9 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             corner_radius: if class_name == "TextButton" { 4.0 } else { 0.0 },
             visible: true,
             z_index: 0,
+            max_distance: None,
+            always_on_top: None,
+            adornee: None,
         },
         text,
         asset: None,

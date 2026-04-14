@@ -408,6 +408,7 @@ pub fn save_space(world: &mut World) {
                 metadata: InstanceMetadata {
                     class_name,
                     archivable: instance.archivable,
+                    name: None,
                     created: String::new(),
                     last_modified: now.clone(),
                 },

@@ -226,7 +226,7 @@ pub fn process_file_changes(
     if counter % 300 == 0 {
         let mut stale: Vec<(Entity, std::path::PathBuf)> = Vec::new();
         for (entity, loaded) in file_entities.iter() {
-            if !loaded.path.exists() {
+            if !loaded.path.exists() && !registry.rename_in_progress.contains(&loaded.path) {
                 stale.push((entity, loaded.path.clone()));
             }
         }
@@ -737,6 +737,11 @@ fn handle_file_removed(
     registry: &mut SpaceFileRegistry,
     commands: &mut Commands,
 ) {
+    // Skip if this path is being renamed — the delete is expected
+    if registry.rename_in_progress.remove(&event.path) {
+        info!("➖ File deleted (rename in progress, skipping despawn): {:?}", event.path);
+        return;
+    }
     if let Some(entity) = registry.get_entity(&event.path) {
         info!("➖ File deleted, despawning entity: {:?}", event.path);
         commands.entity(entity).despawn();

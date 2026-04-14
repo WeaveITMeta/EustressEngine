@@ -201,15 +201,19 @@ pub struct FileMetadata {
 pub struct SpaceFileRegistry {
     /// Map: file path → entity spawned from that file
     pub file_to_entity: HashMap<PathBuf, Entity>,
-    
+
     /// Map: entity → file path it was loaded from
     pub entity_to_file: HashMap<Entity, PathBuf>,
-    
+
     /// Map: file path → metadata
     pub file_metadata: HashMap<PathBuf, FileMetadata>,
-    
+
     /// Files that failed to load (with error message)
     pub failed_files: HashMap<PathBuf, String>,
+
+    /// Paths currently being renamed — file watcher ignores delete events for these.
+    /// Cleared after the rename completes.
+    pub rename_in_progress: std::collections::HashSet<PathBuf>,
 }
 
 impl SpaceFileRegistry {
@@ -226,6 +230,7 @@ impl SpaceFileRegistry {
         self.entity_to_file.clear();
         self.file_metadata.clear();
         self.failed_files.clear();
+        self.rename_in_progress.clear();
     }
 
     /// Unregister a file (when deleted or entity despawned)
@@ -254,6 +259,24 @@ impl SpaceFileRegistry {
         self.entity_to_file.get(&entity)
     }
     
+    /// Rename a file in the registry — updates all maps to point to the new path.
+    /// Returns Ok(()) on success, Err with message on failure.
+    pub fn rename_file(&mut self, old_path: &Path, new_path: PathBuf) -> Result<(), String> {
+        let entity = self.file_to_entity.remove(old_path)
+            .ok_or_else(|| format!("No entity registered for {:?}", old_path))?;
+
+        // Update all maps
+        self.file_to_entity.insert(new_path.clone(), entity);
+        self.entity_to_file.insert(entity, new_path.clone());
+
+        if let Some(mut meta) = self.file_metadata.remove(old_path) {
+            meta.path = new_path.clone();
+            self.file_metadata.insert(new_path, meta);
+        }
+
+        Ok(())
+    }
+
     /// Check if a file is loaded
     pub fn is_loaded(&self, path: &Path) -> bool {
         self.file_to_entity.contains_key(path)

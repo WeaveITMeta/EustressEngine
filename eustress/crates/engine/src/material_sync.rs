@@ -5,12 +5,42 @@ use bevy::prelude::*;
 use bevy::light::{NotShadowCaster, TransmittedShadowReceiver};
 use crate::classes::{BasePart, Material as RobloxMaterial};
 
+/// Tracks the last-known size of the MaterialRegistry to detect when new materials load.
+#[derive(Resource, Default)]
+struct MaterialRegistryTracker {
+    last_count: usize,
+}
+
 /// Plugin for syncing BasePart properties to StandardMaterial in real-time
 pub struct MaterialSyncPlugin;
 
 impl Plugin for MaterialSyncPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, sync_basepart_to_material);
+        app.init_resource::<MaterialRegistryTracker>()
+            .add_systems(Update, (
+                reapply_materials_on_registry_change,
+                sync_basepart_to_material,
+            ).chain());
+    }
+}
+
+/// When MaterialService finishes loading (registry grows), mark all BaseParts as changed
+/// so `sync_basepart_to_material` re-resolves them with the full registry.
+fn reapply_materials_on_registry_change(
+    material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
+    mut tracker: ResMut<MaterialRegistryTracker>,
+    mut base_parts: Query<&mut BasePart>,
+) {
+    let Some(ref registry) = material_registry else { return };
+    let current_count = registry.names().len();
+    if current_count > tracker.last_count {
+        info!("🎨 MaterialRegistry grew ({} → {}), re-applying materials to all parts",
+              tracker.last_count, current_count);
+        tracker.last_count = current_count;
+        // Touch all BaseParts so Changed<BasePart> triggers sync
+        for mut bp in base_parts.iter_mut() {
+            bp.set_changed();
+        }
     }
 }
 
@@ -33,7 +63,7 @@ fn sync_basepart_to_material(
         let mat_name = format!("{:?}", basepart.material);
         if let Some(ref registry) = material_registry {
             if let Some(registry_handle) = registry.get(&mat_name) {
-                // Clone the registry material so we can tint it with the part's color
+                // Clone the registry material so we can tint it with the part's properties
                 if let Some(base_mat) = materials.get(&registry_handle) {
                     let mut cloned = base_mat.clone();
                     let alpha = 1.0 - basepart.transparency.clamp(0.0, 1.0);
@@ -41,9 +71,18 @@ fn sync_basepart_to_material(
                     if basepart.transparency > 0.0 {
                         cloned.alpha_mode = AlphaMode::Blend;
                     }
+                    // Apply reflectance — increases metallic sheen and reduces roughness
+                    let reflectance = basepart.reflectance.clamp(0.0, 1.0);
+                    cloned.reflectance = reflectance;
+                    cloned.metallic = (cloned.metallic + reflectance).min(1.0);
+                    cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
+                    // Emissive for Neon
+                    if matches!(basepart.material, RobloxMaterial::Neon) {
+                        cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
+                    }
                     let new_handle = materials.add(cloned);
                     commands.entity(entity).insert(MeshMaterial3d(new_handle));
-                    continue; // Skip the fallback property-only sync below
+                    continue;
                 }
             }
         }

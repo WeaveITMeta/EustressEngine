@@ -60,7 +60,7 @@ impl Plugin for SharedLightingPlugin {
                 // Regenerate skybox after sun position updates so the sun disk tracks time of day
                 regenerate_skybox_on_sun_change.after(update_sun_position),
                 attach_skybox_to_cameras,
-                apply_atmosphere_to_cameras,
+                apply_atmosphere_to_cameras.after(attach_skybox_to_cameras),
                 update_atmosphere_effects,
                 sync_sun_class_to_sundisk,
                 sync_clock_time_to_sun,
@@ -553,16 +553,17 @@ pub struct SkyboxAttached;
 fn attach_skybox_to_cameras(
     mut commands: Commands,
     skybox_handle: Res<SkyboxHandle>,
-    cameras_without_skybox: Query<Entity, (With<Camera3d>, Without<Skybox>, Without<SkyboxAttached>)>,
+    cameras_without_skybox: Query<Entity, (With<Camera3d>, Without<Skybox>, Without<SkyboxAttached>, Without<NoAtmosphere>)>,
 ) {
     // Only proceed if we have a skybox handle
     let Some(ref skybox_image) = skybox_handle.handle else {
         return;
     };
-    
+
     for camera_entity in cameras_without_skybox.iter() {
+        // Skip cameras that will get Atmosphere (Atmosphere replaces Skybox for sky rendering)
         info!("🌅 Attaching skybox to camera {:?}", camera_entity);
-        
+
         commands.entity(camera_entity).insert((
             Skybox {
                 image: skybox_image.clone(),
@@ -592,6 +593,10 @@ fn attach_skybox_to_cameras(
 #[derive(Component)]
 pub struct AtmosphereApplied;
 
+/// Marker to exclude a camera from atmosphere/skybox systems (e.g. overlay cameras)
+#[derive(Component)]
+pub struct NoAtmosphere;
+
 /// Apply EustressAtmosphere settings to cameras
 /// 
 /// This system:
@@ -606,17 +611,25 @@ fn apply_atmosphere_to_cameras(
     mut commands: Commands,
     scene_atmosphere: Res<SceneAtmosphere>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
+    mut cached_medium: Local<Option<Handle<ScatteringMedium>>>,
     cameras_without_atmosphere: Query<
         Entity,
-        (With<Camera3d>, Without<AtmosphereApplied>)
+        (With<Camera3d>, Without<AtmosphereApplied>, Without<NoAtmosphere>)
     >,
     cameras_with_custom: Query<
         (Entity, &EustressAtmosphere),
-        (With<Camera3d>, Without<AtmosphereApplied>)
+        (With<Camera3d>, Without<AtmosphereApplied>, Without<NoAtmosphere>)
     >,
 ) {
-    // Create an Earth-like scattering medium (shared by all cameras)
-    let medium_handle = mediums.add(ScatteringMedium::earthlike(64, 64));
+    // Early exit if no cameras need atmosphere
+    if cameras_without_atmosphere.is_empty() && cameras_with_custom.is_empty() {
+        return;
+    }
+
+    // Create the scattering medium once and cache the handle
+    let medium_handle = cached_medium.get_or_insert_with(|| {
+        mediums.add(ScatteringMedium::earthlike(256, 256))
+    }).clone();
 
     // Apply custom atmosphere to cameras that have EustressAtmosphere component
     for (camera_entity, atmosphere) in cameras_with_custom.iter() {

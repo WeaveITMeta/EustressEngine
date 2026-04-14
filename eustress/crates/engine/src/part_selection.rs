@@ -332,7 +332,8 @@ pub fn part_selection_system(
             if !entity_part_ids.contains_key(&entity) { continue; }
             let t = transform.compute_transform();
             let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
-            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, t.translation, size, t.rotation) {
+            // ray_obb_intersection takes HALF-extents, not full size
+            if let Some(distance) = ray_obb_intersection(ray.origin, *ray.direction, t.translation, size * 0.5, t.rotation) {
                 if let Some((part_id, parent_model)) = entity_part_ids.get(&entity) {
                     if closest_hit.as_ref().map_or(true, |(_, d, _, _)| distance < *d) {
                         closest_hit = Some((part_id.clone(), distance, entity, *parent_model));

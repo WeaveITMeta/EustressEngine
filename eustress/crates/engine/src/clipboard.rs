@@ -507,7 +507,7 @@ pub fn handle_copy_event(
     mut clipboard: ResMut<EditorClipboard>,
     mut old_clipboard: ResMut<Clipboard>,
     selection: Option<Res<BevySelectionManager>>,
-    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>)>,
+    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>, Option<&eustress_common::classes::Part>)>,
     current_scene: Option<Res<CurrentScenePath>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
@@ -538,7 +538,7 @@ pub fn handle_copy_event(
         let mut entity_data_list = Vec::new();
         let mut old_clipboard_entities = Vec::new();
         
-        for (entity, instance, transform, basepart) in query.iter() {
+        for (entity, instance, transform, basepart, part) in query.iter() {
             let entity_id = format!("{}v{}", entity.index(), entity.generation());
             
             if !selected_ids.contains(&entity_id) {
@@ -552,19 +552,38 @@ pub fn handle_copy_event(
             let (x, y, z) = transform.rotation.to_euler(EulerRot::XYZ);
             let mut properties = HashMap::new();
             
-            // Add component-specific properties
+            // Add ALL BasePart properties so paste creates an exact clone
             if let Some(bp) = basepart {
-                properties.insert("size".to_string(), 
+                properties.insert("size".to_string(),
                     serde_json::json!([bp.size.x, bp.size.y, bp.size.z]));
                 properties.insert("color".to_string(),
-                    serde_json::json!([bp.color.to_srgba().red, bp.color.to_srgba().green, 
+                    serde_json::json!([bp.color.to_srgba().red, bp.color.to_srgba().green,
                                        bp.color.to_srgba().blue, bp.color.to_srgba().alpha]));
-                properties.insert("transparency".to_string(), 
+                properties.insert("transparency".to_string(),
                     serde_json::json!(bp.transparency));
-                properties.insert("anchored".to_string(), 
+                properties.insert("reflectance".to_string(),
+                    serde_json::json!(bp.reflectance));
+                properties.insert("anchored".to_string(),
                     serde_json::json!(bp.anchored));
-                properties.insert("can_collide".to_string(), 
+                properties.insert("can_collide".to_string(),
                     serde_json::json!(bp.can_collide));
+                properties.insert("locked".to_string(),
+                    serde_json::json!(bp.locked));
+                properties.insert("material".to_string(),
+                    serde_json::json!(format!("{:?}", bp.material)));
+            }
+
+            // Save Part shape (Ball, Cylinder, Wedge, etc.)
+            if let Some(p) = part {
+                let shape_str = match p.shape {
+                    eustress_common::classes::PartType::Block => "Block",
+                    eustress_common::classes::PartType::Ball => "Ball",
+                    eustress_common::classes::PartType::Cylinder => "Cylinder",
+                    eustress_common::classes::PartType::Wedge => "Wedge",
+                    eustress_common::classes::PartType::CornerWedge => "CornerWedge",
+                    eustress_common::classes::PartType::Cone => "Cone",
+                };
+                properties.insert("shape".to_string(), serde_json::json!(shape_str));
             }
             
             let entity_data = ClipboardEntityData2 {
@@ -793,15 +812,38 @@ fn spawn_entity_from_data(
             basepart.size = size;
             basepart.color = color;
             basepart.cframe = transform;
+            basepart.transparency = data.properties.get("transparency")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            basepart.reflectance = data.properties.get("reflectance")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
             basepart.anchored = data.properties.get("anchored")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             basepart.can_collide = data.properties.get("can_collide")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            basepart.locked = data.properties.get("locked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Some(mat_str) = data.properties.get("material").and_then(|v| v.as_str()) {
+                basepart.material = eustress_common::classes::Material::from_string(mat_str);
+            }
             
-            let part = Part::default();
-            
+            let shape = data.properties.get("shape")
+                .and_then(|v| v.as_str())
+                .map(|s| match s {
+                    "Ball" => eustress_common::classes::PartType::Ball,
+                    "Cylinder" => eustress_common::classes::PartType::Cylinder,
+                    "Wedge" => eustress_common::classes::PartType::Wedge,
+                    "CornerWedge" => eustress_common::classes::PartType::CornerWedge,
+                    "Cone" => eustress_common::classes::PartType::Cone,
+                    _ => eustress_common::classes::PartType::Block,
+                })
+                .unwrap_or(eustress_common::classes::PartType::Block);
+            let part = Part { shape };
+
             Some(spawn_part_glb(commands, asset_server, materials, instance, basepart, part))
         }
         ClassName::Model => {

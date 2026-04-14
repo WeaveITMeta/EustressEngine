@@ -153,28 +153,34 @@ export component LayoutPresetSelector inherits Rectangle {
     
     in-out property <int> current-preset-index: 0;
     in-out property <bool> dropdown-open: false;
-    
-    callback preset-selected(LayoutPreset);
-    callback save-current-layout();
-    callback load-layout-from-file();
-    callback reset-to-factory();
-    
+
+    callback request-open-dropdown(/* x */ float, /* y */ float);
+
     width: 160px;
     height: 28px;
-    background: Theme.overlay-background;
+    background: root.dropdown-open ? Theme.explorer-item-hover : Theme.overlay-background;
     border-radius: 4px;
-    
+
     // Current preset button
     btn-touch := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.dropdown-open = !root.dropdown-open; }
+        clicked => {
+            if root.dropdown-open {
+                root.dropdown-open = false;
+            } else {
+                root.request-open-dropdown(
+                    root.absolute-position.x / 1px,
+                    (root.absolute-position.y + root.height) / 1px + 2
+                );
+            }
+        }
     }
-    
+
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
         spacing: 6px;
-        
+
         Rectangle {
             width: 16px;
             Image {
@@ -195,7 +201,7 @@ export component LayoutPresetSelector inherits Rectangle {
         VerticalLayout {
             width: 12px;
             alignment: center;
-            
+
             Image {
                 width: 12px;
                 height: 12px;
@@ -206,47 +212,104 @@ export component LayoutPresetSelector inherits Rectangle {
             }
         }
     }
-    
-    // Dropdown menu
-    if root.dropdown-open: Rectangle {
-        y: parent.height + 2px;
-        width: 220px;
-        height: (root.presets.length * 44px) + 72px;
-        background: Theme.panel-background;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 12px;
-        drop-shadow-color: #00000060;
-        
-        VerticalLayout {
-            padding: 4px;
-            spacing: 1px;
-            
-            // Preset list
-            for preset[index] in root.presets: Rectangle {
-                height: 42px;
-                background: item-touch.has-hover ? Theme.explorer-item-hover : 
-                            index == root.current-preset-index ? Theme.explorer-item-selected : transparent;
-                border-radius: 4px;
-                
-                item-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.current-preset-index = index;
-                        root.preset-selected(preset);
-                        root.dropdown-open = false;
-                    }
+}
+
+// Floating layout dropdown menu — rendered at root level above all panels
+export component LayoutDropdownMenu inherits Rectangle {
+    in property <[LayoutPreset]> presets: [
+        {
+            name: "Default",
+            description: "Standard studio layout",
+            icon: @image-url("../../assets/icons/ui/layout-default.svg"),
+            show-explorer: true, show-properties: true, show-output: true,
+            show-toolbox: true, show-assets: false, show-history: false, show-soul-panel: false,
+            left-panel-width: 280.0, right-panel-width: 300.0, output-height: 150.0,
+            left-tab-index: 0, right-tab-index: 0,
+        },
+        {
+            name: "Scripting",
+            description: "Focus on code and output",
+            icon: @image-url("../../assets/icons/ui/layout-scripting.svg"),
+            show-explorer: true, show-properties: false, show-output: true,
+            show-toolbox: false, show-assets: false, show-history: false, show-soul-panel: true,
+            left-panel-width: 250.0, right-panel-width: 400.0, output-height: 250.0,
+            left-tab-index: 0, right-tab-index: 2,
+        },
+        {
+            name: "Building",
+            description: "Focus on 3D viewport",
+            icon: @image-url("../../assets/icons/ui/layout-building.svg"),
+            show-explorer: true, show-properties: true, show-output: false,
+            show-toolbox: true, show-assets: true, show-history: false, show-soul-panel: false,
+            left-panel-width: 220.0, right-panel-width: 280.0, output-height: 100.0,
+            left-tab-index: 1, right-tab-index: 0,
+        },
+        {
+            name: "Minimal",
+            description: "Maximum viewport space",
+            icon: @image-url("../../assets/icons/ui/layout-minimal.svg"),
+            show-explorer: false, show-properties: false, show-output: false,
+            show-toolbox: false, show-assets: false, show-history: false, show-soul-panel: false,
+            left-panel-width: 0.0, right-panel-width: 0.0, output-height: 0.0,
+            left-tab-index: 0, right-tab-index: 0,
+        },
+        {
+            name: "Wide Panels",
+            description: "Extra wide side panels",
+            icon: @image-url("../../assets/icons/ui/layout-wide.svg"),
+            show-explorer: true, show-properties: true, show-output: true,
+            show-toolbox: true, show-assets: true, show-history: true, show-soul-panel: false,
+            left-panel-width: 350.0, right-panel-width: 400.0, output-height: 200.0,
+            left-tab-index: 0, right-tab-index: 0,
+        },
+    ];
+    in-out property <int> current-preset-index: 0;
+
+    callback preset-selected(int, LayoutPreset);
+    callback load-layout-from-file();
+    callback reset-to-factory();
+    callback close();
+
+    width: 220px;
+    height: (root.presets.length * 44px) + 72px;
+    background: Theme.panel-background;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: #00000060;
+
+    // Absorb clicks on menu body
+    TouchArea {}
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 1px;
+
+        // Preset list
+        for preset[index] in root.presets: Rectangle {
+            height: 42px;
+            background: item-touch.has-hover ? Theme.explorer-item-hover :
+                        index == root.current-preset-index ? Theme.explorer-item-selected : transparent;
+            border-radius: 4px;
+
+            item-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.current-preset-index = index;
+                    root.preset-selected(index, preset);
+                    root.close();
                 }
-                
-                HorizontalLayout {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 8px;
-                    
-                    // Icon
-                    Rectangle {
-                        width: 20px;
+            }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 8px;
+
+                // Icon
+                Rectangle {
+                    width: 20px;
                         Image {
                             x: 2px;
                             y: 13px;
@@ -294,7 +357,7 @@ export component LayoutPresetSelector inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => {
                         root.load-layout-from-file();
-                        root.dropdown-open = false;
+                        root.close();
                     }
                 }
                 
@@ -320,7 +383,7 @@ export component LayoutPresetSelector inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => {
                         root.reset-to-factory();
-                        root.dropdown-open = false;
+                        root.close();
                     }
                 }
                 
@@ -337,7 +400,6 @@ export component LayoutPresetSelector inherits Rectangle {
             }
         }
     }
-}
 
 // ============================================================================
 // Advanced Tab Bar with Context Menu, Overflow, Color-Coding

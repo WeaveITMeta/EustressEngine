@@ -83,11 +83,12 @@ pub fn spawn_part_glb(
         format!("{}#Mesh0/Primitive0", glb_path)
     );
     
-    // Create collider at ACTUAL SIZE for physics raycasting
+    // Create collider — Avian3D takes half-extents for cuboid and half-height for cylinder
+    let half = size * 0.5;
     let collider = match part.shape {
-        PartType::Ball => Collider::sphere(size.x / 2.0),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(size.x / 2.0, size.y),
-        _ => Collider::cuboid(size.x, size.y, size.z),
+        PartType::Ball => Collider::sphere(half.x),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y),
+        _ => Collider::cuboid(half.x, half.y, half.z),
     };
     
     // Create material with special handling for Glass
@@ -179,11 +180,12 @@ pub fn spawn_part(
         PartType::Cone => meshes.add(Cylinder::new(size.x / 2.0, size.y)), // TODO: proper cone
     };
     
-    // Create collider at ACTUAL SIZE for physics raycasting
+    // Create collider — Avian3D takes half-extents for cuboid and half-height for cylinder
+    let half = size * 0.5;
     let collider = match part.shape {
-        PartType::Ball => Collider::sphere(size.x / 2.0),
-        PartType::Cylinder | PartType::Cone => Collider::cylinder(size.x / 2.0, size.y),
-        _ => Collider::cuboid(size.x, size.y, size.z),
+        PartType::Ball => Collider::sphere(half.x),
+        PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y),
+        _ => Collider::cuboid(half.x, half.y, half.z),
     };
     
     // Create material with special handling for Glass

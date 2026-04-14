@@ -250,6 +250,10 @@ pub struct InstanceMetadata {
     pub class_name: String,
     #[serde(default = "default_true")]
     pub archivable: bool,
+    /// Display name override. When present, used instead of filename-derived name.
+    /// Allows multiple instances with the same display name but unique filenames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub created: String,
     #[serde(default)]
@@ -265,6 +269,7 @@ impl Default for InstanceMetadata {
         Self {
             class_name: default_class_name(),
             archivable: true,
+            name: None,
             created: String::new(),
             last_modified: String::new(),
         }
@@ -797,15 +802,17 @@ pub fn spawn_instance(
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
-    // Extract instance name from filename (e.g. "Atmosphere" from "Atmosphere.instance.toml")
-    let name = toml_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Unknown")
-        .split('.')
-        .next()
-        .unwrap_or("Unknown")
-        .to_string();
+    // Instance display name: prefer metadata.name, fall back to filename
+    let name = instance.metadata.name.clone().unwrap_or_else(|| {
+        toml_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .split('.')
+            .next()
+            .unwrap_or("Unknown")
+            .to_string()
+    });
 
     // Parse class name early — needed for the no-mesh branch too
     let class_name = eustress_common::classes::ClassName::from_str(
@@ -912,6 +919,7 @@ pub fn spawn_instance(
         anchored: instance.properties.anchored,
         can_collide: instance.properties.can_collide,
         locked: instance.properties.locked,
+        material: eustress_common::classes::Material::from_string(&instance.properties.material),
         cframe: Transform::from(instance.transform.clone()),
         ..default()
     };
@@ -971,14 +979,17 @@ pub fn spawn_instance(
         ec.insert(PartEntity { part_id });
 
         // Only add physics collider when can_collide is true — avoids broadphase
-        // overhead for thousands of static decorative parts
+        // overhead for thousands of static decorative parts.
+        // GLB meshes are unit meshes ([-0.5, 0.5]), so Transform.scale = part size in studs.
+        // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
         if instance.properties.can_collide {
+            let half = scale * 0.5;
             let collider = match part_shape {
-                eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+                eustress_common::classes::PartType::Ball => Collider::sphere(half.x),
                 eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-                    Collider::cylinder(scale.x / 2.0, scale.y)
+                    Collider::cylinder(half.x, half.y)
                 }
-                _ => Collider::cuboid(scale.x, scale.y, scale.z),
+                _ => Collider::cuboid(half.x, half.y, half.z),
             };
             ec.insert((collider, RigidBody::Static));
         }
@@ -1043,14 +1054,16 @@ pub fn spawn_instance(
     ec.insert(PartEntity { part_id });
 
     // Only add physics collider when can_collide is true — avoids broadphase
-    // overhead for thousands of static decorative parts
+    // overhead for thousands of static decorative parts.
+    // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
     if instance.properties.can_collide {
+        let half = scale * 0.5;
         let collider = match part_shape {
-            eustress_common::classes::PartType::Ball => Collider::sphere(scale.x / 2.0),
+            eustress_common::classes::PartType::Ball => Collider::sphere(half.x),
             eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-                Collider::cylinder(scale.x / 2.0, scale.y)
+                Collider::cylinder(half.x, half.y)
             }
-            _ => Collider::cuboid(scale.x, scale.y, scale.z),
+            _ => Collider::cuboid(half.x, half.y, half.z),
         };
         ec.insert((collider, RigidBody::Static));
     }

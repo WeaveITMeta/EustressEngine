@@ -95,8 +95,9 @@ pub fn insert_mesh_instance_at(
     let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Generate unique name within target_dir
-    let instance_name = {
+    // Generate unique FILENAME within target_dir (filesystem requirement).
+    // The display name stays as the base name (e.g. "Ball") regardless of filename.
+    let file_name = {
         let test_path = target_dir.join(format!("{}.glb.toml", base_name));
         if !test_path.exists() {
             base_name.clone()
@@ -112,6 +113,8 @@ pub fn insert_mesh_instance_at(
             found
         }
     };
+    // Display name is always the base name (no number suffix)
+    let instance_name = base_name;
 
     fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to create directory {:?}: {}", target_dir, e))?;
@@ -130,6 +133,7 @@ pub fn insert_mesh_instance_at(
         metadata: crate::space::instance_loader::InstanceMetadata {
             class_name: "Part".to_string(),
             archivable: true,
+            name: if file_name != instance_name { Some(instance_name.clone()) } else { None },
             created: now.clone(),
             last_modified: now,
         },
@@ -143,9 +147,9 @@ pub fn insert_mesh_instance_at(
         extra: std::collections::HashMap::new(),
     };
 
-    let toml_path = target_dir.join(format!("{}.glb.toml", instance_name));
+    let toml_path = target_dir.join(format!("{}.glb.toml", file_name));
     crate::space::instance_loader::write_instance_definition(&toml_path, &instance)?;
-    info!("📦 Toolbox: Created instance file {:?}", toml_path);
+    info!("📦 Toolbox: Created instance file {:?} (display name: {})", toml_path, instance_name);
     Ok(toml_path)
 }
 
@@ -182,6 +186,7 @@ pub fn insert_mesh_instance(
         metadata: InstanceMetadata {
             class_name: "Part".to_string(),
             archivable: true,
+            name: None,
             created: now.clone(),
             last_modified: now,
         },

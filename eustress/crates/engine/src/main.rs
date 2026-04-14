@@ -144,6 +144,15 @@ fn main() {
         "space",
         bevy::asset::io::AssetSourceBuilder::platform_default(&space_root.to_string_lossy(), None),
     );
+
+    // Register bundled common assets (material textures, fonts, etc.)
+    let common_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../common/assets");
+    info!("📦 Registering bundled asset source at: {:?}", common_assets);
+    app.register_asset_source(
+        "bundled",
+        bevy::asset::io::AssetSourceBuilder::platform_default(&common_assets.to_string_lossy(), None),
+    );
     
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
@@ -183,10 +192,8 @@ fn main() {
         // Diagnostic plugins for FPS and performance profiling
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EntityCountDiagnosticsPlugin::default())
-        .add_plugins(LogDiagnosticsPlugin {
-            wait_duration: std::time::Duration::from_secs(5),
-            ..default()
-        })
+        // LogDiagnosticsPlugin disabled — FPS/frame_time shown in Slint overlay instead
+        // .add_plugins(LogDiagnosticsPlugin { wait_duration: std::time::Duration::from_secs(5), ..default() })
         // Register GLTF types for scene spawning (prevents panic on unregistered types)
         .register_type::<GltfExtras>()
         .register_type::<GltfSceneExtras>()

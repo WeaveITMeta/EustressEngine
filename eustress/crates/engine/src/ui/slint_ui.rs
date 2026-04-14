@@ -1432,7 +1432,7 @@ fn setup_slint_overlay(world: &mut World) {
     // Create fullscreen quad mesh
     let quad_mesh = world.resource_mut::<Assets<Mesh>>().add(Rectangle::new(width as f32, height as f32));
     
-    // Track the scene for the render system's materials.get_mut() workaround
+    // Track the scene so render_slint_to_texture can find the Image asset to update
     world.spawn(SlintScene { image: image_handle.clone(), material: material_handle.clone() });
     
     // Use RenderLayers to isolate the overlay from the main 3D scene
@@ -1451,6 +1451,10 @@ fn setup_slint_overlay(world: &mut World) {
     // model — no separate Camera2d needed. One compositor, one z-order.
 
     // Slint overlay camera (order 300): renders the Slint editor chrome texture.
+    // Matches the original working setup — default Camera3d pipeline with only
+    // SkyboxAttached + NoAtmosphere to prevent lighting systems from touching it.
+    // Do NOT add Tonemapping::None — it changes the render pipeline and breaks
+    // alpha compositing with the main camera's output.
     world.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -1471,6 +1475,7 @@ fn setup_slint_overlay(world: &mut World) {
         overlay_layer.clone(),
         SlintOverlayCamera,
         eustress_common::plugins::lighting_plugin::SkyboxAttached,
+        eustress_common::plugins::lighting_plugin::NoAtmosphere,
         Name::new("Slint Overlay Camera"),
     ));
 
@@ -1835,46 +1840,28 @@ fn render_slint_to_texture(
     );
     
     // Only touch the Bevy image when Slint actually repainted something.
-    // This is the critical optimization — when nothing is dirty (e.g. static UI,
-    // no hover, no animation), we skip the ~8MB GPU texture upload entirely.
+    // When nothing is dirty (static UI, no hover, no animation), skip entirely.
     let dirty_size = dirty_region.bounding_box_size();
     if dirty_size.width == 0 || dirty_size.height == 0 {
         return;
     }
-    
-    // Dirty region exists — copy affected rows from staging into image.data
-    let dirty_origin = dirty_region.bounding_box_origin();
-    let dirty_x = dirty_origin.x as usize;
-    let dirty_y = dirty_origin.y as usize;
-    let dirty_w = dirty_size.width as usize;
-    let dirty_h = dirty_size.height as usize;
-    
+
+    // Something changed — copy the FULL staging buffer into image.data.
+    // ReusedBuffer mode ensures Slint only repaints dirty pixels in the staging buffer
+    // (CPU optimization), but we always upload the full buffer to the GPU to avoid
+    // partial-copy artifacts when dirty regions don't cover all affected pixels
+    // (e.g. popup close, dropdown dismiss, overlay compositing edge cases).
+    //
     let Some(image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
-        let expected_bytes = tex_width * tex_height * 4;
-        if data.len() != expected_bytes {
-            // Buffer and descriptor are out of sync (resize in flight) — skip
-            return;
-        }
-        
-        // Copy only the dirty rectangle's rows from staging → image.data.
-        // Each pixel is 4 bytes (PremultipliedRgbaColor = RGBA u8×4).
         let staging_bytes: &[u8] = bytemuck::cast_slice(&staging.pixels);
-        let row_bytes = tex_width * 4;
-        let dirty_row_start = dirty_x * 4;
-        let dirty_row_len = dirty_w * 4;
-        
-        for row in dirty_y..(dirty_y + dirty_h).min(tex_height) {
-            let offset = row * row_bytes + dirty_row_start;
-            let end = offset + dirty_row_len;
-            if end <= data.len() && end <= staging_bytes.len() {
-                data[offset..end].copy_from_slice(&staging_bytes[offset..end]);
-            }
-        }
+        let len = data.len().min(staging_bytes.len());
+        data[..len].copy_from_slice(&staging_bytes[..len]);
     }
-    
-    // WORKAROUND: Force GPU texture re-upload by touching the material mutably.
-    // See: https://github.com/bevyengine/bevy/issues/17350
+
+    // REQUIRED: Force GPU texture re-upload by touching the material mutably.
+    // images.get_mut() marks the asset changed but Bevy's render pipeline doesn't
+    // re-extract the texture data without this. See: bevy#17350
     materials.get_mut(&scene.material);
 }
 
@@ -2538,8 +2525,8 @@ struct DrainActionQueries<'w, 's> {
     instances: Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>,
     transforms: Query<'w, 's, &'static mut Transform>,
     base_parts: Query<'w, 's, &'static mut eustress_common::classes::BasePart>,
-    instance_files: Query<'w, 's, &'static crate::space::instance_loader::InstanceFile>,
-    loaded_from_file: Query<'w, 's, (Entity, &'static crate::space::LoadedFromFile)>,
+    instance_files: Query<'w, 's, &'static mut crate::space::instance_loader::InstanceFile>,
+    loaded_from_file: Query<'w, 's, (Entity, &'static mut crate::space::LoadedFromFile)>,
     service_components: Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>,
     terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
     terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
@@ -3932,12 +3919,73 @@ fn drain_slint_actions(
                         _ => None,
                     }
                 });
+                // Parse a float, rejecting NaN/Inf to prevent camera/transform corruption
+                fn parse_finite(s: &str) -> Option<f32> {
+                    s.parse::<f32>().ok().filter(|v| v.is_finite())
+                }
+
                 if let Some(entity) = selected_entity {
                     match key.as_str() {
                         // Instance fields
                         "Name" => {
                             if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
                                 inst.name = val.clone();
+                            }
+                            commands.entity(entity).insert(Name::new(val.clone()));
+
+                            // Rename the TOML file on disk safely
+                            if let Ok(mut inst_file) = queries.instance_files.get_mut(entity) {
+                                let old_path = inst_file.toml_path.clone();
+                                // Build new filename: keep the extension chain (e.g. ".glb.toml")
+                                let old_name = old_path.file_name().unwrap_or_default().to_string_lossy();
+                                let ext = old_name.splitn(2, '.').nth(1).unwrap_or("glb.toml");
+                                let new_filename = format!("{}.{}", val, ext);
+                                let new_path = old_path.parent()
+                                    .unwrap_or(old_path.as_path())
+                                    .join(&new_filename);
+
+                                if old_path == new_path {
+                                    // Name unchanged, just update display
+                                    inst_file.name = val.clone();
+                                } else if new_path.exists() {
+                                    // Destination already exists — don't overwrite
+                                    if let Some(ref mut out) = res.output {
+                                        out.warning(format!("Cannot rename: '{}' already exists", new_filename));
+                                    }
+                                } else {
+                                    // 1. Tell file watcher to ignore the delete event for the old path
+                                    if let Some(ref mut registry) = res.file_registry {
+                                        registry.rename_in_progress.insert(old_path.clone());
+                                    }
+
+                                    // 2. Rename the file on disk
+                                    match std::fs::rename(&old_path, &new_path) {
+                                        Ok(()) => {
+                                            // 3. Update InstanceFile component
+                                            inst_file.toml_path = new_path.clone();
+                                            inst_file.name = val.clone();
+
+                                            // 4. Update LoadedFromFile component if present
+                                            if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(entity) {
+                                                lff.path = new_path.clone();
+                                            }
+
+                                            // 5. Update the file registry mapping
+                                            if let Some(ref mut registry) = res.file_registry {
+                                                let _ = registry.rename_file(&old_path, new_path.clone());
+                                            }
+
+                                            info!("📝 Renamed {:?} → {:?}", old_path, new_path);
+                                        }
+                                        Err(e) => {
+                                            // Rename failed — clear the suppress flag
+                                            if let Some(ref mut registry) = res.file_registry {
+                                                registry.rename_in_progress.remove(&old_path);
+                                            }
+                                            warn!("Failed to rename {:?} → {:?}: {}", old_path, new_path, e);
+                                        }
+                                    }
+                                }
                             }
                         }
                         "Archivable" => {
@@ -3948,7 +3996,7 @@ fn drain_slint_actions(
                         // Transform fields
                         "Position.X" | "Position.Y" | "Position.Z" => {
                             if let Ok(mut t) = queries.transforms.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
+                                if let Some(v) = parse_finite(&val) {
                                     match key.as_str() {
                                         "Position.X" => t.translation.x = v,
                                         "Position.Y" => t.translation.y = v,
@@ -3960,7 +4008,7 @@ fn drain_slint_actions(
                         }
                         "Scale.X" | "Scale.Y" | "Scale.Z" => {
                             if let Ok(mut t) = queries.transforms.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
+                                if let Some(v) = parse_finite(&val) {
                                     match key.as_str() {
                                         "Scale.X" => t.scale.x = v,
                                         "Scale.Y" => t.scale.y = v,
@@ -3971,10 +4019,29 @@ fn drain_slint_actions(
                             }
                         }
                         // BasePart fields
+                        "Color" => {
+                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() >= 3 {
+                                    let (r, g, b) = (parts[0], parts[1], parts[2]);
+                                    let a = parts.get(3).copied().unwrap_or(255.0);
+                                    // Auto-detect 0-255 vs 0-1 format
+                                    let is_u8 = r > 1.0 || g > 1.0 || b > 1.0;
+                                    if is_u8 {
+                                        bp.color = Color::srgba(r / 255.0, g / 255.0, b / 255.0, a / 255.0);
+                                    } else {
+                                        bp.color = Color::srgba(r, g, b, parts.get(3).copied().unwrap_or(1.0));
+                                    }
+                                }
+                                // Invalid input (< 3 valid numbers) is silently ignored
+                            }
+                        }
                         "Transparency" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    bp.transparency = v;
+                                if let Some(v) = parse_finite(&val) {
+                                    bp.transparency = v.clamp(0.0, 1.0);
                                 }
                             }
                         }
@@ -3996,14 +4063,14 @@ fn drain_slint_actions(
                         // GUI element properties — live-update GuiElementDisplay component
                         "FontSize" => {
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
+                                if let Some(v) = parse_finite(&val) {
                                     gui.font_size = v.max(1.0);
                                 }
                             }
                         }
                         "BackgroundColor" => {
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
                                 if parts.len() >= 3 {
                                     // Input is 0-255 scale
                                     gui.bg_color = [
@@ -4015,7 +4082,7 @@ fn drain_slint_actions(
                         }
                         "TextColor" => {
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                                let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
                                 if parts.len() >= 3 {
                                     gui.text_color = [
                                         parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
@@ -4070,15 +4137,15 @@ fn drain_slint_actions(
                         }
                         "BorderSize" => {
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    gui.border_size = v;
+                                if let Some(v) = parse_finite(&val) {
+                                    gui.border_size = v.max(0.0);
                                 }
                             }
                         }
                         "CornerRadius" => {
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    gui.corner_radius = v;
+                                if let Some(v) = parse_finite(&val) {
+                                    gui.corner_radius = v.max(0.0);
                                 }
                             }
                         }
@@ -4114,8 +4181,8 @@ fn drain_slint_actions(
                         }
                         "Reflectance" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    bp.reflectance = v;
+                                if let Some(v) = parse_finite(&val) {
+                                    bp.reflectance = v.clamp(0.0, 1.0);
                                 }
                             }
                         }
@@ -7894,7 +7961,7 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
         }
         PropertyValue::Color3(c) => (format!("{:.2}, {:.2}, {:.2}", c[0], c[1], c[2]), "color"),
         PropertyValue::Transform(t) => (format!("({:.1}, {:.1}, {:.1})", t.translation.x, t.translation.y, t.translation.z), "string"),
-        PropertyValue::Material(m) => (format!("{:?}", m), "enum"),
+        PropertyValue::Material(m) => (format!("{:?}", m), "material"),
         PropertyValue::Enum(e) => (e.clone(), "enum"),
         PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "string"),
     }

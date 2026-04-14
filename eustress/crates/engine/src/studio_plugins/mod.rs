@@ -412,7 +412,7 @@ fn handle_plugin_action_events(
 
                     // Write child TextLabels as .textlabel.toml files
                     if let Ok(children) = children_query.get(entity) {
-                        for &child in children.iter() {
+                        for child in children.iter() {
                             if let Ok(text_label) = text_label_query.get(child) {
                                 let child_instance = instance_query.get(child);
                                 let label_name = child_instance.map(|(_, i)| i.name.clone())
@@ -882,7 +882,7 @@ fn sync_mindspace_selection(
     // Query to find TextLabel components
     text_label_query: Query<&eustress_common::classes::TextLabel>,
     // Query to check for BillboardGuiMarker
-    billboard_marker_query: Query<(), With<crate::spawn::BillboardGuiMarker>>,
+    billboard_marker_query: Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     // Only sync when MindSpace panel is visible and in Edit mode

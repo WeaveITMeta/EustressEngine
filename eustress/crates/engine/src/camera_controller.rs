@@ -401,35 +401,30 @@ fn handle_snap_to_view(
 /// Handle projection toggle events
 fn handle_toggle_projection(
     mut events: MessageReader<ToggleProjectionEvent>,
-    mut cam_query: Query<&mut EustressCamera, With<Camera3d>>,
-    mut proj_query: Query<&mut Projection, With<Camera3d>>,
+    mut cam_query: Query<(Entity, &mut EustressCamera, &mut Projection), With<Camera3d>>,
 ) {
     for _event in events.read() {
-        for mut cam in cam_query.iter_mut() {
+        for (_entity, mut cam, mut projection) in cam_query.iter_mut() {
             cam.projection_mode = match cam.projection_mode {
                 ProjectionMode::Perspective => ProjectionMode::Orthographic,
                 ProjectionMode::Orthographic => ProjectionMode::Perspective,
             };
-            
-            // Update the actual projection component
-            for mut projection in proj_query.iter_mut() {
-                match cam.projection_mode {
-                    ProjectionMode::Perspective => {
-                        *projection = Projection::Perspective(PerspectiveProjection {
-                            fov: 60.0_f32.to_radians(),
-                            ..default()
-                        });
-                        info!("📷 Camera: Perspective Mode");
-                    }
-                    ProjectionMode::Orthographic => {
-                        // Calculate ortho scale based on current distance
-                        cam.ortho_scale = cam.distance * 0.5;
-                        *projection = Projection::Orthographic(OrthographicProjection {
-                            scale: cam.ortho_scale,
-                            ..OrthographicProjection::default_3d()
-                        });
-                        info!("📷 Camera: Orthographic Mode");
-                    }
+
+            match cam.projection_mode {
+                ProjectionMode::Perspective => {
+                    *projection = Projection::Perspective(PerspectiveProjection {
+                        fov: 60.0_f32.to_radians(),
+                        ..default()
+                    });
+                    info!("📷 Camera: Perspective Mode");
+                }
+                ProjectionMode::Orthographic => {
+                    cam.ortho_scale = cam.distance * 0.5;
+                    *projection = Projection::Orthographic(OrthographicProjection {
+                        scale: cam.ortho_scale,
+                        ..OrthographicProjection::default_3d()
+                    });
+                    info!("📷 Camera: Orthographic Mode");
                 }
             }
         }

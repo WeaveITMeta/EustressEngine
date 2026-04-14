@@ -729,7 +729,7 @@ fn handle_select_drag(
 /// Ray-OBB intersection returning distance (for paste raycasting)
 /// Works on ALL parts regardless of can_collide setting
 pub fn ray_intersects_part_rotated_distance(ray: &Ray3d, position: Vec3, rotation: Quat, size: Vec3) -> Option<f32> {
-    ray_obb_intersection(ray.origin, *ray.direction, position, size, rotation)
+    ray_obb_intersection(ray.origin, *ray.direction, position, size * 0.5, rotation)
 }
 
 // ============================================================================

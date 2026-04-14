@@ -336,27 +336,37 @@ pub fn build_standard_material(
 }
 
 /// Load a texture file relative to the .mat.toml directory via the `space://` asset source.
+/// Falls back to bundled engine assets (common/assets/) if not found in user space.
 fn load_texture(
     asset_server: &AssetServer,
     mat_toml_dir: &Path,
     relative_path: &str,
     space_root: &Path,
 ) -> Option<Handle<Image>> {
+    // 1. Try relative to the .mat.toml directory (user space)
     let absolute_path = mat_toml_dir.join(relative_path);
-    if !absolute_path.exists() {
-        warn!("Texture not found: {:?} (referenced from material)", absolute_path);
-        return None;
+    if absolute_path.exists() {
+        if let Ok(rel) = absolute_path.strip_prefix(space_root) {
+            let asset_path = format!("space://{}", rel.to_string_lossy().replace('\\', "/"));
+            return Some(asset_server.load(asset_path));
+        } else {
+            let asset_path = absolute_path.to_string_lossy().into_owned();
+            return Some(asset_server.load(asset_path));
+        }
     }
 
-    // Build a space:// relative path for the AssetServer
-    if let Ok(rel) = absolute_path.strip_prefix(space_root) {
-        let asset_path = format!("space://{}", rel.to_string_lossy().replace('\\', "/"));
-        Some(asset_server.load(asset_path))
-    } else {
-        // Fallback: use absolute path directly
-        let asset_path = absolute_path.to_string_lossy().into_owned();
-        Some(asset_server.load(asset_path))
+    // 2. Fallback: try bundled engine assets via "bundled://" asset source
+    //    e.g. "materials/textures/brick_base_color.png" → "bundled://materials/textures/brick_base_color.png"
+    let bundled_check = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../common/assets")
+        .join(relative_path);
+    if bundled_check.exists() {
+        let asset_path = format!("bundled://{}", relative_path.replace('\\', "/"));
+        return Some(asset_server.load(asset_path));
     }
+
+    warn!("Texture not found: {:?} (not in space or bundled assets)", absolute_path);
+    None
 }
 
 // ============================================================================
