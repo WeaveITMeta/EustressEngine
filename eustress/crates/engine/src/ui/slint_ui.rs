@@ -1505,6 +1505,10 @@ fn setup_slint_overlay(world: &mut World) {
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         overlay_layer.clone(),
         SlintOverlayCamera,
+        // Hdr marker — required for gizmo pipeline to work correctly when main
+        // camera uses Atmosphere (HDR). Without this, gizmo render passes are
+        // suppressed or corrupted on the secondary camera.
+        bevy::render::view::Hdr,
         eustress_common::plugins::lighting_plugin::SkyboxAttached,
         eustress_common::plugins::lighting_plugin::NoAtmosphere,
         Name::new("Slint Overlay Camera"),
