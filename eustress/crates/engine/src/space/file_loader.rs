@@ -861,7 +861,7 @@ pub fn spawn_directory_entry(
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .and_then(|v| v.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).map(|s| s.to_string()))
             .map(|cn| match cn.as_str() {
-                "Part"           => eustress_common::classes::ClassName::Part,
+                "Part" | "AdvancedPart" => eustress_common::classes::ClassName::Part,
                 "ScreenGui"      => eustress_common::classes::ClassName::ScreenGui,
                 "Frame"          => eustress_common::classes::ClassName::Frame,
                 "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,

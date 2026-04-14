@@ -2068,7 +2068,7 @@ export component StudioWindow inherits Window {
                         clip: true;
                         background: Theme.panel-background;
                         
-                        if root.right-tab-index == 0: PropertiesPanel {
+                        if root.right-tab-index == 0: props-panel := PropertiesPanel {
                             selected-count: root.selected-count;
                             selected-class: root.selected-class;
                             selected-icon: root.selected-icon;

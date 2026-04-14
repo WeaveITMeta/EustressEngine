@@ -632,7 +632,9 @@ fn handle_menu_action_events(
             }
 
             // Select All (Ctrl+A) — select all unlocked BasePart entities
+            // Also blocked when cursor is over UI panels (Properties text fields)
             Action::SelectAll => {
+                if ui_focus.as_ref().map(|f| f.has_focus).unwrap_or(false) { continue; }
                 if let Some(ref sel_mgr) = selection_manager {
                     let sm = sel_mgr.0.write();
                     sm.clear();

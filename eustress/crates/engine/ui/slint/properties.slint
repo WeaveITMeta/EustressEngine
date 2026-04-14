@@ -410,11 +410,9 @@ component PropRow inherits Rectangle {
                 enabled: root.editable;
                 text: root.value;
                 edited(text) => {
-                    // Mark as focused (prevents Rust sync from overwriting mid-edit)
                     root.focus-changed(true);
                 }
                 accepted(text) => {
-                    // Commit the value only when user presses Enter
                     root.value-changed(self.text);
                     root.focus-changed(false);
                 }
