@@ -1480,12 +1480,15 @@ fn setup_slint_overlay(world: &mut World) {
         }),
         Camera {
             order: 300,
-            // Don't clear — composite on top of the main camera's tonemapped output
-            clear_color: ClearColorConfig::None,
-            // Explicit premultiplied alpha blending for correct HDR compositing
+            // Clear to transparent black each frame — NOT ClearColorConfig::None which
+            // means "don't clear" and leaves previous frame's composited pixels behind.
+            // This is the root cause of ghosting: old popup pixels persist because
+            // the overlay render target was never cleared between frames.
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            // Premultiplied alpha blending for correct HDR compositing
             output_mode: bevy::camera::CameraOutputMode::Write {
                 blend_state: Some(bevy::render::render_resource::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                clear_color: ClearColorConfig::None,
+                clear_color: ClearColorConfig::Custom(Color::NONE),
             },
             ..default()
         },
