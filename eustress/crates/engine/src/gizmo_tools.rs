@@ -25,7 +25,25 @@ pub struct GizmoToolsPlugin;
 
 impl Plugin for GizmoToolsPlugin {
     fn build(&self, app: &mut App) {
+        use bevy::camera::visibility::RenderLayers;
+
         app.init_gizmo_group::<TransformGizmoGroup>()
+           // Set gizmo config in build() — before any system runs.
+           // Using insert_gizmo_config ensures the pipeline is set up correctly
+           // from the first frame, avoiding race conditions with Atmosphere/HDR.
+           .insert_gizmo_config(
+               TransformGizmoGroup,
+               GizmoConfig {
+                   render_layers: RenderLayers::layer(0),
+                   depth_bias: -0.02,
+                   enabled: true,
+                   line: bevy::gizmos::config::GizmoLineConfig {
+                       width: 4.0,
+                       ..default()
+                   },
+                   ..default()
+               },
+           )
            .add_systems(Startup, configure_gizmos)
            .add_systems(Update, diagnose_gizmos_once.run_if(
                bevy::time::common_conditions::once_after_real_delay(
