@@ -4347,12 +4347,10 @@ fn drain_slint_actions(
 
                                 // Also update the Soul Settings resource so Workshop/Soul panels see it immediately
                                 if let Some(ref mut ss) = res.soul_settings {
-                                    ss.api_key = val.clone();
-                                    // Persist to soul_settings.json
-                                    let _ = ss.save();
+                                    ss.claude_api_key = val.clone();
                                 }
                                 if let Some(ref mut gs) = res.global_soul_settings {
-                                    gs.api_key = val.clone();
+                                    gs.global_api_key = val.clone();
                                 }
 
                                 if let Some(ref mut out) = res.output {
