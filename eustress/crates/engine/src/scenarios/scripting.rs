@@ -15,6 +15,7 @@
 //! Rune scripts that use the Scenario API, enabling the NL→Rune pipeline (task 206c).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
