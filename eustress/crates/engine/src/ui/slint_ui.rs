@@ -308,6 +308,9 @@ pub enum SlintAction {
     ToggleMindspace,
     MindspaceAddLabel,
     MindspaceConnect,
+
+    // Generic plugin action (from ribbon buttons)
+    PluginAction(String),
     
     // Auth
     Login,
@@ -1264,7 +1267,11 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_mindspace_add_label(move || q.push(SlintAction::MindspaceAddLabel));
     let q = queue.clone();
     ui.on_mindspace_connect(move || q.push(SlintAction::MindspaceConnect));
-    
+
+    // Generic plugin action — routes all ribbon plugin buttons through PluginActionEvent
+    let q = queue.clone();
+    ui.on_plugin_action(move |action| q.push(SlintAction::PluginAction(action.to_string())));
+
     // Auth — SPI (Sign in with Private Identity)
     let q = queue.clone();
     ui.on_login(move || q.push(SlintAction::Login));
@@ -2943,7 +2950,15 @@ fn drain_slint_actions(
             SlintAction::MindspaceConnect => {
                 // TODO: Connect selected MindSpace nodes
             }
-            
+            SlintAction::PluginAction(action_id) => {
+                // Route the action string through to the plugin system.
+                // Normalize Slint kebab-case to Rust snake_case (dashes → underscores).
+                let normalized = action_id.replace('-', "_");
+                events.plugin_action.write(crate::studio_plugins::PluginActionEvent {
+                    action_id: normalized,
+                });
+            }
+
             // Auth
             SlintAction::Login => {
                 if let Some(ref mut s) = res.state {

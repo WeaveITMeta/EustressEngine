@@ -218,6 +218,7 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_toggle_mindspace(move || q.push(SlintAction::ToggleMindspace));
     let q = queue.clone(); ui.on_mindspace_add_label(move || q.push(SlintAction::MindspaceAddLabel));
     let q = queue.clone(); ui.on_mindspace_connect(move || q.push(SlintAction::MindspaceConnect));
+    let q = queue.clone(); ui.on_plugin_action(move |action| q.push(SlintAction::PluginAction(action.to_string())));
 
     // Auth
     let q = queue.clone(); ui.on_login(move || q.push(SlintAction::Login));

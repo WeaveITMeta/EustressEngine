@@ -103,6 +103,8 @@ struct BillboardAtlasSlot {
     content_hash: u64,
     /// UV coordinates in the atlas [u_min, v_min, u_max, v_max]
     uvs: [f32; 4],
+    /// True if children weren't available when first rendered — retry next frame
+    needs_rerender: bool,
 }
 
 /// Marker for the 3D quad entity that displays the billboard texture
@@ -381,12 +383,43 @@ fn setup_billboard_atlas(
     commands.insert_resource(atlas);
 }
 
-/// Assign atlas slots to new BillboardGui entities and render their content
+/// Render child GUI elements for a billboard into the given atlas slot.
+/// Returns true if at least one child element was rendered.
+fn render_children_to_slot(
+    atlas: &mut BillboardAtlas,
+    slot: usize,
+    elements: &[GuiElementDisplay],
+) -> bool {
+    atlas.clear_slot(slot);
+    if elements.is_empty() { return false; }
+    for elem in elements {
+        atlas.render_element_to_slot(slot, elem);
+    }
+    true
+}
+
+/// Collect sorted GuiElementDisplay children for a billboard entity.
+fn collect_child_elements(
+    entity: Entity,
+    children_query: &Query<&Children>,
+    gui_elements: &Query<&GuiElementDisplay>,
+) -> Vec<GuiElementDisplay> {
+    let Ok(children) = children_query.get(entity) else { return Vec::new() };
+    let mut elems: Vec<GuiElementDisplay> = children.iter()
+        .filter_map(|child| gui_elements.get(child).ok().cloned())
+        .collect();
+    elems.sort_by_key(|e| e.z_order);
+    elems
+}
+
+/// Assign atlas slots to new BillboardGui entities and render their content.
+/// Also re-renders billboards that were initially rendered without children
+/// (commands hadn't flushed yet when the billboard was first seen).
 fn update_billboard_textures(
     mut atlas: ResMut<BillboardAtlas>,
     mut commands: Commands,
     new_billboards: Query<(Entity, &BillboardGuiMarker), Without<BillboardAtlasSlot>>,
-    existing_billboards: Query<(Entity, &BillboardAtlasSlot, &BillboardGuiMarker)>,
+    mut pending_billboards: Query<(Entity, &mut BillboardAtlasSlot), With<BillboardGuiMarker>>,
     children_query: Query<&Children>,
     gui_elements: Query<&GuiElementDisplay>,
 ) {
@@ -394,55 +427,27 @@ fn update_billboard_textures(
     for (entity, _marker) in &new_billboards {
         if let Some(slot) = atlas.allocate_slot() {
             let uvs = atlas.slot_uvs(slot);
-
-            // Clear slot, then render ALL child GUI elements (TextLabels, Frames, etc.)
-            atlas.clear_slot(slot);
-            let mut rendered = false;
-            if let Ok(children) = children_query.get(entity) {
-                // Sort children by z_order for correct layering
-                let mut child_elements: Vec<&GuiElementDisplay> = children.iter()
-                    .filter_map(|child| gui_elements.get(child).ok())
-                    .collect();
-                child_elements.sort_by_key(|e| e.z_order);
-
-                for elem in &child_elements {
-                    atlas.render_element_to_slot(slot, elem);
-                    rendered = true;
-                }
-            }
-
-            if !rendered {
-                // Render a default placeholder
-                let placeholder = GuiElementDisplay {
-                    x: 0.0, y: 0.0,
-                    width: DEFAULT_BILLBOARD_WIDTH as f32,
-                    height: DEFAULT_BILLBOARD_HEIGHT as f32,
-                    z_order: 0, visible: true, clip_children: false,
-                    scroll_x: 0.0, scroll_y: 0.0,
-                    bg_color: [0.1, 0.1, 0.15, 0.9],
-                    border_size: 1.0,
-                    border_color: [0.3, 0.5, 0.8, 1.0],
-                    corner_radius: 0.0,
-                    text: String::new(),
-                    text_color: [1.0, 1.0, 1.0, 1.0],
-                    font_size: 14.0,
-                    text_align: "center".to_string(),
-                    image_path: String::new(),
-                    class_type: "billboardgui".to_string(),
-                    mouse_filter: "stop".to_string(),
-                };
-                atlas.render_element_to_slot(slot, &placeholder);
-            }
+            let elems = collect_child_elements(entity, &children_query, &gui_elements);
+            let rendered = render_children_to_slot(&mut atlas, slot, &elems);
 
             commands.entity(entity).insert(BillboardAtlasSlot {
                 slot_index: slot,
                 content_hash: 0,
                 uvs,
+                needs_rerender: !rendered,
             });
         }
     }
 
-    // TODO: Check for dirty billboards (content_hash changed) and re-render
+    // Re-render billboards that had no children on first pass (deferred child spawning)
+    for (entity, mut slot) in &mut pending_billboards {
+        if !slot.needs_rerender { continue; }
+        let elems = collect_child_elements(entity, &children_query, &gui_elements);
+        let rendered = render_children_to_slot(&mut atlas, slot.slot_index, &elems);
+        if rendered {
+            slot.needs_rerender = false;
+        }
+    }
 }
 
 /// Upload dirty atlas pixels to GPU
@@ -464,21 +469,21 @@ fn upload_billboard_atlas(
 fn spawn_billboard_quads(
     mut commands: Commands,
     atlas: Res<BillboardAtlas>,
-    billboards: Query<(Entity, &BillboardGuiMarker, &BillboardAtlasSlot, &GlobalTransform), Without<BillboardQuad>>,
+    billboards: Query<(Entity, &BillboardGuiMarker, &BillboardAtlasSlot), Without<BillboardQuad>>,
 ) {
-    for (entity, marker, _slot, transform) in &billboards {
-        let t = transform.compute_transform();
+    for (entity, marker, _slot) in &billboards {
         // Scale: convert pixel dimensions to world studs (1 stud per 50 pixels)
         let scale_factor = 1.0 / 50.0;
         let size_x = marker.size[0] * scale_factor;
         let size_y = marker.size[1] * scale_factor;
 
-        // Spawn quad as child of the billboard entity
-        let quad = commands.spawn((
+        // Spawn quad as child of the billboard entity.
+        // Local transform at origin — Bevy propagation handles world positioning
+        // via the ChildOf hierarchy.
+        let _quad = commands.spawn((
             Mesh3d(atlas.quad_mesh.clone()),
             MeshMaterial3d(atlas.material.clone()),
-            Transform::from_translation(t.translation)
-                .with_scale(Vec3::new(size_x, size_y, 1.0)),
+            Transform::from_scale(Vec3::new(size_x, size_y, 1.0)),
             BillboardQuad,
             ChildOf(entity),
             bevy::light::NotShadowCaster,
@@ -492,27 +497,24 @@ fn spawn_billboard_quads(
     }
 }
 
-/// Orient billboard quads toward the active camera and track parent position each frame
+/// Orient billboard quads toward the active camera each frame.
+/// Quads are children of the BillboardGui entity (via ChildOf), so their
+/// Transform is in the parent's local space — Bevy's propagation handles
+/// the world-space positioning.  We only need to set the facing rotation.
 fn billboard_face_camera(
     camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<BillboardQuad>, Without<BillboardGuiMarker>)>,
-    billboard_parents: Query<(&GlobalTransform, &BillboardGuiMarker), Without<BillboardQuad>>,
-    mut billboard_quads: Query<(&mut Transform, &ChildOf), With<BillboardQuad>>,
+    mut billboard_quads: Query<(&mut Transform, &GlobalTransform), With<BillboardQuad>>,
 ) {
     let Some(camera_transform) = camera_query.iter().next() else { return };
     let camera_pos = camera_transform.translation();
 
-    for (mut transform, child_of) in &mut billboard_quads {
-        // Update position from parent billboard entity's world position
-        if let Ok((parent_gt, marker)) = billboard_parents.get(child_of.parent()) {
-            transform.translation = parent_gt.translation();
-            transform.scale = Vec3::new(marker.size[0], marker.size[1], 1.0);
-        }
-
+    for (mut local_tf, global_tf) in &mut billboard_quads {
+        let quad_pos = global_tf.translation();
         // Face camera (Y-axis billboard — stays upright)
-        let dir = camera_pos - transform.translation;
+        let dir = camera_pos - quad_pos;
         if dir.length_squared() > 0.001 {
             let yaw = dir.x.atan2(dir.z);
-            transform.rotation = Quat::from_rotation_y(yaw);
+            local_tf.rotation = Quat::from_rotation_y(yaw);
         }
     }
 }
