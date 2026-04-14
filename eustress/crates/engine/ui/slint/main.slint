@@ -2176,7 +2176,6 @@ export component StudioWindow inherits Window {
         cmd-bar := CommandBar {
             command-text <=> root.command-text;
             language <=> root.command-language;
-            output-log: root.script-output-log;
 
             on-execute(language, script) => {
                 root.execute-script(language, script);

@@ -1,13 +1,12 @@
 // ============================================================================
 // Eustress Engine Studio - Command Bar
 // Docked at the bottom of the engine window for executing Rune/Luau scripts.
-// Also serves as VS Code-style command palette (Ctrl+Shift+P).
+// Resizable by dragging the top edge.
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-// Command suggestion (for palette mode)
 export struct CommandSuggestion {
     id: string,
     label: string,
@@ -16,7 +15,6 @@ export struct CommandSuggestion {
     category: string,
 }
 
-// Script output entry
 export struct ScriptOutputEntry {
     text: string,
     is-error: bool,
@@ -24,19 +22,15 @@ export struct ScriptOutputEntry {
 }
 
 export component CommandBar inherits Rectangle {
-    // Properties
     in-out property <string> command-text: "";
-    in-out property <string> language: "luau"; // "luau" or "rune"
+    in-out property <string> language: "rune";
     in property <[CommandSuggestion]> suggestions: [];
     in property <int> selected-index: 0;
     in property <[string]> history: [];
-    in property <[ScriptOutputEntry]> output-log: [];
-    in-out property <bool> show-output: false;
+    in-out property <length> bar-height: 28px;
 
-    // Whether the input has keyboard focus — parent reads this to block engine shortcuts
     out property <bool> input-has-focus: input.has-focus;
 
-    // Callbacks
     callback on-execute(/* language */ string, /* script */ string);
     callback on-close();
     callback on-text-changed(string);
@@ -44,68 +38,41 @@ export component CommandBar inherits Rectangle {
     callback on-clear-output();
 
     width: 100%;
-    height: root.show-output ? 100px : 28px;
+    height: root.bar-height;
     background: Theme.header-background;
     border-width: 1px;
     border-color: Theme.border-color;
 
-    VerticalLayout {
-        // Output log (expandable above the input)
-        if root.show-output: Rectangle {
-            vertical-stretch: 1;
-            background: #0d0d12;
-            border-width: 0px;
+    // Resize handle at top edge — drag to resize
+    Rectangle {
+        y: 0px;
+        width: 100%;
+        height: 4px;
+        background: resize-touch.has-hover ? Theme.accent-blue : transparent;
 
-            // Clear button
-            Rectangle {
-                x: parent.width - 24px;
-                y: 2px;
-                width: 20px;
-                height: 20px;
-                background: clear-touch.has-hover ? Theme.button-hover : transparent;
-                border-radius: 3px;
-
-                clear-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.on-clear-output(); }
-                }
-
-                Text {
-                    text: "✕";
-                    color: Theme.text-secondary;
-                    font-size: 10px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            ScrollView {
-                VerticalLayout {
-                    padding: 4px;
-                    padding-right: 28px;
-                    spacing: 1px;
-
-                    for entry in root.output-log: Text {
-                        text: entry.text;
-                        color: entry.is-error ? #ef5350 : #8bc34a;
-                        font-size: 11px;
-                        font-family: "Cascadia Code";
-                        wrap: word-wrap;
-                    }
-                }
+        resize-touch := TouchArea {
+            mouse-cursor: ns-resize;
+            moved => {
+                root.bar-height = max(28px, min(400px, root.bar-height - (self.mouse-y - self.pressed-y)));
             }
         }
+    }
 
-        // Input bar — always 28px
+    VerticalLayout {
+        padding-top: 4px;
+
+        // Input bar at top
         Rectangle {
             height: 28px;
-            background: Theme.header-background;
 
             HorizontalLayout {
-                padding: 3px;
+                padding-left: 4px;
+                padding-right: 4px;
+                padding-top: 3px;
+                padding-bottom: 3px;
                 spacing: 4px;
 
-                // Language selector toggle
+                // Language selector
                 Rectangle {
                     width: 48px;
                     height: 22px;
@@ -144,38 +111,35 @@ export component CommandBar inherits Rectangle {
                     horizontal-alignment: center;
                 }
 
-                // Input field — supports multi-line paste with scroll
+                // Input field
                 Rectangle {
                     horizontal-stretch: 1;
-                    vertical-stretch: 1;
+                    height: 22px;
                     background: input.has-focus ? Theme.input-background : transparent;
                     border-radius: 3px;
                     border-width: input.has-focus ? 1px : 0px;
                     border-color: Theme.accent-blue;
 
-                    // Click anywhere in the input area to grab focus
                     TouchArea {
                         clicked => { input.focus(); }
                     }
 
-                    ScrollView {
-                        input := TextInput {
-                            width: parent.width - 12px;
-                            text <=> root.command-text;
-                            color: Theme.text-primary;
-                            font-size: 12px;
-                            font-family: "Cascadia Code";
-                            single-line: !root.show-output;
-                            wrap: root.show-output ? word-wrap : no-wrap;
+                    input := TextInput {
+                        x: 6px;
+                        width: parent.width - 12px;
+                        height: 100%;
+                        text <=> root.command-text;
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        single-line: true;
+                        vertical-alignment: center;
 
-                            edited => { root.on-text-changed(self.text); }
+                        edited => { root.on-text-changed(self.text); }
 
-                            accepted => {
-                                if self.text != "" {
-                                    root.on-execute(root.language, self.text);
-                                    self.text = "";
-                                    root.show-output = true;
-                                }
+                        accepted => {
+                            if self.text != "" {
+                                root.on-execute(root.language, self.text);
+                                self.text = "";
                             }
                         }
                     }
@@ -183,7 +147,7 @@ export component CommandBar inherits Rectangle {
 
                 // Run button
                 Rectangle {
-                    width: 28px;
+                    width: 22px;
                     height: 22px;
                     background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
                     border-radius: 3px;
@@ -196,7 +160,6 @@ export component CommandBar inherits Rectangle {
                             if root.command-text != "" {
                                 root.on-execute(root.language, root.command-text);
                                 root.command-text = "";
-                                root.show-output = true;
                             }
                         }
                     }
@@ -204,96 +167,36 @@ export component CommandBar inherits Rectangle {
                     Text {
                         text: "▶";
                         color: #8bc34a;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                // Output toggle
-                Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    background: out-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 3px;
-
-                    out-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.show-output = !root.show-output; }
-                    }
-
-                    Text {
-                        text: root.show-output ? "▼" : "▲";
-                        color: Theme.text-secondary;
-                        font-size: 10px;
+                        font-size: 11px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }
             }
         }
-    }
 
-    // Suggestions dropdown (shown above the bar when there are suggestions)
-    if root.suggestions.length > 0: Rectangle {
-        y: -min(300px, root.suggestions.length * 36px + 8px);
-        width: parent.width;
-        height: min(300px, root.suggestions.length * 36px + 8px);
-        background: Theme.panel-background;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 8px;
-        drop-shadow-color: Theme.shadow-color;
+        // Separator (only when expanded)
+        if root.bar-height > 32px: Rectangle {
+            height: 1px;
+            background: Theme.border-color;
+        }
 
-        ScrollView {
-            VerticalBox {
-                padding: 4px;
-                spacing: 2px;
+        // Output log — fills remaining space when expanded
+        if root.bar-height > 32px: Rectangle {
+            vertical-stretch: 1;
+            background: #0d0d12;
 
-                for suggestion[index] in root.suggestions: Rectangle {
-                    height: 32px;
-                    background: index == root.selected-index ? Theme.selection-background :
-                                suggestion-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                    border-radius: 4px;
+            ScrollView {
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 1px;
 
-                    suggestion-touch := TouchArea {
-                        clicked => { root.on-select-suggestion(index); }
-                    }
-
-                    HorizontalBox {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 8px;
-
-                        Rectangle {
-                            width: 60px;
-                            height: 18px;
-                            background: Theme.accent-blue;
-                            border-radius: 2px;
-
-                            Text {
-                                text: suggestion.category;
-                                color: white;
-                                font-size: 10px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-
-                        Text {
-                            horizontal-stretch: 1;
-                            text: suggestion.label;
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-
-                        if suggestion.shortcut != "": Text {
-                            text: suggestion.shortcut;
-                            color: Theme.text-secondary;
-                            font-size: 11px;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                        }
+                    for entry in root.output-log: Text {
+                        text: entry.text;
+                        color: entry.is-error ? #ef5350 : #8bc34a;
+                        font-size: 11px;
+                        font-family: "Cascadia Code";
+                        wrap: word-wrap;
                     }
                 }
             }
