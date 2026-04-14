@@ -88,7 +88,7 @@ export component CommandBar inherits Rectangle {
         // Input field
         input := LineEdit {
             horizontal-stretch: 1;
-            placeholder-text: root.language == "rune" ? "pub fn main() { ... }" : "print(\"Hello\")";
+            placeholder-text: "";
             text <=> root.command-text;
 
             edited(text) => { root.on-text-changed(text); }
