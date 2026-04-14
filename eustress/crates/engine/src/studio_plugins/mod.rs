@@ -358,6 +358,7 @@ fn handle_plugin_action_events(
                 // Attach InstanceFile so Properties panel works
                 commands.entity(billboard_entity).insert(crate::space::instance_loader::InstanceFile {
                     toml_path: bb_dir.join("_instance.toml"),
+                    mesh_path: std::path::PathBuf::new(),
                     name: safe_name.clone(),
                 });
 
