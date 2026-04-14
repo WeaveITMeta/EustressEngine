@@ -938,55 +938,17 @@ export component Ribbon inherits Rectangle {
                     }
                 }
                 
-                // ── MINDSPACE ──
+                // ── MINDSPACE (tab only, actions in ribbon) ──
                 Rectangle {
                     width: self.preferred-width;
                     preferred-width: mindspace-label.preferred-width + 12px;
                     background: mindspace-touch.has-hover ? Theme.button-hover : transparent;
                     border-radius: 2px;
-                    
-                    mindspace-touch := TouchArea { clicked => { mindspace-popup.show(); } }
+
+                    mindspace-touch := TouchArea { clicked => { root.ribbon-tab = "mindspace"; } }
                     mindspace-label := Text { text: "MindSpace"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                    
-                    mindspace-popup := PopupWindow {
-                        x: 0px;
-                        y: parent.height;
-                        width: 220px;
-                        
-                        Rectangle {
-                            background: #1e1e1e;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: #3a3a3a;
-                            drop-shadow-blur: 8px;
-                            drop-shadow-color: #00000080;
-                            width: 220px;
-                            
-                            VerticalLayout {
-                                padding-top: 4px;
-                                padding-bottom: 4px;
-                                
-                                DropdownHeader { label: "LABELS"; }
-                                DropdownItem { label: "Add Label"; shortcut: "Ctrl+L"; clicked => { root.on-plugin-action("mindspace:add-label"); } }
-                                DropdownItem { label: "Remove Label"; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "CONNECTIONS"; }
-                                DropdownItem { label: "Connect Nodes"; shortcut: "Ctrl+K"; clicked => { root.on-plugin-action("mindspace:connect"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "FILE"; }
-                                DropdownItem { label: "New Mind Map"; clicked => { root.on-plugin-action("mindspace:new"); } }
-                                DropdownItem { label: "Export..."; clicked => { root.on-plugin-action("mindspace:export"); } }
-                                DropdownItem { label: "Import..."; clicked => { root.on-plugin-action("mindspace:import"); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "AI TOOLS"; }
-                                DropdownItem { label: "AI Suggestions"; clicked => { root.on-plugin-action("mindspace:ai-suggest"); } }
-                                DropdownItem { label: "Auto Layout"; clicked => { root.on-plugin-action("mindspace:ai-layout"); } }
-                                DropdownItem { label: "Generate Summary"; clicked => { root.on-plugin-action("mindspace:ai-summarize"); } }
-                            }
-                        }
-                    }
                 }
-                
+
                 // ── HELP ──
                 Rectangle {
                     width: self.preferred-width;
