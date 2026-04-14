@@ -562,6 +562,11 @@ impl Vector3 {
     pub const ZERO: Vector3 = Vector3 { x: 0.0, y: 0.0, z: 0.0 };
     pub const ONE: Vector3 = Vector3 { x: 1.0, y: 1.0, z: 1.0 };
 
+    /// Rust-side constructor (not wrapped by rune macro)
+    pub fn create(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
     #[rune::function(path = Self::new)]
     pub fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
@@ -1170,12 +1175,12 @@ fn workspace_raycast(
     result.map(|hit| RaycastResultRune {
         instance: hit.entity_name,
         entity_id: hit.entity_id as i64,
-        position: Vector3::new(
+        position: Vector3::create(
             hit.position[0] as f64,
             hit.position[1] as f64,
             hit.position[2] as f64,
         ),
-        normal: Vector3::new(
+        normal: Vector3::create(
             hit.normal[0] as f64,
             hit.normal[1] as f64,
             hit.normal[2] as f64,
@@ -1209,12 +1214,12 @@ fn workspace_raycast_all(
     results.into_iter().map(|hit| RaycastResultRune {
         instance: hit.entity_name,
         entity_id: hit.entity_id as i64,
-        position: Vector3::new(
+        position: Vector3::create(
             hit.position[0] as f64,
             hit.position[1] as f64,
             hit.position[2] as f64,
         ),
-        normal: Vector3::new(
+        normal: Vector3::create(
             hit.normal[0] as f64,
             hit.normal[1] as f64,
             hit.normal[2] as f64,
@@ -1697,8 +1702,7 @@ fn tween_info_new(time: f64) -> TweenInfoRune {
 }
 
 /// Create a new TweenInfo with full parameters.
-/// 
-/// ## Rune: `let info = eustress::tween_info_full(1.0, 1, 1, 0, false, 0.0);`
+/// Note: Rune Function trait supports max 5 args. This wraps 6 into a helper.
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn tween_info_full(
@@ -1706,9 +1710,10 @@ fn tween_info_full(
     easing_style: i32,
     easing_direction: i32,
     repeat_count: i32,
-    reverses: bool,
-    delay_time: f64,
+    reverses_and_delay: f64, // pack: if >= 100, reverses=true and delay=value-100
 ) -> TweenInfoRune {
+    let reverses = reverses_and_delay >= 100.0;
+    let delay_time = if reverses { reverses_and_delay - 100.0 } else { reverses_and_delay };
     TweenInfoRune {
         time,
         easing_style,
@@ -2356,7 +2361,7 @@ pub struct HttpResponseRune {
     #[rune(get)]
     pub body: String,
     #[rune(get)]
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: Vec<(String, String)>,
 }
 
 #[cfg(feature = "realism-scripting")]
@@ -2419,11 +2424,11 @@ fn http_request_async(
             let status = response.status();
             let status_text = response.status_text().to_string();
             
-            // Collect headers
-            let mut response_headers = std::collections::HashMap::new();
+            // Collect headers as Vec<(key, value)> (Rune TryClone compatible)
+            let mut response_headers = Vec::new();
             for name in response.headers_names() {
                 if let Some(value) = response.header(&name) {
-                    response_headers.insert(name, value.to_string());
+                    response_headers.push((name, value.to_string()));
                 }
             }
             

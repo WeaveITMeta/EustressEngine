@@ -6,6 +6,9 @@
 use std::sync::Arc;
 
 #[cfg(feature = "realism-scripting")]
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+#[cfg(feature = "realism-scripting")]
 use rune::{Context, Vm, Source, Sources, Value as RuneValue};
 
 #[cfg(feature = "realism-scripting")]
@@ -116,8 +119,7 @@ impl ParallelScriptExecutor {
         // Execute with acquired VM
         let vm = vm_guard.vm_mut();
         let output: RuneValue = vm.call(["main"], (task.entity_id.clone(),))
-            .into_result()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e: rune::runtime::VmError| e.to_string())?;
 
         Ok(output)
     }
