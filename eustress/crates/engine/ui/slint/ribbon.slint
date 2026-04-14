@@ -1741,7 +1741,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 // ── FILE group ──
                 ToolGroup {
@@ -1818,9 +1818,9 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
-                Rectangle { horizontal-stretch: 1; }
-                
-                // ── UTILS group — right-aligned ──
+                GroupDivider {}
+
+                // ── UTILS group ──
                 ToolGroup {
                     label: "Utils";
                     IconButton { icon: @image-url("../../assets/icons/ui/keyboard.svg"); label: "Keys"; tooltip: "Keyboard Shortcuts"; tint: #b39ddb; clicked => { root.on-show-keybindings(); } }
@@ -1836,7 +1836,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 ToolGroup {
                     label: "Parts";
@@ -1895,7 +1895,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 ToolGroup {
                     label: "Containers";
@@ -1942,7 +1942,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 ToolGroup {
                     label: "Generate";
@@ -2131,7 +2131,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 ToolGroup {
                     label: "Server";
@@ -2184,7 +2184,7 @@ export component Ribbon inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
-                alignment: start;
+                alignment: center;
                 
                 ToolGroup {
                     label: "Labels";
