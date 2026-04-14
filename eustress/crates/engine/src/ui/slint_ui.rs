@@ -8178,6 +8178,7 @@ fn sync_properties_to_slint(
             "Grass".into(), "Concrete".into(), "Brick".into(), "Granite".into(),
             "Marble".into(), "Slate".into(), "Sand".into(), "Fabric".into(),
             "Glass".into(), "Neon".into(), "Ice".into(),
+            "Gold".into(), "Silver".into(), "Bronze".into(),
         ];
         // Add custom materials from MaterialRegistry (loaded from .mat.toml in MaterialService)
         if let Some(ref mat_reg) = material_registry {

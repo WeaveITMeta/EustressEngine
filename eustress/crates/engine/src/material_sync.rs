@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 use bevy::light::{NotShadowCaster, TransmittedShadowReceiver};
-use crate::classes::{BasePart, Material as RobloxMaterial};
+use crate::classes::{BasePart, Material as EustressMaterial};
 
 /// Tracks the last-known size of the MaterialRegistry to detect when new materials load.
 #[derive(Resource, Default)]
@@ -82,7 +82,7 @@ fn sync_basepart_to_material(
                     cloned.metallic = (cloned.metallic + reflectance).min(1.0);
                     cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
                     // Emissive for Neon
-                    if matches!(basepart.material, RobloxMaterial::Neon) {
+                    if matches!(basepart.material, EustressMaterial::Neon) {
                         cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
                     }
                     let new_handle = materials.add(cloned);
@@ -98,31 +98,34 @@ fn sync_basepart_to_material(
             material.base_color = basepart.color.with_alpha(alpha);
             
             // Check if this is Glass material
-            let is_glass = matches!(basepart.material, RobloxMaterial::Glass);
+            let is_glass = matches!(basepart.material, EustressMaterial::Glass);
             
             // Sync Reflectance - affects metallic and perceptual_roughness
             let reflectance = basepart.reflectance.clamp(0.0, 1.0);
             material.metallic = reflectance;
             material.perceptual_roughness = match basepart.material {
-                RobloxMaterial::Plastic => 0.7,
-                RobloxMaterial::Wood => 0.8,
-                RobloxMaterial::Slate => 0.6,
-                RobloxMaterial::Concrete => 0.9,
-                RobloxMaterial::CorrodedMetal => 0.8,
-                RobloxMaterial::DiamondPlate => 0.3,
-                RobloxMaterial::Foil => 0.2,
-                RobloxMaterial::Grass => 0.9,
-                RobloxMaterial::Ice => 0.1,
-                RobloxMaterial::Marble => 0.4,
-                RobloxMaterial::Granite => 0.7,
-                RobloxMaterial::Brick => 0.8,
-                RobloxMaterial::Sand => 0.9,
-                RobloxMaterial::Fabric => 0.9,
-                RobloxMaterial::SmoothPlastic => 0.5,
-                RobloxMaterial::Metal => 0.3,
-                RobloxMaterial::WoodPlanks => 0.7,
-                RobloxMaterial::Neon => 0.1,
-                RobloxMaterial::Glass => 0.0,
+                EustressMaterial::Plastic => 0.7,
+                EustressMaterial::Wood => 0.8,
+                EustressMaterial::Slate => 0.6,
+                EustressMaterial::Concrete => 0.9,
+                EustressMaterial::CorrodedMetal => 0.8,
+                EustressMaterial::DiamondPlate => 0.3,
+                EustressMaterial::Foil => 0.2,
+                EustressMaterial::Grass => 0.9,
+                EustressMaterial::Ice => 0.1,
+                EustressMaterial::Marble => 0.4,
+                EustressMaterial::Granite => 0.7,
+                EustressMaterial::Brick => 0.8,
+                EustressMaterial::Sand => 0.9,
+                EustressMaterial::Fabric => 0.9,
+                EustressMaterial::SmoothPlastic => 0.5,
+                EustressMaterial::Metal => 0.3,
+                EustressMaterial::WoodPlanks => 0.7,
+                EustressMaterial::Neon => 0.1,
+                EustressMaterial::Glass => 0.0,
+                EustressMaterial::Gold => 0.2,
+                EustressMaterial::Silver => 0.15,
+                EustressMaterial::Bronze => 0.35,
             };
             
             // Adjust roughness based on reflectance (more reflectance = less rough)
@@ -182,7 +185,7 @@ fn sync_basepart_to_material(
             }
             
             // Emissive for Neon material
-            if matches!(basepart.material, RobloxMaterial::Neon) {
+            if matches!(basepart.material, EustressMaterial::Neon) {
                 material.emissive = LinearRgba::from(basepart.color) * 2.0;
             } else {
                 material.emissive = LinearRgba::NONE;

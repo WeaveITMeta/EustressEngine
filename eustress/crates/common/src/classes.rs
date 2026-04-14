@@ -86,6 +86,9 @@ pub enum Material {
     Glass,
     Neon,
     Ice,
+    Gold,
+    Silver,
+    Bronze,
 }
 
 impl Default for Material {
@@ -117,6 +120,9 @@ impl Material {
             "glass" => Material::Glass,
             "neon" => Material::Neon,
             "ice" => Material::Ice,
+            "gold" => Material::Gold,
+            "silver" => Material::Silver,
+            "bronze" => Material::Bronze,
             _ => Material::Plastic, // Default fallback
         }
     }
@@ -143,6 +149,9 @@ impl Material {
             Material::Glass => (0.02, 0.0, 0.95),            // Very smooth and reflective
             Material::Neon => (0.1, 0.0, 0.0),               // Smooth for glow effect
             Material::Ice => (0.08, 0.0, 0.88),              // Very reflective and smooth
+            Material::Gold => (0.2, 1.0, 0.95),              // Polished gold
+            Material::Silver => (0.15, 1.0, 0.97),           // Polished silver
+            Material::Bronze => (0.35, 0.9, 0.85),           // Aged bronze
         }
     }
 }
@@ -742,6 +751,9 @@ impl BasePart {
             Material::Glass => 2500.0,
             Material::Neon => 0.9,         // Light/gas
             Material::Ice => 918.0,
+            Material::Gold => 19300.0,
+            Material::Silver => 10490.0,
+            Material::Bronze => 8800.0,
         }
     }
     
