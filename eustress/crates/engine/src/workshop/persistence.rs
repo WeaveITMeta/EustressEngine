@@ -99,22 +99,10 @@ pub struct SessionManifest {
 
 /// Get the workshop history root directory within the current Space.
 /// {SpaceRoot}/SoulService/Workshop/
-/// Falls back to ~/.eustress_engine/workshop/history/ if no Space is loaded.
 pub fn history_root_for_space(space_root: Option<&std::path::Path>) -> PathBuf {
-    if let Some(root) = space_root {
-        root.join("SoulService").join("Workshop")
-    } else {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".eustress_engine").join("workshop").join("history")
-    }
-}
-
-/// Legacy: get history root from home dir (used when SpaceRoot isn't available)
-pub fn history_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-        home.join(".eustress_engine").join("workshop").join("history")
-    })
+    space_root
+        .map(|root| root.join("SoulService").join("Workshop"))
+        .expect("Workshop requires an active Space. No SpaceRoot available.")
 }
 
 /// Get the session directory for a specific session ID
@@ -130,15 +118,6 @@ pub fn session_entries_path_in_space(space_root: Option<&std::path::Path>, sessi
 /// Get the _instance.toml path for a conversation (makes it an Explorer entity)
 pub fn session_instance_path(space_root: Option<&std::path::Path>, session_id: &str) -> PathBuf {
     session_dir_in_space(space_root, session_id).join("_instance.toml")
-}
-
-/// Legacy path helpers
-pub fn session_dir(session_id: &str) -> Option<PathBuf> {
-    history_root().map(|root| root.join(session_id))
-}
-
-pub fn session_entries_path(session_id: &str) -> Option<PathBuf> {
-    session_dir(session_id).map(|dir| dir.join("entries.json"))
 }
 
 // ============================================================================
@@ -216,10 +195,6 @@ pub fn save_session_to_space(pipeline: &IdeationPipeline, space_root: Option<&st
     Ok(())
 }
 
-/// Legacy: save to ~/.eustress_engine/ (fallback)
-pub fn save_session(pipeline: &IdeationPipeline) -> Result<(), String> {
-    save_session_to_space(pipeline, None)
-}
 
 /// Load a session from the Space's SoulService/Workshop/ directory
 pub fn load_session_from_space(space_root: Option<&std::path::Path>, session_id: &str) -> Result<SessionManifest, String> {
@@ -235,10 +210,6 @@ pub fn load_session_from_space(space_root: Option<&std::path::Path>, session_id:
     Ok(manifest)
 }
 
-/// Legacy fallback
-pub fn load_session(session_id: &str) -> Result<SessionManifest, String> {
-    load_session_from_space(None, session_id)
-}
 
 /// List all past sessions from the Space's SoulService/Workshop/ directory (newest first)
 pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<SessionSummary> {
@@ -287,11 +258,6 @@ pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<Sessi
 
     sessions.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
     sessions
-}
-
-/// Legacy fallback
-pub fn list_sessions() -> Vec<SessionSummary> {
-    list_sessions_in_space(None)
 }
 
 /// Summary of a past session for history browsing
