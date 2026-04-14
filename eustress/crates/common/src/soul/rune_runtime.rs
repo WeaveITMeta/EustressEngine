@@ -222,7 +222,20 @@ pub fn execute_oneshot(
         .with_context(&ctx)
         .with_diagnostics(&mut diagnostics)
         .build()
-        .map_err(|e| format!("Compile error: {}", e))?;
+        .map_err(|e| {
+            // Include diagnostic details in the error message
+            let mut diag_msgs = Vec::new();
+            if diagnostics.has_error() {
+                for diag in diagnostics.diagnostics() {
+                    diag_msgs.push(format!("{:?}", diag));
+                }
+            }
+            if diag_msgs.is_empty() {
+                format!("Compile error: {}", e)
+            } else {
+                format!("Compile error: {}\n{}", e, diag_msgs.join("\n"))
+            }
+        })?;
 
     let mut vm = rune::Vm::new(
         std::sync::Arc::new(runtime_ctx),
