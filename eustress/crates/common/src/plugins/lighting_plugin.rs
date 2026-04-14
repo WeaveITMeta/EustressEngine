@@ -404,15 +404,29 @@ pub fn create_procedural_skybox_with_sun(
 ) -> Handle<Image> {
     const SIZE: u32 = 1024;
     
-    // AAA sky palette
-    let zenith: [f32; 3] = [0.16, 0.32, 0.75];      // Deep blue zenith
-    let mid_sky: [f32; 3] = [0.40, 0.60, 0.92];      // Mid-sky blue
-    let horizon: [f32; 3] = [0.75, 0.82, 0.90];      // Pale horizon haze
-    let ground: [f32; 3] = [0.22, 0.22, 0.20];        // Dark ground
-    
-    // Use the override direction when provided (live SunClass position),
-    // otherwise fall back to the LightingService simple formula
+    // Time-of-day sky palette — lerp between day and night based on sun elevation
     let sun_dir = sun_dir_override.unwrap_or_else(|| lighting.sun_direction());
+    let night_t = (-sun_dir.y).clamp(0.0, 0.3) / 0.3; // 0=day, 1=deep night
+
+    // Day palette
+    let day_zenith: [f32; 3] = [0.16, 0.32, 0.75];
+    let day_mid: [f32; 3] = [0.40, 0.60, 0.92];
+    let day_horizon: [f32; 3] = [0.75, 0.82, 0.90];
+
+    // Night palette — very dark for stars to show through atmosphere
+    let night_zenith: [f32; 3] = [0.01, 0.01, 0.03];
+    let night_mid: [f32; 3] = [0.02, 0.02, 0.06];
+    let night_horizon: [f32; 3] = [0.04, 0.04, 0.08];
+
+    let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    };
+
+    let zenith = lerp3(day_zenith, night_zenith, night_t);
+    let mid_sky = lerp3(day_mid, night_mid, night_t);
+    let horizon = lerp3(day_horizon, night_horizon, night_t);
+    let ground: [f32; 3] = [0.22 * (1.0 - night_t * 0.7), 0.22 * (1.0 - night_t * 0.7), 0.20 * (1.0 - night_t * 0.7)];
+    
     let sun_angular_radius = lighting.sun_angular_radius.to_radians().max(0.005); // degrees → radians
     let sun_color: [f32; 3] = [lighting.sun_color[0], lighting.sun_color[1], lighting.sun_color[2]];
     // Corona extends 4x the sun disc radius for a soft glow
@@ -477,27 +491,36 @@ pub fn create_procedural_skybox_with_sun(
                 // (resolution-independent, pixel-perfect at any distance).
                 // Cubemap only contains sky gradient + stars.
 
-                // Stars — only visible at night (sun well below horizon)
-                let pixel_faces_sky = ny > 0.0;
-                let sun_below_horizon = sun_dir.y < -0.05;
-                if sun_below_horizon && pixel_faces_sky {
-                    // Hash function for uniform distribution across the sphere.
-                    // Uses multiple rounds of fract(sin(dot(...))) for pseudo-random coverage.
+                // Stars — visible at night, fade in during twilight
+                let pixel_faces_sky = ny > -0.02;
+                let sun_below = sun_dir.y < 0.0;
+                if sun_below && pixel_faces_sky {
+                    // Hash for pseudo-random star positions across the sphere
                     let h1 = (nx * 127.1 + ny * 311.7 + nz * 74.7).sin() * 43758.5453;
                     let star_seed = h1.fract().abs();
                     let h2 = (nx * 269.5 + ny * 183.3 + nz * 421.1).sin() * 28947.7231;
                     let star_seed2 = h2.fract().abs();
+                    let h3 = (nx * 419.2 + ny * 67.3 + nz * 253.9).sin() * 17654.3219;
+                    let star_seed3 = h3.fract().abs();
 
-                    // ~0.4% of sky pixels become stars
-                    if star_seed > 0.996 {
-                        let night_factor = (-sun_dir.y - 0.05).clamp(0.0, 0.3) * 3.3;
-                        let twinkle = 0.5 + 0.5 * star_seed2;
-                        let star_brightness = night_factor * twinkle;
-                        // Color variation: blue-white to warm yellow
+                    // Star density: ~0.8% bright stars + ~2% dim stars
+                    let star_threshold = if star_seed3 > 0.5 { 0.992 } else { 0.980 };
+                    if star_seed > star_threshold {
+                        // Fade in as sun goes below horizon
+                        let night_factor = (-sun_dir.y).clamp(0.0, 0.2) * 5.0; // 0→1 over 0.2 sun_dir.y range
+                        let twinkle = 0.4 + 0.6 * star_seed2;
+
+                        // Brightness varies by star "magnitude"
+                        let magnitude = if star_seed > 0.998 { 1.5 } // bright stars
+                            else if star_seed > 0.995 { 1.0 }        // medium stars
+                            else { 0.5 };                              // dim stars
+                        let star_brightness = night_factor * twinkle * magnitude;
+
+                        // Color: blue-white (hot) to warm yellow (cool)
                         let warmth = star_seed2;
                         r = r + star_brightness * (0.85 + warmth * 0.15);
                         g = g + star_brightness * (0.88 + (1.0 - warmth) * 0.12);
-                        b = b + star_brightness * (0.95 + warmth * 0.05);
+                        b = b + star_brightness * (1.0 - warmth * 0.1);
                     }
                 }
 

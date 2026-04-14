@@ -6241,11 +6241,11 @@ fn forward_keyboard_to_slint(
     let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     
     for event in key_events.read() {
-        // Skip bare modifier keys — Slint doesn't need them for text input
+        // Skip Alt and Super — engine uses these for shortcuts.
+        // Forward Ctrl and Shift — Slint needs them for Ctrl+V paste,
+        // Ctrl+A select-all, Ctrl+C copy, Shift+arrow selection, etc.
         match &event.logical_key {
             bevy::input::keyboard::Key::Alt
-            | bevy::input::keyboard::Key::Control
-            | bevy::input::keyboard::Key::Shift
             | bevy::input::keyboard::Key::Super => continue,
             _ => {}
         }
