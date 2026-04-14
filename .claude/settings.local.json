@@ -40,7 +40,21 @@
       "Bash(grep -n \"component IconButton\\\\|export component IconButton\" /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*.slint)",
       "Bash(ls \"E:\\\\Workspace\\\\EustressEngine\\\\infrastructure\\\\cloudflare/\"*/jurisdictions.json)",
       "Bash(trunk build:*)",
-      "WebFetch(domain:bevy.org)"
+      "WebFetch(domain:bevy.org)",
+      "Read(//fn sync_viewport_selection_to_explorer/,/^fn [a-z_]/**)",
+      "Bash(grep \"\\\\.rs$\")",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(grep -n \"pub struct StudioState\" /e/Workspace/EustressEngine/eustress/crates/engine/src/ui/*.rs)",
+      "Bash(grep -n \"api_key\\\\|GlobalSoulSettings\\\\|SoulServiceSettings\" /e/Workspace/EustressEngine/eustress/crates/engine/src/workshop/*.rs)",
+      "Bash(grep -n \"workshop_visible\\\\|WorkshopPanel\\\\|sync_workshop_to_slint\" /e/Workspace/EustressEngine/eustress/crates/engine/src/ui/*.rs)",
+      "Bash(grep -n \"WorkshopEditMcp\\\\|WorkshopOpenArtifact\\\\|on_workshop_approve_mcp\\\\|on_workshop_open_artifact\" /e/Workspace/EustressEngine/eustress/crates/engine/src/ui/*.rs)",
+      "Bash(grep -n \"workshop-active-modes\\\\|set_workshop.*active\\\\|workshop.*set_workshop_\" /e/Workspace/EustressEngine/eustress/crates/engine/src/ui/*.rs)",
+      "Bash(grep -n \"import.*Workshop\" /e/Workspace/EustressEngine/eustress/crates/engine/src/ui/*.slint)",
+      "Bash(grep -E \"\\\\.\\(json|toml|yaml|yml\\)$\")",
+      "Bash(ls -la /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*panel*.slint)",
+      "Bash(grep -n \"component DropdownItem\\\\|component DropdownHeader\\\\|component DropdownSeparator\" /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*.slint)",
+      "Bash(python3 -c ':*)"
     ]
   }
 }

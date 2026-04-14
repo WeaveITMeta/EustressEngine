@@ -122,6 +122,10 @@ pub struct BridgeState {
     pub workshop_messages: Option<Vec<WorkshopMessageData>>,
     pub workshop_steps: Option<Vec<WorkshopStepData>>,
 
+    // ---- Command Bar Script Output ----
+    /// (text, is_error) entries from script execution
+    pub script_output: Vec<(String, bool)>,
+
     // ---- Viewport Bounds (read by camera controller) ----
     pub viewport_x: Option<f32>,
     pub viewport_y: Option<f32>,

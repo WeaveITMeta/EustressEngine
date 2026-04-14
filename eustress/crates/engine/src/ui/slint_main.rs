@@ -445,6 +445,19 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
         ui.set_workshop_pipeline_steps(slint::ModelRc::from(model));
     }
 
+    // Command bar script output
+    if !state.script_output.is_empty() {
+        let entries: Vec<ScriptOutputEntry> = state.script_output.into_iter().map(|(text, is_error)| {
+            ScriptOutputEntry {
+                text: text.into(),
+                is_error,
+                timestamp: slint::SharedString::default(),
+            }
+        }).collect();
+        let model = slint::ModelRc::new(slint::VecModel::from(entries));
+        ui.set_script_output_log(model);
+    }
+
     // Universe browser
     if let Some(v) = state.show_universe_browser { ui.set_show_universe_browser(v); }
     if let Some(v) = state.active_space_path { ui.set_active_space_path(v.into()); }

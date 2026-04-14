@@ -773,6 +773,11 @@ impl InstanceRegistry {
         instance
     }
 
+    /// Iterate over all instances
+    pub fn iter(&self) -> impl Iterator<Item = (&u64, &InstanceData)> {
+        self.instances.iter()
+    }
+
     /// Find instance by name (first match)
     pub fn find_by_name(&self, name: &str) -> Option<u64> {
         self.instances.iter()

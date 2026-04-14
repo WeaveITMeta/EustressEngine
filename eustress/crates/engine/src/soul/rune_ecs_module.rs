@@ -1410,6 +1410,65 @@ impl InstanceRune {
         })
     }
 
+    /// Set a Vector3 property (Position, Size)
+    #[rune::function(instance)]
+    pub fn set_vector3(&self, key: String, value: Vector3) {
+        with_instance_registry((), |registry| {
+            let mut reg = registry.write().unwrap();
+            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
+                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Vector3(
+                    eustress_common::scripting::types::Vector3 { x: value.x, y: value.y, z: value.z }
+                ));
+            }
+        });
+    }
+
+    /// Set a Color3 property (Color)
+    #[rune::function(instance)]
+    pub fn set_color3(&self, key: String, value: Color3) {
+        with_instance_registry((), |registry| {
+            let mut reg = registry.write().unwrap();
+            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
+                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Color3(
+                    eustress_common::scripting::types::Color3 { r: value.r, g: value.g, b: value.b }
+                ));
+            }
+        });
+    }
+
+    /// Set a string property (Material)
+    #[rune::function(instance)]
+    pub fn set_string(&self, key: String, value: String) {
+        with_instance_registry((), |registry| {
+            let mut reg = registry.write().unwrap();
+            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
+                inst.properties.insert(key, eustress_common::scripting::PropertyValue::String(value));
+            }
+        });
+    }
+
+    /// Set a bool property (Anchored, CanCollide)
+    #[rune::function(instance)]
+    pub fn set_bool(&self, key: String, value: bool) {
+        with_instance_registry((), |registry| {
+            let mut reg = registry.write().unwrap();
+            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
+                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Bool(value));
+            }
+        });
+    }
+
+    /// Set a float property (Transparency, Reflectance)
+    #[rune::function(instance)]
+    pub fn set_float(&self, key: String, value: f64) {
+        with_instance_registry((), |registry| {
+            let mut reg = registry.write().unwrap();
+            if let Some(inst) = reg.get_mut(self.entity_id as u64) {
+                inst.properties.insert(key, eustress_common::scripting::PropertyValue::Float(value));
+            }
+        });
+    }
+
     /// Destroy the instance
     #[rune::function(instance)]
     pub fn destroy(&self) {
@@ -1443,8 +1502,65 @@ impl InstanceRune {
     }
 }
 
+/// Execute a Rune script from the command bar with full ECS module support.
+/// Sets up a temporary InstanceRegistry, runs the script, drains created instances.
+#[cfg(feature = "realism-scripting")]
+pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+    let instance_registry = std::sync::Arc::new(std::sync::RwLock::new(
+        eustress_common::scripting::InstanceRegistry::default()
+    ));
+    set_instance_registry(instance_registry.clone());
+
+    let modules: Vec<rune::Module> = match create_ecs_module() {
+        Ok(m) => vec![m],
+        Err(e) => { warn!("Failed to create ECS module: {:?}", e); vec![] }
+    };
+
+    let r = eustress_common::soul::rune_runtime::execute_oneshot(&modules, source, "command_bar");
+
+    // Drain created instances
+    let mut created = Vec::new();
+    {
+        let reg = instance_registry.read().unwrap();
+        for (_id, inst_data) in reg.iter() {
+            use eustress_common::scripting::PropertyValue as PV;
+            let pos = inst_data.properties.get("Position")
+                .and_then(|v| if let PV::Vector3(vec) = v { Some([vec.x as f32, vec.y as f32, vec.z as f32]) } else { None })
+                .unwrap_or([0.0, 0.5, 0.0]);
+            let size = inst_data.properties.get("Size")
+                .and_then(|v| if let PV::Vector3(vec) = v { Some([vec.x as f32, vec.y as f32, vec.z as f32]) } else { None })
+                .unwrap_or([4.0, 1.0, 2.0]);
+            let color = inst_data.properties.get("Color")
+                .and_then(|v| if let PV::Color3(c) = v { Some([c.r as f32, c.g as f32, c.b as f32, 1.0]) } else { None })
+                .unwrap_or([0.639, 0.635, 0.647, 1.0]);
+            let material = inst_data.properties.get("Material")
+                .and_then(|v| if let PV::String(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_else(|| "Plastic".to_string());
+            let anchored = inst_data.properties.get("Anchored")
+                .and_then(|v| if let PV::Bool(b) = v { Some(*b) } else { None })
+                .unwrap_or(false);
+
+            created.push(eustress_common::luau::runtime::LuauCreatedInstance {
+                class_name: inst_data.class_name.clone(),
+                name: inst_data.name.clone(),
+                position: pos, size, color, material,
+                transparency: 0.0, anchored, can_collide: true,
+            });
+        }
+    }
+    clear_instance_registry();
+
+    r.map(|_| created)
+}
+
+/// Stub when realism-scripting is disabled
+#[cfg(not(feature = "realism-scripting"))]
+pub fn execute_rune_oneshot(_source: &str) -> Result<Vec<eustress_common::luau::runtime::LuauCreatedInstance>, String> {
+    Err("Rune scripting requires the realism-scripting feature. Use Luau instead.".to_string())
+}
+
 /// Create a new instance of the given class.
-/// 
+///
 /// ## Rune: `let part = Instance::new("Part");`
 #[cfg(feature = "realism-scripting")]
 #[rune::function]

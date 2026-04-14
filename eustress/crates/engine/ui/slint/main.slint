@@ -8,7 +8,7 @@ import { Ribbon, SavedIdentityData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData } from "properties.slint";
 import { OutputConsole, LogData } from "output.slint";
-import { CommandBar } from "command_bar.slint";
+import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
@@ -140,9 +140,11 @@ export component StudioWindow inherits Window {
     in-out property <length> tab-context-menu-x: 0px;
     in-out property <length> tab-context-menu-y: 0px;
     
-    // Command bar
-    in-out property <bool> show-command-bar: false;
+    // Command bar (docked at bottom)
+    in-out property <bool> show-command-bar: true;
     in-out property <string> command-text: "";
+    in-out property <string> command-language: "rune";
+    in-out property <[ScriptOutputEntry]> script-output-log: [];
     
     // Dialogs
     in-out property <bool> show-publish-dialog: false;
@@ -527,6 +529,8 @@ export component StudioWindow inherits Window {
     
     // Command bar
     callback execute-command(string);
+    callback execute-script(/* language */ string, /* script */ string);
+    callback clear-script-output();
     
     // Toolbox part insertion
     callback insert-part(string);
@@ -2163,26 +2167,29 @@ export component StudioWindow inherits Window {
                 on-open-path(msg) => { root.open-path-from-log(msg); }
             }
         }
-        
+
+        // ====================================================================
+        // Command Bar (docked at very bottom)
+        // ====================================================================
+        CommandBar {
+            command-text <=> root.command-text;
+            language <=> root.command-language;
+            output-log: root.script-output-log;
+
+            on-execute(language, script) => {
+                root.execute-script(language, script);
+            }
+            on-close => { root.show-command-bar = false; }
+            on-text-changed(text) => { root.command-text = text; }
+            on-clear-output => { root.clear-script-output(); }
+        }
+
     }
 
     // ========================================================================
     // Overlays and Dialogs
     // ========================================================================
     
-    // Command bar (floating, bottom-center, VS Code style — Ctrl+Shift+P)
-    if root.show-command-bar: Rectangle {
-        x: (parent.width - 500px) / 2;
-        y: parent.height - 340px;
-        width: 500px;
-        
-        CommandBar {
-            width: 100%;
-            command-text <=> root.command-text;
-            on-execute(cmd) => { root.execute-command(cmd); }
-            on-close => { root.show-command-bar = false; }
-        }
-    }
     
     // Notifications (toast messages)
     Notifications {

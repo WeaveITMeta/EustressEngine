@@ -648,6 +648,9 @@ pub fn handle_paste_event(
     mut paste_completed: MessageWriter<PasteCompletedEvent>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     selection_manager: Option<Res<BevySelectionManager>>,
+    mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
+    mut mesh_cache: Option<ResMut<crate::space::instance_loader::PrimitiveMeshCache>>,
+    mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
 ) {
     for event in events.read() {
         if clipboard.is_empty() {
@@ -680,16 +683,24 @@ pub fn handle_paste_event(
             .unwrap_or_else(|| clipboard.get_paste_offset());
         
         let mut created_ids = Vec::new();
-        
-        // Spawn entities from clipboard
+
+        // Resolve workspace directory for TOML file writing
+        let workspace_dir = space_root.as_ref()
+            .map(|sr| sr.0.join("Workspace"))
+            .unwrap_or_else(|| crate::space::default_space_root().join("Workspace"));
+
+        // Spawn entities from clipboard — write TOML files for Parts (same as Insert)
         for entity_data in &clipboard.entities {
-            let spawned_id = spawn_entity_from_data(
+            let spawned_id = spawn_pasted_entity(
                 &mut commands,
                 &asset_server,
-                &mut meshes,
                 &mut materials,
                 entity_data,
                 offset,
+                &workspace_dir,
+                material_registry.as_deref_mut(),
+                mesh_cache.as_deref_mut(),
+                file_registry.as_deref_mut(),
             );
 
             if let Some(id) = spawned_id {
@@ -746,18 +757,21 @@ pub fn handle_duplicate_event(
     }
 }
 
-/// Helper function to spawn an entity from ClipboardEntityData2
-fn spawn_entity_from_data(
+/// Spawn a pasted entity by writing a TOML file and using the standard instance loader.
+/// This ensures pasted parts have full parity with inserted parts (InstanceFile, properties, etc.)
+fn spawn_pasted_entity(
     commands: &mut Commands,
     asset_server: &AssetServer,
-    _meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     data: &ClipboardEntityData2,
     offset: Vec3,
+    workspace_dir: &std::path::Path,
+    material_registry: Option<&mut crate::space::material_loader::MaterialRegistry>,
+    mesh_cache: Option<&mut crate::space::instance_loader::PrimitiveMeshCache>,
+    file_registry: Option<&mut crate::space::file_loader::SpaceFileRegistry>,
 ) -> Option<String> {
     use crate::spawn::*;
-    
-    // Parse class name
+
     let class_name = match ClassName::from_str(&data.class) {
         Ok(cn) => cn,
         Err(_) => {
@@ -765,101 +779,170 @@ fn spawn_entity_from_data(
             return None;
         }
     };
-    
-    // Get transform
-    let transform = Transform {
-        translation: Vec3::new(data.position[0], data.position[1], data.position[2]) + offset,
-        rotation: Quat::from_euler(
-            EulerRot::XYZ,
-            data.rotation[0].to_radians(),
-            data.rotation[1].to_radians(),
-            data.rotation[2].to_radians(),
-        ),
-        scale: Vec3::new(data.scale[0], data.scale[1], data.scale[2]),
-    };
-    
-    let instance = Instance {
-        name: data.name.clone(),
-        class_name,
-        archivable: true,
-        id: data.id,
-        ..Default::default()
-    };
-    
+
+    let pos = Vec3::new(data.position[0], data.position[1], data.position[2]) + offset;
+    let rot = Quat::from_euler(
+        EulerRot::XYZ,
+        data.rotation[0].to_radians(),
+        data.rotation[1].to_radians(),
+        data.rotation[2].to_radians(),
+    );
+    let scale = Vec3::new(data.scale[0], data.scale[1], data.scale[2]);
+
     let entity = match class_name {
         ClassName::Part => {
-            // Extract properties
-            let size = data.properties.get("size")
-                .and_then(|v| v.as_array())
-                .map(|a| Vec3::new(
-                    a.get(0).and_then(|v| v.as_f64()).unwrap_or(4.0) as f32,
-                    a.get(1).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                    a.get(2).and_then(|v| v.as_f64()).unwrap_or(2.0) as f32,
-                ))
-                .unwrap_or(Vec3::new(4.0, 1.0, 2.0));
-            
+            // Determine mesh path from shape
+            let shape = data.properties.get("shape")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Block");
+            let mesh_path = match shape {
+                "Ball" => "assets/parts/ball.glb",
+                "Cylinder" => "assets/parts/cylinder.glb",
+                "Wedge" => "assets/parts/wedge.glb",
+                "CornerWedge" => "assets/parts/corner_wedge.glb",
+                "Cone" => "assets/parts/cone.glb",
+                _ => "assets/parts/block.glb",
+            };
+
+            // Extract properties for TOML
             let color = data.properties.get("color")
                 .and_then(|v| v.as_array())
-                .map(|a| Color::srgba(
+                .map(|a| [
                     a.get(0).and_then(|v| v.as_f64()).unwrap_or(0.639) as f32,
                     a.get(1).and_then(|v| v.as_f64()).unwrap_or(0.635) as f32,
                     a.get(2).and_then(|v| v.as_f64()).unwrap_or(0.647) as f32,
                     a.get(3).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                ))
-                .unwrap_or(Color::srgba(0.639, 0.635, 0.647, 1.0));
-            
-            let mut basepart = BasePart::default();
-            basepart.size = size;
-            basepart.color = color;
-            basepart.cframe = transform;
-            basepart.transparency = data.properties.get("transparency")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-            basepart.reflectance = data.properties.get("reflectance")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0) as f32;
-            basepart.anchored = data.properties.get("anchored")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            basepart.can_collide = data.properties.get("can_collide")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            basepart.locked = data.properties.get("locked")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if let Some(mat_str) = data.properties.get("material").and_then(|v| v.as_str()) {
-                basepart.material = eustress_common::classes::Material::from_string(mat_str);
-            }
-            
-            let shape = data.properties.get("shape")
-                .and_then(|v| v.as_str())
-                .map(|s| match s {
-                    "Ball" => eustress_common::classes::PartType::Ball,
-                    "Cylinder" => eustress_common::classes::PartType::Cylinder,
-                    "Wedge" => eustress_common::classes::PartType::Wedge,
-                    "CornerWedge" => eustress_common::classes::PartType::CornerWedge,
-                    "Cone" => eustress_common::classes::PartType::Cone,
-                    _ => eustress_common::classes::PartType::Block,
-                })
-                .unwrap_or(eustress_common::classes::PartType::Block);
-            let part = Part { shape };
+                ])
+                .unwrap_or([0.639, 0.635, 0.647, 1.0]);
+            let transparency = data.properties.get("transparency")
+                .and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let reflectance = data.properties.get("reflectance")
+                .and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let anchored = data.properties.get("anchored")
+                .and_then(|v| v.as_bool()).unwrap_or(true);
+            let can_collide = data.properties.get("can_collide")
+                .and_then(|v| v.as_bool()).unwrap_or(true);
+            let locked = data.properties.get("locked")
+                .and_then(|v| v.as_bool()).unwrap_or(false);
+            let material_name = data.properties.get("material")
+                .and_then(|v| v.as_str()).unwrap_or("Plastic").to_string();
 
-            Some(spawn_part_glb(commands, asset_server, materials, instance, basepart, part))
+            let now = chrono::Utc::now().to_rfc3339();
+
+            // Build InstanceDefinition (same structure as toolbox insert)
+            let instance_def = crate::space::instance_loader::InstanceDefinition {
+                asset: Some(crate::space::instance_loader::AssetReference {
+                    mesh: mesh_path.to_string(),
+                    scene: "Scene0".to_string(),
+                }),
+                transform: crate::space::instance_loader::TransformData {
+                    position: [pos.x, pos.y, pos.z],
+                    rotation: [rot.x, rot.y, rot.z, rot.w],
+                    scale: [scale.x, scale.y, scale.z],
+                },
+                properties: crate::space::instance_loader::InstanceProperties {
+                    color,
+                    transparency,
+                    reflectance,
+                    anchored,
+                    can_collide,
+                    cast_shadow: true,
+                    material: material_name,
+                    locked,
+                    ..Default::default()
+                },
+                metadata: crate::space::instance_loader::InstanceMetadata {
+                    class_name: "Part".to_string(),
+                    archivable: true,
+                    name: Some(data.name.clone()),
+                    created: now.clone(),
+                    last_modified: now,
+                },
+                material: None,
+                thermodynamic: None,
+                electrochemical: None,
+                ui: None,
+                attributes: None,
+                tags: None,
+                parameters: None,
+                extra: std::collections::HashMap::new(),
+            };
+
+            // Generate unique filename
+            let _ = std::fs::create_dir_all(workspace_dir);
+            let base = &data.name;
+            let file_name = {
+                let test = workspace_dir.join(format!("{}.glb.toml", base));
+                if !test.exists() {
+                    base.clone()
+                } else {
+                    (1..1000).map(|i| format!("{}{}", base, i))
+                        .find(|c| !workspace_dir.join(format!("{}.glb.toml", c)).exists())
+                        .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
+                }
+            };
+            let toml_path = workspace_dir.join(format!("{}.glb.toml", file_name));
+
+            // Write TOML file
+            if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
+                warn!("Failed to write pasted entity TOML: {}", e);
+                return None;
+            }
+
+            // Spawn via standard instance loader (same path as file_loader)
+            let mut default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
+            let mat_reg = material_registry.unwrap_or(&mut default_mat_reg);
+            let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
+            let mesh_c = mesh_cache.unwrap_or(&mut default_mesh_cache);
+
+            let entity = crate::space::instance_loader::spawn_instance(
+                commands,
+                asset_server,
+                materials,
+                mat_reg,
+                mesh_c,
+                toml_path.clone(),
+                instance_def,
+            );
+
+            // Register in file registry
+            if let Some(registry) = file_registry {
+                registry.register(
+                    toml_path.clone(),
+                    entity,
+                    crate::space::FileMetadata {
+                        path: toml_path,
+                        file_type: crate::space::FileType::Toml,
+                        service: "Workspace".to_string(),
+                        name: data.name.clone(),
+                        size: 0,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    },
+                );
+            }
+
+            Some(entity)
         }
         ClassName::Model => {
+            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
             Some(spawn_model(commands, instance, Model::default()))
         }
         ClassName::Folder => {
+            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
             Some(spawn_folder(commands, instance))
         }
         ClassName::PointLight => {
+            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
+            let transform = Transform { translation: pos, rotation: rot, scale };
             Some(spawn_point_light(commands, instance, EustressPointLight::default(), transform))
         }
         ClassName::SpotLight => {
+            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
+            let transform = Transform { translation: pos, rotation: rot, scale };
             Some(spawn_spot_light(commands, instance, EustressSpotLight::default(), transform))
         }
         _ => {
-            // Generic spawn for unsupported types
             warn!("Paste not fully implemented for {:?}", class_name);
             None
         }

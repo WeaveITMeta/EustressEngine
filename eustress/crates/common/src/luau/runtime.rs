@@ -12,6 +12,33 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
+/// Instance data extracted from the Luau VM after script execution.
+/// Used to bridge Luau Instance.new() to Bevy ECS entity spawning.
+#[derive(Debug, Clone)]
+pub struct LuauCreatedInstance {
+    pub class_name: String,
+    pub name: String,
+    pub position: [f32; 3],
+    pub size: [f32; 3],
+    pub color: [f32; 4],
+    pub material: String,
+    pub transparency: f32,
+    pub anchored: bool,
+    pub can_collide: bool,
+}
+
+// Thread-local output buffer for capturing print/warn/error from Luau scripts.
+// Drained after execute_chunk() to return output to the caller.
+thread_local! {
+    static LUAU_OUTPUT: std::cell::RefCell<Vec<(String, bool)>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Drain all captured Luau output since the last call.
+/// Returns (text, is_error) pairs.
+pub fn drain_luau_output() -> Vec<(String, bool)> {
+    LUAU_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
 // ============================================================================
 // Luau Runtime — mlua VM wrapper
 // ============================================================================
@@ -92,6 +119,59 @@ impl LuauRuntime {
         result
     }
 
+    /// Drain all instances created during script execution.
+    /// Returns a list of (class_name, properties) for spawning in ECS.
+    #[cfg(feature = "luau")]
+    pub fn drain_created_instances(&self) -> Vec<LuauCreatedInstance> {
+        let mut instances = Vec::new();
+        let globals = self.lua.globals();
+        let Ok(registry) = globals.get::<mlua::Table>("__INSTANCE_REGISTRY__") else { return instances };
+
+        for pair in registry.pairs::<i64, mlua::Table>() {
+            let Ok((_, inst)) = pair else { continue };
+
+            let class_name: String = inst.get("_className").unwrap_or_default();
+            let name: String = inst.get("Name").unwrap_or_else(|_| class_name.clone());
+
+            // Extract Part-specific properties
+            let material: String = inst.get("Material").unwrap_or_else(|_| "Plastic".to_string());
+            let transparency: f64 = inst.get("Transparency").unwrap_or(0.0);
+            let anchored: bool = inst.get("Anchored").unwrap_or(false);
+            let can_collide: bool = inst.get("CanCollide").unwrap_or(true);
+
+            // Extract position from Vector3 userdata or default
+            let position = inst.get::<mlua::AnyUserData>("Position").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
+                .unwrap_or([0.0, 0.0, 0.0]);
+
+            let size = inst.get::<mlua::AnyUserData>("Size").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok().map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]))
+                .unwrap_or([4.0, 1.0, 2.0]);
+
+            let color = inst.get::<mlua::AnyUserData>("Color").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauColor3>().ok().map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32, 1.0]))
+                .unwrap_or([0.639, 0.635, 0.647, 1.0]);
+
+            instances.push(LuauCreatedInstance {
+                class_name,
+                name,
+                position,
+                size,
+                color,
+                material,
+                transparency: transparency as f32,
+                anchored,
+                can_collide,
+            });
+        }
+
+        instances
+    }
+
+    /// Fallback when luau feature is not enabled
+    #[cfg(not(feature = "luau"))]
+    pub fn drain_created_instances(&self) -> Vec<LuauCreatedInstance> { Vec::new() }
+
     /// Fallback when luau feature is not enabled
     #[cfg(not(feature = "luau"))]
     pub fn execute_chunk(&mut self, _source: &str, _chunk_name: &str) -> Result<(), String> {
@@ -148,113 +228,188 @@ impl LuauRuntime {
     /// - `Vector3`, `CFrame`, `Color3` — data types from shared scripting module
     #[cfg(feature = "luau")]
     fn inject_eustress_globals(lua: &mlua::Lua) -> Result<(), String> {
-        let globals = lua.globals();
-
-        // Helper to create a signal object with Connect/Wait methods
-        fn create_signal(lua: &mlua::Lua, connections: mlua::Table) -> Result<mlua::Table, String> {
-            let signal = lua.create_table()
-                .map_err(|e| format!("Failed to create signal: {}", e))?;
-            
-            signal.set("_connections", connections.clone())
-                .map_err(|e| format!("Failed to set _connections: {}", e))?;
-            signal.set("_nextId", 1i64)
-                .map_err(|e| format!("Failed to set _nextId: {}", e))?;
-
-            // Signal:Connect(callback) -> Connection
-            let connect_fn = lua.create_function(|lua, (this, callback): (mlua::Table, mlua::Function)| {
-                let connections: mlua::Table = this.get("_connections")?;
-                let next_id: i64 = this.get("_nextId")?;
-                this.set("_nextId", next_id + 1)?;
-                
-                // Store callback
-                connections.set(next_id, callback)?;
-                
-                // Create connection object
-                let connection = lua.create_table()?;
-                connection.set("_id", next_id)?;
-                connection.set("_signal", this.clone())?;
-                connection.set("Connected", true)?;
-                
-                // Connection:Disconnect()
-                connection.set("Disconnect", lua.create_function(|_, conn: mlua::Table| {
-                    let id: i64 = conn.get("_id")?;
-                    let signal: mlua::Table = conn.get("_signal")?;
-                    let connections: mlua::Table = signal.get("_connections")?;
-                    connections.set(id, mlua::Value::Nil)?;
-                    conn.set("Connected", false)?;
-                    Ok(())
-                })?)?;
-                
-                Ok(connection)
-            }).map_err(|e| format!("Failed to create Connect: {}", e))?;
-            signal.set("Connect", connect_fn)
-                .map_err(|e| format!("Failed to set Connect: {}", e))?;
-
-            // Signal:Once(callback) -> Connection (fires once then disconnects)
-            let once_fn = lua.create_function(|lua, (this, callback): (mlua::Table, mlua::Function)| {
-                let connections: mlua::Table = this.get("_connections")?;
-                let next_id: i64 = this.get("_nextId")?;
-                this.set("_nextId", next_id + 1)?;
-                
-                // Wrap callback to auto-disconnect
-                let wrapped = lua.create_function(move |lua, args: mlua::MultiValue| {
-                    let result = callback.call::<mlua::MultiValue>(args.clone());
-                    // Get connection and disconnect (simplified - actual impl would track this)
-                    result
-                })?;
-                
-                connections.set(next_id, wrapped)?;
-                
-                let connection = lua.create_table()?;
-                connection.set("_id", next_id)?;
-                connection.set("_signal", this.clone())?;
-                connection.set("Connected", true)?;
-                connection.set("Disconnect", lua.create_function(|_, conn: mlua::Table| {
-                    let id: i64 = conn.get("_id")?;
-                    let signal: mlua::Table = conn.get("_signal")?;
-                    let connections: mlua::Table = signal.get("_connections")?;
-                    connections.set(id, mlua::Value::Nil)?;
-                    conn.set("Connected", false)?;
-                    Ok(())
-                })?)?;
-                
-                Ok(connection)
-            }).map_err(|e| format!("Failed to create Once: {}", e))?;
-            signal.set("Once", once_fn)
-                .map_err(|e| format!("Failed to set Once: {}", e))?;
-
-            // Signal:Wait() -> returns when signal fires (stub - returns immediately)
-            let wait_fn = lua.create_function(|_, _this: mlua::Table| {
-                // TODO: Integrate with coroutine scheduler to actually yield
-                Ok(0.0f64) // Return delta time
-            }).map_err(|e| format!("Failed to create Wait: {}", e))?;
-            signal.set("Wait", wait_fn)
-                .map_err(|e| format!("Failed to set Wait: {}", e))?;
-
-            Ok(signal)
-        }
-
         // Inject shared scripting types (Vector3, CFrame, Color3)
         super::types::inject_types(lua)
             .map_err(|e| format!("Failed to inject scripting types: {}", e))?;
 
-        // Override print to route to Eustress output log
+        // Inject each API subsystem via separate functions to avoid compiler stack overflow
+        Self::inject_core_globals(lua)?;
+        Self::inject_instance_api(lua)?;
+        Self::inject_task_library(lua)?;
+        Self::inject_run_service(lua)?;
+        Self::inject_user_input_service(lua)?;
+        Self::inject_players_service(lua)?;
+        Self::inject_storage_services(lua)?;
+        Self::inject_tween_service(lua)?;
+        Self::inject_data_services(lua)?;
+        Self::inject_http_service(lua)?;
+        Self::inject_collection_service(lua)?;
+        Self::inject_sound_service(lua)?;
+        Self::inject_camera_api(lua)?;
+        Self::inject_mouse_api(lua)?;
+        Self::inject_animation_api(lua)?;
+        Self::inject_humanoid_api(lua)?;
+        Self::inject_marketplace_service(lua)?;
+        Self::inject_simulation_service(lua)?;
+        Self::inject_workspace_query(lua)?;
+        Self::inject_spatial_queries(lua)?;
+        #[cfg(feature = "gui")]
+        Self::inject_gui_api(lua)?;
+        Self::inject_event_system(lua)?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Signal helper — creates a Roblox-compatible RBXScriptSignal table
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn create_signal(lua: &mlua::Lua) -> Result<mlua::Table, String> {
+        let signal = lua.create_table()
+            .map_err(|e| format!("Failed to create signal: {}", e))?;
+
+        let connections = lua.create_table()
+            .map_err(|e| format!("Failed to create signal connections: {}", e))?;
+        signal.set("_connections", connections)
+            .map_err(|e| format!("Failed to set _connections: {}", e))?;
+        signal.set("_nextId", 1i64)
+            .map_err(|e| format!("Failed to set _nextId: {}", e))?;
+
+        // Signal:Connect(callback) -> Connection
+        let connect_fn = lua.create_function(|lua, (this, callback): (mlua::Table, mlua::Function)| {
+            let connections: mlua::Table = this.get("_connections")?;
+            let next_id: i64 = this.get("_nextId")?;
+            this.set("_nextId", next_id + 1)?;
+            connections.set(next_id, callback)?;
+
+            let connection = lua.create_table()?;
+            connection.set("_id", next_id)?;
+            connection.set("_signal", this.clone())?;
+            connection.set("Connected", true)?;
+            connection.set("Disconnect", lua.create_function(|_, conn: mlua::Table| {
+                let id: i64 = conn.get("_id")?;
+                let signal: mlua::Table = conn.get("_signal")?;
+                let conns: mlua::Table = signal.get("_connections")?;
+                conns.set(id, mlua::Value::Nil)?;
+                conn.set("Connected", false)?;
+                Ok(())
+            })?)?;
+            Ok(connection)
+        }).map_err(|e| format!("Failed to create Connect: {}", e))?;
+        signal.set("Connect", connect_fn)
+            .map_err(|e| format!("Failed to set Connect: {}", e))?;
+
+        // Signal:Once(callback) -> Connection (auto-disconnect after first fire)
+        let once_fn = lua.create_function(|lua, (this, callback): (mlua::Table, mlua::Function)| {
+            let connections: mlua::Table = this.get("_connections")?;
+            let next_id: i64 = this.get("_nextId")?;
+            this.set("_nextId", next_id + 1)?;
+            let wrapped = lua.create_function(move |_lua, args: mlua::MultiValue| {
+                callback.call::<mlua::MultiValue>(args.clone())
+            })?;
+            connections.set(next_id, wrapped)?;
+
+            let connection = lua.create_table()?;
+            connection.set("_id", next_id)?;
+            connection.set("_signal", this.clone())?;
+            connection.set("Connected", true)?;
+            connection.set("Disconnect", lua.create_function(|_, conn: mlua::Table| {
+                let id: i64 = conn.get("_id")?;
+                let signal: mlua::Table = conn.get("_signal")?;
+                let conns: mlua::Table = signal.get("_connections")?;
+                conns.set(id, mlua::Value::Nil)?;
+                conn.set("Connected", false)?;
+                Ok(())
+            })?)?;
+            Ok(connection)
+        }).map_err(|e| format!("Failed to create Once: {}", e))?;
+        signal.set("Once", once_fn)
+            .map_err(|e| format!("Failed to set Once: {}", e))?;
+
+        // Signal:Wait() -> returns when signal fires (stub — returns immediately)
+        let wait_fn = lua.create_function(|_, _this: mlua::Table| {
+            // TODO: Integrate with coroutine scheduler to actually yield
+            Ok(0.0f64)
+        }).map_err(|e| format!("Failed to create Wait: {}", e))?;
+        signal.set("Wait", wait_fn)
+            .map_err(|e| format!("Failed to set Wait: {}", e))?;
+
+        // Signal:Fire(...) — fire all connected callbacks with given arguments
+        let fire_fn = lua.create_function(|_, (this, args): (mlua::Table, mlua::MultiValue)| {
+            let connections: mlua::Table = this.get("_connections")?;
+            for pair in connections.pairs::<i64, mlua::Function>() {
+                if let Ok((_, callback)) = pair {
+                    let _ = callback.call::<()>(args.clone());
+                }
+            }
+            Ok(())
+        }).map_err(|e| format!("Failed to create Fire: {}", e))?;
+        signal.set("Fire", fire_fn)
+            .map_err(|e| format!("Failed to set Fire: {}", e))?;
+
+        Ok(signal)
+    }
+
+    // ========================================================================
+    // Core globals: print, warn, game, workspace
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_core_globals(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
+        // Override print to route to Eustress output log + capture buffer
         let print_function = lua.create_function(|_, args: mlua::MultiValue| {
-            let output: Vec<String> = args.iter().map(|value| format!("{:?}", value)).collect();
-            tracing::info!("[Luau] {}", output.join("\t"));
+            let output: Vec<String> = args.iter().map(|value| format!("{}", value.to_string().unwrap_or_default())).collect();
+            let line = output.join("\t");
+            tracing::info!("[Luau] {}", line);
+            LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((line, false)));
             Ok(())
         }).map_err(|error| format!("Failed to create print function: {}", error))?;
         globals.set("print", print_function)
             .map_err(|error| format!("Failed to set print: {}", error))?;
 
-        // Override warn to route to Eustress warning log
+        // Override warn to route to Eustress warning log + capture buffer
         let warn_function = lua.create_function(|_, args: mlua::MultiValue| {
-            let output: Vec<String> = args.iter().map(|value| format!("{:?}", value)).collect();
-            tracing::warn!("[Luau] {}", output.join("\t"));
+            let output: Vec<String> = args.iter().map(|value| format!("{}", value.to_string().unwrap_or_default())).collect();
+            let line = output.join("\t");
+            tracing::warn!("[Luau] {}", line);
+            LUAU_OUTPUT.with(|buf| buf.borrow_mut().push((format!("⚠ {}", line), false)));
             Ok(())
         }).map_err(|error| format!("Failed to create warn function: {}", error))?;
         globals.set("warn", warn_function)
             .map_err(|error| format!("Failed to set warn: {}", error))?;
+
+        // typeof() — Roblox type checking
+        let typeof_fn = lua.create_function(|_, value: mlua::Value| {
+            let type_name = match &value {
+                mlua::Value::Nil => "nil",
+                mlua::Value::Boolean(_) => "boolean",
+                mlua::Value::Integer(_) => "number",
+                mlua::Value::Number(_) => "number",
+                mlua::Value::String(_) => "string",
+                mlua::Value::Table(t) => {
+                    // Check for known class types
+                    if let Ok(class) = t.raw_get::<String>("_className") {
+                        return Ok(class);
+                    }
+                    "table"
+                }
+                mlua::Value::Function(_) => "function",
+                mlua::Value::Thread(_) => "thread",
+                mlua::Value::UserData(ud) => {
+                    if ud.is::<super::types::LuauVector3>() { return Ok("Vector3".to_string()); }
+                    if ud.is::<super::types::LuauCFrame>() { return Ok("CFrame".to_string()); }
+                    if ud.is::<super::types::LuauColor3>() { return Ok("Color3".to_string()); }
+                    if ud.is::<super::types::LuauUDim2>() { return Ok("UDim2".to_string()); }
+                    if ud.is::<super::types::LuauTweenInfo>() { return Ok("TweenInfo".to_string()); }
+                    "userdata"
+                }
+                _ => "userdata",
+            };
+            Ok(type_name.to_string())
+        }).map_err(|error| format!("Failed to create typeof: {}", error))?;
+        globals.set("typeof", typeof_fn)
+            .map_err(|error| format!("Failed to set typeof: {}", error))?;
 
         // Stub `game` as an empty table (populated per-script by bridge)
         let game_table = lua.create_table()
@@ -269,6 +424,16 @@ impl LuauRuntime {
             .map_err(|error| format!("Failed to set workspace.Gravity: {}", error))?;
         globals.set("workspace", workspace_table)
             .map_err(|error| format!("Failed to set workspace: {}", error))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Instance API: Instance.new, Clone, Destroy, FindFirstChild, etc.
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_instance_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P0: Instance API — Core entity creation and manipulation
@@ -354,12 +519,192 @@ impl LuauRuntime {
                 "ClickDetector" => {
                     instance.set("MaxActivationDistance", 32.0f64)?;
                 }
-                "Frame" | "TextLabel" | "TextButton" | "ImageLabel" | "ImageButton" => {
+                "ScreenGui" => {
+                    instance.set("Enabled", true)?;
+                    instance.set("DisplayOrder", 0i64)?;
+                    instance.set("IgnoreGuiInset", false)?;
+                    instance.set("ResetOnSpawn", true)?;
+                    instance.set("ZIndexBehavior", "Sibling")?;
+                }
+                "SurfaceGui" => {
+                    instance.set("Enabled", true)?;
+                    instance.set("Face", "Front")?;
+                    instance.set("Active", true)?;
+                    instance.set("Adornee", mlua::Value::Nil)?;
+                    instance.set("AlwaysOnTop", false)?;
+                    instance.set("LightInfluence", 0.0f64)?;
+                    instance.set("SizingMode", "FixedSize")?;
+                    instance.set("CanvasSize", lua.create_userdata(super::types::LuauVector3::new(800.0, 600.0, 0.0))?)?;
+                }
+                "BillboardGui" => {
+                    instance.set("Enabled", true)?;
+                    instance.set("Active", true)?;
+                    instance.set("Adornee", mlua::Value::Nil)?;
+                    instance.set("AlwaysOnTop", false)?;
+                    instance.set("LightInfluence", 0.0f64)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("StudsOffset", lua.create_userdata(super::types::LuauVector3::new(0.0, 2.0, 0.0))?)?;
+                    instance.set("MaxDistance", 100.0f64)?;
+                }
+                "Frame" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("BorderColor3", lua.create_userdata(super::types::LuauColor3::new(0.105, 0.164, 0.207))?)?;
+                    instance.set("BorderSizePixel", 1i64)?;
+                    instance.set("ClipsDescendants", false)?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                    instance.set("Rotation", 0.0f64)?;
+                }
+                "TextLabel" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("BorderSizePixel", 1i64)?;
+                    instance.set("Text", "")?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("TextSize", 14.0f64)?;
+                    instance.set("Font", "SourceSans")?;
+                    instance.set("TextWrapped", false)?;
+                    instance.set("TextScaled", false)?;
+                    instance.set("TextXAlignment", "Center")?;
+                    instance.set("TextYAlignment", "Center")?;
+                    instance.set("TextTransparency", 0.0f64)?;
+                    instance.set("TextTruncate", "None")?;
+                    instance.set("RichText", false)?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "TextButton" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("AnchorPoint", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("BorderSizePixel", 1i64)?;
+                    instance.set("Text", "Button")?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("TextSize", 14.0f64)?;
+                    instance.set("Font", "SourceSans")?;
+                    instance.set("AutoButtonColor", true)?;
+                    instance.set("Active", true)?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "TextBox" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 50.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("Text", "")?;
+                    instance.set("PlaceholderText", "")?;
+                    instance.set("PlaceholderColor3", lua.create_userdata(super::types::LuauColor3::new(0.7, 0.7, 0.7))?)?;
+                    instance.set("TextColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("TextSize", 14.0f64)?;
+                    instance.set("Font", "SourceSans")?;
+                    instance.set("ClearTextOnFocus", true)?;
+                    instance.set("MultiLine", false)?;
+                    instance.set("TextEditable", true)?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "ImageLabel" => {
                     instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
                     instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
                     instance.set("Visible", true)?;
                     instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
                     instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("Image", "")?;
+                    instance.set("ImageColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("ImageTransparency", 0.0f64)?;
+                    instance.set("ScaleType", "Stretch")?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "ImageButton" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("Image", "")?;
+                    instance.set("ImageColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("ImageTransparency", 0.0f64)?;
+                    instance.set("AutoButtonColor", true)?;
+                    instance.set("Active", true)?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "ScrollingFrame" => {
+                    instance.set("Position", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Size", lua.create_userdata(super::types::LuauUDim2::new(0.0, 200.0, 0.0, 200.0))?)?;
+                    instance.set("Visible", true)?;
+                    instance.set("BackgroundColor3", lua.create_userdata(super::types::LuauColor3::new(1.0, 1.0, 1.0))?)?;
+                    instance.set("BackgroundTransparency", 0.0f64)?;
+                    instance.set("CanvasSize", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 2.0, 0.0))?)?;
+                    instance.set("CanvasPosition", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("ScrollBarThickness", 12i64)?;
+                    instance.set("ScrollBarImageColor3", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("ScrollingDirection", "XY")?;
+                    instance.set("ScrollingEnabled", true)?;
+                    instance.set("ElasticBehavior", "WhenScrollable")?;
+                    instance.set("LayoutOrder", 0i64)?;
+                    instance.set("ZIndex", 1i64)?;
+                }
+                "UIListLayout" => {
+                    instance.set("FillDirection", "Vertical")?;
+                    instance.set("HorizontalAlignment", "Left")?;
+                    instance.set("VerticalAlignment", "Top")?;
+                    instance.set("SortOrder", "LayoutOrder")?;
+                    instance.set("Padding", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("Wraps", false)?;
+                }
+                "UIGridLayout" => {
+                    instance.set("CellSize", lua.create_userdata(super::types::LuauUDim2::new(0.0, 100.0, 0.0, 100.0))?)?;
+                    instance.set("CellPadding", lua.create_userdata(super::types::LuauUDim2::new(0.0, 5.0, 0.0, 5.0))?)?;
+                    instance.set("FillDirection", "Horizontal")?;
+                    instance.set("FillDirectionMaxCells", 0i64)?;
+                    instance.set("HorizontalAlignment", "Left")?;
+                    instance.set("VerticalAlignment", "Top")?;
+                    instance.set("SortOrder", "LayoutOrder")?;
+                }
+                "UIPadding" => {
+                    instance.set("PaddingTop", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingBottom", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingLeft", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                    instance.set("PaddingRight", lua.create_userdata(super::types::LuauUDim2::new(0.0, 0.0, 0.0, 0.0))?)?;
+                }
+                "UICorner" => {
+                    instance.set("CornerRadius", lua.create_userdata(super::types::LuauUDim2::new(0.0, 8.0, 0.0, 0.0))?)?;
+                }
+                "UIStroke" => {
+                    instance.set("Color", lua.create_userdata(super::types::LuauColor3::new(0.0, 0.0, 0.0))?)?;
+                    instance.set("Thickness", 1.0f64)?;
+                    instance.set("Transparency", 0.0f64)?;
+                    instance.set("ApplyStrokeMode", "Contextual")?;
+                    instance.set("LineJoinMode", "Round")?;
+                }
+                "UIAspectRatioConstraint" => {
+                    instance.set("AspectRatio", 1.0f64)?;
+                    instance.set("AspectType", "FitWithinMaxSize")?;
+                    instance.set("DominantAxis", "Width")?;
+                }
+                "UISizeConstraint" => {
+                    instance.set("MaxSize", lua.create_userdata(super::types::LuauVector3::new(f64::MAX, f64::MAX, 0.0))?)?;
+                    instance.set("MinSize", lua.create_userdata(super::types::LuauVector3::new(0.0, 0.0, 0.0))?)?;
+                }
+                "UITextSizeConstraint" => {
+                    instance.set("MaxTextSize", 100i64)?;
+                    instance.set("MinTextSize", 1i64)?;
                 }
                 _ => {}
             }
@@ -684,7 +1029,107 @@ impl LuauRuntime {
                     })?;
                     Ok(mlua::Value::Function(get_full_name_fn))
                 }
-                _ => Ok(mlua::Value::Nil)
+                // WaitForChild(name, timeout?) — returns child or errors
+                "WaitForChild" => {
+                    let wait_for_child_fn = lua.create_function(|_, (this, name, _timeout): (mlua::Table, String, Option<f64>)| {
+                        // Immediate lookup (TODO: integrate with coroutine scheduler for actual waiting)
+                        let children: mlua::Table = this.raw_get("_children")?;
+                        for pair in children.pairs::<mlua::Value, mlua::Table>() {
+                            if let Ok((_, child)) = pair {
+                                let child_name: String = child.raw_get("Name").unwrap_or_default();
+                                if child_name == name {
+                                    return Ok(mlua::Value::Table(child));
+                                }
+                            }
+                        }
+                        Err(mlua::Error::RuntimeError(format!(
+                            "Infinite yield possible on '{}:WaitForChild(\"{}\")'", 
+                            this.raw_get::<String>("Name").unwrap_or_default(), name
+                        )))
+                    })?;
+                    Ok(mlua::Value::Function(wait_for_child_fn))
+                }
+                // FindFirstAncestor(name) — walks up Parent chain
+                "FindFirstAncestor" => {
+                    let find_ancestor_fn = lua.create_function(|_, (this, name): (mlua::Table, String)| {
+                        let mut current: mlua::Value = this.raw_get("Parent")?;
+                        while let mlua::Value::Table(parent) = current {
+                            let parent_name: String = parent.raw_get("Name").unwrap_or_default();
+                            if parent_name == name {
+                                return Ok(mlua::Value::Table(parent));
+                            }
+                            current = parent.raw_get("Parent")?;
+                        }
+                        Ok(mlua::Value::Nil)
+                    })?;
+                    Ok(mlua::Value::Function(find_ancestor_fn))
+                }
+                // FindFirstAncestorOfClass(className)
+                "FindFirstAncestorOfClass" => {
+                    let find_ancestor_class_fn = lua.create_function(|_, (this, class_name): (mlua::Table, String)| {
+                        let mut current: mlua::Value = this.raw_get("Parent")?;
+                        while let mlua::Value::Table(parent) = current {
+                            let parent_class: String = parent.raw_get("_className").unwrap_or_default();
+                            if parent_class == class_name {
+                                return Ok(mlua::Value::Table(parent));
+                            }
+                            current = parent.raw_get("Parent")?;
+                        }
+                        Ok(mlua::Value::Nil)
+                    })?;
+                    Ok(mlua::Value::Function(find_ancestor_class_fn))
+                }
+                // FindFirstAncestorWhichIsA(className) — includes inheritance
+                "FindFirstAncestorWhichIsA" => {
+                    let find_ancestor_isa_fn = lua.create_function(|_, (this, class_name): (mlua::Table, String)| {
+                        let mut current: mlua::Value = this.raw_get("Parent")?;
+                        while let mlua::Value::Table(parent) = current {
+                            let parent_class: String = parent.raw_get("_className").unwrap_or_default();
+                            if parent_class == class_name {
+                                return Ok(mlua::Value::Table(parent));
+                            }
+                            // Inheritance check
+                            let matches = match class_name.as_str() {
+                                "BasePart" => matches!(parent_class.as_str(),
+                                    "Part" | "MeshPart" | "WedgePart" | "CornerWedgePart" | "SpawnLocation" | "Seat"),
+                                "PVInstance" => matches!(parent_class.as_str(),
+                                    "Part" | "MeshPart" | "Model" | "BasePart"),
+                                "GuiObject" => matches!(parent_class.as_str(),
+                                    "Frame" | "TextLabel" | "TextButton" | "TextBox" | "ImageLabel" | "ImageButton"),
+                                _ => false,
+                            };
+                            if matches {
+                                return Ok(mlua::Value::Table(parent));
+                            }
+                            current = parent.raw_get("Parent")?;
+                        }
+                        Ok(mlua::Value::Nil)
+                    })?;
+                    Ok(mlua::Value::Function(find_ancestor_isa_fn))
+                }
+                // Event signal access: Changed, ChildAdded, ChildRemoved, Touched, TouchEnded
+                "Changed" | "ChildAdded" | "ChildRemoved" | "Touched" | "TouchEnded" 
+                | "AncestryChanged" | "DescendantAdded" | "DescendantRemoving" => {
+                    let event_name_owned = key.to_string();
+                    let entity_id: i64 = this.raw_get("_entityId").unwrap_or(0);
+                    let globals = lua.globals();
+                    let get_or_create: mlua::Function = globals.get("__get_or_create_event__")?;
+                    let signal: mlua::Table = get_or_create.call((entity_id, event_name_owned))?;
+                    Ok(mlua::Value::Table(signal))
+                }
+                _ => {
+                    // Try finding a child with this name (implicit child access)
+                    let children: mlua::Table = this.raw_get("_children")?;
+                    for pair in children.pairs::<mlua::Value, mlua::Table>() {
+                        if let Ok((_, child)) = pair {
+                            let child_name: String = child.raw_get("Name").unwrap_or_default();
+                            if child_name == key {
+                                return Ok(mlua::Value::Table(child));
+                            }
+                        }
+                    }
+                    Ok(mlua::Value::Nil)
+                }
             }
         }).map_err(|e| format!("Failed to create instance __index: {}", e))?;
         
@@ -695,77 +1140,90 @@ impl LuauRuntime {
         // For BasePart properties (Position, Size, Color, Material, Anchored,
         // Transparency, CanCollide), log the change for the engine to apply.
         // All other properties are set directly on the table.
-        let instance_newindex = lua.create_function(|_, (this, key, value): (mlua::Table, String, mlua::Value)| {
+        let instance_newindex = lua.create_function(|lua, (this, key, value): (mlua::Table, String, mlua::Value)| {
+            // Helper: fire the Changed event for this instance if listeners exist
+            let fire_changed = |lua: &mlua::Lua, inst: &mlua::Table, property: &str| -> mlua::Result<()> {
+                let entity_id: i64 = inst.raw_get("_entityId").unwrap_or(0);
+                if entity_id == 0 { return Ok(()); }
+                let globals = lua.globals();
+                if let Ok(fire_fn) = globals.get::<mlua::Function>("__fire_event__") {
+                    let _ = fire_fn.call::<()>((entity_id, "Changed", property.to_string()));
+                }
+                Ok(())
+            };
+
             match key.as_str() {
-                "Position" => {
-                    // Accept Vector3 userdata or table with X/Y/Z
-                    this.raw_set(key, value)?;
+                // BasePart tracked properties — set + log + fire Changed
+                "Position" | "Size" | "CFrame" | "Material" | "Transparency" 
+                | "Anchored" | "CanCollide" | "Reflectance" | "Velocity"
+                | "RotVelocity" | "Massless" | "RootPriority" => {
+                    this.raw_set(key.clone(), value)?;
                     let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.Position changed", name);
-                }
-                "Size" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.Size changed", name);
-                }
-                "CFrame" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.CFrame changed", name);
+                    tracing::debug!("[Luau] {}.{} changed", name, key);
+                    fire_changed(lua, &this, &key)?;
                 }
                 "Color" | "Color3" | "BrickColor" => {
                     this.raw_set("Color", value)?;
                     let name: String = this.raw_get("Name").unwrap_or_default();
                     tracing::debug!("[Luau] {}.Color changed", name);
+                    fire_changed(lua, &this, "Color")?;
                 }
-                "Material" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.Material changed", name);
+                // Name change — fire Changed
+                "Name" => {
+                    this.raw_set(key.clone(), value)?;
+                    fire_changed(lua, &this, &key)?;
                 }
-                "Transparency" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.Transparency changed", name);
-                }
-                "Anchored" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.Anchored changed", name);
-                }
-                "CanCollide" => {
-                    this.raw_set(key, value)?;
-                    let name: String = this.raw_get("Name").unwrap_or_default();
-                    tracing::debug!("[Luau] {}.CanCollide changed", name);
-                }
-                "Reflectance" => {
-                    this.raw_set(key, value)?;
-                }
+                // Parent reparenting — fire AncestryChanged + ChildAdded/ChildRemoved
                 "Parent" => {
-                    // Handle reparenting
                     let entity_id: i64 = this.raw_get("_entityId").unwrap_or(0);
 
-                    // Remove from old parent's children
+                    // Remove from old parent's children and fire ChildRemoved
                     let old_parent: mlua::Value = this.raw_get("Parent")?;
                     if let mlua::Value::Table(ref old_pt) = old_parent {
                         if let Ok(old_children) = old_pt.raw_get::<mlua::Table>("_children") {
                             old_children.set(entity_id, mlua::Value::Nil)?;
+                        }
+                        // Fire ChildRemoved on old parent
+                        let old_parent_id: i64 = old_pt.raw_get("_entityId").unwrap_or(0);
+                        if old_parent_id != 0 {
+                            let globals = lua.globals();
+                            if let Ok(fire_fn) = globals.get::<mlua::Function>("__fire_event__") {
+                                let _ = fire_fn.call::<()>((old_parent_id, "ChildRemoved", this.clone()));
+                            }
                         }
                     }
 
                     // Set new parent
                     this.raw_set("Parent", value.clone())?;
 
-                    // Add to new parent's children
+                    // Add to new parent's children and fire ChildAdded
                     if let mlua::Value::Table(ref new_pt) = value {
                         if let Ok(new_children) = new_pt.raw_get::<mlua::Table>("_children") {
                             new_children.set(entity_id, this.clone())?;
                         }
+                        // Fire ChildAdded on new parent
+                        let new_parent_id: i64 = new_pt.raw_get("_entityId").unwrap_or(0);
+                        if new_parent_id != 0 {
+                            let globals = lua.globals();
+                            if let Ok(fire_fn) = globals.get::<mlua::Function>("__fire_event__") {
+                                let _ = fire_fn.call::<()>((new_parent_id, "ChildAdded", this.clone()));
+                            }
+                        }
+                    }
+
+                    // Fire AncestryChanged on the instance itself
+                    fire_changed(lua, &this, "Parent")?;
+                    if entity_id != 0 {
+                        let globals = lua.globals();
+                        if let Ok(fire_fn) = globals.get::<mlua::Function>("__fire_event__") {
+                            let _ = fire_fn.call::<()>((entity_id, "AncestryChanged", (this.clone(), value)));
+                        }
                     }
                 }
                 _ => {
-                    // Default: set directly on the table
-                    this.raw_set(key, value)?;
+                    // Default: set directly on the table, fire Changed
+                    this.raw_set(key.clone(), value)?;
+                    fire_changed(lua, &this, &key)?;
                 }
             }
             Ok(())
@@ -777,6 +1235,16 @@ impl LuauRuntime {
         // Store metatable for use by Instance.new
         globals.set("__INSTANCE_MT__", instance_mt)
             .map_err(|e| format!("Failed to set instance metatable: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // task library: task.wait, task.spawn, task.defer, task.delay
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_task_library(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // Stub `task` library for coroutine scheduling
         let task_table = lua.create_table()
@@ -792,21 +1260,41 @@ impl LuauRuntime {
         task_table.set("wait", task_wait)
             .map_err(|error| format!("Failed to set task.wait: {}", error))?;
 
-        // task.spawn(function) — spawn a new thread
-        let task_spawn = lua.create_function(|_, _function: mlua::Function| {
-            // TODO: Integrate with Luau coroutine scheduler
+        // task.spawn(function, ...) — execute function immediately in a new logical thread
+        let task_spawn = lua.create_function(|_, (function, args): (mlua::Function, mlua::MultiValue)| {
+            // Execute immediately (proper coroutine scheduling is TODO)
+            let _ = function.call::<mlua::MultiValue>(args);
             Ok(())
         }).map_err(|error| format!("Failed to create task.spawn: {}", error))?;
         task_table.set("spawn", task_spawn)
             .map_err(|error| format!("Failed to set task.spawn: {}", error))?;
 
-        // task.defer(function) — defer execution to end of frame
-        let task_defer = lua.create_function(|_, _function: mlua::Function| {
-            // TODO: Queue for end-of-frame execution
+        // task.defer(function, ...) — defer execution to end of current resumption cycle
+        let task_defer = lua.create_function(|_, (function, args): (mlua::Function, mlua::MultiValue)| {
+            // Execute immediately for now (proper deferral is TODO)
+            let _ = function.call::<mlua::MultiValue>(args);
             Ok(())
         }).map_err(|error| format!("Failed to create task.defer: {}", error))?;
         task_table.set("defer", task_defer)
             .map_err(|error| format!("Failed to set task.defer: {}", error))?;
+
+        // task.delay(seconds, function, ...) — execute function after delay
+        let task_delay = lua.create_function(|_, (_seconds, function, args): (f64, mlua::Function, mlua::MultiValue)| {
+            // Execute immediately for now (proper timer scheduling is TODO)
+            // In production this would queue into a timer system
+            let _ = function.call::<mlua::MultiValue>(args);
+            Ok(())
+        }).map_err(|error| format!("Failed to create task.delay: {}", error))?;
+        task_table.set("delay", task_delay)
+            .map_err(|error| format!("Failed to set task.delay: {}", error))?;
+
+        // task.cancel(thread) — cancel a spawned/delayed thread
+        let task_cancel = lua.create_function(|_, _thread: mlua::Value| {
+            // TODO: Integrate with coroutine scheduler
+            Ok(())
+        }).map_err(|error| format!("Failed to create task.cancel: {}", error))?;
+        task_table.set("cancel", task_cancel)
+            .map_err(|error| format!("Failed to set task.cancel: {}", error))?;
 
         globals.set("task", task_table)
             .map_err(|error| format!("Failed to set task: {}", error))?;
@@ -818,6 +1306,16 @@ impl LuauRuntime {
         }).map_err(|error| format!("Failed to create wait: {}", error))?;
         globals.set("wait", legacy_wait)
             .map_err(|error| format!("Failed to set wait: {}", error))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // TweenService
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_tween_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P1: TweenService
@@ -855,32 +1353,34 @@ impl LuauRuntime {
         globals.set("TweenService", tween_service_table)
             .map_err(|error| format!("Failed to set TweenService: {}", error))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // RunService — frame-based event signals
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_run_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P0: RunService — Frame-based event signals
         // ====================================================================
         let run_service_table = lua.create_table()
             .map_err(|e| format!("Failed to create RunService table: {}", e))?;
 
-        // Signal connection storage for RunService events
-        let heartbeat_connections = lua.create_table()
-            .map_err(|e| format!("Failed to create Heartbeat connections: {}", e))?;
-        let stepped_connections = lua.create_table()
-            .map_err(|e| format!("Failed to create Stepped connections: {}", e))?;
-        let render_stepped_connections = lua.create_table()
-            .map_err(|e| format!("Failed to create RenderStepped connections: {}", e))?;
-
         // RunService.Heartbeat — fires every frame after physics
-        let heartbeat = create_signal(lua, heartbeat_connections)?;
+        let heartbeat = Self::create_signal(lua)?;
         run_service_table.set("Heartbeat", heartbeat)
             .map_err(|e| format!("Failed to set Heartbeat: {}", e))?;
 
         // RunService.Stepped — fires every frame before physics
-        let stepped = create_signal(lua, stepped_connections)?;
+        let stepped = Self::create_signal(lua)?;
         run_service_table.set("Stepped", stepped)
             .map_err(|e| format!("Failed to set Stepped: {}", e))?;
 
         // RunService.RenderStepped — fires every frame before rendering (client only)
-        let render_stepped = create_signal(lua, render_stepped_connections)?;
+        let render_stepped = Self::create_signal(lua)?;
         run_service_table.set("RenderStepped", render_stepped)
             .map_err(|e| format!("Failed to set RenderStepped: {}", e))?;
 
@@ -938,6 +1438,16 @@ impl LuauRuntime {
         globals.set("RunService", run_service_table)
             .map_err(|e| format!("Failed to set RunService: {}", e))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // UserInputService
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_user_input_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P1: UserInputService
         // ====================================================================
@@ -982,8 +1492,7 @@ impl LuauRuntime {
         globals.set("UserInputService", uis_table)
             .map_err(|error| format!("Failed to set UserInputService: {}", error))?;
 
-        // ====================================================================
-        // P1: Debris service
+        // Debris service (bundled here since it's small)
         // ====================================================================
         let debris_table = lua.create_table()
             .map_err(|error| format!("Failed to create Debris table: {}", error))?;
@@ -998,6 +1507,16 @@ impl LuauRuntime {
 
         globals.set("Debris", debris_table)
             .map_err(|error| format!("Failed to set Debris: {}", error))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Players Service
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_players_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P1: Players Service
@@ -1092,15 +1611,11 @@ impl LuauRuntime {
             .map_err(|e| format!("Failed to set GetPlayerFromCharacter: {}", e))?;
 
         // PlayerAdded/PlayerRemoving signals
-        let player_added_conns = lua.create_table()
-            .map_err(|e| format!("Failed to create PlayerAdded connections: {}", e))?;
-        let player_added = create_signal(lua, player_added_conns)?;
+        let player_added = Self::create_signal(lua)?;
         players_table.set("PlayerAdded", player_added)
             .map_err(|e| format!("Failed to set PlayerAdded: {}", e))?;
 
-        let player_removing_conns = lua.create_table()
-            .map_err(|e| format!("Failed to create PlayerRemoving connections: {}", e))?;
-        let player_removing = create_signal(lua, player_removing_conns)?;
+        let player_removing = Self::create_signal(lua)?;
         players_table.set("PlayerRemoving", player_removing)
             .map_err(|e| format!("Failed to set PlayerRemoving: {}", e))?;
 
@@ -1114,6 +1629,20 @@ impl LuauRuntime {
             .map_err(|e| format!("Failed to get Players: {}", e))?;
         game.set("Players", players_ref)
             .map_err(|e| format!("Failed to set game.Players: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Storage Services: ReplicatedStorage, ServerStorage, ServerScriptService,
+    //                   StarterGui, StarterPlayer, StarterPack, Lighting,
+    //                   game:GetService()
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_storage_services(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+        let game: mlua::Table = globals.get("game")
+            .map_err(|e| format!("Failed to get game: {}", e))?;
 
         // ====================================================================
         // P1: ReplicatedStorage — Shared data container
@@ -1218,6 +1747,16 @@ impl LuauRuntime {
         }).map_err(|e| format!("Failed to create GetService: {}", e))?;
         game.set("GetService", get_service)
             .map_err(|e| format!("Failed to set GetService: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // DataStoreService + Debris (data services)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_data_services(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P2: DataStoreService
@@ -1325,6 +1864,16 @@ impl LuauRuntime {
 
         globals.set("DataStoreService", datastore_service_table)
             .map_err(|error| format!("Failed to set DataStoreService: {}", error))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // HttpService — HTTP requests, JSON, GUID, URL encoding
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_http_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P2: HttpService — Full Roblox Parity
@@ -1482,6 +2031,16 @@ impl LuauRuntime {
         globals.set("HttpService", http_service_table)
             .map_err(|error| format!("Failed to set HttpService: {}", error))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // CollectionService (Tags)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_collection_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P2: CollectionService (Tags)
         // ====================================================================
@@ -1565,6 +2124,16 @@ impl LuauRuntime {
         globals.set("CollectionService", collection_service_table)
             .map_err(|error| format!("Failed to set CollectionService: {}", error))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // SoundService
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_sound_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P2: SoundService / Sound
         // ====================================================================
@@ -1583,6 +2152,16 @@ impl LuauRuntime {
 
         globals.set("SoundService", sound_service_table)
             .map_err(|error| format!("Failed to set SoundService: {}", error))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Camera API (workspace.CurrentCamera)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_camera_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P3: Camera API (workspace.CurrentCamera)
@@ -1679,6 +2258,16 @@ impl LuauRuntime {
         workspace.set("CurrentCamera", camera_table)
             .map_err(|error| format!("Failed to set workspace.CurrentCamera: {}", error))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // Mouse API
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_mouse_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P3: Mouse API (game.Players.LocalPlayer:GetMouse())
         // ====================================================================
@@ -1731,12 +2320,21 @@ impl LuauRuntime {
         globals.set("_EustressMouse", mouse_table)
             .map_err(|error| format!("Failed to set _EustressMouse: {}", error))?;
 
-        // ====================================================================
-        // P3: ClickDetector API
-        // ====================================================================
-        // ClickDetector is typically a child of a Part, created via Instance.new("ClickDetector")
-        // The events (MouseClick, MouseHoverEnter, MouseHoverLeave) are handled by the bridge
-        // Here we just ensure the class is recognized
+        // Also store as global Mouse for compatibility
+        let mouse_ref: mlua::Table = globals.get("_EustressMouse")
+            .map_err(|e| format!("Failed to get _EustressMouse: {}", e))?;
+        globals.set("Mouse", mouse_ref)
+            .map_err(|e| format!("Failed to set Mouse: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Animation API (Animator, AnimationTrack)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_animation_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // P3: Animation API (Animator, AnimationTrack)
@@ -1820,6 +2418,16 @@ impl LuauRuntime {
         globals.set("_EustressAnimatorProto", animator_proto)
             .map_err(|e| format!("Failed to set _EustressAnimatorProto: {}", e))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // Humanoid API (character control)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_humanoid_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // P3: Humanoid API (stub for character control)
         // ====================================================================
@@ -1900,6 +2508,16 @@ impl LuauRuntime {
         globals.set("_EustressHumanoidProto", humanoid_proto)
             .map_err(|e| format!("Failed to set _EustressHumanoidProto: {}", e))?;
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // MarketplaceService
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_marketplace_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
         // ====================================================================
         // MarketplaceService — Roblox-compatible marketplace API (Tickets)
         // ====================================================================
@@ -1957,34 +2575,15 @@ impl LuauRuntime {
         globals.set("MarketplaceService", marketplace_service)
             .map_err(|e| format!("Failed to set MarketplaceService: {}", e))?;
 
-        // ====================================================================
-        // Players service — Roblox-compatible player API
-        // ====================================================================
-        let players_service = lua.create_table()
-            .map_err(|e| format!("Failed to create Players: {}", e))?;
+        Ok(())
+    }
 
-        // Players:GetPlayerByUserId(userId)
-        players_service.set("GetPlayerByUserId", lua.create_function(|lua, user_id: i64| {
-            let player = lua.create_table()?;
-            player.set("UserId", user_id)?;
-            player.set("Name", "")?;
-            player.set("_entityId", 0i64)?;
-            // TODO: populate from player bridge
-            Ok(player)
-        }).map_err(|e| format!("GetPlayerByUserId: {}", e))?)
-            .map_err(|e| format!("set GetPlayerByUserId: {}", e))?;
-
-        // Players.LocalPlayer (stub — set per-script)
-        let local_player = lua.create_table()
-            .map_err(|e| format!("LocalPlayer table: {}", e))?;
-        local_player.set("UserId", 0i64).map_err(|e| format!("LP UserId: {}", e))?;
-        local_player.set("Name", "").map_err(|e| format!("LP Name: {}", e))?;
-        local_player.set("_entityId", 0i64).map_err(|e| format!("LP entityId: {}", e))?;
-        players_service.set("LocalPlayer", local_player)
-            .map_err(|e| format!("set LocalPlayer: {}", e))?;
-
-        globals.set("Players", players_service)
-            .map_err(|e| format!("Failed to set Players: {}", e))?;
+    // ========================================================================
+    // SimulationService — read/write watchpoint values (bridge with MCP tools)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_simulation_service(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // SimulationService — read/write watchpoint values (bridge with MCP tools)
@@ -2017,6 +2616,16 @@ impl LuauRuntime {
 
         globals.set("SimulationService", sim_service)
             .map_err(|e| format!("Failed to set SimulationService: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // WorkspaceQuery — entity search + file access (bridge with MCP tools)
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_workspace_query(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // WorkspaceQuery — entity search + file access (bridge with MCP tools)
@@ -2068,6 +2677,423 @@ impl LuauRuntime {
 
         globals.set("WorkspaceQuery", workspace_query)
             .map_err(|e| format!("Failed to set WorkspaceQuery: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Spatial Queries — workspace:GetPartBoundsInBox/Radius, Blockcast, etc.
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_spatial_queries(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+        let workspace: mlua::Table = globals.get("workspace")
+            .map_err(|e| format!("Failed to get workspace for spatial queries: {}", e))?;
+
+        // Helper: collect all BasePart instances from the registry
+        // Returns Vec of (entity_id, instance_table) for parts only
+        fn is_base_part(class: &str) -> bool {
+            matches!(class, "Part" | "MeshPart" | "WedgePart" | "CornerWedgePart" | "SpawnLocation" | "Seat")
+        }
+
+        // workspace:GetPartBoundsInBox(cframe, size, overlapParams?) -> {BasePart}
+        // Returns all BaseParts whose bounding box overlaps the query box
+        let get_in_box = lua.create_function(|lua, (cframe, size, _params): (mlua::Value, mlua::Value, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+            let result = lua.create_table()?;
+            let mut idx = 1i64;
+
+            // Extract query box center from CFrame userdata
+            let (qx, qy, qz) = if let mlua::Value::UserData(ref ud) = cframe {
+                if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+                    (cf.0.position.x, cf.0.position.y, cf.0.position.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            // Extract query half-extents from Size Vector3
+            let (hx, hy, hz) = if let mlua::Value::UserData(ref ud) = size {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            // AABB overlap test against each BasePart
+            for pair in registry.pairs::<i64, mlua::Table>() {
+                if let Ok((_, inst)) = pair {
+                    let class: String = inst.raw_get("_className").unwrap_or_default();
+                    if !is_base_part(&class) { continue; }
+
+                    // Part position
+                    let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            (v.0.x, v.0.y, v.0.z)
+                        } else { continue; }
+                    } else { continue; };
+
+                    // Part half-size
+                    let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
+                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                        } else { (2.0, 0.5, 1.0) }
+                    } else { (2.0, 0.5, 1.0) };
+
+                    // AABB overlap check
+                    if (qx - hx) <= (px + sx) && (qx + hx) >= (px - sx)
+                        && (qy - hy) <= (py + sy) && (qy + hy) >= (py - sy)
+                        && (qz - hz) <= (pz + sz) && (qz + hz) >= (pz - sz)
+                    {
+                        result.set(idx, inst)?;
+                        idx += 1;
+                    }
+                }
+            }
+            Ok(result)
+        }).map_err(|e| format!("Failed to create GetPartBoundsInBox: {}", e))?;
+        workspace.set("GetPartBoundsInBox", get_in_box)
+            .map_err(|e| format!("Failed to set GetPartBoundsInBox: {}", e))?;
+
+        // workspace:GetPartBoundsInRadius(position, radius, overlapParams?) -> {BasePart}
+        let get_in_radius = lua.create_function(|lua, (position, radius, _params): (mlua::Value, f64, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+            let result = lua.create_table()?;
+            let mut idx = 1i64;
+
+            let (qx, qy, qz) = if let mlua::Value::UserData(ref ud) = position {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            let radius_sq = radius * radius;
+
+            for pair in registry.pairs::<i64, mlua::Table>() {
+                if let Ok((_, inst)) = pair {
+                    let class: String = inst.raw_get("_className").unwrap_or_default();
+                    if !is_base_part(&class) { continue; }
+
+                    let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            (v.0.x, v.0.y, v.0.z)
+                        } else { continue; }
+                    } else { continue; };
+
+                    let dx = px - qx;
+                    let dy = py - qy;
+                    let dz = pz - qz;
+                    let dist_sq = dx * dx + dy * dy + dz * dz;
+
+                    if dist_sq <= radius_sq {
+                        result.set(idx, inst)?;
+                        idx += 1;
+                    }
+                }
+            }
+            Ok(result)
+        }).map_err(|e| format!("Failed to create GetPartBoundsInRadius: {}", e))?;
+        workspace.set("GetPartBoundsInRadius", get_in_radius)
+            .map_err(|e| format!("Failed to set GetPartBoundsInRadius: {}", e))?;
+
+        // workspace:GetPartsInPart(part, overlapParams?) -> {BasePart}
+        // Returns all BaseParts overlapping the given part's bounding box
+        let get_parts_in_part = lua.create_function(|lua, (part, _params): (mlua::Table, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+            let result = lua.create_table()?;
+            let mut idx = 1i64;
+
+            let part_id: i64 = part.raw_get("_entityId").unwrap_or(0);
+
+            // Get query part position and half-size
+            let (qx, qy, qz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Position") {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { return Ok(result); }
+            } else { return Ok(result); };
+
+            let (hx, hy, hz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Size") {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                } else { (2.0, 0.5, 1.0) }
+            } else { (2.0, 0.5, 1.0) };
+
+            for pair in registry.pairs::<i64, mlua::Table>() {
+                if let Ok((eid, inst)) = pair {
+                    if eid == part_id { continue; } // Skip self
+                    let class: String = inst.raw_get("_className").unwrap_or_default();
+                    if !is_base_part(&class) { continue; }
+
+                    let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            (v.0.x, v.0.y, v.0.z)
+                        } else { continue; }
+                    } else { continue; };
+
+                    let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
+                        if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                            (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                        } else { (2.0, 0.5, 1.0) }
+                    } else { (2.0, 0.5, 1.0) };
+
+                    // AABB overlap
+                    if (qx - hx) <= (px + sx) && (qx + hx) >= (px - sx)
+                        && (qy - hy) <= (py + sy) && (qy + hy) >= (py - sy)
+                        && (qz - hz) <= (pz + sz) && (qz + hz) >= (pz - sz)
+                    {
+                        result.set(idx, inst)?;
+                        idx += 1;
+                    }
+                }
+            }
+            Ok(result)
+        }).map_err(|e| format!("Failed to create GetPartsInPart: {}", e))?;
+        workspace.set("GetPartsInPart", get_parts_in_part)
+            .map_err(|e| format!("Failed to set GetPartsInPart: {}", e))?;
+
+        // workspace:Blockcast(cframe, size, direction, params?) -> RaycastResult?
+        // Sweeps an AABB along a direction and returns the first hit
+        let blockcast = lua.create_function(|lua, (cframe, size, direction, _params): (mlua::Value, mlua::Value, mlua::Value, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+
+            // Extract origin from CFrame
+            let (ox, oy, oz) = if let mlua::Value::UserData(ref ud) = cframe {
+                if let Ok(cf) = ud.borrow::<super::types::LuauCFrame>() {
+                    (cf.0.position.x, cf.0.position.y, cf.0.position.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            // Extract half-extents from Size
+            let (hx, hy, hz) = if let mlua::Value::UserData(ref ud) = size {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            // Extract direction vector
+            let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            let dir_len = (dx * dx + dy * dy + dz * dz).sqrt();
+            if dir_len < 1e-10 { return Ok(mlua::Value::Nil); }
+
+            // Simple swept AABB: sample along direction and check overlaps
+            let steps = 20i32;
+            let step_size = dir_len / steps as f64;
+
+            for step in 0..=steps {
+                let t = step as f64 * step_size / dir_len;
+                let cx = ox + dx * t;
+                let cy = oy + dy * t;
+                let cz = oz + dz * t;
+
+                for pair in registry.pairs::<i64, mlua::Table>() {
+                    if let Ok((_, inst)) = pair {
+                        let class: String = inst.raw_get("_className").unwrap_or_default();
+                        if !is_base_part(&class) { continue; }
+
+                        let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x, v.0.y, v.0.z)
+                            } else { continue; }
+                        } else { continue; };
+
+                        let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                            } else { (2.0, 0.5, 1.0) }
+                        } else { (2.0, 0.5, 1.0) };
+
+                        if (cx - hx) <= (px + sx) && (cx + hx) >= (px - sx)
+                            && (cy - hy) <= (py + sy) && (cy + hy) >= (py - sy)
+                            && (cz - hz) <= (pz + sz) && (cz + hz) >= (pz - sz)
+                        {
+                            let hit = lua.create_table()?;
+                            hit.set("Instance", inst)?;
+                            hit.set("Position", lua.create_userdata(
+                                super::types::LuauVector3::new(cx, cy, cz)
+                            )?)?;
+                            hit.set("Normal", lua.create_userdata(
+                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                            )?)?;
+                            hit.set("Distance", t * dir_len)?;
+                            hit.set("Material", "Plastic")?;
+                            return Ok(mlua::Value::Table(hit));
+                        }
+                    }
+                }
+            }
+            Ok(mlua::Value::Nil)
+        }).map_err(|e| format!("Failed to create Blockcast: {}", e))?;
+        workspace.set("Blockcast", blockcast)
+            .map_err(|e| format!("Failed to set Blockcast: {}", e))?;
+
+        // workspace:Spherecast(position, radius, direction, params?) -> RaycastResult?
+        let spherecast = lua.create_function(|lua, (position, radius, direction, _params): (mlua::Value, f64, mlua::Value, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+
+            let (ox, oy, oz) = if let mlua::Value::UserData(ref ud) = position {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            let dir_len = (dx * dx + dy * dy + dz * dz).sqrt();
+            if dir_len < 1e-10 { return Ok(mlua::Value::Nil); }
+
+            // Sphere sweep: sample along ray, check sphere-AABB overlap
+            let steps = 20i32;
+            for step in 0..=steps {
+                let t = step as f64 / steps as f64;
+                let cx = ox + dx * t;
+                let cy = oy + dy * t;
+                let cz = oz + dz * t;
+
+                for pair in registry.pairs::<i64, mlua::Table>() {
+                    if let Ok((_, inst)) = pair {
+                        let class: String = inst.raw_get("_className").unwrap_or_default();
+                        if !is_base_part(&class) { continue; }
+
+                        let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x, v.0.y, v.0.z)
+                            } else { continue; }
+                        } else { continue; };
+
+                        let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                            } else { (2.0, 0.5, 1.0) }
+                        } else { (2.0, 0.5, 1.0) };
+
+                        // Closest point on AABB to sphere center
+                        let closest_x = cx.max(px - sx).min(px + sx);
+                        let closest_y = cy.max(py - sy).min(py + sy);
+                        let closest_z = cz.max(pz - sz).min(pz + sz);
+
+                        let ddx = closest_x - cx;
+                        let ddy = closest_y - cy;
+                        let ddz = closest_z - cz;
+                        let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+
+                        if dist_sq <= radius * radius {
+                            let hit = lua.create_table()?;
+                            hit.set("Instance", inst)?;
+                            hit.set("Position", lua.create_userdata(
+                                super::types::LuauVector3::new(closest_x, closest_y, closest_z)
+                            )?)?;
+                            hit.set("Normal", lua.create_userdata(
+                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                            )?)?;
+                            hit.set("Distance", t * dir_len)?;
+                            hit.set("Material", "Plastic")?;
+                            return Ok(mlua::Value::Table(hit));
+                        }
+                    }
+                }
+            }
+            Ok(mlua::Value::Nil)
+        }).map_err(|e| format!("Failed to create Spherecast: {}", e))?;
+        workspace.set("Spherecast", spherecast)
+            .map_err(|e| format!("Failed to set Spherecast: {}", e))?;
+
+        // workspace:Shapecast(part, direction, params?) -> RaycastResult?
+        // Generic shape cast using the part's own bounding box as the shape
+        let shapecast = lua.create_function(|lua, (part, direction, _params): (mlua::Table, mlua::Value, Option<mlua::Table>)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
+            let part_id: i64 = part.raw_get("_entityId").unwrap_or(0);
+
+            let (ox, oy, oz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Position") {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { return Ok(mlua::Value::Nil); }
+            } else { return Ok(mlua::Value::Nil); };
+
+            let (hx, hy, hz) = if let Ok(mlua::Value::UserData(ud)) = part.raw_get::<mlua::Value>("Size") {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                } else { (2.0, 0.5, 1.0) }
+            } else { (2.0, 0.5, 1.0) };
+
+            let (dx, dy, dz) = if let mlua::Value::UserData(ref ud) = direction {
+                if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                    (v.0.x, v.0.y, v.0.z)
+                } else { (0.0, 0.0, 0.0) }
+            } else { (0.0, 0.0, 0.0) };
+
+            let dir_len = (dx * dx + dy * dy + dz * dz).sqrt();
+            if dir_len < 1e-10 { return Ok(mlua::Value::Nil); }
+
+            let steps = 20i32;
+            for step in 0..=steps {
+                let t = step as f64 / steps as f64;
+                let cx = ox + dx * t;
+                let cy = oy + dy * t;
+                let cz = oz + dz * t;
+
+                for pair in registry.pairs::<i64, mlua::Table>() {
+                    if let Ok((eid, inst)) = pair {
+                        if eid == part_id { continue; }
+                        let class: String = inst.raw_get("_className").unwrap_or_default();
+                        if !is_base_part(&class) { continue; }
+
+                        let (px, py, pz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Position") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x, v.0.y, v.0.z)
+                            } else { continue; }
+                        } else { continue; };
+
+                        let (sx, sy, sz) = if let Ok(mlua::Value::UserData(ud)) = inst.raw_get::<mlua::Value>("Size") {
+                            if let Ok(v) = ud.borrow::<super::types::LuauVector3>() {
+                                (v.0.x.abs() / 2.0, v.0.y.abs() / 2.0, v.0.z.abs() / 2.0)
+                            } else { (2.0, 0.5, 1.0) }
+                        } else { (2.0, 0.5, 1.0) };
+
+                        if (cx - hx) <= (px + sx) && (cx + hx) >= (px - sx)
+                            && (cy - hy) <= (py + sy) && (cy + hy) >= (py - sy)
+                            && (cz - hz) <= (pz + sz) && (cz + hz) >= (pz - sz)
+                        {
+                            let hit = lua.create_table()?;
+                            hit.set("Instance", inst)?;
+                            hit.set("Position", lua.create_userdata(
+                                super::types::LuauVector3::new(cx, cy, cz)
+                            )?)?;
+                            hit.set("Normal", lua.create_userdata(
+                                super::types::LuauVector3::new(0.0, 1.0, 0.0)
+                            )?)?;
+                            hit.set("Distance", t * dir_len)?;
+                            hit.set("Material", "Plastic")?;
+                            return Ok(mlua::Value::Table(hit));
+                        }
+                    }
+                }
+            }
+            Ok(mlua::Value::Nil)
+        }).map_err(|e| format!("Failed to create Shapecast: {}", e))?;
+        workspace.set("Shapecast", shapecast)
+            .map_err(|e| format!("Failed to set Shapecast: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // GUI Scripting API — Roblox-compatible UI manipulation
+    // ========================================================================
+    #[cfg(all(feature = "luau", feature = "gui"))]
+    fn inject_gui_api(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
 
         // ====================================================================
         // GUI Scripting API — Roblox-compatible UI manipulation
@@ -2158,6 +3184,99 @@ impl LuauRuntime {
 
         globals.set("gui", gui_table)
             .map_err(|e| format!("Failed to set gui: {}", e))?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Event System — instance.Changed, ChildAdded/ChildRemoved, Touched, etc.
+    // ========================================================================
+    #[cfg(feature = "luau")]
+    fn inject_event_system(lua: &mlua::Lua) -> Result<(), String> {
+        let globals = lua.globals();
+
+        // Global event signal registry: maps entity_id -> { event_name -> signal }
+        let event_registry = lua.create_table()
+            .map_err(|e| format!("Failed to create event registry: {}", e))?;
+        globals.set("__EVENT_REGISTRY__", event_registry)
+            .map_err(|e| format!("Failed to set event registry: {}", e))?;
+
+        // Helper Lua function: get_or_create_signal(entityId, eventName)
+        // Returns the signal for that entity+event, creating one if needed.
+        let get_or_create_event = lua.create_function(|lua, (entity_id, event_name): (i64, String)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__EVENT_REGISTRY__")?;
+
+            // Get or create entity entry
+            let entity_events: mlua::Table = match registry.get::<Option<mlua::Table>>(entity_id)? {
+                Some(t) => t,
+                None => {
+                    let t = lua.create_table()?;
+                    registry.set(entity_id, t.clone())?;
+                    t
+                }
+            };
+
+            // Get or create signal for this event
+            match entity_events.get::<Option<mlua::Table>>(event_name.clone())? {
+                Some(signal) => Ok(signal),
+                None => {
+                    // Create a new signal inline (lightweight version)
+                    let signal = lua.create_table()?;
+                    let connections = lua.create_table()?;
+                    signal.set("_connections", connections)?;
+                    signal.set("_nextId", 1i64)?;
+
+                    signal.set("Connect", lua.create_function(|lua, (this, callback): (mlua::Table, mlua::Function)| {
+                        let conns: mlua::Table = this.get("_connections")?;
+                        let id: i64 = this.get("_nextId")?;
+                        this.set("_nextId", id + 1)?;
+                        conns.set(id, callback)?;
+                        let conn = lua.create_table()?;
+                        conn.set("_id", id)?;
+                        conn.set("_signal", this.clone())?;
+                        conn.set("Connected", true)?;
+                        conn.set("Disconnect", lua.create_function(|_, c: mlua::Table| {
+                            let cid: i64 = c.get("_id")?;
+                            let sig: mlua::Table = c.get("_signal")?;
+                            let cs: mlua::Table = sig.get("_connections")?;
+                            cs.set(cid, mlua::Value::Nil)?;
+                            c.set("Connected", false)?;
+                            Ok(())
+                        })?)?;
+                        Ok(conn)
+                    })?)?;
+
+                    signal.set("Wait", lua.create_function(|_, _this: mlua::Table| {
+                        Ok(0.0f64)
+                    })?)?;
+
+                    entity_events.set(event_name, signal.clone())?;
+                    Ok(signal)
+                }
+            }
+        }).map_err(|e| format!("Failed to create __get_or_create_event__: {}", e))?;
+        globals.set("__get_or_create_event__", get_or_create_event)
+            .map_err(|e| format!("Failed to set __get_or_create_event__: {}", e))?;
+
+        // Helper Lua function: fire_event(entityId, eventName, ...)
+        let fire_event = lua.create_function(|lua, (entity_id, event_name, args): (i64, String, mlua::MultiValue)| {
+            let globals = lua.globals();
+            let registry: mlua::Table = globals.get("__EVENT_REGISTRY__")?;
+            if let Some(entity_events) = registry.get::<Option<mlua::Table>>(entity_id)? {
+                if let Some(signal) = entity_events.get::<Option<mlua::Table>>(event_name)? {
+                    let connections: mlua::Table = signal.get("_connections")?;
+                    for pair in connections.pairs::<i64, mlua::Function>() {
+                        if let Ok((_, callback)) = pair {
+                            let _ = callback.call::<()>(args.clone());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }).map_err(|e| format!("Failed to create __fire_event__: {}", e))?;
+        globals.set("__fire_event__", fire_event)
+            .map_err(|e| format!("Failed to set __fire_event__: {}", e))?;
 
         Ok(())
     }

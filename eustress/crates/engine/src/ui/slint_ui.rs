@@ -259,6 +259,9 @@ pub enum SlintAction {
     
     // Command bar
     ExecuteCommand(String),
+    /// Execute a script from the command bar: (language, source_code)
+    ExecuteScript(String, String),
+    ClearScriptOutput,
     
     // Context menu
     InsertPart(String),
@@ -1172,6 +1175,10 @@ fn setup_slint_overlay(world: &mut World) {
     // Command bar
     let q = queue.clone();
     ui.on_execute_command(move |cmd| q.push(SlintAction::ExecuteCommand(cmd.to_string())));
+    let q = queue.clone();
+    ui.on_execute_script(move |lang, script| q.push(SlintAction::ExecuteScript(lang.to_string(), script.to_string())));
+    let q = queue.clone();
+    ui.on_clear_script_output(move || q.push(SlintAction::ClearScriptOutput));
     
     // Toolbox part insertion
     let q = queue.clone();
@@ -1451,10 +1458,15 @@ fn setup_slint_overlay(world: &mut World) {
     // model — no separate Camera2d needed. One compositor, one z-order.
 
     // Slint overlay camera (order 300): renders the Slint editor chrome texture.
-    // Matches the original working setup — default Camera3d pipeline with only
-    // SkyboxAttached + NoAtmosphere to prevent lighting systems from touching it.
-    // Do NOT add Tonemapping::None — it changes the render pipeline and breaks
-    // alpha compositing with the main camera's output.
+    //
+    // The main camera (order 0) renders the 3D scene with Atmosphere (HDR).
+    // After tonemapping, the result is written to the window surface in sRGB.
+    // This overlay camera then composites the Slint UI on top using premultiplied
+    // alpha blending via CameraOutputMode::Write { blend_state }.
+    //
+    // Before Atmosphere, both cameras were LDR and the default output_mode (no
+    // blend_state) worked. With HDR, explicit premultiplied alpha blending is
+    // required to correctly composite the UI over the tonemapped 3D output.
     world.spawn((
         Camera3d::default(),
         Projection::from(OrthographicProjection {
@@ -1468,7 +1480,13 @@ fn setup_slint_overlay(world: &mut World) {
         }),
         Camera {
             order: 300,
+            // Don't clear — composite on top of the main camera's tonemapped output
             clear_color: ClearColorConfig::None,
+            // Explicit premultiplied alpha blending for correct HDR compositing
+            output_mode: bevy::camera::CameraOutputMode::Write {
+                blend_state: Some(bevy::render::render_resource::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                clear_color: ClearColorConfig::None,
+            },
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -1839,23 +1857,28 @@ fn render_slint_to_texture(
         tex_width,
     );
     
-    // Only touch the Bevy image when Slint actually repainted something.
-    // When nothing is dirty (static UI, no hover, no animation), skip entirely.
+    // Clear the GPU image to transparent black EVERY frame, then copy the full
+    // staging buffer. This is the correct fix for ghosting per WGPU best practices:
+    // when layering two renderers (Slint + Bevy), the overlay texture must be fully
+    // cleared before drawing. Without this, stale pixels from closed popups/dropdowns
+    // persist because ReusedBuffer mode only repaints dirty regions in the staging
+    // buffer, and partial copies can miss areas that Slint considers "unchanged"
+    // but that the GPU texture still shows from a previous frame.
+    //
+    // The clear is a fast memset (~5.5MB at 1600x900). The staging→GPU copy only
+    // happens when Slint reports dirty pixels; otherwise we still skip the upload.
     let dirty_size = dirty_region.bounding_box_size();
     if dirty_size.width == 0 || dirty_size.height == 0 {
         return;
     }
 
-    // Something changed — copy the FULL staging buffer into image.data.
-    // ReusedBuffer mode ensures Slint only repaints dirty pixels in the staging buffer
-    // (CPU optimization), but we always upload the full buffer to the GPU to avoid
-    // partial-copy artifacts when dirty regions don't cover all affected pixels
-    // (e.g. popup close, dropdown dismiss, overlay compositing edge cases).
-    //
     let Some(image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
         let staging_bytes: &[u8] = bytemuck::cast_slice(&staging.pixels);
         let len = data.len().min(staging_bytes.len());
+
+        // Clear to transparent black first (LoadOp::Clear equivalent for CPU texture)
+        // Then overwrite with the full staging buffer contents
         data[..len].copy_from_slice(&staging_bytes[..len]);
     }
 
@@ -4466,10 +4489,162 @@ fn drain_slint_actions(
                 }
             }
             
-            // Command bar
+            // Command bar (palette)
             SlintAction::ExecuteCommand(cmd) => {
                 if let Some(ref mut out) = res.output {
                     out.info(format!("> {}", cmd));
+                }
+            }
+
+            // Script execution from command bar
+            SlintAction::ExecuteScript(language, script) => {
+                // Clear stale output
+                eustress_common::luau::runtime::drain_luau_output();
+                eustress_common::soul::rune_runtime::drain_rune_output();
+
+                // Execute the script
+                let (result, created_instances) = if language == "luau" {
+                    match eustress_common::luau::runtime::LuauRuntime::new() {
+                        Ok(mut runtime) => {
+                            let r = runtime.execute_chunk(&script, "command_bar");
+                            let instances = runtime.drain_created_instances();
+                            (r, instances)
+                        }
+                        Err(e) => (Err(format!("Failed to create Luau runtime: {}", e)), Vec::new()),
+                    }
+                } else {
+                    // Rune — execute with ECS module for Instance.new support
+                    let r = crate::soul::rune_ecs_module::execute_rune_oneshot(&script);
+                    match r {
+                        Ok(instances) => (Ok(()), instances),
+                        Err(e) => (Err(e), Vec::new()),
+                    }
+                };
+
+                // Drain print/warn output to Output panel
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("[{}] > {}", language, script));
+
+                    let script_output = if language == "luau" {
+                        eustress_common::luau::runtime::drain_luau_output()
+                    } else {
+                        eustress_common::soul::rune_runtime::drain_rune_output()
+                    };
+                    for (line, is_err) in script_output {
+                        if is_err { out.error(line); } else { out.info(line); }
+                    }
+
+                    match &result {
+                        Ok(()) => {},
+                        Err(e) => out.error(format!("✗ {}", e)),
+                    }
+                }
+
+                // Bridge: spawn real ECS entities from Instance.new() calls
+                if !created_instances.is_empty() {
+                    let workspace_dir = res.space_root.as_ref()
+                        .map(|sr| sr.0.join("Workspace"))
+                        .unwrap_or_else(|| crate::space::default_space_root().join("Workspace"));
+                    let _ = std::fs::create_dir_all(&workspace_dir);
+
+                    let mut default_mat_reg = crate::space::material_loader::MaterialRegistry::default();
+                    let mat_reg = res.material_registry.as_deref_mut().unwrap_or(&mut default_mat_reg);
+                    let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
+                    let mesh_c = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache);
+
+                    for inst in &created_instances {
+                        // Determine mesh from class
+                        let mesh_path = match inst.class_name.as_str() {
+                            "Part" | "MeshPart" => "assets/parts/block.glb",
+                            "WedgePart" => "assets/parts/wedge.glb",
+                            "SpherePart" => "assets/parts/ball.glb",
+                            "CylinderPart" => "assets/parts/cylinder.glb",
+                            _ => "assets/parts/block.glb",
+                        };
+
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let instance_def = crate::space::instance_loader::InstanceDefinition {
+                            asset: Some(crate::space::instance_loader::AssetReference {
+                                mesh: mesh_path.to_string(),
+                                scene: "Scene0".to_string(),
+                            }),
+                            transform: crate::space::instance_loader::TransformData {
+                                position: inst.position,
+                                rotation: [0.0, 0.0, 0.0, 1.0],
+                                scale: inst.size,
+                            },
+                            properties: crate::space::instance_loader::InstanceProperties {
+                                color: inst.color,
+                                transparency: inst.transparency,
+                                reflectance: 0.0,
+                                anchored: inst.anchored,
+                                can_collide: inst.can_collide,
+                                cast_shadow: true,
+                                material: inst.material.clone(),
+                                locked: false,
+                                ..Default::default()
+                            },
+                            metadata: crate::space::instance_loader::InstanceMetadata {
+                                class_name: "Part".to_string(),
+                                archivable: true,
+                                name: Some(inst.name.clone()),
+                                created: now.clone(),
+                                last_modified: now,
+                            },
+                            material: None,
+                            thermodynamic: None,
+                            electrochemical: None,
+                            ui: None,
+                            attributes: None,
+                            tags: None,
+                            parameters: None,
+                            extra: std::collections::HashMap::new(),
+                        };
+
+                        // Unique filename
+                        let file_name = {
+                            let base = &inst.name;
+                            let test = workspace_dir.join(format!("{}.glb.toml", base));
+                            if !test.exists() {
+                                base.clone()
+                            } else {
+                                (1..1000).map(|i| format!("{}{}", base, i))
+                                    .find(|c| !workspace_dir.join(format!("{}.glb.toml", c)).exists())
+                                    .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
+                            }
+                        };
+                        let toml_path = workspace_dir.join(format!("{}.glb.toml", file_name));
+
+                        if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Failed to write {}: {}", inst.name, e));
+                            }
+                            continue;
+                        }
+
+                        let entity = crate::space::instance_loader::spawn_instance(
+                            &mut commands, &asset_server, &mut res.materials,
+                            mat_reg, mesh_c, toml_path.clone(), instance_def,
+                        );
+
+                        if let Some(ref mut registry) = res.file_registry {
+                            registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
+                                path: toml_path, file_type: crate::space::FileType::Toml,
+                                service: "Workspace".to_string(), name: inst.name.clone(),
+                                size: 0, modified: std::time::SystemTime::now(), children: Vec::new(),
+                            });
+                        }
+
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("✓ Spawned {} '{}'", inst.class_name, inst.name));
+                        }
+                    }
+                }
+            }
+
+            SlintAction::ClearScriptOutput => {
+                if let Some(ref mut out) = res.output {
+                    out.clear();
                 }
             }
 

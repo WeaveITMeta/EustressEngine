@@ -50,25 +50,32 @@ pub mod proximity;
 #[cfg(feature = "ontology")]
 pub mod ontology;
 
-// Future stages (uncomment as implemented):
-// #[cfg(feature = "knowledge")]
-// pub mod knowledge;
-// #[cfg(feature = "measurement")]
-// pub mod measurement;
-// #[cfg(feature = "refinement")]
-// pub mod refinement;
-// #[cfg(feature = "language")]
-// pub mod language;
-// #[cfg(feature = "temporal")]
-// pub mod temporal;
-// #[cfg(feature = "spatial")]
-// pub mod spatial;
-// #[cfg(feature = "statistical")]
-// pub mod statistical;
-// #[cfg(feature = "planning")]
-// pub mod planning;
-// #[cfg(feature = "meta")]
-// pub mod meta;
+#[cfg(feature = "knowledge")]
+pub mod knowledge;
+
+#[cfg(feature = "measurement")]
+pub mod measurement;
+
+#[cfg(feature = "refinement")]
+pub mod refinement;
+
+#[cfg(feature = "language")]
+pub mod language;
+
+#[cfg(feature = "temporal")]
+pub mod temporal;
+
+#[cfg(feature = "spatial")]
+pub mod spatial_intelligence;
+
+#[cfg(feature = "statistical")]
+pub mod statistical;
+
+#[cfg(feature = "planning")]
+pub mod planning;
+
+#[cfg(feature = "meta")]
+pub mod meta;
 
 // ============================================================================
 // Unified Module Registration
@@ -102,6 +109,33 @@ pub fn register_all_modules() -> Result<Vec<rune::Module>, rune::ContextError> {
     #[cfg(feature = "ontology")]
     modules.push(ontology::create_ontology_module()?);
 
+    #[cfg(feature = "knowledge")]
+    modules.push(knowledge::create_knowledge_module()?);
+
+    #[cfg(feature = "measurement")]
+    modules.push(measurement::create_measurement_module()?);
+
+    #[cfg(feature = "refinement")]
+    modules.push(refinement::create_refinement_module()?);
+
+    #[cfg(feature = "language")]
+    modules.push(language::create_language_module()?);
+
+    #[cfg(feature = "temporal")]
+    modules.push(temporal::create_temporal_module()?);
+
+    #[cfg(feature = "spatial")]
+    modules.push(spatial_intelligence::create_spatial_intelligence_module()?);
+
+    #[cfg(feature = "statistical")]
+    modules.push(statistical::create_statistical_module()?);
+
+    #[cfg(feature = "planning")]
+    modules.push(planning::create_planning_module()?);
+
+    #[cfg(feature = "meta")]
+    modules.push(meta::create_meta_module()?);
+
     Ok(modules)
 }
 
@@ -118,6 +152,33 @@ pub mod prelude {
 
     #[cfg(feature = "ontology")]
     pub use crate::ontology::*;
+
+    #[cfg(feature = "knowledge")]
+    pub use crate::knowledge::*;
+
+    #[cfg(feature = "measurement")]
+    pub use crate::measurement::*;
+
+    #[cfg(feature = "refinement")]
+    pub use crate::refinement::*;
+
+    #[cfg(feature = "language")]
+    pub use crate::language::*;
+
+    #[cfg(feature = "temporal")]
+    pub use crate::temporal::*;
+
+    #[cfg(feature = "spatial")]
+    pub use crate::spatial_intelligence::*;
+
+    #[cfg(feature = "statistical")]
+    pub use crate::statistical::*;
+
+    #[cfg(feature = "planning")]
+    pub use crate::planning::*;
+
+    #[cfg(feature = "meta")]
+    pub use crate::meta::*;
 
     #[cfg(feature = "rune-dsl")]
     pub use crate::register_all_modules;

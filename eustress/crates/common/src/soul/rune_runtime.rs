@@ -10,6 +10,16 @@ use bevy::prelude::*;
 use tracing::{info, warn, error};
 use std::collections::HashMap;
 
+// Thread-local output buffer for capturing print/warn from Rune scripts.
+thread_local! {
+    pub static RUNE_OUTPUT: std::cell::RefCell<Vec<(String, bool)>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Drain all captured Rune output since the last call.
+pub fn drain_rune_output() -> Vec<(String, bool)> {
+    RUNE_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
 // ============================================================================
 // Runtime State — Bevy resource tracking compiled scripts
 // ============================================================================
@@ -155,6 +165,86 @@ pub fn compile_scripts(
     }
 
     info!("🎮 Compiled {} Rune scripts", runtime.compiled.len());
+}
+
+// ============================================================================
+// One-shot execution — run a script immediately outside simulation mode
+// ============================================================================
+
+/// Execute a Rune script string immediately and return the result.
+/// Accepts optional extra modules (e.g. the engine's ECS module with Instance API).
+/// Captures print output to RUNE_OUTPUT thread-local.
+#[cfg(feature = "realism-scripting")]
+pub fn execute_oneshot(
+    extra_modules: &[rune::Module],
+    source_code: &str,
+    _name: &str,
+) -> Result<String, String> {
+    let mut ctx = rune::Context::with_default_modules()
+        .map_err(|e| format!("Failed to create Rune context: {}", e))?;
+
+    // Install caller-provided modules (ECS module with Instance API, Vector3, etc.)
+    for module in extra_modules {
+        ctx.install(module.clone())
+            .map_err(|e| format!("Failed to install module: {}", e))?;
+    }
+
+    // Install output capture — overrides std::io print functions
+    let mut io_module = rune::Module::with_crate("std")
+        .map_err(|e| format!("Failed to create io module: {}", e))?;
+
+    io_module.function("println", |s: String| {
+        tracing::info!("[Rune] {}", s);
+        RUNE_OUTPUT.with(|buf| buf.borrow_mut().push((s, false)));
+    }).build()
+        .map_err(|e| format!("Failed to register println: {}", e))?;
+
+    io_module.function("print", |s: String| {
+        tracing::info!("[Rune] {}", s);
+        RUNE_OUTPUT.with(|buf| buf.borrow_mut().push((s, false)));
+    }).build()
+        .map_err(|e| format!("Failed to register print: {}", e))?;
+
+    ctx.install(io_module)
+        .map_err(|e| format!("Failed to install io capture module: {}", e))?;
+
+    let runtime_ctx = ctx.runtime()
+        .map_err(|e| format!("Failed to build runtime context: {}", e))?;
+
+    let mut sources = rune::Sources::new();
+    let source = rune::Source::memory(source_code)
+        .map_err(|e| format!("Source error: {}", e))?;
+    sources.insert(source)
+        .map_err(|e| format!("Insert error: {}", e))?;
+
+    let mut diagnostics = rune::Diagnostics::new();
+    let unit = rune::prepare(&mut sources)
+        .with_context(&ctx)
+        .with_diagnostics(&mut diagnostics)
+        .build()
+        .map_err(|e| format!("Compile error: {}", e))?;
+
+    let mut vm = rune::Vm::new(
+        std::sync::Arc::new(runtime_ctx),
+        std::sync::Arc::new(unit),
+    );
+
+    // Try calling main() first, fall back to on_init()
+    let result = vm.call(["main"], ())
+        .or_else(|_| vm.call(["on_init"], ()))
+        .map_err(|e| format!("Runtime error: {}", e))?;
+
+    Ok(format!("{:?}", result))
+}
+
+/// Stub for when realism-scripting feature is disabled
+#[cfg(not(feature = "realism-scripting"))]
+pub fn execute_oneshot(
+    _extra_modules: &[()],
+    _source_code: &str,
+    _name: &str,
+) -> Result<String, String> {
+    Err("Rune scripting is not enabled (realism-scripting feature required)".to_string())
 }
 
 // ============================================================================

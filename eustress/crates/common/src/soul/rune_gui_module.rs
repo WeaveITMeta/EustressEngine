@@ -18,6 +18,7 @@
 #[cfg(feature = "realism-scripting")]
 use rune::{Module, ContextError};
 
+#[cfg(feature = "gui")]
 use crate::gui::{push_gui_command, gui_snapshot_get, GuiCommand, push_script_log, ScriptLogLevel};
 
 /// Create a Rune module with GUI + logging functions.

@@ -116,7 +116,7 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `error(...)` | 🔶 | ✅ `log_error` | |
 | `assert()` | ❌ | ❌ | |
 | `type()` | ✅ Native | ❌ | Lua built-in |
-| `typeof()` | ❌ | ❌ | Roblox extension |
+| `typeof()` | ✅ | ❌ | Detects Vector3, CFrame, Color3, UDim2, TweenInfo, Instance |
 | `tostring()` | ✅ Native | ❌ | |
 | `tonumber()` | ✅ Native | ❌ | |
 | `pairs()` | ✅ Native | ❌ | |
@@ -131,7 +131,7 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `rawget/rawset` | ✅ Native | ➖ | Lua-specific |
 | `require()` | 🔶 Stub | ❌ | ModuleScript loading |
 | `wait(n)` | ✅ Stub | ❌ | Deprecated, use task.wait |
-| `delay()` | ❌ | ❌ | Deprecated |
+| `delay()` | ❌ | ❌ | Deprecated, use task.delay |
 | `spawn()` | ❌ | ❌ | Deprecated |
 | `tick()` | ❌ | ❌ | Unix timestamp |
 | `time()` | ❌ | ❌ | Game time |
@@ -166,11 +166,13 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | `instance:FindFirstChild()` | ✅ | ✅ | `find_first_child()` |
 | `instance:FindFirstChildOfClass()` | ✅ | ✅ | `find_first_child_of_class()` |
 | `instance:FindFirstChildWhichIsA()` | ❌ | ❌ | |
-| `instance:FindFirstAncestor()` | ❌ | ❌ | |
+| `instance:FindFirstAncestorOfClass()` | ✅ | ❌ | |
+| `instance:FindFirstAncestorWhichIsA()` | ✅ | ❌ | Includes inheritance |
+| `instance:FindFirstAncestor()` | ✅ | ❌ | Walks Parent chain |
 | `instance:FindFirstDescendant()` | ❌ | ❌ | |
 | `instance:GetChildren()` | ✅ | ✅ | `get_children()` |
 | `instance:GetDescendants()` | ✅ | ❌ | Recursive child traversal |
-| `instance:WaitForChild()` | ❌ | ❌ | Async |
+| `instance:WaitForChild()` | 🔶 Sync | ❌ | Immediate lookup (coroutine yield TODO) |
 | `instance:GetFullName()` | ✅ | ❌ | Dot-separated path from root |
 | `instance:GetAttribute()` | ✅ | ✅ `instance_get_attribute` | Custom key-value pairs |
 | `instance:SetAttribute()` | ✅ | ✅ `instance_set_attribute` | Stored in memory |
@@ -180,12 +182,12 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `instance.Changed` | ❌ | ❌ | |
-| `instance.ChildAdded` | ❌ | ❌ | |
-| `instance.ChildRemoved` | ❌ | ❌ | |
-| `instance.DescendantAdded` | ❌ | ❌ | |
-| `instance.DescendantRemoving` | ❌ | ❌ | |
-| `instance.AncestryChanged` | ❌ | ❌ | |
+| `instance.Changed` | ✅ | ❌ | Fires property name on any __newindex |
+| `instance.ChildAdded` | ✅ | ❌ | Fires on Parent set |
+| `instance.ChildRemoved` | ✅ | ❌ | Fires on Parent change |
+| `instance.DescendantAdded` | 🔶 Signal | ❌ | Signal exists, not auto-fired yet |
+| `instance.DescendantRemoving` | 🔶 Signal | ❌ | Signal exists, not auto-fired yet |
+| `instance.AncestryChanged` | ✅ | ❌ | Fires on Parent reparenting |
 | `instance:GetPropertyChangedSignal()` | ❌ | ❌ | |
 | `instance:GetAttributeChangedSignal()` | ❌ | ❌ | |
 
@@ -214,12 +216,12 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `workspace:GetPartBoundsInBox()` | ❌ | ❌ | AABB query |
-| `workspace:GetPartBoundsInRadius()` | ❌ | ❌ | Sphere query |
-| `workspace:GetPartsInPart()` | ❌ | ❌ | Overlap query |
-| `workspace:Blockcast()` | ❌ | ❌ | Box sweep |
-| `workspace:Spherecast()` | ❌ | ❌ | Sphere sweep |
-| `workspace:Shapecast()` | ❌ | ❌ | Generic shape sweep |
+| `workspace:GetPartBoundsInBox()` | ✅ | ❌ | AABB overlap against registry |
+| `workspace:GetPartBoundsInRadius()` | ✅ | ❌ | Sphere distance check |
+| `workspace:GetPartsInPart()` | ✅ | ❌ | AABB overlap, skips self |
+| `workspace:Blockcast()` | ✅ | ❌ | Swept AABB (20-step sample) |
+| `workspace:Spherecast()` | ✅ | ❌ | Swept sphere-AABB (20-step sample) |
+| `workspace:Shapecast()` | ✅ | ❌ | Uses part's own AABB as shape |
 
 ### Workspace Properties
 
@@ -384,12 +386,12 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
 | `task.wait(n)` | ✅ | ✅ | P1 implemented |
-| `task.spawn(fn)` | 🔶 Stub | 🔶 Placeholder | Closures complex |
-| `task.defer(fn)` | 🔶 Stub | 🔶 Placeholder | |
-| `task.delay(n, fn)` | ❌ | 🔶 Placeholder | |
+| `task.spawn(fn, ...)` | ✅ Immediate | 🔶 Placeholder | Executes immediately (coroutine TODO) |
+| `task.defer(fn, ...)` | ✅ Immediate | 🔶 Placeholder | Executes immediately (deferral TODO) |
+| `task.delay(n, fn, ...)` | ✅ Immediate | 🔶 Placeholder | Executes immediately (timer TODO) |
 | `task.desynchronize()` | ❌ | ❌ | Parallel Luau |
 | `task.synchronize()` | ❌ | ❌ | |
-| `task.cancel(thread)` | ❌ | ✅ | |
+| `task.cancel(thread)` | ✅ Stub | ✅ | No-op until coroutine scheduler |
 
 ### Remote Events/Functions (P0 - Networking)
 
@@ -419,6 +421,7 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
 | `signal:Connect(fn)` | ✅ | ❌ | Returns Connection with Disconnect() |
+| `signal:Fire(...)` | ✅ | ❌ | Eustress extension — fire all connected callbacks |
 | `signal:Once(fn)` | ✅ | ❌ | Auto-disconnect after first fire |
 | `signal:Wait()` | 🔶 Stub | ❌ | Returns immediately (needs coroutine scheduler) |
 | `connection:Disconnect()` | ✅ | ❌ | Removes callback from signal |
@@ -432,19 +435,19 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `part.Position` | ❌ | ✅ `part_set_position` | Writes to .part.toml |
+| `part.Position` | ✅ __newindex | ✅ `part_set_position` | Fires Changed event |
 | `part.Orientation` | ❌ | ✅ `part_set_rotation` | Euler deg → quaternion |
-| `part.Size` | ❌ | ✅ `part_set_size` | Writes scale to TOML |
-| `part.CFrame` | ❌ | ❌ | Full transform (use Position + Rotation) |
-| `part.Anchored` | ❌ | ✅ `part_set_anchored` | |
+| `part.Size` | ✅ __newindex | ✅ `part_set_size` | Fires Changed event |
+| `part.CFrame` | ✅ __newindex | ❌ | Fires Changed event |
+| `part.Anchored` | ✅ __newindex | ✅ `part_set_anchored` | Fires Changed event |
 | `part.CanCollide` | ✅ __newindex | ✅ `part_set_can_collide` | |
 | `part.CanTouch` | ❌ | ❌ | |
 | `part.CanQuery` | ❌ | ❌ | Raycast filter |
-| `part.Massless` | ❌ | ❌ | |
-| `part.Transparency` | ❌ | ✅ `part_set_transparency` | |
-| `part.Color` | ❌ | ✅ `part_set_color` | r, g, b (0-1 range) |
-| `part.Material` | ❌ | ✅ `part_set_material` | 19 presets |
-| `part.Reflectance` | ❌ | ❌ | |
+| `part.Massless` | ✅ __newindex | ❌ | Fires Changed event |
+| `part.Transparency` | ✅ __newindex | ✅ `part_set_transparency` | Fires Changed event |
+| `part.Color` | ✅ __newindex | ✅ `part_set_color` | Accepts Color3/BrickColor, fires Changed |
+| `part.Material` | ✅ __newindex | ✅ `part_set_material` | Fires Changed event |
+| `part.Reflectance` | ✅ __newindex | ❌ | Fires Changed event |
 | `part.CastShadow` | ❌ | ❌ | |
 | `part.AssemblyLinearVelocity` | ❌ | ✅ `part_get_velocity` | Returns (x,y,z) m/s |
 | `part.AssemblyAngularVelocity` | ❌ | ❌ | |
@@ -457,8 +460,8 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `part.Touched` | ❌ | ❌ | Collision start |
-| `part.TouchEnded` | ❌ | ❌ | Collision end |
+| `part.Touched` | ✅ Signal | ❌ | Signal accessible via __index |
+| `part.TouchEnded` | ✅ Signal | ❌ | Signal accessible via __index |
 
 ### Constraints
 
@@ -488,75 +491,91 @@ Comprehensive comparison of Roblox Luau API vs Eustress implementation status fo
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `ScreenGui` creation | ❌ | ❌ | |
-| `ScreenGui.Enabled` | ❌ | ❌ | |
-| `ScreenGui.DisplayOrder` | ❌ | ❌ | |
-| `ScreenGui.IgnoreGuiInset` | ❌ | ❌ | |
+| `ScreenGui` creation | ✅ | ❌ | Instance.new("ScreenGui") |
+| `ScreenGui.Enabled` | ✅ | ❌ | Default true |
+| `ScreenGui.DisplayOrder` | ✅ | ❌ | Default 0 |
+| `ScreenGui.IgnoreGuiInset` | ✅ | ❌ | Default false |
+| `ScreenGui.ResetOnSpawn` | ✅ | ❌ | Default true |
+| `ScreenGui.ZIndexBehavior` | ✅ | ❌ | Default "Sibling" |
 
 ### GuiObject (Base)
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `gui.Position` | ❌ | ❌ | UDim2 |
-| `gui.Size` | ❌ | ❌ | UDim2 |
-| `gui.AnchorPoint` | ❌ | ❌ | |
-| `gui.Rotation` | ❌ | ❌ | |
-| `gui.Visible` | ❌ | ❌ | |
-| `gui.ZIndex` | ❌ | ❌ | |
-| `gui.BackgroundColor3` | ❌ | ❌ | |
-| `gui.BackgroundTransparency` | ❌ | ❌ | |
-| `gui.BorderColor3` | ❌ | ❌ | |
-| `gui.BorderSizePixel` | ❌ | ❌ | |
-| `gui.ClipsDescendants` | ❌ | ❌ | |
-| `gui.LayoutOrder` | ❌ | ❌ | |
+| `gui.Position` | ✅ | ❌ | UDim2 default |
+| `gui.Size` | ✅ | ❌ | UDim2 default |
+| `gui.AnchorPoint` | ✅ | ❌ | Vector2 (as Vector3) |
+| `gui.Rotation` | ✅ | ❌ | Frame only, default 0 |
+| `gui.Visible` | ✅ | ❌ | Default true |
+| `gui.ZIndex` | ✅ | ❌ | Default 1 |
+| `gui.BackgroundColor3` | ✅ | ❌ | Color3 default white |
+| `gui.BackgroundTransparency` | ✅ | ❌ | Default 0.0 |
+| `gui.BorderColor3` | ✅ | ❌ | Frame only |
+| `gui.BorderSizePixel` | ✅ | ❌ | Default 1 |
+| `gui.ClipsDescendants` | ✅ | ❌ | Frame only |
+| `gui.LayoutOrder` | ✅ | ❌ | Default 0 |
 
 ### Frame/TextLabel/TextButton/TextBox
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `Frame` | ❌ | ❌ | Container |
-| `TextLabel.Text` | ❌ | ❌ | |
-| `TextLabel.TextColor3` | ❌ | ❌ | |
-| `TextLabel.TextSize` | ❌ | ❌ | |
-| `TextLabel.Font` | ❌ | ❌ | |
-| `TextLabel.TextScaled` | ❌ | ❌ | |
-| `TextLabel.TextWrapped` | ❌ | ❌ | |
-| `TextButton.Activated` | ❌ | ❌ | Click event |
-| `TextButton.MouseButton1Click` | ❌ | ❌ | |
-| `TextBox.Text` | ❌ | ❌ | |
-| `TextBox.FocusLost` | ❌ | ❌ | |
-| `TextBox:CaptureFocus()` | ❌ | ❌ | |
+| `Frame` | ✅ | ❌ | Full property set |
+| `TextLabel.Text` | ✅ | ❌ | Default "" |
+| `TextLabel.TextColor3` | ✅ | ❌ | Default black |
+| `TextLabel.TextSize` | ✅ | ❌ | Default 14 |
+| `TextLabel.Font` | ✅ | ❌ | Default SourceSans |
+| `TextLabel.TextScaled` | ✅ | ❌ | Default false |
+| `TextLabel.TextWrapped` | ✅ | ❌ | Default false |
+| `TextLabel.TextXAlignment` | ✅ | ❌ | Default Center |
+| `TextLabel.TextYAlignment` | ✅ | ❌ | Default Center |
+| `TextLabel.TextTransparency` | ✅ | ❌ | Default 0.0 |
+| `TextLabel.RichText` | ✅ | ❌ | Default false |
+| `TextButton` | ✅ | ❌ | Full property set |
+| `TextButton.AutoButtonColor` | ✅ | ❌ | Default true |
+| `TextButton.Activated` | ❌ | ❌ | Click event (TODO) |
+| `TextButton.MouseButton1Click` | ❌ | ❌ | Event (TODO) |
+| `TextBox` | ✅ | ❌ | Full property set |
+| `TextBox.PlaceholderText` | ✅ | ❌ | Default "" |
+| `TextBox.ClearTextOnFocus` | ✅ | ❌ | Default true |
+| `TextBox.MultiLine` | ✅ | ❌ | Default false |
+| `TextBox.TextEditable` | ✅ | ❌ | Default true |
+| `TextBox.FocusLost` | ❌ | ❌ | Event (TODO) |
+| `TextBox:CaptureFocus()` | ❌ | ❌ | Method (TODO) |
 
 ### ImageLabel/ImageButton
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `ImageLabel.Image` | ❌ | ❌ | Asset ID |
-| `ImageLabel.ImageColor3` | ❌ | ❌ | |
-| `ImageLabel.ImageTransparency` | ❌ | ❌ | |
-| `ImageLabel.ScaleType` | ❌ | ❌ | |
+| `ImageLabel` | ✅ | ❌ | Full property set |
+| `ImageLabel.Image` | ✅ | ❌ | Default "" |
+| `ImageLabel.ImageColor3` | ✅ | ❌ | Default white |
+| `ImageLabel.ImageTransparency` | ✅ | ❌ | Default 0.0 |
+| `ImageLabel.ScaleType` | ✅ | ❌ | Default Stretch |
+| `ImageButton` | ✅ | ❌ | Full property set |
+| `ScrollingFrame` | ✅ | ❌ | CanvasSize, ScrollBar, etc. |
 
 ### Layout Objects
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `UIListLayout` | ❌ | ❌ | |
-| `UIGridLayout` | ❌ | ❌ | |
+| `UIListLayout` | ✅ | ❌ | FillDirection, SortOrder, Padding |
+| `UIGridLayout` | ✅ | ❌ | CellSize, CellPadding, FillDirection |
 | `UITableLayout` | ❌ | ❌ | |
 | `UIPageLayout` | ❌ | ❌ | |
-| `UIPadding` | ❌ | ❌ | |
-| `UICorner` | ❌ | ❌ | |
-| `UIStroke` | ❌ | ❌ | |
+| `UIPadding` | ✅ | ❌ | Top/Bottom/Left/Right |
+| `UICorner` | ✅ | ❌ | CornerRadius default 8px |
+| `UIStroke` | ✅ | ❌ | Color, Thickness, Mode |
 | `UIGradient` | ❌ | ❌ | |
-| `UIAspectRatioConstraint` | ❌ | ❌ | |
-| `UISizeConstraint` | ❌ | ❌ | |
+| `UIAspectRatioConstraint` | ✅ | ❌ | AspectRatio, Type, Axis |
+| `UISizeConstraint` | ✅ | ❌ | MinSize, MaxSize |
+| `UITextSizeConstraint` | ✅ | ❌ | MinTextSize, MaxTextSize |
 
 ### BillboardGui / SurfaceGui
 
 | Roblox API | Luau Status | Rune Status | Notes |
 |------------|-------------|-------------|-------|
-| `BillboardGui` | ❌ | ❌ | 3D UI |
-| `SurfaceGui` | ❌ | ❌ | On part surface |
+| `BillboardGui` | ✅ | ❌ | Size, StudsOffset, MaxDistance, Adornee |
+| `SurfaceGui` | ✅ | ❌ | Face, CanvasSize, SizingMode, Adornee |
 
 ---
 
