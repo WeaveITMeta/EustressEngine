@@ -236,8 +236,7 @@ impl ScenarioScriptEngine {
         
         // Call main function with context
         let output: RuneValue = vm.call(["main"], (context.current_branch_id.to_string(),))
-            .into_result()
-            .map_err(|e| ScriptError::RuntimeError(e.to_string()))?;
+            .map_err(|e: rune::runtime::VmError| ScriptError::RuntimeError(e.to_string()))?;
 
         // Parse output into ScriptResult
         // Scripts can return structured data or use directive functions
