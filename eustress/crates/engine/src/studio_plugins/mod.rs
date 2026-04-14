@@ -247,6 +247,7 @@ fn handle_plugin_action_events(
     text_label_query: Query<&crate::classes::TextLabel>,
     children_query: Query<&Children>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
+    mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
@@ -261,90 +262,128 @@ fn handle_plugin_action_events(
                 info!("🏷️ MindSpace panel toggled: {}", studio_state.mindspace_panel_visible);
             }
             "mindspace:add_label" => {
-                // Get selected entity
                 let selected_ids = selection_manager.0.read().get_selected();
-                
+
                 if selected_ids.is_empty() {
                     notifications.warning("Select an entity first to add a label");
                     continue;
                 }
-                
-                // Find the entity from the selection ID
+
                 let selected_id = &selected_ids[0];
-                let mut target_entity: Option<Entity> = None;
-                
-                for (entity, _instance) in instance_query.iter() {
-                    let entity_id = format!("{}v{}", entity.index(), entity.generation());
-                    if &entity_id == selected_id {
-                        target_entity = Some(entity);
-                        break;
-                    }
-                }
-                
+                let target_entity = instance_query.iter()
+                    .find(|(entity, _)| format!("{}v{}", entity.index(), entity.generation()) == *selected_id)
+                    .map(|(e, _)| e);
+
                 let Some(parent_entity) = target_entity else {
                     notifications.warning("Could not find selected entity");
                     continue;
                 };
-                
-                // Get label text and font from studio state
+
                 let label_text = if studio_state.mindspace_edit_buffer.is_empty() {
                     "Label".to_string()
                 } else {
                     studio_state.mindspace_edit_buffer.clone()
                 };
-                let font = studio_state.mindspace_font;
                 let font_size = studio_state.mindspace_font_size;
-                
-                info!("🏷️ Adding label '{}' to entity {:?}", label_text, parent_entity);
-                
-                // Use proper spawn helpers for correct component setup
+
+                // Generate safe unique name
+                let safe_name = label_text.replace(' ', "_");
+                let now = chrono::Utc::now().to_rfc3339();
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let id = (ts % u32::MAX as u128) as u32;
+
+                // ── Write TOML files to StarterGui/{name}/ ──
+                let space_root = crate::space::default_space_root();
+                let starter_gui = space_root.join("StarterGui");
+                let bb_dir = starter_gui.join(&safe_name);
+
+                if let Err(e) = std::fs::create_dir_all(&bb_dir) {
+                    notifications.error(format!("Failed to create directory: {}", e));
+                    continue;
+                }
+
+                // _instance.toml for BillboardGui
+                let instance_toml = format!(
+                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nsize = [200.0, 50.0]\nposition = [0.0, 3.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 100.0\n",
+                    now, now
+                );
+                if let Err(e) = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml) {
+                    notifications.error(format!("Failed to write _instance.toml: {}", e));
+                    continue;
+                }
+
+                // TextLabel.textlabel.toml
+                let label_toml = format!(
+                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [200.0, 50.0]\nbackground_color = [0.1, 0.1, 0.15, 0.5]\nborder_size = 0.0\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
+                    label_text.replace('"', "\\\""), font_size
+                );
+                if let Err(e) = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_name)), &label_toml) {
+                    notifications.error(format!("Failed to write textlabel.toml: {}", e));
+                    continue;
+                }
+
+                // ── Spawn ECS entities ──
                 use crate::spawn::{spawn_billboard_gui, spawn_text_label};
-                
-                // Create BillboardGui
+
                 let billboard_instance = Instance {
-                    name: "BillboardGui".to_string(),
+                    name: safe_name.clone(),
                     class_name: ClassName::BillboardGui,
                     archivable: true,
-                    id: (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() % u32::MAX as u128) as u32,
+                    id,
                     ..Default::default()
                 };
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
-                billboard_gui.units_offset = [0.0, 3.0, 0.0]; // Offset above the part
+                billboard_gui.units_offset = [0.0, 3.0, 0.0];
                 billboard_gui.size = [200.0, 50.0];
                 billboard_gui.always_on_top = true;
-                
-                // Spawn BillboardGui using proper helper (includes Transform, Visibility, Marker)
+
                 let billboard_entity = spawn_billboard_gui(&mut commands, billboard_instance, billboard_gui);
                 commands.entity(billboard_entity).insert(bevy::prelude::ChildOf(parent_entity));
-                
-                // Create TextLabel as child of BillboardGui
+                // Attach InstanceFile so Properties panel works
+                commands.entity(billboard_entity).insert(crate::space::instance_loader::InstanceFile {
+                    toml_path: bb_dir.join("_instance.toml"),
+                    name: safe_name.clone(),
+                });
+
                 let text_instance = Instance {
                     name: "TextLabel".to_string(),
                     class_name: ClassName::TextLabel,
                     archivable: true,
-                    id: (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos() % u32::MAX as u128) as u32,
+                    id: id + 1,
                     ..Default::default()
                 };
                 let mut text_label = TextLabel::default();
                 text_label.text = label_text.clone();
-                text_label.font = font;
                 text_label.font_size = font_size;
-                text_label.text_color3 = [1.0, 1.0, 1.0]; // White text
+                text_label.text_color3 = [1.0, 1.0, 1.0];
                 text_label.background_transparency = 0.5;
-                
-                // Spawn TextLabel using proper helper
+
                 let text_entity = spawn_text_label(&mut commands, text_instance, text_label);
                 commands.entity(text_entity).insert(bevy::prelude::ChildOf(billboard_entity));
-                
-                notifications.success(format!("Added label '{}' to entity", label_text));
-                info!("✅ Created BillboardGui {:?} with TextLabel {:?} for entity {:?}", billboard_entity, text_entity, parent_entity);
+
+                // ── Register in file registry ──
+                if let Some(ref mut registry) = file_registry {
+                    registry.register(
+                        bb_dir.join("_instance.toml"),
+                        billboard_entity,
+                        crate::space::FileMetadata {
+                            path: bb_dir.clone(),
+                            file_type: crate::space::FileType::Directory,
+                            service: "StarterGui".to_string(),
+                            name: safe_name.clone(),
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        },
+                    );
+                }
+
+                notifications.success(format!("Added label '{}' — saved to StarterGui/{}/", label_text, safe_name));
+                info!("✅ Created BillboardGui {:?} with TOML at {:?}", billboard_entity, bb_dir);
             }
             "mindspace:update_label" => {
                 // Update existing TextLabel with new text from MindSpace panel
@@ -371,7 +410,6 @@ fn handle_plugin_action_events(
                 }
             }
             "mindspace:remove_label" => {
-                // Get selected entity and remove its BillboardGui children
                 let selected_ids = selection_manager.0.read().get_selected();
 
                 if selected_ids.is_empty() {
@@ -379,13 +417,94 @@ fn handle_plugin_action_events(
                     continue;
                 }
 
-                notifications.info("Remove label not yet implemented");
+                let selected_id = &selected_ids[0];
+                let target_entity = instance_query.iter()
+                    .find(|(entity, _)| format!("{}v{}", entity.index(), entity.generation()) == *selected_id)
+                    .map(|(e, _)| e);
+
+                let Some(parent_entity) = target_entity else {
+                    notifications.warning("Could not find selected entity");
+                    continue;
+                };
+
+                // Find BillboardGui children of the selected entity
+                let mut removed = 0usize;
+                if let Ok(children) = children_query.get(parent_entity) {
+                    let billboard_children: Vec<Entity> = children.iter()
+                        .filter(|&child| {
+                            instance_query.get(child)
+                                .map(|(_, i)| i.class_name == ClassName::BillboardGui)
+                                .unwrap_or(false)
+                        })
+                        .collect();
+
+                    for billboard_entity in billboard_children {
+                        // Delete TOML files from disk
+                        let billboard_name = instance_query.get(billboard_entity)
+                            .map(|(_, i)| i.name.clone())
+                            .unwrap_or_else(|_| "BillboardGui".to_string());
+                        let safe_name = billboard_name.replace(' ', "_");
+                        let space_root = crate::space::default_space_root();
+                        let bb_dir = space_root.join("StarterGui").join(&safe_name);
+
+                        if bb_dir.exists() {
+                            if let Err(e) = std::fs::remove_dir_all(&bb_dir) {
+                                warn!("Failed to delete BillboardGui directory {:?}: {}", bb_dir, e);
+                            } else {
+                                info!("🗑️ Deleted BillboardGui directory {:?}", bb_dir);
+                            }
+                        }
+
+                        // Unregister from file registry
+                        if let Some(ref mut registry) = file_registry {
+                            registry.unregister_file(&bb_dir.join("_instance.toml"));
+                        }
+
+                        // Despawn entity and all children (TextLabels etc.)
+                        commands.entity(billboard_entity).despawn();
+                        removed += 1;
+                    }
+                }
+
+                // Also check if the selected entity IS a BillboardGui (direct selection)
+                if removed == 0 {
+                    if let Ok((_, inst)) = instance_query.get(parent_entity) {
+                        if inst.class_name == ClassName::BillboardGui {
+                            let safe_name = inst.name.replace(' ', "_");
+                            let space_root = crate::space::default_space_root();
+                            let bb_dir = space_root.join("StarterGui").join(&safe_name);
+
+                            if bb_dir.exists() {
+                                if let Err(e) = std::fs::remove_dir_all(&bb_dir) {
+                                    warn!("Failed to delete BillboardGui directory {:?}: {}", bb_dir, e);
+                                } else {
+                                    info!("🗑️ Deleted BillboardGui directory {:?}", bb_dir);
+                                }
+                            }
+
+                            if let Some(ref mut registry) = file_registry {
+                                registry.unregister_file(&bb_dir.join("_instance.toml"));
+                            }
+
+                            commands.entity(parent_entity).despawn();
+                            removed = 1;
+                        }
+                    }
+                }
+
+                if removed > 0 {
+                    notifications.success(format!("Removed {} label(s)", removed));
+                } else {
+                    notifications.warning("No BillboardGui labels found on selected entity");
+                }
             }
             "mindspace:save" => {
                 // Save all BillboardGui entities to TOML on disk
                 let space_root = crate::space::default_space_root();
                 let starter_gui = space_root.join("StarterGui");
-                let _ = std::fs::create_dir_all(&starter_gui);
+                if let Err(e) = std::fs::create_dir_all(&starter_gui) {
+                    warn!("Failed to create StarterGui directory: {}", e);
+                }
                 let mut saved = 0usize;
 
                 for (entity, instance) in instance_query.iter() {
@@ -394,7 +513,10 @@ fn handle_plugin_action_events(
                     // Create folder: StarterGui/{name}/
                     let safe_name = instance.name.replace(' ', "_");
                     let bb_dir = starter_gui.join(&safe_name);
-                    let _ = std::fs::create_dir_all(&bb_dir);
+                    if let Err(e) = std::fs::create_dir_all(&bb_dir) {
+                        warn!("Failed to create BillboardGui directory {:?}: {}", bb_dir, e);
+                        continue;
+                    }
 
                     // Write _instance.toml
                     let billboard_gui = billboard_query.get(entity);
@@ -408,7 +530,9 @@ fn handle_plugin_action_events(
                         "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\n\n[gui]\nsize = [{}, {}]\nposition = [{}, {}, {}]\nvisible = true\nalways_on_top = {}\nmax_distance = {}\n",
                         size[0], size[1], offset[0], offset[1], offset[2], aot, max_dist
                     );
-                    let _ = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml);
+                    if let Err(e) = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml) {
+                        warn!("Failed to write _instance.toml for {:?}: {}", bb_dir, e);
+                    }
 
                     // Write child TextLabels as .textlabel.toml files
                     if let Ok(children) = children_query.get(entity) {
@@ -434,7 +558,9 @@ fn handle_plugin_action_events(
                                         crate::classes::TextXAlignment::Right => "right",
                                     },
                                 );
-                                let _ = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_label)), &label_toml);
+                                if let Err(e) = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_label)), &label_toml) {
+                                    warn!("Failed to write {}.textlabel.toml: {}", safe_label, e);
+                                }
                             }
                         }
                     }
