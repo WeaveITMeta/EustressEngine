@@ -2202,6 +2202,7 @@ struct DrainEventWriters<'w> {
     workshop_edit: MessageWriter<'w, crate::workshop::WorkshopEditMcpEvent>,
     workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
     workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
+    plugin_action: MessageWriter<'w, crate::studio_plugins::PluginActionEvent>,
 }
 
 /// Terrain brush settings state
@@ -2923,7 +2924,9 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::MindspaceAddLabel => {
-                // TODO: Add label node to MindSpace graph
+                events.plugin_action.write(crate::studio_plugins::PluginActionEvent {
+                    action_id: "mindspace:add_label".to_string(),
+                });
             }
             SlintAction::MindspaceConnect => {
                 // TODO: Connect selected MindSpace nodes

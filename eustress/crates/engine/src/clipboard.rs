@@ -430,8 +430,9 @@ impl Clipboard {
     
     /// Get paste offset for current paste operation
     pub fn get_paste_offset(&self) -> Vec3 {
-        let offset = self.paste_count as f32 * 2.0;
-        Vec3::new(offset, 0.0, offset)
+        // Paste stacks on top of the original (Y offset only)
+        let y_offset = (self.paste_count as f32 + 1.0) * 2.0;
+        Vec3::new(0.0, y_offset, 0.0)
     }
 
     /// Increment paste counter
