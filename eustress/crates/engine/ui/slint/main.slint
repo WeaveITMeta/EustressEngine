@@ -353,6 +353,7 @@ export component StudioWindow inherits Window {
     // Input focus tracking — when true, Rust sync systems should NOT push property updates
     // to avoid overwriting user input while they're typing. Set by callbacks from input fields.
     in-out property <bool> any-input-has-focus: false;
+    out property <bool> command-bar-has-focus: cmd-bar.input-has-focus;
     
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
@@ -2172,7 +2173,7 @@ export component StudioWindow inherits Window {
         // ====================================================================
         // Command Bar (docked at very bottom)
         // ====================================================================
-        CommandBar {
+        cmd-bar := CommandBar {
             command-text <=> root.command-text;
             language <=> root.command-language;
             output-log: root.script-output-log;

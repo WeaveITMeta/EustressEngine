@@ -2016,6 +2016,7 @@ fn update_slint_ui_focus(
     // Track text input focus from Slint (blocks keyboard shortcuts while typing)
     let any_focus = slint_context.as_ref()
         .map(|ctx| ctx.window.get_any_input_has_focus()
+            || ctx.window.get_command_bar_has_focus()
             || ctx.window.get_show_settings_dialog()
             || ctx.window.get_show_exit_confirmation())
         .unwrap_or(false);
@@ -4309,33 +4310,32 @@ fn drain_slint_actions(
                                 service.description = val.clone();
                                 changed = true;
                             }
-                            // Sync ClockTime ↔ TimeOfDay bidirectionally
+                            // Sync ClockTime (0-24) ↔ TimeOfDay (HH:MM:SS) bidirectionally
                             "ClockTime" | "clock_time" => {
-                                // Parse "HH:MM:SS" → update time_of_day (0.0-1.0)
-                                let parts: Vec<&str> = val.split(':').collect();
-                                if let Some(hours) = parts.first().and_then(|s| s.parse::<f32>().ok()) {
-                                    let mins = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                    let secs = parts.get(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                    let tod = (hours + mins / 60.0 + secs / 3600.0) / 24.0;
+                                // ClockTime is 0-24 hours → convert to TimeOfDay "HH:MM:SS"
+                                if let Ok(hours) = val.parse::<f64>() {
+                                    let hours = hours.clamp(0.0, 24.0);
+                                    let h = hours as u32 % 24;
+                                    let m = ((hours.fract()) * 60.0) as u32;
+                                    let s = ((hours.fract() * 60.0).fract() * 60.0) as u32;
                                     service.properties.insert("clock_time".to_string(),
                                         crate::space::service_loader::PropertyValue::String(val.clone()));
                                     service.properties.insert("time_of_day".to_string(),
-                                        crate::space::service_loader::PropertyValue::Float(tod as f64));
+                                        crate::space::service_loader::PropertyValue::String(format!("{:02}:{:02}:{:02}", h, m, s)));
                                     changed = true;
                                 }
                             }
                             "TimeOfDay" | "time_of_day" => {
-                                // Parse 0.0-1.0 → update clock_time "HH:MM:SS"
-                                if let Ok(tod) = val.parse::<f64>() {
-                                    let hours_total = tod * 24.0;
-                                    let h = hours_total as u32 % 24;
-                                    let m = ((hours_total - h as f64) * 60.0) as u32;
-                                    let s = ((hours_total - h as f64 - m as f64 / 60.0) * 3600.0) as u32 % 60;
-                                    let clock = format!("{:02}:{:02}:{:02}", h, m, s);
+                                // TimeOfDay is "HH:MM:SS" → convert to ClockTime 0-24
+                                let parts: Vec<&str> = val.split(':').collect();
+                                if let Some(h) = parts.first().and_then(|s| s.trim().parse::<f64>().ok()) {
+                                    let m = parts.get(1).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                                    let s = parts.get(2).and_then(|s| s.trim().parse::<f64>().ok()).unwrap_or(0.0);
+                                    let hours = (h + m / 60.0 + s / 3600.0).clamp(0.0, 24.0);
                                     service.properties.insert("time_of_day".to_string(),
-                                        crate::space::service_loader::PropertyValue::Float(tod));
+                                        crate::space::service_loader::PropertyValue::String(val.clone()));
                                     service.properties.insert("clock_time".to_string(),
-                                        crate::space::service_loader::PropertyValue::String(clock));
+                                        crate::space::service_loader::PropertyValue::String(format!("{:.2}", hours)));
                                     changed = true;
                                 }
                             }
@@ -4409,25 +4409,27 @@ fn drain_slint_actions(
                         if service.class_name == "Lighting" {
                             if let Some(ref mut lighting) = res.lighting {
                                 match key.as_str() {
-                                    "Brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
-                                    "ClockTime" => {
-                                        // ClockTime = "HH:MM:SS" format → parse to time_of_day
-                                        let parts: Vec<&str> = val.split(':').collect();
-                                        let h: f32 = parts.get(0).and_then(|s| s.trim().parse().ok()).unwrap_or(12.0);
-                                        let m: f32 = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-                                        let s: f32 = parts.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-                                        let hours = h + m / 60.0 + s / 3600.0;
-                                        lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
-                                        lighting.clock_time = val.clone();
-                                    }
-                                    "TimeOfDay" => {
-                                        // TimeOfDay = plain number (hours, e.g. 14.5 = 2:30pm)
+                                    "Brightness" | "brightness" => { if let Ok(v) = val.parse::<f32>() { lighting.brightness = v; } }
+                                    "ClockTime" | "clock_time" => {
+                                        // ClockTime is 0-24 hours
                                         if let Ok(hours) = val.parse::<f32>() {
-                                            lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
+                                            let hours = hours.clamp(0.0, 24.0);
+                                            lighting.time_of_day = hours / 24.0;
                                             let h = hours as u32 % 24;
-                                            let m = ((hours % 1.0) * 60.0) as u32;
-                                            let sec = (((hours * 60.0) % 1.0) * 60.0) as u32;
-                                            lighting.clock_time = format!("{:02}:{:02}:{:02}", h, m, sec);
+                                            let m = ((hours.fract()) * 60.0) as u32;
+                                            let s = ((hours.fract() * 60.0).fract() * 60.0) as u32;
+                                            lighting.clock_time = format!("{:02}:{:02}:{:02}", h, m, s);
+                                        }
+                                    }
+                                    "TimeOfDay" | "time_of_day" => {
+                                        // TimeOfDay is "HH:MM:SS"
+                                        let parts: Vec<&str> = val.split(':').collect();
+                                        if let Some(h) = parts.first().and_then(|s| s.trim().parse::<f32>().ok()) {
+                                            let m = parts.get(1).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
+                                            let sec = parts.get(2).and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0);
+                                            let hours = h + m / 60.0 + sec / 3600.0;
+                                            lighting.time_of_day = (hours / 24.0).clamp(0.0, 1.0);
+                                            lighting.clock_time = val.clone();
                                         }
                                     }
                                     "GeographicLatitude" => { if let Ok(v) = val.parse::<f32>() { lighting.geographic_latitude = v; } }

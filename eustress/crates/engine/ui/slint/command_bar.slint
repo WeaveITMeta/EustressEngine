@@ -33,6 +33,9 @@ export component CommandBar inherits Rectangle {
     in property <[ScriptOutputEntry]> output-log: [];
     in-out property <bool> show-output: false;
 
+    // Whether the input has keyboard focus — parent reads this to block engine shortcuts
+    out property <bool> input-has-focus: input.has-focus;
+
     // Callbacks
     callback on-execute(/* language */ string, /* script */ string);
     callback on-close();
@@ -149,6 +152,11 @@ export component CommandBar inherits Rectangle {
                     border-radius: 3px;
                     border-width: input.has-focus ? 1px : 0px;
                     border-color: Theme.accent-blue;
+
+                    // Click anywhere in the input area to grab focus
+                    TouchArea {
+                        clicked => { input.focus(); }
+                    }
 
                     ScrollView {
                         input := TextInput {
