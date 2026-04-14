@@ -671,7 +671,7 @@ struct NudgeTimer {
     down_timer: f32,
 }
 
-const NUDGE_REPEAT_SECS: f32 = 0.15;
+const NUDGE_REPEAT_SECS: f32 = 0.5;
 
 fn handle_nudge_keys(
     keys: Res<ButtonInput<KeyCode>>,

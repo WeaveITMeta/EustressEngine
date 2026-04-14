@@ -388,6 +388,8 @@ pub enum SlintAction {
     WorkshopResumePipeline,
     WorkshopCancelPipeline,
     WorkshopOptimizeAndBuild,
+    WorkshopLoadConversation(String),
+    WorkshopNewConversation,
 
     // API Reference panel
     ApiSearchChanged(String),
@@ -3690,7 +3692,6 @@ fn drain_slint_actions(
                             info!("📂 OpenNode class: {:?}", inst.class_name);
                             if inst.class_name == eustress_common::classes::ClassName::SoulScript {
                                 // Open SoulScript in tabbed viewer
-                                // Get the file path from LoadedFromFile component if available
                                 if let Ok((_, loaded)) = queries.loaded_from_file.get(entity) {
                                     if let Some(ref mut mgr) = res.tab_manager {
                                         let idx = mgr.open_file(&loaded.path);
@@ -3699,9 +3700,29 @@ fn drain_slint_actions(
                                         }
                                     }
                                 } else {
-                                    // Fallback: use pending_open_script for scripts without file path
                                     if let Some(ref mut s) = res.state {
                                         s.pending_open_script = Some((id, inst.name.clone()));
+                                    }
+                                }
+                            } else if inst.class_name == eustress_common::classes::ClassName::WorkshopConversation {
+                                // Open WorkshopConversation in Workshop panel
+                                // Read the session_id from the _instance.toml properties
+                                if let Ok((_, loaded)) = queries.loaded_from_file.get(entity) {
+                                    // The session_id is the folder name
+                                    let session_id = loaded.path.parent()
+                                        .and_then(|p| p.file_name())
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    if !session_id.is_empty() {
+                                        // Switch to Workshop tab and load conversation
+                                        if let Some(ref mut s) = res.state {
+                                            s.right_tab_index = 3; // Workshop tab
+                                        }
+                                        pending_actions.push(SlintAction::WorkshopLoadConversation(session_id.clone()));
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Opening conversation: {}", inst.name));
+                                        }
                                     }
                                 }
                             }
@@ -4726,7 +4747,8 @@ fn drain_slint_actions(
             }
             SlintAction::WorkshopCancelPipeline => {
                 if let Some(ref mut pipeline) = res.workshop_pipeline {
-                    let _ = crate::workshop::persistence::save_session(pipeline);
+                    let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                    let _ = crate::workshop::persistence::save_session_to_space(pipeline, space);
                     pipeline.reset();
                     info!("Workshop: Pipeline cancelled, session reset");
                 }
@@ -4751,6 +4773,37 @@ fn drain_slint_actions(
                 }
             }
             
+            SlintAction::WorkshopLoadConversation(session_id) => {
+                let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                match crate::workshop::persistence::load_session_from_space(space, &session_id) {
+                    Ok(manifest) => {
+                        if let Some(ref mut pipeline) = res.workshop_pipeline {
+                            pipeline.load_from_manifest(&manifest, &session_id);
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Workshop: Loaded conversation '{}' ({} messages)",
+                                    manifest.product_name, manifest.entries.len()));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Failed to load conversation: {}", e));
+                        }
+                    }
+                }
+            }
+            SlintAction::WorkshopNewConversation => {
+                if let Some(ref mut pipeline) = res.workshop_pipeline {
+                    // Save current before resetting
+                    let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                    let _ = crate::workshop::persistence::save_session_to_space(pipeline, space);
+                    pipeline.reset();
+                    if let Some(ref mut out) = res.output {
+                        out.info("Workshop: New conversation started".to_string());
+                    }
+                }
+            }
+
             // API Reference panel actions
             SlintAction::ApiSearchChanged(text) => {
                 if let Some(filter) = res.api_filter.as_mut() {
@@ -9080,6 +9133,8 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         // Asset classes
         ClassName::Material => "materialservice",
         ClassName::Image => "imagelabel",
+        ClassName::WorkshopConversation => "classes/WorkshopConversation",
+        // Workshop folder uses wrench icon (not a ClassName but handled via name match below)
         _ => "instance",
     }
 }

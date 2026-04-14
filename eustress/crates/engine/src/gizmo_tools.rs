@@ -61,20 +61,24 @@ fn diagnose_gizmos_once(
 /// Bevy 0.18 reversed-Z: depth_bias 0.0 = normal depth test.
 /// Small positive values may clip against near plane. Use 0.0 for now.
 fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
-    // Transform tool gizmos — render on top of everything
+    use bevy::camera::visibility::RenderLayers;
+
+    // Transform tool gizmos — render on main camera only (layer 0)
     {
         let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
-        config.depth_bias = 0.0;
+        config.depth_bias = -0.001; // Slight bias to render on top of geometry
         config.line.width = 4.0;
         config.enabled = true;
+        config.render_layers = RenderLayers::layer(0);
     }
 
     // Default gizmos — grid overlay, debug visualization
     {
         let (config, _) = config_store.config_mut::<bevy::gizmos::config::DefaultGizmoConfigGroup>();
-        config.depth_bias = 0.0; // Normal depth testing for grid
+        config.depth_bias = 0.0;
         config.line.width = 2.0;
         config.enabled = true;
+        config.render_layers = RenderLayers::layer(0);
     }
 
     // Light gizmos — visualize point/spot/directional light shapes and ranges
@@ -83,6 +87,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         config.enabled = true;
         config.depth_bias = 0.0;
         config.line.width = 1.5;
+        config.render_layers = RenderLayers::layer(0);
         light_config.draw_all = true;
         light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
     }

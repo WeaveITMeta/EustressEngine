@@ -1013,13 +1013,16 @@ export component WorkshopPanel inherits Rectangle {
                             HorizontalLayout {
                                 padding-left: 10px;
                                 padding-right: 10px;
+                                spacing: 6px;
+                                alignment: center;
 
-                                Text {
-                                    text: "\u{1F50D}";
-                                    font-size: 11px;
-                                    color: #666;
+                                Image {
+                                    width: 14px;
+                                    height: 14px;
+                                    source: @image-url("../../assets/icons/ui/search.svg");
+                                    image-fit: contain;
+                                    colorize: #666;
                                     vertical-alignment: center;
-                                    width: 18px;
                                 }
 
                                 hist-search-input := TextInput {
@@ -1027,6 +1030,7 @@ export component WorkshopPanel inherits Rectangle {
                                     color: Theme.text-primary;
                                     horizontal-stretch: 1;
                                     single-line: true;
+                                    vertical-alignment: center;
                                     text <=> root.history-search;
                                 }
                             }

@@ -851,6 +851,55 @@ impl IdeationPipeline {
         *self = Self::default();
     }
 
+    /// Load a conversation from a saved SessionManifest
+    pub fn load_from_manifest(&mut self, manifest: &persistence::SessionManifest, session_id: &str) {
+        self.reset();
+        self.session_id = session_id.to_string();
+        self.product_name = manifest.product_name.clone();
+        self.total_cost = manifest.total_cost;
+        self.state = IdeationState::Conversing;
+
+        // Rebuild messages from entries
+        for entry in &manifest.entries {
+            let role = match entry.source.as_str() {
+                "user" => MessageRole::User,
+                "system" => MessageRole::System,
+                "mcp" => MessageRole::Mcp,
+                "artifact" => MessageRole::Artifact,
+                "error" => MessageRole::Error,
+                _ => MessageRole::System,
+            };
+
+            let id = self.next_message_id;
+            self.next_message_id += 1;
+
+            // Rebuild conversation context
+            match role {
+                MessageRole::User => self.conversation_context.push_str(&format!("\nUser: {}", entry.content)),
+                MessageRole::System => self.conversation_context.push_str(&format!("\nWorkshop: {}", entry.content)),
+                _ => {}
+            }
+
+            self.messages.push(ChatMessage {
+                id,
+                role,
+                content: entry.content.clone(),
+                timestamp: chrono::DateTime::from_timestamp_millis(entry.timestamp as i64)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+                mcp_endpoint: entry.mcp_endpoint.clone(),
+                mcp_method: None,
+                mcp_status: None, // TODO: parse from string
+                artifact_path: entry.artifact_path.as_ref().map(std::path::PathBuf::from),
+                artifact_type: None, // TODO: parse from string
+                estimated_cost: entry.cost,
+                actual_cost: None,
+            });
+        }
+
+        self.dirty = false;
+    }
+
     /// Check if the pipeline has an active session (not idle)
     pub fn is_active(&self) -> bool {
         self.state != IdeationState::Idle
@@ -1274,12 +1323,14 @@ fn handle_claude_error(
 /// Autosave conversation to disk periodically when dirty
 fn autosave_conversation(
     mut pipeline: ResMut<IdeationPipeline>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
     if !pipeline.dirty || !pipeline.is_active() {
         return;
     }
-    
-    if let Err(e) = persistence::save_session(&pipeline) {
+
+    let space = space_root.as_ref().map(|sr| sr.0.as_path());
+    if let Err(e) = persistence::save_session_to_space(&pipeline, space) {
         warn!("Workshop: Failed to autosave conversation: {}", e);
     } else {
         pipeline.dirty = false;

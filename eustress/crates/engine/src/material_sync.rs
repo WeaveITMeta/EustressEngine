@@ -80,6 +80,11 @@ fn sync_basepart_to_material(
                     if matches!(basepart.material, RobloxMaterial::Neon) {
                         cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
                     }
+                    // Auto UV tiling based on part size (consistent texel density)
+                    let studs_per_tile = 10.0_f32;
+                    let auto_u = (basepart.size.x / studs_per_tile).max(0.1);
+                    let auto_v = (basepart.size.z / studs_per_tile).max(0.1);
+                    cloned.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(auto_u, auto_v));
                     let new_handle = materials.add(cloned);
                     commands.entity(entity).insert(MeshMaterial3d(new_handle));
                     continue;
@@ -130,13 +135,14 @@ fn sync_basepart_to_material(
                 material.alpha_mode = AlphaMode::Opaque;
             }
             
-            // Texture repeat (UV tiling)
+            // UV tiling: auto-scale based on part size for consistent texel density.
+            // StudsPerTile controls how many studs one texture tile covers.
+            // Larger parts tile more, smaller parts tile less. Default 10 studs/tile.
+            let studs_per_tile = 10.0_f32;
             let [u_repeat, v_repeat] = basepart.texture_repeat;
-            if u_repeat != 1.0 || v_repeat != 1.0 {
-                material.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(u_repeat, v_repeat));
-            } else {
-                material.uv_transform = bevy::math::Affine2::IDENTITY;
-            }
+            let auto_u = if u_repeat != 1.0 { u_repeat } else { (basepart.size.x / studs_per_tile).max(0.1) };
+            let auto_v = if v_repeat != 1.0 { v_repeat } else { (basepart.size.z / studs_per_tile).max(0.1) };
+            material.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(auto_u, auto_v));
 
             // Glass material gets specular/diffuse transmission for colored shadows
             if is_glass {

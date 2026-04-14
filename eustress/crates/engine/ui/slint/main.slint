@@ -2092,6 +2092,7 @@ export component StudioWindow inherits Window {
                         if root.right-tab-index == 2: SoulPanel {
                             on-build-script(id) => { root.build-script(id); }
                             on-open-script(id) => { root.open-script(id); }
+                            on-configure-api() => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
                         }
                         
                         if root.right-tab-index == 3: WorkshopPanel {
@@ -2116,7 +2117,7 @@ export component StudioWindow inherits Window {
                             on-pause-pipeline() => { root.workshop-pause-pipeline(); }
                             on-resume-pipeline() => { root.workshop-resume-pipeline(); }
                             on-cancel-pipeline() => { root.workshop-cancel-pipeline(); }
-                            on-configure-api() => { root.open-settings(); }
+                            on-configure-api() => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
                             on-optimize-and-build() => { root.workshop-optimize-and-build(); }
                             on-execute-command(cmd) => { root.workshop-send-message(cmd); }
                             on-load-conversation(id) => { root.workshop-load-conversation(id); }

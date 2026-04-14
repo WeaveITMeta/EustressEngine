@@ -194,6 +194,8 @@ pub enum ClassName {
     UnionOperation,
     // Soul Scripting - Single unified script class
     SoulScript,
+    /// Workshop conversation session stored in SoulService/Workshop/
+    WorkshopConversation,
     // Luau Scripting - Roblox-compatible script types
     LuauScript,         // Server-side Luau script
     LuauLocalScript,    // Client-side Luau script
@@ -303,6 +305,7 @@ impl ClassName {
             ClassName::Sky => "Sky",
             ClassName::UnionOperation => "UnionOperation",
             ClassName::SoulScript => "SoulScript",
+            ClassName::WorkshopConversation => "WorkshopConversation",
             ClassName::LuauScript => "LuauScript",
             ClassName::LuauLocalScript => "LuauLocalScript",
             ClassName::LuauModuleScript => "LuauModuleScript",
@@ -402,6 +405,7 @@ impl ClassName {
             "Sky" => Ok(ClassName::Sky),
             "UnionOperation" => Ok(ClassName::UnionOperation),
             "SoulScript" => Ok(ClassName::SoulScript),
+            "WorkshopConversation" => Ok(ClassName::WorkshopConversation),
             "LuauScript" | "Script" => Ok(ClassName::LuauScript),
             "LuauLocalScript" | "LocalScript" => Ok(ClassName::LuauLocalScript),
             "LuauModuleScript" | "ModuleScript" => Ok(ClassName::LuauModuleScript),

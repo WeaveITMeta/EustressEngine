@@ -97,8 +97,20 @@ pub struct SessionManifest {
 // 3. Path helpers
 // ============================================================================
 
-/// Get the workshop history root directory
-/// ~/.eustress_engine/workshop/history/
+/// Get the workshop history root directory within the current Space.
+/// {SpaceRoot}/SoulService/Workshop/
+/// Falls back to ~/.eustress_engine/workshop/history/ if no Space is loaded.
+pub fn history_root_for_space(space_root: Option<&std::path::Path>) -> PathBuf {
+    if let Some(root) = space_root {
+        root.join("SoulService").join("Workshop")
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".eustress_engine").join("workshop").join("history")
+    }
+}
+
+/// Legacy: get history root from home dir (used when SpaceRoot isn't available)
 pub fn history_root() -> Option<PathBuf> {
     dirs::home_dir().map(|home| {
         home.join(".eustress_engine").join("workshop").join("history")
@@ -106,12 +118,25 @@ pub fn history_root() -> Option<PathBuf> {
 }
 
 /// Get the session directory for a specific session ID
-/// ~/.eustress_engine/workshop/history/{session_id}/
+pub fn session_dir_in_space(space_root: Option<&std::path::Path>, session_id: &str) -> PathBuf {
+    history_root_for_space(space_root).join(session_id)
+}
+
+/// Get the entries.json path for a specific session ID
+pub fn session_entries_path_in_space(space_root: Option<&std::path::Path>, session_id: &str) -> PathBuf {
+    session_dir_in_space(space_root, session_id).join("entries.json")
+}
+
+/// Get the _instance.toml path for a conversation (makes it an Explorer entity)
+pub fn session_instance_path(space_root: Option<&std::path::Path>, session_id: &str) -> PathBuf {
+    session_dir_in_space(space_root, session_id).join("_instance.toml")
+}
+
+/// Legacy path helpers
 pub fn session_dir(session_id: &str) -> Option<PathBuf> {
     history_root().map(|root| root.join(session_id))
 }
 
-/// Get the entries.json path for a specific session ID
 pub fn session_entries_path(session_id: &str) -> Option<PathBuf> {
     session_dir(session_id).map(|dir| dir.join("entries.json"))
 }
@@ -140,17 +165,17 @@ fn message_to_entry(msg: &ChatMessage) -> SessionEntry {
     }
 }
 
-/// Save the current ideation session to disk
-pub fn save_session(pipeline: &IdeationPipeline) -> Result<(), String> {
-    let path = session_entries_path(&pipeline.session_id)
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
-    
+/// Save the current ideation session to the Space's SoulService/Workshop/ directory.
+/// Creates an _instance.toml so the file loader picks it up as a WorkshopConversation entity.
+pub fn save_session_to_space(pipeline: &IdeationPipeline, space_root: Option<&std::path::Path>) -> Result<(), String> {
+    let entries_path = session_entries_path_in_space(space_root, &pipeline.session_id);
+
     // Ensure directory exists
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = entries_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create session directory: {}", e))?;
     }
-    
+
     let manifest = SessionManifest {
         version: 1,
         resource: format!("workshop://ideation/{}", pipeline.session_id),
@@ -159,70 +184,91 @@ pub fn save_session(pipeline: &IdeationPipeline) -> Result<(), String> {
         total_cost: pipeline.total_cost,
         entries: pipeline.messages.iter().map(message_to_entry).collect(),
     };
-    
+
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("Failed to serialize session: {}", e))?;
-    
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    
-    info!("Workshop: Saved session {} ({} entries) to {:?}", 
-          pipeline.session_id, manifest.entries.len(), path);
-    
+
+    std::fs::write(&entries_path, json)
+        .map_err(|e| format!("Failed to write {}: {}", entries_path.display(), e))?;
+
+    // Write _instance.toml so Explorer shows this as a WorkshopConversation entity
+    let instance_path = session_instance_path(space_root, &pipeline.session_id);
+    if !instance_path.exists() {
+        let display_name = if pipeline.product_name.is_empty() {
+            format!("Session {}", &pipeline.session_id[..8.min(pipeline.session_id.len())])
+        } else {
+            pipeline.product_name.clone()
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let instance_toml = format!(
+            "[metadata]\nclass_name = \"WorkshopConversation\"\narchivable = true\nname = \"{}\"\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[properties]\nsession_id = \"{}\"\nproduct_name = \"{}\"\nmessage_count = {}\ntotal_cost = {:.4}\n",
+            display_name, now, now,
+            pipeline.session_id, pipeline.product_name,
+            pipeline.messages.len(), pipeline.total_cost,
+        );
+        std::fs::write(&instance_path, instance_toml)
+            .map_err(|e| format!("Failed to write instance TOML: {}", e))?;
+    }
+
+    info!("Workshop: Saved session {} ({} entries) to {:?}",
+          pipeline.session_id, manifest.entries.len(), entries_path);
+
     Ok(())
 }
 
-/// Load a session from disk by session ID
-pub fn load_session(session_id: &str) -> Result<SessionManifest, String> {
-    let path = session_entries_path(session_id)
-        .ok_or_else(|| "Cannot determine home directory".to_string())?;
-    
+/// Legacy: save to ~/.eustress_engine/ (fallback)
+pub fn save_session(pipeline: &IdeationPipeline) -> Result<(), String> {
+    save_session_to_space(pipeline, None)
+}
+
+/// Load a session from the Space's SoulService/Workshop/ directory
+pub fn load_session_from_space(space_root: Option<&std::path::Path>, session_id: &str) -> Result<SessionManifest, String> {
+    let path = session_entries_path_in_space(space_root, session_id);
+
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    
+
     let manifest: SessionManifest = serde_json::from_str(&json)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-    
+
     info!("Workshop: Loaded session {} ({} entries)", session_id, manifest.entries.len());
-    
     Ok(manifest)
 }
 
-/// List all past session IDs with metadata (newest first)
-pub fn list_sessions() -> Vec<SessionSummary> {
-    let Some(root) = history_root() else {
-        return Vec::new();
-    };
-    
+/// Legacy fallback
+pub fn load_session(session_id: &str) -> Result<SessionManifest, String> {
+    load_session_from_space(None, session_id)
+}
+
+/// List all past sessions from the Space's SoulService/Workshop/ directory (newest first)
+pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<SessionSummary> {
+    let root = history_root_for_space(space_root);
+
     if !root.exists() {
         return Vec::new();
     }
-    
+
     let mut sessions = Vec::new();
-    
+
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            
+            if !path.is_dir() { continue; }
+
             let session_id = path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-            
-            if session_id.is_empty() {
-                continue;
-            }
-            
+
+            if session_id.is_empty() { continue; }
+
             // Try to read the manifest for metadata
-            match load_session(&session_id) {
+            match load_session_from_space(space_root, &session_id) {
                 Ok(manifest) => {
                     let last_timestamp = manifest.entries.last()
                         .map(|e| e.timestamp)
                         .unwrap_or(0);
-                    
+
                     sessions.push(SessionSummary {
                         session_id,
                         product_name: manifest.product_name,
@@ -238,10 +284,14 @@ pub fn list_sessions() -> Vec<SessionSummary> {
             }
         }
     }
-    
-    // Sort newest first
+
     sessions.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
     sessions
+}
+
+/// Legacy fallback
+pub fn list_sessions() -> Vec<SessionSummary> {
+    list_sessions_in_space(None)
 }
 
 /// Summary of a past session for history browsing
