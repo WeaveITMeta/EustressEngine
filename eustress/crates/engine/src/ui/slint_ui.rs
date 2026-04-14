@@ -2014,9 +2014,13 @@ fn update_slint_ui_focus(
     mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
 ) {
     // Track text input focus from Slint (blocks keyboard shortcuts while typing)
-    ui_focus.text_input_focused = slint_context.as_ref()
-        .map(|ctx| ctx.window.get_any_input_has_focus())
+    let any_focus = slint_context.as_ref()
+        .map(|ctx| ctx.window.get_any_input_has_focus()
+            || ctx.window.get_show_settings_dialog()
+            || ctx.window.get_show_exit_confirmation())
         .unwrap_or(false);
+    ui_focus.text_input_focused = any_focus;
+    OVERLAY_INPUT_FOCUSED.store(any_focus, std::sync::atomic::Ordering::Relaxed);
 
     let Some(vb) = viewport_bounds.as_deref() else {
         ui_focus.has_focus = false;
@@ -2247,8 +2251,8 @@ struct DrainResources<'w> {
     /// Standard materials for spawning instances
     materials: ResMut<'w, Assets<StandardMaterial>>,
     /// Soul service settings for API key access
-    soul_settings: Option<Res<'w, crate::soul::SoulServiceSettings>>,
-    global_soul_settings: Option<Res<'w, crate::soul::GlobalSoulSettings>>,
+    soul_settings: Option<ResMut<'w, crate::soul::SoulServiceSettings>>,
+    global_soul_settings: Option<ResMut<'w, crate::soul::GlobalSoulSettings>>,
     /// Stress test state
     stress_test: Option<ResMut<'w, crate::network_benchmark::StressTestState>>,
     /// Play server state (for stress test port)
@@ -4304,6 +4308,26 @@ fn drain_slint_actions(
                             "Description" => {
                                 service.description = val.clone();
                                 changed = true;
+                            }
+                            "ApiKey" => {
+                                // Sync API key to service properties + Soul Settings resource
+                                service.properties.insert("api_key".to_string(),
+                                    crate::space::service_loader::PropertyValue::String(val.clone()));
+                                changed = true;
+
+                                // Also update the Soul Settings resource so Workshop/Soul panels see it immediately
+                                if let Some(ref mut ss) = res.soul_settings {
+                                    ss.api_key = val.clone();
+                                    // Persist to soul_settings.json
+                                    let _ = ss.save();
+                                }
+                                if let Some(ref mut gs) = res.global_soul_settings {
+                                    gs.api_key = val.clone();
+                                }
+
+                                if let Some(ref mut out) = res.output {
+                                    out.info("API key updated".to_string());
+                                }
                             }
                             _ => {
                                 // Dynamic property - parse value based on existing type or infer
@@ -7940,6 +7964,14 @@ fn sync_properties_to_slint(
             add_prop("Service", "Description", service.description.clone(), "string", true);
         }
         add_prop("Service", "TomlPath", service.toml_path.display().to_string(), "string", false);
+
+        // SoulService: show API key from the service's own properties
+        if service.class_name == "SoulService" {
+            let api_key = service.properties.get("api_key")
+                .map(|v| v.to_display_string())
+                .unwrap_or_default();
+            add_prop("API", "ApiKey", api_key, "string", true);
+        }
         
         // Display ALL dynamic properties from the TOML file
         // Properties are sorted alphabetically for consistent display

@@ -664,14 +664,18 @@ fn handle_menu_action_events(
 // Nudge System — +/- keys move selection up/down by grid unit
 // ============================================================================
 
-/// Timer for nudge repeat rate (one step per 0.15s when held)
+/// Timer for nudge keys — one step on press, then after NUDGE_DELAY_SECS
+/// of holding, repeat every NUDGE_REPEAT_SECS.
 #[derive(Resource, Default)]
 struct NudgeTimer {
     up_timer: f32,
     down_timer: f32,
 }
 
-const NUDGE_REPEAT_SECS: f32 = 0.5;
+/// Initial delay before auto-repeat starts (seconds)
+const NUDGE_DELAY_SECS: f32 = 2.0;
+/// Repeat interval once auto-repeat is active (seconds)
+const NUDGE_REPEAT_SECS: f32 = 1.0;
 
 fn handle_nudge_keys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -695,7 +699,8 @@ fn handle_nudge_keys(
             }
         } else {
             timer.up_timer += time.delta_secs();
-            if timer.up_timer >= NUDGE_REPEAT_SECS {
+            // After initial delay, repeat every NUDGE_REPEAT_SECS
+            if timer.up_timer >= NUDGE_DELAY_SECS {
                 timer.up_timer -= NUDGE_REPEAT_SECS;
                 for mut t in selected.iter_mut() {
                     t.translation.y += snap;
@@ -715,7 +720,7 @@ fn handle_nudge_keys(
             }
         } else {
             timer.down_timer += time.delta_secs();
-            if timer.down_timer >= NUDGE_REPEAT_SECS {
+            if timer.down_timer >= NUDGE_DELAY_SECS {
                 timer.down_timer -= NUDGE_REPEAT_SECS;
                 for mut t in selected.iter_mut() {
                     t.translation.y -= snap;

@@ -120,98 +120,108 @@ export component SoulPanel inherits Rectangle {
     callback on-select-script(int);
     
     background: Theme.panel-background;
-    
+
     VerticalBox {
         padding: 0px;
         spacing: 0px;
-        
-        // Header
-        PanelHeader {
-            title: "Soul Scripts";
-        }
-        
-        // API key status
-        if root.api-key-status != "valid": Rectangle {
-            height: 72px;
-            background: root.api-key-status == "invalid" ? #4a2020 : Theme.background-tertiary;
-            
-            VerticalLayout {
-                padding: 8px;
-                spacing: 6px;
-                alignment: center;
-                
-                // Icon + message row
-                HorizontalLayout {
-                    spacing: 6px;
-                    alignment: center;
-                    
-                    Image {
-                        width: 16px;
-                        height: 16px;
-                        source: root.api-key-status == "invalid" ? @image-url("../../assets/icons/ui/warning.svg") :
-                                @image-url("../../assets/icons/ui/info.svg");
-                        image-fit: contain;
-                    }
-                    
-                    Text {
-                        text: root.api-key-status == "invalid" ? "Invalid API key" : "API key not configured";
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                    }
+
+        // Header — matches Workshop style
+        Rectangle {
+            height: 28px;
+            background: Theme.header-background;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 4px;
+                spacing: 4px;
+
+                Text {
+                    text: "Soul Scripts";
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
                 }
-                
-                // Configure button centered below
-                HorizontalLayout {
-                    alignment: center;
-                    
-                    Rectangle {
-                        width: 80px;
-                        height: 24px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-configure-api(); }
-                        }
-                        
-                        Text {
-                            text: "Configure";
-                            color: Theme.text-primary;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
+
+                // Build All button (hammer icon)
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: 3px;
+                    background: build-touch.has-hover ? Theme.button-hover : transparent;
+                    y: (parent.height - self.height) / 2;
+
+                    build-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-build-all(); }
+                    }
+
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: @image-url("../../assets/icons/ui/build.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
                     }
                 }
             }
         }
-        
-        // Toolbar
-        Rectangle {
-            height: 36px;
-            background: Theme.header-background;
-            
-            HorizontalLayout {
-                padding: 4px;
+
+        // API key banner — only shown when not configured, matches Workshop style
+        if root.api-key-status != "valid": Rectangle {
+            height: 56px;
+            background: root.api-key-status == "invalid" ? #3a2020 : #2a2a1a;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 4px;
                 alignment: center;
-                
-                Rectangle {
-                    width: 80px;
-                    height: 28px;
-                    background: Theme.button-primary;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-build-all(); }
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: root.api-key-status == "invalid" ? @image-url("../../assets/icons/ui/warning.svg") :
+                                @image-url("../../assets/icons/ui/info.svg");
+                        image-fit: contain;
+                        colorize: root.api-key-status == "invalid" ? #ef5350 : #42a5f5;
                     }
-                    
+
                     Text {
-                        text: "Build All";
-                        color: white;
-                        font-size: 12px;
-                        horizontal-alignment: center;
+                        text: root.api-key-status == "invalid" ? "Invalid API key" : "Soul Service API key required";
+                        color: Theme.text-primary;
+                        font-size: 11px;
                         vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 70px;
+                        height: 22px;
+                        background: Theme.button-background;
+                        border-radius: 4px;
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.on-configure-api(); }
+                        }
+
+                        Text {
+                            text: "Configure";
+                            color: Theme.text-primary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
