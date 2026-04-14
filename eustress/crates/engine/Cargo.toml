@@ -21,6 +21,9 @@ path = "src/bin/generate_benchmark_map.rs"
 
 
 [dependencies]
+# System clipboard for Slint platform (Ctrl+V paste in LineEdit/TextInput)
+clipboard-win = "5"
+
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
 eustress-bliss = { path = "../bliss" }

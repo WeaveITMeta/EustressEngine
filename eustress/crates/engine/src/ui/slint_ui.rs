@@ -124,6 +124,14 @@ impl slint::platform::Platform for SlintBevyPlatform {
         });
         Ok(adapter)
     }
+
+    fn clipboard_text(&self, _clipboard: slint::platform::Clipboard) -> Option<String> {
+        clipboard_win::get_clipboard_string().ok()
+    }
+
+    fn set_clipboard_text(&self, text: &str, _clipboard: slint::platform::Clipboard) {
+        let _ = clipboard_win::set_clipboard_string(text);
+    }
 }
 
 /// Non-Send resource holding Slint UI context (must stay on main thread)
