@@ -141,7 +141,7 @@ png = "0.17"
 slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
 
 [features]
-default = []
+default = ["realism-scripting"]
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]

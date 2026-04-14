@@ -6382,11 +6382,6 @@ fn forward_keyboard_to_slint(
         let text = convert_key_to_slint_text(&event.logical_key);
         if text.is_empty() { continue; }
 
-        // Debug: log all key events forwarded to Slint
-        if event.state == ButtonState::Pressed {
-            info!("⌨️→Slint: {:?} → text={:?}", event.logical_key, text);
-        }
-
         match event.state {
             ButtonState::Pressed => {
                 adapter.slint_window.dispatch_event(

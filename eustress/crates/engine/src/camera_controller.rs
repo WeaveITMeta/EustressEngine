@@ -232,7 +232,8 @@ impl Plugin for CameraControllerPlugin {
             .add_systems(Update, (
                 ensure_camera_exists,
                 update_camera_viewport_for_ui,
-                camera_view_input_system,
+                camera_view_input_system
+                    .after(crate::ui::slint_ui::update_slint_ui_focus),
                 handle_snap_to_view,
                 handle_toggle_projection,
                 handle_frame_selection,
