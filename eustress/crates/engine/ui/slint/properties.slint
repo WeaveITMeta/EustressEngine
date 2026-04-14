@@ -87,8 +87,8 @@ component HelpIcon inherits Rectangle {
     Rectangle {
         width: 14px;
         height: 14px;
-        x: 2px;
-        y: 2px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
         border-radius: 7px;
         background: tip-area.has-hover && learn-url != "" ? Theme.accent-blue
                   : tip-area.has-hover ? #3a3a3a
