@@ -1,10 +1,10 @@
 // ============================================================================
 // Eustress Engine Studio - Command Bar
 // Docked at the bottom of the engine window for executing Rune/Luau scripts.
-// Resizable by dragging the top edge.
+// Output goes to the existing Output panel, not rendered here.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { HorizontalBox, LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 export struct CommandSuggestion {
@@ -24,11 +24,6 @@ export struct ScriptOutputEntry {
 export component CommandBar inherits Rectangle {
     in-out property <string> command-text: "";
     in-out property <string> language: "rune";
-    in property <[CommandSuggestion]> suggestions: [];
-    in property <int> selected-index: 0;
-    in property <[string]> history: [];
-    in property <[ScriptOutputEntry]> output-log: [];
-    in-out property <length> bar-height: 28px;
 
     out property <bool> input-has-focus: input.has-focus;
 
@@ -39,151 +34,99 @@ export component CommandBar inherits Rectangle {
     callback on-clear-output();
 
     width: 100%;
-    height: root.bar-height;
+    height: 28px;
     background: Theme.header-background;
     border-width: 1px;
     border-color: Theme.border-color;
 
-    // Resize handle at top edge — drag to resize
-    Rectangle {
-        y: 0px;
-        width: 100%;
-        height: 4px;
-        background: resize-touch.has-hover ? Theme.accent-blue : transparent;
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        padding-top: 3px;
+        padding-bottom: 3px;
+        spacing: 4px;
 
-        resize-touch := TouchArea {
-            mouse-cursor: ns-resize;
-            moved => {
-                root.bar-height = max(28px, min(400px, root.bar-height - (self.mouse-y - self.pressed-y)));
-            }
-        }
-    }
-
-    VerticalLayout {
-        padding-top: 4px;
-
-        // Output log above input — fills space when expanded by drag
-        if root.bar-height > 32px: Rectangle {
-            vertical-stretch: 1;
-            background: #0d0d12;
-
-            ScrollView {
-                VerticalLayout {
-                    padding: 4px;
-                    spacing: 1px;
-
-                    for entry in root.output-log: Text {
-                        text: entry.text;
-                        color: entry.is-error ? #ef5350 : #8bc34a;
-                        font-size: 11px;
-                        font-family: "Cascadia Code";
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
-
-        // Separator
-        if root.bar-height > 32px: Rectangle {
-            height: 1px;
-            background: Theme.border-color;
-        }
-
-        // Input bar at bottom
+        // Language selector
         Rectangle {
-            height: 28px;
+            width: 48px;
+            height: 22px;
+            background: lang-touch.has-hover ? Theme.button-hover : Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
 
-            HorizontalLayout {
-                padding-left: 4px;
-                padding-right: 4px;
-                padding-top: 3px;
-                padding-bottom: 3px;
-                spacing: 4px;
-
-                // Language selector
-                Rectangle {
-                    width: 48px;
-                    height: 22px;
-                    background: lang-touch.has-hover ? Theme.button-hover : Theme.input-background;
-                    border-radius: 3px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-
-                    lang-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            root.language = root.language == "luau" ? "rune" : "luau";
-                        }
-                    }
-
-                    Text {
-                        width: 100%;
-                        height: 100%;
-                        text: root.language == "luau" ? "Luau" : "Rune";
-                        color: root.language == "luau" ? #4fc3f7 : #ffb74d;
-                        font-size: 11px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+            lang-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.language = root.language == "luau" ? "rune" : "luau";
                 }
+            }
 
-                // Prompt
-                Text {
-                    width: 14px;
-                    text: ">";
-                    color: root.language == "luau" ? #4fc3f7 : #ffb74d;
-                    font-size: 14px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
+            Text {
+                width: 100%;
+                height: 100%;
+                text: root.language == "luau" ? "Luau" : "Rune";
+                color: root.language == "luau" ? #4fc3f7 : #ffb74d;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
 
-                // Input field — uses LineEdit for proper paste/focus/enter handling
-                input := LineEdit {
-                    horizontal-stretch: 1;
-                    placeholder-text: root.language == "rune" ? "pub fn main() { ... }" : "print(\"Hello\")";
-                    text <=> root.command-text;
+        // Prompt
+        Text {
+            width: 14px;
+            text: ">";
+            color: root.language == "luau" ? #4fc3f7 : #ffb74d;
+            font-size: 14px;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
 
-                    edited(text) => { root.on-text-changed(text); }
+        // Input field
+        input := LineEdit {
+            horizontal-stretch: 1;
+            placeholder-text: root.language == "rune" ? "pub fn main() { ... }" : "print(\"Hello\")";
+            text <=> root.command-text;
 
-                    accepted(text) => {
-                        if text != "" {
-                            root.on-execute(root.language, text);
-                            root.command-text = "";
-                        }
-                    }
-                }
+            edited(text) => { root.on-text-changed(text); }
 
-                // Run button
-                Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
-                    border-radius: 3px;
-                    border-width: 1px;
-                    border-color: Theme.input-border;
-
-                    run-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => {
-                            if root.command-text != "" {
-                                root.on-execute(root.language, root.command-text);
-                                root.command-text = "";
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "▶";
-                        color: #8bc34a;
-                        font-size: 11px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
+            accepted(text) => {
+                if text != "" {
+                    root.on-execute(root.language, text);
+                    root.command-text = "";
                 }
             }
         }
 
+        // Run button
+        Rectangle {
+            width: 22px;
+            height: 22px;
+            background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Theme.input-border;
+
+            run-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if root.command-text != "" {
+                        root.on-execute(root.language, root.command-text);
+                        root.command-text = "";
+                    }
+                }
+            }
+
+            Text {
+                text: "▶";
+                color: #8bc34a;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
     }
 }
