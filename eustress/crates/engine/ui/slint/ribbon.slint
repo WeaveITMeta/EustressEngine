@@ -938,17 +938,6 @@ export component Ribbon inherits Rectangle {
                     }
                 }
                 
-                // ── MINDSPACE (tab only, actions in ribbon) ──
-                Rectangle {
-                    width: self.preferred-width;
-                    preferred-width: mindspace-label.preferred-width + 12px;
-                    background: mindspace-touch.has-hover ? Theme.button-hover : transparent;
-                    border-radius: 2px;
-
-                    mindspace-touch := TouchArea { clicked => { root.ribbon-tab = "mindspace"; } }
-                    mindspace-label := Text { text: "MindSpace"; color: Theme.text-primary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                }
-
                 // ── HELP ──
                 Rectangle {
                     width: self.preferred-width;
