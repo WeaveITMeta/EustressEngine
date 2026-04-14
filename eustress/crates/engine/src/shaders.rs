@@ -22,10 +22,14 @@ pub struct MoonPhaseState {
 
 pub struct SunDiscPlugin;
 
+/// Marker for star field entities
+#[derive(Component)]
+pub struct StarFieldMarker;
+
 impl Plugin for SunDiscPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_moon_disc)
-            .add_systems(Update, (sync_moon_disc_transform, update_moon_phase));
+        app.add_systems(Startup, (spawn_moon_disc, spawn_star_field))
+            .add_systems(Update, (sync_moon_disc_transform, update_moon_phase, sync_star_field));
     }
 }
 
@@ -199,6 +203,127 @@ fn update_moon_phase(
     if let Some(data) = image.data.as_mut() {
         if data.len() == new_pixels.len() {
             data.copy_from_slice(&new_pixels);
+        }
+    }
+}
+
+// ============================================================================
+// Star Field — 3D point meshes at sky distance (visible through Atmosphere)
+// ============================================================================
+
+/// Generate deterministic star positions on the upper hemisphere.
+/// Returns (direction, brightness, color_warmth) for each star.
+fn generate_star_catalog() -> Vec<(Vec3, f32, f32)> {
+    let mut stars = Vec::new();
+    // Use a hash-based approach for uniform distribution
+    for i in 0..800u32 {
+        let h1 = ((i as f32) * 127.1 + 311.7).sin() * 43758.5453;
+        let h2 = ((i as f32) * 269.5 + 183.3).sin() * 28947.7231;
+        let h3 = ((i as f32) * 419.2 + 67.3).sin() * 17654.3219;
+
+        // Uniform distribution on sphere (upper hemisphere only)
+        let theta = h1.fract().abs() * std::f32::consts::TAU;
+        let phi = (h2.fract().abs()).acos(); // 0 to PI/2 for upper hemisphere
+        let phi = phi * 0.45; // compress to upper 80% of sky
+
+        let dir = Vec3::new(
+            phi.sin() * theta.cos(),
+            phi.cos(), // always positive (above horizon)
+            phi.sin() * theta.sin(),
+        ).normalize();
+
+        // Magnitude: mix of bright and dim
+        let seed = h3.fract().abs();
+        let brightness = if seed > 0.95 { 2.0 }      // 5% very bright
+            else if seed > 0.8 { 1.2 }                 // 15% bright
+            else if seed > 0.5 { 0.7 }                 // 30% medium
+            else { 0.4 };                               // 50% dim
+
+        let warmth = h2.fract().abs(); // 0=blue-white, 1=warm yellow
+
+        stars.push((dir, brightness, warmth));
+    }
+    stars
+}
+
+fn spawn_star_field(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let star_mesh = meshes.add(Circle::new(0.5));
+    let catalog = generate_star_catalog();
+    let sky_distance = 7500.0_f32;
+
+    for (dir, brightness, warmth) in &catalog {
+        // Color: blue-white to warm yellow based on warmth
+        let r = 0.8 + warmth * 0.2;
+        let g = 0.85 + (1.0 - warmth) * 0.15;
+        let b = 1.0 - warmth * 0.15;
+
+        // Bevy emissive is in lumens (cd/m²). Stars need high values to be visible.
+        let lum = brightness * 200.0; // bright stars ~400 lm, dim ~80 lm
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(r, g, b, 0.9),
+            emissive: LinearRgba::new(r * lum, g * lum, b * lum, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            cull_mode: None,
+            ..default()
+        });
+
+        // Scale based on brightness (brighter = slightly larger)
+        let scale = brightness * 8.0;
+
+        commands.spawn((
+            Mesh3d(star_mesh.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(*dir * sky_distance)
+                .with_scale(Vec3::splat(scale)),
+            StarFieldMarker,
+            bevy::light::NotShadowCaster,
+            bevy::light::NotShadowReceiver,
+        ));
+    }
+
+    info!("⭐ Spawned {} stars in star field", catalog.len());
+}
+
+/// Position stars relative to camera and fade based on sun elevation.
+fn sync_star_field(
+    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<StarFieldMarker>, Without<MoonDiscMarker>)>,
+    sun_class: Query<&eustress_common::classes::Sun, With<eustress_common::services::lighting::Sun>>,
+    mut stars: Query<(&mut Transform, &mut Visibility), With<StarFieldMarker>>,
+) {
+    let Some(camera_gt) = camera_query.iter().next() else { return };
+    let cam_pos = camera_gt.translation();
+
+    let sun_dir = sun_class.iter().next()
+        .map(|sc| sc.direction())
+        .unwrap_or(Vec3::new(0.3, 0.8, 0.2).normalize());
+
+    // Stars visible when sun is below horizon, fade during twilight
+    let sun_y = sun_dir.y;
+    let visible = sun_y < 0.05;
+    let fade = if sun_y < -0.1 { 1.0 }
+        else if sun_y < 0.05 { 1.0 - (sun_y + 0.1) / 0.15 }
+        else { 0.0 };
+
+    let sky_distance = 7500.0_f32;
+
+    for (mut transform, mut visibility) in stars.iter_mut() {
+        if !visible || fade < 0.01 {
+            *visibility = Visibility::Hidden;
+        } else {
+            *visibility = Visibility::Visible;
+            // Keep star at sky distance from camera
+            let dir = transform.translation.normalize();
+            transform.translation = cam_pos + dir * sky_distance;
+            // Face camera
+            transform.look_at(cam_pos, Vec3::Y);
+            // Scale by fade for twilight transition
+            let base_scale = transform.scale.x; // preserve original magnitude-based scale
+            let _ = base_scale; // scale is set at spawn, fade via visibility
         }
     }
 }

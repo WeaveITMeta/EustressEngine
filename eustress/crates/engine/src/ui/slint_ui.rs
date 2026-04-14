@@ -4309,6 +4309,36 @@ fn drain_slint_actions(
                                 service.description = val.clone();
                                 changed = true;
                             }
+                            // Sync ClockTime ↔ TimeOfDay bidirectionally
+                            "ClockTime" | "clock_time" => {
+                                // Parse "HH:MM:SS" → update time_of_day (0.0-1.0)
+                                let parts: Vec<&str> = val.split(':').collect();
+                                if let Some(hours) = parts.first().and_then(|s| s.parse::<f32>().ok()) {
+                                    let mins = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                                    let secs = parts.get(2).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                                    let tod = (hours + mins / 60.0 + secs / 3600.0) / 24.0;
+                                    service.properties.insert("clock_time".to_string(),
+                                        crate::space::service_loader::PropertyValue::String(val.clone()));
+                                    service.properties.insert("time_of_day".to_string(),
+                                        crate::space::service_loader::PropertyValue::Float(tod as f64));
+                                    changed = true;
+                                }
+                            }
+                            "TimeOfDay" | "time_of_day" => {
+                                // Parse 0.0-1.0 → update clock_time "HH:MM:SS"
+                                if let Ok(tod) = val.parse::<f64>() {
+                                    let hours_total = tod * 24.0;
+                                    let h = hours_total as u32 % 24;
+                                    let m = ((hours_total - h as f64) * 60.0) as u32;
+                                    let s = ((hours_total - h as f64 - m as f64 / 60.0) * 3600.0) as u32 % 60;
+                                    let clock = format!("{:02}:{:02}:{:02}", h, m, s);
+                                    service.properties.insert("time_of_day".to_string(),
+                                        crate::space::service_loader::PropertyValue::Float(tod));
+                                    service.properties.insert("clock_time".to_string(),
+                                        crate::space::service_loader::PropertyValue::String(clock));
+                                    changed = true;
+                                }
+                            }
                             "ApiKey" => {
                                 // Sync API key to service properties + Soul Settings resource
                                 service.properties.insert("api_key".to_string(),
