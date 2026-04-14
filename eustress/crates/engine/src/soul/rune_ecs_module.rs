@@ -1488,15 +1488,18 @@ impl InstanceRune {
     pub fn clone_instance(&self) -> Option<InstanceRune> {
         with_instance_registry(None, |registry| {
             let mut reg = registry.write().unwrap();
-            if let Some(source) = reg.get(self.entity_id as u64) {
-                if !source.archivable {
+            let source_data = reg.get(self.entity_id as u64).map(|s| {
+                (s.archivable, s.class_name.clone(), s.name.clone())
+            });
+            if let Some((archivable, class_name, name)) = source_data {
+                if !archivable {
                     return None;
                 }
                 let new_id = reg.next_entity_id();
                 let new_instance = eustress_common::scripting::InstanceData::new(
                     new_id,
-                    &source.class_name,
-                    &source.name,
+                    &class_name,
+                    &name,
                 );
                 reg.insert(new_instance);
                 Some(InstanceRune { entity_id: new_id as i64 })

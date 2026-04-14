@@ -28,22 +28,6 @@ impl Plugin for GizmoToolsPlugin {
         use bevy::camera::visibility::RenderLayers;
 
         app.init_gizmo_group::<TransformGizmoGroup>()
-           // Set gizmo config in build() — before any system runs.
-           // Using insert_gizmo_config ensures the pipeline is set up correctly
-           // from the first frame, avoiding race conditions with Atmosphere/HDR.
-           .insert_gizmo_config(
-               TransformGizmoGroup,
-               GizmoConfig {
-                   render_layers: RenderLayers::layer(0),
-                   depth_bias: -0.02,
-                   enabled: true,
-                   line: bevy::gizmos::config::GizmoLineConfig {
-                       width: 4.0,
-                       ..default()
-                   },
-                   ..default()
-               },
-           )
            .add_systems(Startup, configure_gizmos)
            .add_systems(Update, diagnose_gizmos_once.run_if(
                bevy::time::common_conditions::once_after_real_delay(
@@ -76,36 +60,34 @@ fn diagnose_gizmos_once(
 
 /// Configure all gizmo groups on startup.
 ///
-/// Bevy 0.18 reversed-Z: depth_bias 0.0 = normal depth test.
-/// Small positive values may clip against near plane. Use 0.0 for now.
+/// Configure all gizmo groups per Bevy's official 3d_gizmos example.
+/// depth_bias = -1.0 renders gizmos on top of ALL geometry (always visible).
+/// depth_bias = 0.0 renders with normal depth testing.
 fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
-    use bevy::camera::visibility::RenderLayers;
-
-    // Transform tool gizmos — render on main camera only (layer 0)
+    // Transform tool gizmos — ALWAYS on top (depth_bias = -1.0)
+    // This matches Bevy's example: pressing 'T' toggles between 0.0 and -1.0
     {
         let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
-        config.depth_bias = -0.02; // Aggressive negative bias to render on top with HDR/Atmosphere
+        config.depth_bias = -1.0; // Always render on top of everything
         config.line.width = 4.0;
+        config.line.perspective = false; // Constant screen-space width
         config.enabled = true;
-        config.render_layers = RenderLayers::layer(0);
     }
 
-    // Default gizmos — grid overlay, debug visualization
+    // Default gizmos — grid, debug lines (depth-tested normally)
     {
         let (config, _) = config_store.config_mut::<bevy::gizmos::config::DefaultGizmoConfigGroup>();
         config.depth_bias = 0.0;
         config.line.width = 2.0;
         config.enabled = true;
-        config.render_layers = RenderLayers::layer(0);
     }
 
-    // Light gizmos — visualize point/spot/directional light shapes and ranges
+    // Light gizmos — always on top so they're visible through geometry
     {
         let (config, light_config) = config_store.config_mut::<bevy::gizmos::light::LightGizmoConfigGroup>();
         config.enabled = true;
-        config.depth_bias = 0.0;
+        config.depth_bias = -1.0; // Always visible
         config.line.width = 1.5;
-        config.render_layers = RenderLayers::layer(0);
         light_config.draw_all = true;
         light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
     }
