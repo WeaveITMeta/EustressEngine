@@ -68,11 +68,13 @@ impl ParallelScriptExecutor {
         Ok(Self {})
     }
 
-    /// Execute scripts in parallel across multiple entities
+    /// Execute scripts across multiple entities.
+    /// Note: Rune's Vm is !Send, so we use sequential execution.
+    /// Parallel execution requires Vm pooling with unsafe Send wrapper.
     #[cfg(feature = "realism-scripting")]
     pub fn execute_parallel(&self, tasks: Vec<ScriptTask>) -> Vec<ScriptTaskResult> {
         tasks
-            .into_par_iter()
+            .into_iter()
             .map(|task| self.execute_single(task))
             .collect()
     }

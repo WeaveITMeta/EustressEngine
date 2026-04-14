@@ -2364,7 +2364,8 @@ pub struct HttpResponseRune {
     #[rune(get)]
     pub body: String,
     #[rune(get)]
-    pub headers: Vec<(String, String)>,
+    /// Headers as a single serialized string "key:value\nkey:value" (Rune TryClone compatible)
+    pub headers: String,
 }
 
 #[cfg(feature = "realism-scripting")]
@@ -2427,11 +2428,11 @@ fn http_request_async(
             let status = response.status();
             let status_text = response.status_text().to_string();
             
-            // Collect headers as Vec<(key, value)> (Rune TryClone compatible)
-            let mut response_headers = Vec::new();
+            // Collect headers as "key:value\n" string (Rune TryClone compatible)
+            let mut response_headers = String::new();
             for name in response.headers_names() {
                 if let Some(value) = response.header(&name) {
-                    response_headers.push((name, value.to_string()));
+                    response_headers.push_str(&format!("{}:{}\n", name, value));
                 }
             }
             
@@ -2454,7 +2455,7 @@ fn http_request_async(
                 status_code: code as i64,
                 status_message: status_text,
                 body: body_text,
-                headers: std::collections::HashMap::new(),
+                headers: String::new(),
             }
         }
         Err(_) => {
@@ -2463,7 +2464,7 @@ fn http_request_async(
                 status_code: 0,
                 status_message: "Connection failed".to_string(),
                 body: String::new(),
-                headers: std::collections::HashMap::new(),
+                headers: String::new(),
             }
         }
     }
