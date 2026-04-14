@@ -216,6 +216,8 @@ pub enum PasteMode {
     Normal,
     /// Regenerate all entity IDs to avoid conflicts
     NewIds,
+    /// Duplicate in place — new IDs, zero offset
+    DuplicateInPlace,
     /// Paste cancelled
     Cancelled,
 }
@@ -673,14 +675,18 @@ pub fn handle_paste_event(
         }
         
         // Remap IDs if requested
-        if event.mode == PasteMode::NewIds {
+        if matches!(event.mode, PasteMode::NewIds | PasteMode::DuplicateInPlace) {
             clipboard.remap_ids();
         }
-        
-        // Calculate paste offset
-        let offset = event.target_position
-            .map(|pos| pos - clipboard.copy_center)
-            .unwrap_or_else(|| clipboard.get_paste_offset());
+
+        // Calculate paste offset — DuplicateInPlace uses zero offset
+        let offset = if event.mode == PasteMode::DuplicateInPlace {
+            Vec3::ZERO
+        } else {
+            event.target_position
+                .map(|pos| pos - clipboard.copy_center)
+                .unwrap_or_else(|| clipboard.get_paste_offset())
+        };
         
         let mut created_ids = Vec::new();
 
@@ -746,12 +752,10 @@ pub fn handle_duplicate_event(
     _clipboard: Res<EditorClipboard>,
 ) {
     for _event in events.read() {
-        // First copy
+        // Copy then paste in exact same position (duplicate = clone in place)
         copy_events.write(CopyEvent { is_cut: false });
-        
-        // Then paste with new IDs (to avoid conflicts)
         paste_events.write(PasteEvent {
-            mode: PasteMode::NewIds,
+            mode: PasteMode::DuplicateInPlace,
             target_position: None,
         });
     }
