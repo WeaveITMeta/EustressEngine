@@ -120,14 +120,14 @@ export component CommandBar inherits Rectangle {
                 }
             }
 
-            Text {
-                width: 100%;
-                height: 100%;
-                text: "▶";
-                color: #8bc34a;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/play.svg");
+                image-fit: contain;
+                colorize: #8bc34a;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
             }
         }
     }
