@@ -62,7 +62,34 @@ export component CommandBar inherits Rectangle {
     VerticalLayout {
         padding-top: 4px;
 
-        // Input bar at top
+        // Output log above input — fills space when expanded by drag
+        if root.bar-height > 32px: Rectangle {
+            vertical-stretch: 1;
+            background: #0d0d12;
+
+            ScrollView {
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 1px;
+
+                    for entry in root.output-log: Text {
+                        text: entry.text;
+                        color: entry.is-error ? #ef5350 : #8bc34a;
+                        font-size: 11px;
+                        font-family: "Cascadia Code";
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // Separator
+        if root.bar-height > 32px: Rectangle {
+            height: 1px;
+            background: Theme.border-color;
+        }
+
+        // Input bar at bottom
         Rectangle {
             height: 28px;
 
@@ -112,36 +139,18 @@ export component CommandBar inherits Rectangle {
                     horizontal-alignment: center;
                 }
 
-                // Input field
-                Rectangle {
+                // Input field — uses LineEdit for proper paste/focus/enter handling
+                input := LineEdit {
                     horizontal-stretch: 1;
-                    height: 22px;
-                    background: input.has-focus ? Theme.input-background : transparent;
-                    border-radius: 3px;
-                    border-width: input.has-focus ? 1px : 0px;
-                    border-color: Theme.accent-blue;
+                    placeholder-text: root.language == "rune" ? "pub fn main() { ... }" : "print(\"Hello\")";
+                    text <=> root.command-text;
 
-                    TouchArea {
-                        clicked => { input.focus(); }
-                    }
+                    edited(text) => { root.on-text-changed(text); }
 
-                    input := TextInput {
-                        x: 6px;
-                        width: parent.width - 12px;
-                        height: 100%;
-                        text <=> root.command-text;
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        single-line: true;
-                        vertical-alignment: center;
-
-                        edited => { root.on-text-changed(self.text); }
-
-                        accepted => {
-                            if self.text != "" {
-                                root.on-execute(root.language, self.text);
-                                self.text = "";
-                            }
+                    accepted(text) => {
+                        if text != "" {
+                            root.on-execute(root.language, text);
+                            root.command-text = "";
                         }
                     }
                 }
@@ -176,31 +185,5 @@ export component CommandBar inherits Rectangle {
             }
         }
 
-        // Separator (only when expanded)
-        if root.bar-height > 32px: Rectangle {
-            height: 1px;
-            background: Theme.border-color;
-        }
-
-        // Output log — fills remaining space when expanded
-        if root.bar-height > 32px: Rectangle {
-            vertical-stretch: 1;
-            background: #0d0d12;
-
-            ScrollView {
-                VerticalLayout {
-                    padding: 4px;
-                    spacing: 1px;
-
-                    for entry in root.output-log: Text {
-                        text: entry.text;
-                        color: entry.is-error ? #ef5350 : #8bc34a;
-                        font-size: 11px;
-                        font-family: "Cascadia Code";
-                        wrap: word-wrap;
-                    }
-                }
-            }
-        }
     }
 }
