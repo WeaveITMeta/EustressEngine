@@ -679,7 +679,6 @@ const NUDGE_DELAY_SECS: f32 = 2.0;
 const NUDGE_REPEAT_SECS: f32 = 1.0;
 
 fn handle_nudge_keys(
-    mut key_events: EventReader<bevy::input::keyboard::KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut timer: ResMut<NudgeTimer>,
@@ -693,59 +692,48 @@ fn handle_nudge_keys(
 
     let snap = settings.as_ref().map(|s| if s.snap_enabled { s.snap_size } else { 1.0 }).unwrap_or(1.0);
 
-    // Consume raw key events to detect true initial press vs OS repeat
-    for event in key_events.read() {
-        if event.state != bevy::input::ButtonState::Pressed { continue; }
-        match event.key_code {
-            KeyCode::Equal => {
-                if !timer.up_held {
-                    // True initial press — nudge once
-                    timer.up_held = true;
-                    timer.up_timer = 0.0;
-                    for mut t in selected.iter_mut() {
-                        t.translation.y += snap;
-                    }
-                }
-                // Ignore OS key repeats (up_held is already true)
-            }
-            KeyCode::Minus => {
-                if !timer.down_held {
-                    timer.down_held = true;
-                    timer.down_timer = 0.0;
-                    for mut t in selected.iter_mut() {
-                        t.translation.y -= snap;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Auto-repeat while physically held (using ButtonInput, not events)
-    if keys.pressed(KeyCode::Equal) && timer.up_held {
-        timer.up_timer += time.delta_secs();
-        if timer.up_timer >= NUDGE_DELAY_SECS {
-            timer.up_timer -= NUDGE_REPEAT_SECS;
+    // + key (Equal) = nudge up
+    if keys.pressed(KeyCode::Equal) {
+        if !timer.up_held {
+            // First frame pressed — single nudge
+            timer.up_held = true;
+            timer.up_timer = 0.0;
             for mut t in selected.iter_mut() {
                 t.translation.y += snap;
             }
+        } else {
+            // Held — auto-repeat after delay
+            timer.up_timer += time.delta_secs();
+            if timer.up_timer >= NUDGE_DELAY_SECS {
+                timer.up_timer -= NUDGE_REPEAT_SECS;
+                for mut t in selected.iter_mut() {
+                    t.translation.y += snap;
+                }
+            }
         }
-    }
-    if !keys.pressed(KeyCode::Equal) {
+    } else {
         timer.up_held = false;
         timer.up_timer = 0.0;
     }
 
-    if keys.pressed(KeyCode::Minus) && timer.down_held {
-        timer.down_timer += time.delta_secs();
-        if timer.down_timer >= NUDGE_DELAY_SECS {
-            timer.down_timer -= NUDGE_REPEAT_SECS;
+    // - key (Minus) = nudge down
+    if keys.pressed(KeyCode::Minus) {
+        if !timer.down_held {
+            timer.down_held = true;
+            timer.down_timer = 0.0;
             for mut t in selected.iter_mut() {
                 t.translation.y -= snap;
             }
+        } else {
+            timer.down_timer += time.delta_secs();
+            if timer.down_timer >= NUDGE_DELAY_SECS {
+                timer.down_timer -= NUDGE_REPEAT_SECS;
+                for mut t in selected.iter_mut() {
+                    t.translation.y -= snap;
+                }
+            }
         }
-    }
-    if !keys.pressed(KeyCode::Minus) {
+    } else {
         timer.down_held = false;
         timer.down_timer = 0.0;
     }
