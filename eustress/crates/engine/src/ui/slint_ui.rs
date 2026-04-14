@@ -6537,13 +6537,9 @@ fn sync_viewport_selection_to_explorer(
     let Some(mut explorer_state) = explorer_state else { return };
 
     // Compute the new SelectedItem from the SelectionManager state.
-    // When SelectionManager is empty, only clear if the current selection is an Entity.
-    // Don't overwrite Service/File selections (which clear SM intentionally).
+    // When SelectionManager is empty (user clicked empty 3D space), clear everything.
     let new_selected = if selected_ids.is_empty() {
-        match &explorer_state.selected {
-            SelectedItem::Entity(_) => SelectedItem::None,
-            other => other.clone(), // Keep Service/File/None as-is
-        }
+        SelectedItem::None
     } else {
         // Try to find the first selected entity by matching the id string
         // format "index v generation" (e.g. "42v0") produced by entity_to_id_string()
