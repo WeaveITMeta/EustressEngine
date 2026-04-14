@@ -17,7 +17,7 @@ This workflow creates a complete Voltec product package following the V-Cell ref
 
 - Product idea with: name, chemistry/mechanism/physics, target specs, key innovations
 - Familiarity with Voltec design language (see `docs/Voltec.md`)
-- EustressEngine `.glb.toml` instance format knowledge (see any existing product's `README.md`)
+- EustressEngine folder-first instance format knowledge (`_instance.toml` inside named folders)
 - Blender 4.4+ installed at the path above
 - For exotic propulsion: Understanding of General Relativity, antimatter physics, or warp field theory
 
@@ -52,9 +52,10 @@ docs/Products/{ProductName}/
 ├── README.md
 └── V1/
     ├── meshes/
-    │   └── scripts/     (Blender Python scripts)
+    │   ├── scripts/     (Blender Python scripts)
     │   └── *.glb        (generated meshes)
-    └── *.glb.toml       (instance files)
+    └── {ComponentName}/
+        └── _instance.toml   (instance definition per component)
 ```
 
 // turbo
@@ -139,7 +140,7 @@ Create `docs/Products/{ProductName}/EustressEngine_Requirements.md` mapping the 
 
 1. **Required Crate Features** — Feature flags table
 2. **MaterialProperties — Per Component** — One subsection per material with full `[material]` TOML block (14 base fields) + `[material.custom]` for domain-specific extensions. Each material must include a `role` tag.
-3. **Instance File Structure** — File→Entity mapping table, standard `.glb.toml` section template, Transform layout table (position + scale for every component)
+3. **Instance File Structure** — Folder→Entity mapping table, standard `_instance.toml` section template, Transform layout table (position + scale for every component)
 4. **Domain-Specific State** (e.g., `ElectrochemicalState`, `FluidState`, `KineticState`, `ExoticPropulsionState`) — All fields with types, units, initial values, runtime update flow pseudocode
    - **For exotic propulsion**: Add `Element115ReactorState`, `TEGState`, `GravityWaveFocusingState`, `WarpBubbleState`, `VectorThrustState`
 5. **ThermodynamicState** — Fields table + operating envelope table
@@ -151,7 +152,7 @@ Create `docs/Products/{ProductName}/EustressEngine_Requirements.md` mapping the 
 
 ### Style Rules
 
-- All TOML blocks must match the actual `.glb.toml` instance file format (flat `[material]`, not `[material.housing]`)
+- All TOML blocks must match the actual `_instance.toml` instance file format (flat `[material]`, not `[material.housing]`)
 - Include `[material.custom]` with domain-specific extensions and `role` tag
 - Runtime update pseudocode shows the tick-level simulation flow
 - Deployment checklist includes 3+ concrete sanity-check assertions with expected values
@@ -259,7 +260,7 @@ Create a detailed physics model for the antimatter reactor:
 
 ### Required Exotic Physics Components
 
-Add these to `.glb.toml` instance files:
+Add these to `_instance.toml` files:
 
 ```toml
 [reactor]
@@ -629,7 +630,7 @@ bpy.ops.mesh.primitive_cone_add(vertices=32, radius1=r1, radius2=r2, depth=h)
 
 Execute each script — Blender runs in background, no GUI.
 
-**IMPORTANT**: Cascade MUST run these scripts automatically. Do NOT leave mesh generation for the user. Generate the scripts, then run them, then create `.glb.toml` files referencing the generated custom meshes.
+**IMPORTANT**: Cascade MUST run these scripts automatically. Do NOT leave mesh generation for the user. Generate the scripts, then run them, then create component folders with `_instance.toml` referencing the generated custom meshes.
 
 // turbo
 ```powershell
@@ -651,25 +652,26 @@ After successful mesh generation, list all `.glb` files to confirm they exist:
 Get-ChildItem "docs/Products/{ProductName}/V1/meshes" -Filter "*.glb" | Format-Table Name, @{N='KB';E={[math]::Round($_.Length/1024,1)}}
 ```
 
-### 5.4 Create .glb.toml Instance Files from Generated Meshes
+### 5.4 Create Folder-Based Instance Files from Generated Meshes
 
-After mesh generation, create one `.glb.toml` instance file per component in `V1/`. The `.glb` meshes stay in `V1/meshes/` as the source of truth. Only `.glb.toml` files live in `V1/` — they reference the meshes via `[asset] mesh`.
+After mesh generation, create one folder per component in `V1/` with `_instance.toml` inside. The `.glb` meshes stay in `V1/meshes/` as the source of truth. Each component folder references its mesh via `[asset] mesh = "../meshes/{file}.glb"`.
 
 The flow in one swift motion per component:
 1. Read the generated `.glb` filename from `V1/meshes/`
-2. Create `V1/{Product}_{Component}.glb.toml` with `[asset] mesh` pointing at the mesh
-3. Add `[transform]`, `[properties]`, `[metadata]`, `[material]`, `[thermodynamic]`, and optionally `[electrochemical]` sections with realism data from PATENT.md and EustressEngine_Requirements.md
+2. Create `V1/{Product}_{Component}/` folder
+3. Create `V1/{Product}_{Component}/_instance.toml` with `[asset] mesh = "../meshes/{file}.glb"`
+4. Add `[transform]`, `[properties]`, `[metadata]`, `[material]`, `[thermodynamic]`, and optionally `[electrochemical]` sections with realism data from PATENT.md and EustressEngine_Requirements.md
 
 // turbo
 ```powershell
-# Verify all meshes exist, then list the .glb.toml files that should be created
+# Verify all meshes exist, then list the instance folders that should be created
 Get-ChildItem "docs/Products/{ProductName}/V1/meshes" -Filter "*.glb" | ForEach-Object {
-    $toml = "docs/Products/{ProductName}/V1/$($_.BaseName).glb.toml"
-    Write-Host "$($_.Name) -> $toml"
+    $folder = "docs/Products/{ProductName}/V1/$($_.BaseName)"
+    Write-Host "$($_.Name) -> $folder/_instance.toml"
 }
 ```
 
-**Result**: `V1/` contains only `.glb.toml` files. `V1/meshes/` contains the `.glb` meshes + `scripts/` with the Blender Python sources.
+**Result**: `V1/` contains named component folders each with `_instance.toml`. `V1/meshes/` contains the `.glb` meshes + `scripts/` with the Blender Python sources. Children (BillboardGui labels, attachments) can be added inside any component folder.
 
 ### 5.5 PBR Material Reference — Voltec Design Language
 
@@ -696,27 +698,28 @@ Get-ChildItem "docs/Products/{ProductName}/V1/meshes" -Filter "*.glb" | ForEach-
 
 ---
 
-## Step 6: Create .glb.toml Instance Files
+## Step 6: Create Instance Folders
 
-Create one `.glb.toml` file per physical component in `docs/Products/{ProductName}/V1/`.
+Create one folder per physical component in `docs/Products/{ProductName}/V1/` with `_instance.toml` inside.
 
-### File Naming Convention
+### Folder Naming Convention
 
 ```
-{ProductName}_{ComponentName}.glb.toml
+V1/{ProductName}_{ComponentName}/
+    _instance.toml
 ```
 
 ### Asset Reference
 
-After Step 5, point each instance at its custom mesh:
+After Step 5, point each instance at its custom mesh (relative path from the component folder up to meshes/):
 
 ```toml
 [asset]
-mesh = "assets/meshes/products/{ProductName}/{ProductName}_{ComponentName}.glb"
+mesh = "../meshes/{ProductName}_{ComponentName}.glb"
 scene = "Scene0"
 ```
 
-**IMPORTANT**: Generate a Blender script for EVERY component in Step 5. Every `.glb.toml` should reference its own custom mesh. Only fall back to a primitive if the component is trivially simple (e.g., a single sphere LED):
+**IMPORTANT**: Generate a Blender script for EVERY component in Step 5. Every `_instance.toml` should reference its own custom mesh. Only fall back to a primitive if the component is trivially simple (e.g., a single sphere LED):
 
 | Mesh ID | File | Geometry | Typical Use |
 |---------|------|----------|-------------|
@@ -735,7 +738,7 @@ scene = "Scene0"
 # {Brief description of this component's role}
 
 [asset]
-mesh = "assets/meshes/products/{ProductName}/{ProductName}_{ComponentName}.glb"
+mesh = "../meshes/{ProductName}_{ComponentName}.glb"
 scene = "Scene0"
 
 [transform]
@@ -809,7 +812,7 @@ moles = 1.0              # mol
 # {ProductName} {ComponentName} — {Description}
 
 [asset]
-mesh = "assets/meshes/products/{ProductName}/{ProductName}_{ComponentName}.glb"
+mesh = "../meshes/{ProductName}_{ComponentName}.glb"
 scene = "Scene0"
 
 [transform]
@@ -846,7 +849,7 @@ last_modified = "{ISO 8601 date}"
 
 ## Step 7: Create README.md
 
-Create `docs/Products/{ProductName}/README.md` documenting the `.glb.toml` blueprint package.
+Create `docs/Products/{ProductName}/README.md` documenting the folder-first instance blueprint package.
 
 ### Required Sections
 
@@ -855,7 +858,7 @@ Create `docs/Products/{ProductName}/README.md` documenting the `.glb.toml` bluep
 3. **Instance Files** — Table: File | Mesh | Class | Realism Sections
 4. **Import into EustressEngine** — Copy-to-Workspace instructions + programmatic spawn Rust snippet
 5. **Coordinate System** — Origin, axes, scale convention
-6. **Entity Hierarchy** — ASCII tree of all `.glb.toml` files with class/material annotations
+6. **Entity Hierarchy** — ASCII tree of all component folders with class/material annotations
 7. **Realism Components Attached** — Bullet list mapping TOML sections → ECS components
 8. **Custom Material Extensions** — Bullet list of `[material.custom]` keys used
 
@@ -921,12 +924,12 @@ After all files are created, verify:
 - [ ] Y-up coordinate system (glTF/Bevy standard)
 
 **Instance Files (Step 6)**
-- [ ] `V1/` has one `.glb.toml` per physical component with correct naming
-- [ ] All `.glb.toml` `[asset]` sections point to custom meshes from Step 5 (or fallback primitives)
-- [ ] All `.glb.toml` files use flat `[material]` (not `[material.name]`)
+- [ ] `V1/` has one folder per physical component, each with `_instance.toml` inside
+- [ ] All `_instance.toml` `[asset]` sections point to custom meshes via `../meshes/` relative path (or fallback primitives)
+- [ ] All `_instance.toml` files use flat `[material]` (not `[material.name]`)
 - [ ] All `Part` instances have `[material]` + `[thermodynamic]`, and `[electrochemical]` only where applicable
 - [ ] Every `[material.custom]` has a `role` tag
-- [ ] No references to deprecated `.eustressengine` RON/JSON format anywhere
+- [ ] No references to deprecated flat `.glb.toml` or `.part.toml` format
 
 ---
 
@@ -945,8 +948,10 @@ docs/Products/{ProductName}/
     │   │   └── {Product}_{Comp2}.py
     │   ├── {Product}_{Comp1}.glb      # Generated AAA meshes
     │   └── {Product}_{Comp2}.glb
-    ├── {Product}_{Comp1}.glb.toml     # Instance files with realism
-    └── {Product}_{Comp2}.glb.toml
+    ├── {Product}_{Comp1}/             # Folder-first instance (can hold children)
+    │   └── _instance.toml             #   mesh = "../meshes/{Product}_{Comp1}.glb"
+    └── {Product}_{Comp2}/
+        └── _instance.toml
 ```
 
 ## Quick Reference: Pipeline
@@ -964,7 +969,7 @@ User Idea
   ↓
 [5] Patent research → Blender Python scripts → blender --background → AAA .glb meshes in V1/meshes/
   ↓
-[6] .glb.toml instance files in V1/ → point [asset] at meshes + add realism sections
+[6] Component folders in V1/{Name}/_instance.toml → point [asset] at ../meshes/ + add realism sections
   ↓
 [7] README.md — blueprint docs
   ↓

@@ -660,8 +660,8 @@ pub fn handle_artifact_completion(
 
         let output_path = match step {
             ArtifactStep::PartFiles => {
-                // Part .toml files → Space/Workspace/{product}/
-                write_split_files(&workspace_product_dir, &event.content, ".part.toml");
+                // Part folder instances → Space/Workspace/{product}/{name}/_instance.toml
+                write_split_part_folders(&workspace_product_dir, &event.content);
                 workspace_product_dir.clone()
             }
             ArtifactStep::SimScripts => {
@@ -820,6 +820,43 @@ fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &st
     if let Some(ref filename) = current_filename {
         let path = resolve_split_file_path(output_dir, filename, default_extension);
         write_artifact_file(&path, current_content.trim());
+    }
+}
+
+/// Write split Part files as folder-based instances.
+/// Each "# --- FILE: name ---" block creates `output_dir/{name}/_instance.toml`.
+fn write_split_part_folders(output_dir: &PathBuf, content: &str) {
+    let _ = std::fs::create_dir_all(output_dir);
+
+    let mut current_name: Option<String> = None;
+    let mut current_content = String::new();
+
+    for line in content.lines() {
+        if line.starts_with("# --- FILE:") && line.ends_with("---") {
+            if let Some(ref name) = current_name {
+                let safe = name.replace(' ', "_").replace('/', "_")
+                    .trim_end_matches(".part.toml").trim_end_matches(".glb.toml")
+                    .to_string();
+                let part_dir = output_dir.join(&safe);
+                let _ = std::fs::create_dir_all(&part_dir);
+                write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
+            }
+            let name = line.trim_start_matches("# --- FILE:").trim_end_matches("---").trim();
+            current_name = Some(name.to_string());
+            current_content.clear();
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    if let Some(ref name) = current_name {
+        let safe = name.replace(' ', "_").replace('/', "_")
+            .trim_end_matches(".part.toml").trim_end_matches(".glb.toml")
+            .to_string();
+        let part_dir = output_dir.join(&safe);
+        let _ = std::fs::create_dir_all(&part_dir);
+        write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
     }
 }
 

@@ -4713,19 +4713,20 @@ fn drain_slint_actions(
                             extra: std::collections::HashMap::new(),
                         };
 
-                        // Unique filename
-                        let file_name = {
+                        // Unique folder name (folder-first architecture)
+                        let folder_name = {
                             let base = &inst.name;
-                            let test = workspace_dir.join(format!("{}.glb.toml", base));
-                            if !test.exists() {
+                            if !workspace_dir.join(base).exists() {
                                 base.clone()
                             } else {
                                 (1..1000).map(|i| format!("{}{}", base, i))
-                                    .find(|c| !workspace_dir.join(format!("{}.glb.toml", c)).exists())
+                                    .find(|c| !workspace_dir.join(c).exists())
                                     .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
                             }
                         };
-                        let toml_path = workspace_dir.join(format!("{}.glb.toml", file_name));
+                        let instance_dir = workspace_dir.join(&folder_name);
+                        let _ = std::fs::create_dir_all(&instance_dir);
+                        let toml_path = instance_dir.join("_instance.toml");
 
                         if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
                             if let Some(ref mut out) = res.output {
@@ -4741,7 +4742,7 @@ fn drain_slint_actions(
 
                         if let Some(ref mut registry) = res.file_registry {
                             registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
-                                path: toml_path, file_type: crate::space::FileType::Toml,
+                                path: instance_dir, file_type: crate::space::FileType::Directory,
                                 service: "Workspace".to_string(), name: inst.name.clone(),
                                 size: 0, modified: std::time::SystemTime::now(), children: Vec::new(),
                             });
@@ -5101,17 +5102,18 @@ fn drain_slint_actions(
 
                                 // Step 5: Register in SpaceFileRegistry
                                 if let Some(ref mut registry) = res.file_registry {
-                                    let name = toml_path.file_stem()
+                                    // toml_path is now folder/_instance.toml — derive name from folder
+                                    let instance_dir = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
+                                    let name = instance_dir.file_name()
                                         .and_then(|s| s.to_str())
                                         .unwrap_or("Unknown")
-                                        .trim_end_matches(".glb")
                                         .to_string();
                                     registry.register(
                                         toml_path.clone(),
                                         entity,
                                         crate::space::FileMetadata {
-                                            path: toml_path.clone(),
-                                            file_type: crate::space::FileType::Toml,
+                                            path: instance_dir,
+                                            file_type: crate::space::FileType::Directory,
                                             service: "Workspace".to_string(),
                                             name,
                                             size: 0,
@@ -5411,17 +5413,17 @@ fn drain_slint_actions(
                                         commands.entity(entity).insert(ChildOf(parent));
                                     }
                                     if let Some(ref mut registry) = res.file_registry {
-                                        let name = toml_path.file_stem()
+                                        let instance_dir = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
+                                        let name = instance_dir.file_name()
                                             .and_then(|s| s.to_str())
                                             .unwrap_or("Unknown")
-                                            .trim_end_matches(".glb")
                                             .to_string();
                                         registry.register(
                                             toml_path.clone(),
                                             entity,
                                             crate::space::FileMetadata {
-                                                path: toml_path.clone(),
-                                                file_type: crate::space::FileType::Toml,
+                                                path: instance_dir,
+                                                file_type: crate::space::FileType::Directory,
                                                 service: "Workspace".to_string(),
                                                 name,
                                                 size: 0,

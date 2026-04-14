@@ -249,7 +249,7 @@ fn handle_plugin_action_events(
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
-    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
@@ -296,21 +296,60 @@ fn handle_plugin_action_events(
                     .as_nanos();
                 let id = (ts % u32::MAX as u128) as u32;
 
-                // ── Find the parent Part's directory on disk ──
-                // BillboardGui is a child of the Part, so its TOML folder
-                // goes inside the Part's directory (or next to its .glb.toml).
-                let parent_dir = instance_files.get(parent_entity)
-                    .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
-                    .or_else(|_| loaded_from_file.get(parent_entity).map(|lff| {
-                        if lff.path.is_dir() { lff.path.clone() }
-                        else { lff.path.parent().unwrap_or(lff.path.as_path()).to_path_buf() }
-                    }))
-                    .unwrap_or_else(|_| {
-                        // Fallback: Workspace root
-                        crate::space::default_space_root().join("Workspace")
-                    });
+                // ── Resolve the parent Part's directory on disk ──
+                // Parts can be stored as either:
+                //   a) Flat file:  Workspace/MyPart.part.toml
+                //   b) Folder:     Workspace/MyPart/_instance.toml
+                // BillboardGui must be a child folder inside the Part's directory.
+                // If the part is a flat file, promote it to a folder first.
+                let part_dir = if let Ok(mut inst_file) = instance_files.get_mut(parent_entity) {
+                    let toml = inst_file.toml_path.clone();
+                    if toml.file_name().map(|n| n.to_string_lossy() == "_instance.toml").unwrap_or(false) {
+                        // Already a folder — _instance.toml's parent IS the part dir
+                        toml.parent().unwrap_or(toml.as_path()).to_path_buf()
+                    } else {
+                        // Flat file (e.g. MyPart.part.toml) → promote to folder
+                        // 1. Derive folder name from file stem (strip .part, .glb, etc.)
+                        let file_name = toml.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let folder_name = file_name
+                            .strip_suffix(".part.toml").or_else(|| file_name.strip_suffix(".glb.toml"))
+                            .or_else(|| file_name.strip_suffix(".instance.toml"))
+                            .unwrap_or(&file_name)
+                            .to_string();
+                        let parent = toml.parent().unwrap_or(toml.as_path());
+                        let new_dir = parent.join(&folder_name);
 
-                let bb_dir = parent_dir.join(&safe_name);
+                        // 2. Create the folder
+                        if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                            notifications.error(format!("Failed to create part folder: {}", e));
+                            continue;
+                        }
+                        // 3. Tell file watcher to ignore the delete of the old path
+                        if let Some(ref mut registry) = file_registry {
+                            registry.rename_in_progress.insert(toml.clone());
+                        }
+                        // 4. Move the flat file into the folder as _instance.toml
+                        let new_toml = new_dir.join("_instance.toml");
+                        if let Err(e) = std::fs::rename(&toml, &new_toml) {
+                            if let Some(ref mut registry) = file_registry {
+                                registry.rename_in_progress.remove(&toml);
+                            }
+                            notifications.error(format!("Failed to promote part to folder: {}", e));
+                            continue;
+                        }
+                        // 5. Update the InstanceFile component to reflect the new path
+                        inst_file.toml_path = new_toml;
+                        info!("📂 Promoted {} to folder: {:?}", folder_name, new_dir);
+                        new_dir
+                    }
+                } else if let Ok(lff) = loaded_from_file.get(parent_entity) {
+                    if lff.path.is_dir() { lff.path.clone() }
+                    else { lff.path.parent().unwrap_or(lff.path.as_path()).to_path_buf() }
+                } else {
+                    crate::space::default_space_root().join("Workspace")
+                };
+
+                let bb_dir = part_dir.join(&safe_name);
 
                 if let Err(e) = std::fs::create_dir_all(&bb_dir) {
                     notifications.error(format!("Failed to create directory: {}", e));

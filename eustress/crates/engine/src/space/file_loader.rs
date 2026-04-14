@@ -861,6 +861,7 @@ pub fn spawn_directory_entry(
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .and_then(|v| v.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).map(|s| s.to_string()))
             .map(|cn| match cn.as_str() {
+                "Part"           => eustress_common::classes::ClassName::Part,
                 "ScreenGui"      => eustress_common::classes::ClassName::ScreenGui,
                 "Frame"          => eustress_common::classes::ClassName::Frame,
                 "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,
@@ -1009,6 +1010,43 @@ pub fn spawn_directory_entry(
             Transform::from_translation(bb_offset),
             Visibility::default(),
         )).id()
+    } else if matches!(class_name, eustress_common::classes::ClassName::Part) {
+        // Part folder — load via spawn_instance (same path as flat .glb.toml files).
+        // The _instance.toml inside contains the full InstanceDefinition with mesh, transform, etc.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        match super::instance_loader::load_instance_definition(&instance_toml) {
+            Ok(instance_def) => {
+                // spawn_instance attaches InstanceFile internally with the toml_path
+                super::instance_loader::spawn_instance(
+                    commands,
+                    asset_server,
+                    materials,
+                    material_registry,
+                    mesh_cache,
+                    instance_toml,
+                    instance_def,
+                )
+            }
+            Err(e) => {
+                warn!("Failed to load Part folder {:?}: {}", dir_meta.path, e);
+                // Fall back to empty folder entity
+                commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_meta.name.clone(),
+                        class_name: eustress_common::classes::ClassName::Folder,
+                        archivable: true, id: 0, ai: false, uuid: String::new(),
+                    },
+                    LoadedFromFile {
+                        path: dir_meta.path.clone(),
+                        file_type: FileType::Directory,
+                        service: dir_meta.service.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                )).id()
+            }
+        }
     } else {
         // Regular Folder / Model — 3D entity
         let display_name = {

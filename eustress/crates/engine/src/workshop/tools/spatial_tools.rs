@@ -102,20 +102,27 @@ impl ToolHandler for ListSpaceContentsTool {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                            let name = val.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or(fname);
-                            let pos = val.get("transform").and_then(|t| t.get("position")).and_then(|p| p.as_array())
-                                .map(|a| {
-                                    let x = a.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
-                                    let y = a.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
-                                    let z = a.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
-                                    [x, y, z]
-                                })
-                                .unwrap_or([0.0, 0.0, 0.0]);
-                            entities.push(serde_json::json!({ "name": name, "position": pos }));
-                        }
+                // Resolve TOML: folder/_instance.toml or flat .part.toml/.glb.toml
+                let toml_path = if path.is_dir() {
+                    let inst = path.join("_instance.toml");
+                    if inst.exists() { inst } else { continue; }
+                } else if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
+                    path.clone()
+                } else {
+                    continue;
+                };
+                if let Ok(content) = std::fs::read_to_string(&toml_path) {
+                    if let Ok(val) = toml::from_str::<toml::Value>(&content) {
+                        let name = val.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or(fname);
+                        let pos = val.get("transform").and_then(|t| t.get("position")).and_then(|p| p.as_array())
+                            .map(|a| {
+                                let x = a.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+                                let y = a.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+                                let z = a.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
+                                [x, y, z]
+                            })
+                            .unwrap_or([0.0, 0.0, 0.0]);
+                        entities.push(serde_json::json!({ "name": name, "position": pos }));
                     }
                 }
             }

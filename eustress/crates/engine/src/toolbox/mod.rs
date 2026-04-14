@@ -95,17 +95,17 @@ pub fn insert_mesh_instance_at(
     let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Generate unique FILENAME within target_dir (filesystem requirement).
-    // The display name stays as the base name (e.g. "Ball") regardless of filename.
-    let file_name = {
-        let test_path = target_dir.join(format!("{}.glb.toml", base_name));
+    // Generate unique FOLDER NAME within target_dir.
+    // Each instance is a folder with _instance.toml inside (folder-first architecture).
+    let folder_name = {
+        let test_path = target_dir.join(&base_name);
         if !test_path.exists() {
             base_name.clone()
         } else {
             let mut found = format!("{}_{}", base_name, now.len()); // fallback
             for i in 1..1000usize {
                 let candidate = format!("{}{}", base_name, i);
-                if !target_dir.join(format!("{}.glb.toml", candidate)).exists() {
+                if !target_dir.join(&candidate).exists() {
                     found = candidate;
                     break;
                 }
@@ -116,8 +116,9 @@ pub fn insert_mesh_instance_at(
     // Display name is always the base name (no number suffix)
     let instance_name = base_name;
 
-    fs::create_dir_all(target_dir)
-        .map_err(|e| format!("Failed to create directory {:?}: {}", target_dir, e))?;
+    let instance_dir = target_dir.join(&folder_name);
+    fs::create_dir_all(&instance_dir)
+        .map_err(|e| format!("Failed to create directory {:?}: {}", instance_dir, e))?;
 
     let instance = crate::space::instance_loader::InstanceDefinition {
         asset: Some(crate::space::instance_loader::AssetReference {
@@ -133,7 +134,7 @@ pub fn insert_mesh_instance_at(
         metadata: crate::space::instance_loader::InstanceMetadata {
             class_name: "Part".to_string(),
             archivable: true,
-            name: if file_name != instance_name { Some(instance_name.clone()) } else { None },
+            name: if folder_name != instance_name { Some(instance_name.clone()) } else { None },
             created: now.clone(),
             last_modified: now,
         },
@@ -147,93 +148,34 @@ pub fn insert_mesh_instance_at(
         extra: std::collections::HashMap::new(),
     };
 
-    let toml_path = target_dir.join(format!("{}.glb.toml", file_name));
+    let toml_path = instance_dir.join("_instance.toml");
     crate::space::instance_loader::write_instance_definition(&toml_path, &instance)?;
-    info!("📦 Toolbox: Created instance file {:?} (display name: {})", toml_path, instance_name);
+    info!("📦 Toolbox: Created instance folder {:?} (display name: {})", instance_dir, instance_name);
     Ok(toml_path)
 }
 
-/// Insert a mesh instance by creating a .glb.toml file in the Workspace folder
+/// Insert a mesh instance by creating a folder with _instance.toml in Workspace
 pub fn insert_mesh_instance(
     space_root: &PathBuf,
     mesh_id: &str,
     position: [f32; 3],
     instance_name: Option<String>,
 ) -> Result<PathBuf, String> {
-    // Find mesh in catalog
-    let catalog = get_mesh_catalog();
-    let mesh = catalog.iter()
-        .find(|m| m.id == mesh_id)
-        .ok_or_else(|| format!("Mesh '{}' not found in catalog", mesh_id))?;
-    
-    // Generate unique instance name
-    let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
-    let instance_name = generate_unique_name(space_root, &base_name);
-    
-    // Build structured InstanceDefinition
-    let now = Utc::now().to_rfc3339();
-    let instance = InstanceDefinition {
-        asset: Some(AssetReference {
-            mesh: mesh.mesh_path.to_string(),
-            scene: "Scene0".to_string(),
-        }),
-        transform: TransformData {
-            position,
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: mesh.default_size,
-        },
-        properties: InstanceProperties::default(),
-        metadata: InstanceMetadata {
-            class_name: "Part".to_string(),
-            archivable: true,
-            name: None,
-            created: now.clone(),
-            last_modified: now,
-        },
-        material: None,
-        thermodynamic: None,
-        electrochemical: None,
-        ui: None,
-        attributes: None,
-        tags: None,
-        parameters: None,
-        extra: std::collections::HashMap::new(),
-    };
-
-    // Write to Workspace folder
     let workspace_path = space_root.join("Workspace");
-    fs::create_dir_all(&workspace_path)
-        .map_err(|e| format!("Failed to create Workspace directory: {}", e))?;
-    
-    let toml_path = workspace_path.join(format!("{}.glb.toml", instance_name));
-    
-    write_instance_definition(&toml_path, &instance)?;
-    
-    info!("📦 Toolbox: Created instance file {:?}", toml_path);
-    
-    Ok(toml_path)
+    insert_mesh_instance_at(&workspace_path, mesh_id, position, instance_name)
 }
 
-/// Generate a unique name by appending numbers if needed
-fn generate_unique_name(space_root: &PathBuf, base_name: &str) -> String {
-    let workspace_path = space_root.join("Workspace");
-    
-    // Check if base name is available
-    let test_path = workspace_path.join(format!("{}.glb.toml", base_name));
-    if !test_path.exists() {
+/// Generate a unique folder name by appending numbers if needed
+fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str) -> String {
+    if !parent_dir.join(base_name).exists() {
         return base_name.to_string();
     }
-    
-    // Try numbered variants
     for i in 1..1000 {
         let candidate = format!("{}{}", base_name, i);
-        let test_path = workspace_path.join(format!("{}.glb.toml", candidate));
-        if !test_path.exists() {
+        if !parent_dir.join(&candidate).exists() {
             return candidate;
         }
     }
-    
-    // Fallback with timestamp
     format!("{}_{}", base_name, Utc::now().timestamp())
 }
 

@@ -642,10 +642,12 @@ impl TomlElectrochemicalState {
     }
 }
 
-/// Component marking an entity as loaded from an instance file
+/// Component marking an entity as loaded from an instance file.
+/// For folder-based instances: toml_path = folder/_instance.toml
+/// For legacy flat files: toml_path = folder/Name.glb.toml
 #[derive(Component, Debug, Clone)]
 pub struct InstanceFile {
-    /// Path to the .glb.toml file
+    /// Path to the instance TOML file (_instance.toml or .glb.toml)
     pub toml_path: PathBuf,
     /// Path to the referenced mesh asset
     pub mesh_path: PathBuf,
@@ -802,16 +804,20 @@ pub fn spawn_instance(
     toml_path: PathBuf,
     instance: InstanceDefinition,
 ) -> Entity {
-    // Instance display name: prefer metadata.name, fall back to filename
+    // Instance display name: prefer metadata.name, fall back to folder/file name.
+    // For folder-based instances (_instance.toml), use the parent folder name.
+    // For legacy flat files (.glb.toml), use the filename stem.
     let name = instance.metadata.name.clone().unwrap_or_else(|| {
-        toml_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unknown")
-            .split('.')
-            .next()
-            .unwrap_or("Unknown")
-            .to_string()
+        let fname = toml_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if fname == "_instance.toml" {
+            toml_path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string()
+        } else {
+            fname.split('.').next().unwrap_or("Unknown").to_string()
+        }
     });
 
     // Parse class name early — needed for the no-mesh branch too

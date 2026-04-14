@@ -346,12 +346,18 @@ impl ToolHandler for GenerateDocsTool {
         let mut entity_count = 0;
         if let Ok(entries) = std::fs::read_dir(&workspace) {
             for entry in entries.flatten() {
+                let path = entry.path();
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
-                    let name = fname.trim_end_matches(".part.toml").trim_end_matches(".glb.toml");
-                    doc.push_str(&format!("- {}\n", name));
-                    entity_count += 1;
-                }
+                // Folder-based parts: folder/_instance.toml; legacy: .part.toml/.glb.toml
+                let name = if path.is_dir() && path.join("_instance.toml").exists() {
+                    fname.clone()
+                } else if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
+                    fname.trim_end_matches(".part.toml").trim_end_matches(".glb.toml").to_string()
+                } else {
+                    continue;
+                };
+                doc.push_str(&format!("- {}\n", name));
+                entity_count += 1;
             }
         }
         if entity_count == 0 {

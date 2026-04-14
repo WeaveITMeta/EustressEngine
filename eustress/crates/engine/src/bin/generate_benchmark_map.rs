@@ -134,7 +134,9 @@ last_modified = "2026-03-22T00:00:00Z"
                 velocity = velocity,
             );
 
-            let file_path = output_dir.join(format!("{}.part.toml", part_name));
+            let part_dir = output_dir.join(&part_name);
+            let _ = std::fs::create_dir_all(&part_dir);
+            let file_path = part_dir.join("_instance.toml");
             match std::fs::File::create(&file_path) {
                 Ok(mut file) => {
                     if let Err(error) = file.write_all(toml_content.as_bytes()) {

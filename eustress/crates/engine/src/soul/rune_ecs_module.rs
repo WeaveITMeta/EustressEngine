@@ -374,21 +374,31 @@ fn query_workspace_entities(class_filter: Option<String>) -> Vec<(String, String
             for entry in entries.flatten() {
                 let path = entry.path();
                 let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !fname.ends_with(".part.toml") && !fname.ends_with(".glb.toml") { continue; }
-                if let Ok(content) = std::fs::read_to_string(&path) {
+
+                // Determine TOML path: folder/_instance.toml or flat .part.toml/.glb.toml
+                let toml_path = if path.is_dir() {
+                    let inst = path.join("_instance.toml");
+                    if inst.exists() { inst } else { continue; }
+                } else if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
+                    path.clone()
+                } else {
+                    continue;
+                };
+
+                if let Ok(content) = std::fs::read_to_string(&toml_path) {
                     if let Ok(val) = toml::from_str::<toml::Value>(&content) {
                         let class = val.get("metadata")
                             .and_then(|m| m.get("class_name"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("Unknown");
-                        let name = val.get("metadata")
+                        let display_name = val.get("metadata")
                             .and_then(|m| m.get("name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or(fname);
                         if let Some(ref filter) = class_filter {
                             if class != filter.as_str() { continue; }
                         }
-                        results.push((name.to_string(), class.to_string()));
+                        results.push((display_name.to_string(), class.to_string()));
                     }
                 }
             }
@@ -3290,6 +3300,15 @@ fn instance_delete(entity_name: &str) -> bool {
             }
         }
 
+        // Try folder-based deletion first: dir/{name}/_instance.toml
+        for dir in &search_dirs {
+            let folder = dir.join(&safe);
+            if folder.is_dir() && folder.join("_instance.toml").exists() {
+                return std::fs::remove_dir_all(&folder).is_ok();
+            }
+        }
+
+        // Legacy flat-file deletion
         for dir in &search_dirs {
             for ext in &extensions {
                 let candidate = dir.join(format!("{}{}", safe, ext));
@@ -3333,7 +3352,7 @@ fn instance_delete(entity_name: &str) -> bool {
 }
 
 /// Helper: find an entity's TOML file by name and apply a mutation.
-/// Searches Workspace/ for matching .part.toml or .glb.toml files.
+/// Searches Workspace/ for folder/_instance.toml first, then legacy .part.toml/.glb.toml.
 fn update_part_toml(entity_name: &str, mutate: impl FnOnce(&mut toml::Value)) {
     SPACE_ROOT.with(|root| {
         let root = root.borrow();
@@ -3341,6 +3360,7 @@ fn update_part_toml(entity_name: &str, mutate: impl FnOnce(&mut toml::Value)) {
         let workspace = base.join("Workspace");
         let safe = entity_name.replace(' ', "_").replace('/', "_");
         let candidates = [
+            workspace.join(&safe).join("_instance.toml"),
             workspace.join(format!("{}.part.toml", safe)),
             workspace.join(format!("{}.glb.toml", safe)),
         ];

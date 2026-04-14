@@ -873,20 +873,21 @@ fn spawn_pasted_entity(
                 extra: std::collections::HashMap::new(),
             };
 
-            // Generate unique filename
+            // Generate unique folder name (folder-first architecture)
             let _ = std::fs::create_dir_all(workspace_dir);
             let base = &data.name;
-            let file_name = {
-                let test = workspace_dir.join(format!("{}.glb.toml", base));
-                if !test.exists() {
+            let folder_name = {
+                if !workspace_dir.join(base).exists() {
                     base.clone()
                 } else {
                     (1..1000).map(|i| format!("{}{}", base, i))
-                        .find(|c| !workspace_dir.join(format!("{}.glb.toml", c)).exists())
+                        .find(|c| !workspace_dir.join(c).exists())
                         .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
                 }
             };
-            let toml_path = workspace_dir.join(format!("{}.glb.toml", file_name));
+            let instance_dir = workspace_dir.join(&folder_name);
+            let _ = std::fs::create_dir_all(&instance_dir);
+            let toml_path = instance_dir.join("_instance.toml");
 
             // Write TOML file
             if let Err(e) = crate::space::instance_loader::write_instance_definition(&toml_path, &instance_def) {
@@ -910,14 +911,14 @@ fn spawn_pasted_entity(
                 instance_def,
             );
 
-            // Register in file registry
+            // Register in file registry (folder path, not TOML path)
             if let Some(registry) = file_registry {
                 registry.register(
                     toml_path.clone(),
                     entity,
                     crate::space::FileMetadata {
-                        path: toml_path,
-                        file_type: crate::space::FileType::Toml,
+                        path: instance_dir,
+                        file_type: crate::space::FileType::Directory,
                         service: "Workspace".to_string(),
                         name: data.name.clone(),
                         size: 0,

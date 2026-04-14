@@ -155,15 +155,15 @@ pub fn handle_spawn_part_events(
         if !is_playing {
             if let Some(ref sr) = space_root {
                 let workspace_dir = sr.0.join("Workspace");
-                let _ = std::fs::create_dir_all(&workspace_dir);
-                let toml_filename = format!("{}.part.toml", part_name);
-                let toml_path = workspace_dir.join(&toml_filename);
-                // Avoid overwriting existing files — append entity index
-                let final_path = if toml_path.exists() {
-                    workspace_dir.join(format!("{}_{}.part.toml", part_name, spawned_entity.index()))
+                // Folder-first: each Part is a folder with _instance.toml inside
+                let folder_name = if workspace_dir.join(part_name).exists() {
+                    format!("{}_{}", part_name, spawned_entity.index())
                 } else {
-                    toml_path
+                    part_name.to_string()
                 };
+                let instance_dir = workspace_dir.join(&folder_name);
+                let _ = std::fs::create_dir_all(&instance_dir);
+                let final_path = instance_dir.join("_instance.toml");
                 // Write minimal TOML definition
                 let toml_content = format!(
                     "[asset]\nmesh = \"{}\"\nscene = \"Scene0\"\n\n[transform]\nposition = [{:.4}, {:.4}, {:.4}]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [{:.4}, {:.4}, {:.4}]\n\n[properties]\ncolor = [128, 128, 128, 255]\ntransparency = 0.0\nanchored = false\ncan_collide = true\ncast_shadow = true\nreflectance = 0.0\nmaterial = \"Plastic\"\nlocked = false\n\n[metadata]\nclass_name = \"Part\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n",

@@ -201,15 +201,21 @@ pub fn scaffold_new_space(
         }
     }
 
-    // ── Workspace/Baseplate.part.toml ──────────────────────────────────────
+    // ── Workspace/Baseplate/_instance.toml ──────────────────────────────────
+    let baseplate_dir = space_root.join("Workspace").join("Baseplate");
+    std::fs::create_dir_all(&baseplate_dir)
+        .map_err(|e| format!("Failed to create Baseplate dir: {}", e))?;
     write_file(
-        &space_root.join("Workspace").join("Baseplate.part.toml"),
+        &baseplate_dir.join("_instance.toml"),
         &baseplate_part_toml(),
     )?;
 
-    // ── Workspace/WelcomeCube.part.toml ────────────────────────────────────
+    // ── Workspace/WelcomeCube/_instance.toml ──────────────────────────────
+    let cube_dir = space_root.join("Workspace").join("WelcomeCube");
+    std::fs::create_dir_all(&cube_dir)
+        .map_err(|e| format!("Failed to create WelcomeCube dir: {}", e))?;
     write_file(
-        &space_root.join("Workspace").join("WelcomeCube.part.toml"),
+        &cube_dir.join("_instance.toml"),
         &welcome_cube_part_toml(),
     )?;
 
@@ -363,7 +369,11 @@ pub fn save_space(world: &mut World) {
             let toml_path = if let Some(inst_file) = instance_file {
                 inst_file.toml_path.clone()
             } else {
-                workspace_dir.join(format!("{}.part.toml", sanitize_filename(&instance.name)))
+                // New entity without InstanceFile — create folder structure
+                let safe_name = sanitize_filename(&instance.name);
+                let part_dir = workspace_dir.join(&safe_name);
+                let _ = std::fs::create_dir_all(&part_dir);
+                part_dir.join("_instance.toml")
             };
 
             let t = global_tf.compute_transform();

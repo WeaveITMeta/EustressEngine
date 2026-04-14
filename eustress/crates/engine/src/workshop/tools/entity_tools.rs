@@ -42,8 +42,9 @@ impl ToolHandler for CreateEntityTool {
 
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace_dir = ctx.space_root.join("Workspace");
-        let _ = std::fs::create_dir_all(&workspace_dir);
-        let filepath = workspace_dir.join(format!("{}.part.toml", safe_name));
+        let instance_dir = workspace_dir.join(&safe_name);
+        let _ = std::fs::create_dir_all(&instance_dir);
+        let filepath = instance_dir.join("_instance.toml");
 
         let toml_content = format!(
 r#"[metadata]
@@ -120,9 +121,17 @@ impl ToolHandler for QueryEntitiesTool {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !fname.ends_with(".part.toml") && !fname.ends_with(".glb.toml") { continue; }
+                // Resolve TOML: folder/_instance.toml or flat .part.toml/.glb.toml
+                let toml_path = if path.is_dir() {
+                    let inst = path.join("_instance.toml");
+                    if inst.exists() { inst } else { continue; }
+                } else if fname.ends_with(".part.toml") || fname.ends_with(".glb.toml") {
+                    path.clone()
+                } else {
+                    continue;
+                };
 
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = std::fs::read_to_string(&toml_path) {
                     if let Ok(val) = toml::from_str::<toml::Value>(&content) {
                         let class = val.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).unwrap_or("Unknown");
                         let name = val.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or(fname);
@@ -180,8 +189,10 @@ impl ToolHandler for UpdateEntityTool {
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
 
-        // Find the entity file
+        // Find the entity file: folder/_instance.toml or legacy flat files
+        let folder_path = workspace.join(&safe_name).join("_instance.toml");
         let candidates = [
+            folder_path,
             workspace.join(format!("{}.part.toml", safe_name)),
             workspace.join(format!("{}.glb.toml", safe_name)),
         ];
@@ -315,12 +326,31 @@ impl ToolHandler for DeleteEntityTool {
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace = ctx.space_root.join("Workspace");
 
-        let candidates = [
+        // Try folder-based first, then legacy flat files
+        let folder_path = workspace.join(&safe_name);
+        if folder_path.is_dir() && folder_path.join("_instance.toml").exists() {
+            match std::fs::remove_dir_all(&folder_path) {
+                Ok(_) => return ToolResult {
+                    tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
+                    success: true,
+                    content: format!("Deleted entity '{}' (folder)", name),
+                    structured_data: Some(serde_json::json!({ "name": name, "file": folder_path.to_string_lossy() })),
+                    stream_topic: Some("workshop.tool.delete_entity".to_string()),
+                },
+                Err(e) => return ToolResult {
+                    tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
+                    success: false, content: format!("Failed to delete folder: {}", e),
+                    structured_data: None, stream_topic: None,
+                },
+            }
+        }
+
+        // Legacy flat file fallback
+        let legacy_candidates = [
             workspace.join(format!("{}.part.toml", safe_name)),
             workspace.join(format!("{}.glb.toml", safe_name)),
         ];
-
-        for path in &candidates {
+        for path in &legacy_candidates {
             if path.exists() {
                 match std::fs::remove_file(path) {
                     Ok(_) => return ToolResult {
