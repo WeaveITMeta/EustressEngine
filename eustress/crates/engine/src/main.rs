@@ -332,7 +332,8 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.add_systems(Update, part_selection::part_selection_system
-            .after(ui::slint_ui::SlintSystems::Drain));
+            .after(ui::slint_ui::SlintSystems::Drain)
+            .after(ui::slint_ui::update_slint_ui_focus));
     }
 
     // Streaming — must use a separate block because #[cfg] cannot gate

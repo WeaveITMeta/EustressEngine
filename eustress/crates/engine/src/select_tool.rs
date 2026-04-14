@@ -113,8 +113,10 @@ impl Plugin for SelectToolPlugin {
             .init_resource::<SelectToolState>()
             .init_resource::<BoxSelectionState>()
             .add_systems(Update, (
-                handle_select_drag,
-                handle_box_selection.after(handle_select_drag),
+                handle_select_drag
+                    .after(crate::ui::slint_ui::update_slint_ui_focus),
+                handle_box_selection
+                    .after(handle_select_drag),
                 debug_drag_gizmos.after(handle_box_selection),
             ))
             // render_box_selection uses NonSend<SlintUiState> — must run separately
