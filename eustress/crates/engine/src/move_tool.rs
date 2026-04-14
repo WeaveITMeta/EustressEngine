@@ -465,7 +465,12 @@ fn handle_move_interaction(
             let target_pos = if target_pos.is_finite() { target_pos } else { leader_initial };
 
             let final_target = if settings.snap_enabled {
-                snap_to_grid(target_pos, settings.snap_size)
+                let snapped = snap_to_grid(target_pos, settings.snap_size);
+                // Ensure Y doesn't snap below the surface hit point.
+                // The offset places the part's bottom at the hit surface;
+                // snapping Y down would push it inside the surface.
+                let min_y = target_pos.y;
+                Vec3::new(snapped.x, snapped.y.max(min_y), snapped.z)
             } else {
                 target_pos
             };
