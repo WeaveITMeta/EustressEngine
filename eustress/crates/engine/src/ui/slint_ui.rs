@@ -3542,8 +3542,14 @@ fn drain_slint_actions(
                                 let (start, end) = if a <= b { (a, b) } else { (b, a) };
                                 let mut sel = sel_mgr.0.write();
                                 sel.clear();
+                                // Always include the anchor node first
+                                if let Some(entity) = es.entity_id_cache.get(&anchor_id).copied() {
+                                    let id_str = format!("{}v{}", entity.index(), entity.generation());
+                                    sel.add_to_selection(id_str);
+                                }
+                                // Then add the full range (anchor through target, inclusive)
                                 for &range_id in &order[start..=end] {
-                                    if range_id > 0 { // entity nodes only (positive IDs)
+                                    if range_id > 0 {
                                         if let Some(entity) = es.entity_id_cache.get(&range_id).copied() {
                                             let id_str = format!("{}v{}", entity.index(), entity.generation());
                                             sel.add_to_selection(id_str);
