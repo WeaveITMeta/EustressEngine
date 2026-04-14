@@ -66,7 +66,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     // Transform tool gizmos — render on main camera only (layer 0)
     {
         let (config, _) = config_store.config_mut::<TransformGizmoGroup>();
-        config.depth_bias = -0.001; // Slight bias to render on top of geometry
+        config.depth_bias = 0.0;
         config.line.width = 4.0;
         config.enabled = true;
         config.render_layers = RenderLayers::layer(0);
@@ -92,3 +92,4 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         light_config.color = bevy::gizmos::light::LightGizmoColor::MatchLightColor;
     }
 }
+
