@@ -80,13 +80,6 @@ fn sync_basepart_to_material(
                     if matches!(basepart.material, RobloxMaterial::Neon) {
                         cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
                     }
-                    // Auto UV tiling — only when the material has textures
-                    if cloned.base_color_texture.is_some() {
-                        let studs_per_tile = 10.0_f32;
-                        let auto_u = (basepart.size.x / studs_per_tile).max(0.1);
-                        let auto_v = (basepart.size.z / studs_per_tile).max(0.1);
-                        cloned.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(auto_u, auto_v));
-                    }
                     let new_handle = materials.add(cloned);
                     commands.entity(entity).insert(MeshMaterial3d(new_handle));
                     continue;
@@ -137,15 +130,10 @@ fn sync_basepart_to_material(
                 material.alpha_mode = AlphaMode::Opaque;
             }
             
-            // UV tiling — only apply when material has textures or user set explicit repeat
+            // Texture repeat (UV tiling) — only when explicitly set by user
             let [u_repeat, v_repeat] = basepart.texture_repeat;
             if u_repeat != 1.0 || v_repeat != 1.0 {
                 material.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(u_repeat, v_repeat));
-            } else if material.base_color_texture.is_some() {
-                let studs_per_tile = 10.0_f32;
-                let auto_u = (basepart.size.x / studs_per_tile).max(0.1);
-                let auto_v = (basepart.size.z / studs_per_tile).max(0.1);
-                material.uv_transform = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(auto_u, auto_v));
             } else {
                 material.uv_transform = bevy::math::Affine2::IDENTITY;
             }

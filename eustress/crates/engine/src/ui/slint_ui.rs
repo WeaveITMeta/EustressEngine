@@ -7993,11 +7993,21 @@ fn sync_properties_to_slint(
         }
         add_prop("Service", "TomlPath", service.toml_path.display().to_string(), "string", false);
 
-        // SoulService: show API key from the service's own properties
+        // SoulService: show API key — read from settings file on disk
         if service.class_name == "SoulService" {
+            // Try service TOML properties first, then fall back to soul_settings.json
             let api_key = service.properties.get("api_key")
                 .map(|v| v.to_display_string())
-                .unwrap_or_default();
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    // Read from ~/.eustress_engine/soul_settings.json
+                    let path = dirs::home_dir()
+                        .map(|h| h.join(".eustress_engine").join("soul_settings.json"));
+                    path.and_then(|p| std::fs::read_to_string(p).ok())
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                        .and_then(|v| v.get("claude_api_key").and_then(|k| k.as_str().map(String::from)))
+                        .unwrap_or_default()
+                });
             add_prop("API", "ApiKey", api_key, "string", true);
         }
         
