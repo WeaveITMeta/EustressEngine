@@ -972,7 +972,6 @@ export component Ribbon inherits Rectangle {
                                 DropdownSeparator {}
                                 DropdownHeader { label: "CONNECTIONS"; }
                                 DropdownItem { label: "Connect Nodes"; shortcut: "Ctrl+K"; clicked => { root.on-plugin-action("mindspace:connect"); } }
-                                DropdownItem { label: "Search"; shortcut: "Ctrl+F"; clicked => { root.on-plugin-action("mindspace:search"); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "FILE"; }
                                 DropdownItem { label: "New Mind Map"; clicked => { root.on-plugin-action("mindspace:new"); } }
@@ -2226,22 +2225,15 @@ export component Ribbon inherits Rectangle {
                 alignment: start;
                 
                 ToolGroup {
-                    label: "Panel";
-                    IconButton { icon: @image-url("../../assets/icons/ui/brain.svg"); label: "Mind"; tooltip: "Toggle MindSpace (Ctrl+M)"; tint: #b39ddb; clicked => { root.on-plugin-action("mindspace:toggle-panel"); } }
-                }
-                GroupDivider {}
-                
-                ToolGroup {
                     label: "Labels";
                     IconButton { icon: @image-url("../../assets/icons/ui/label.svg"); label: "Add"; tooltip: "Add Label (Ctrl+L)"; tint: #9575cd; clicked => { root.on-plugin-action("mindspace:add-label"); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Remove"; tooltip: "Remove Label"; tint: #ef9a9a; clicked => { root.on-plugin-action("mindspace:remove-label"); } }
                 }
                 GroupDivider {}
-                
+
                 ToolGroup {
                     label: "Connect";
                     IconButton { icon: @image-url("../../assets/icons/ui/link.svg"); label: "Connect"; tooltip: "Connect Nodes (Ctrl+K)"; tint: #66bb6a; clicked => { root.on-plugin-action("mindspace:connect"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/search.svg"); label: "Search"; tooltip: "Search Nodes (Ctrl+F)"; tint: #64b5f6; clicked => { root.on-plugin-action("mindspace:search"); } }
                 }
                 GroupDivider {}
                 
