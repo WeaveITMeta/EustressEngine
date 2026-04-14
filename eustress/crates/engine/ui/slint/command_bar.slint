@@ -27,6 +27,7 @@ export component CommandBar inherits Rectangle {
     in property <[CommandSuggestion]> suggestions: [];
     in property <int> selected-index: 0;
     in property <[string]> history: [];
+    in property <[ScriptOutputEntry]> output-log: [];
     in-out property <length> bar-height: 28px;
 
     out property <bool> input-has-focus: input.has-focus;

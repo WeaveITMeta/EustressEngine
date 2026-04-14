@@ -248,6 +248,8 @@ fn handle_plugin_action_events(
     children_query: Query<&Children>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
+    loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
@@ -286,7 +288,6 @@ fn handle_plugin_action_events(
                 };
                 let font_size = studio_state.mindspace_font_size;
 
-                // Generate safe unique name
                 let safe_name = label_text.replace(' ', "_");
                 let now = chrono::Utc::now().to_rfc3339();
                 let ts = std::time::SystemTime::now()
@@ -295,10 +296,21 @@ fn handle_plugin_action_events(
                     .as_nanos();
                 let id = (ts % u32::MAX as u128) as u32;
 
-                // ── Write TOML files to StarterGui/{name}/ ──
-                let space_root = crate::space::default_space_root();
-                let starter_gui = space_root.join("StarterGui");
-                let bb_dir = starter_gui.join(&safe_name);
+                // ── Find the parent Part's directory on disk ──
+                // BillboardGui is a child of the Part, so its TOML folder
+                // goes inside the Part's directory (or next to its .glb.toml).
+                let parent_dir = instance_files.get(parent_entity)
+                    .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
+                    .or_else(|_| loaded_from_file.get(parent_entity).map(|lff| {
+                        if lff.path.is_dir() { lff.path.clone() }
+                        else { lff.path.parent().unwrap_or(lff.path.as_path()).to_path_buf() }
+                    }))
+                    .unwrap_or_else(|_| {
+                        // Fallback: Workspace root
+                        crate::space::default_space_root().join("Workspace")
+                    });
+
+                let bb_dir = parent_dir.join(&safe_name);
 
                 if let Err(e) = std::fs::create_dir_all(&bb_dir) {
                     notifications.error(format!("Failed to create directory: {}", e));
@@ -382,7 +394,7 @@ fn handle_plugin_action_events(
                     );
                 }
 
-                notifications.success(format!("Added label '{}' — saved to StarterGui/{}/", label_text, safe_name));
+                notifications.success(format!("Added label '{}' to selected part", label_text));
                 info!("✅ Created BillboardGui {:?} with TOML at {:?}", billboard_entity, bb_dir);
             }
             "mindspace:update_label" => {
@@ -439,28 +451,25 @@ fn handle_plugin_action_events(
                         .collect();
 
                     for billboard_entity in billboard_children {
-                        // Delete TOML files from disk
-                        let billboard_name = instance_query.get(billboard_entity)
-                            .map(|(_, i)| i.name.clone())
-                            .unwrap_or_else(|_| "BillboardGui".to_string());
-                        let safe_name = billboard_name.replace(' ', "_");
-                        let space_root = crate::space::default_space_root();
-                        let bb_dir = space_root.join("StarterGui").join(&safe_name);
+                        // Find the TOML directory from InstanceFile or LoadedFromFile
+                        let bb_dir = instance_files.get(billboard_entity)
+                            .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
+                            .or_else(|_| loaded_from_file.get(billboard_entity).map(|lff| lff.path.clone()))
+                            .ok();
 
-                        if bb_dir.exists() {
-                            if let Err(e) = std::fs::remove_dir_all(&bb_dir) {
-                                warn!("Failed to delete BillboardGui directory {:?}: {}", bb_dir, e);
-                            } else {
-                                info!("🗑️ Deleted BillboardGui directory {:?}", bb_dir);
+                        if let Some(ref dir) = bb_dir {
+                            if dir.exists() && dir.is_dir() {
+                                if let Err(e) = std::fs::remove_dir_all(dir) {
+                                    warn!("Failed to delete BillboardGui directory {:?}: {}", dir, e);
+                                } else {
+                                    info!("🗑️ Deleted BillboardGui directory {:?}", dir);
+                                }
+                            }
+                            if let Some(ref mut registry) = file_registry {
+                                registry.unregister_file(&dir.join("_instance.toml"));
                             }
                         }
 
-                        // Unregister from file registry
-                        if let Some(ref mut registry) = file_registry {
-                            registry.unregister_file(&bb_dir.join("_instance.toml"));
-                        }
-
-                        // Despawn entity and all children (TextLabels etc.)
                         commands.entity(billboard_entity).despawn();
                         removed += 1;
                     }
@@ -470,20 +479,22 @@ fn handle_plugin_action_events(
                 if removed == 0 {
                     if let Ok((_, inst)) = instance_query.get(parent_entity) {
                         if inst.class_name == ClassName::BillboardGui {
-                            let safe_name = inst.name.replace(' ', "_");
-                            let space_root = crate::space::default_space_root();
-                            let bb_dir = space_root.join("StarterGui").join(&safe_name);
+                            let bb_dir = instance_files.get(parent_entity)
+                                .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
+                                .or_else(|_| loaded_from_file.get(parent_entity).map(|lff| lff.path.clone()))
+                                .ok();
 
-                            if bb_dir.exists() {
-                                if let Err(e) = std::fs::remove_dir_all(&bb_dir) {
-                                    warn!("Failed to delete BillboardGui directory {:?}: {}", bb_dir, e);
-                                } else {
-                                    info!("🗑️ Deleted BillboardGui directory {:?}", bb_dir);
+                            if let Some(ref dir) = bb_dir {
+                                if dir.exists() && dir.is_dir() {
+                                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                                        warn!("Failed to delete BillboardGui directory {:?}: {}", dir, e);
+                                    } else {
+                                        info!("🗑️ Deleted BillboardGui directory {:?}", dir);
+                                    }
                                 }
-                            }
-
-                            if let Some(ref mut registry) = file_registry {
-                                registry.unregister_file(&bb_dir.join("_instance.toml"));
+                                if let Some(ref mut registry) = file_registry {
+                                    registry.unregister_file(&dir.join("_instance.toml"));
+                                }
                             }
 
                             commands.entity(parent_entity).despawn();
