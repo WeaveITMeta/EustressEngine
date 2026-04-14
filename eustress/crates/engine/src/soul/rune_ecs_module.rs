@@ -115,7 +115,7 @@ where
 /// Create the Eustress ECS module for Rune scripts
 #[cfg(feature = "realism-scripting")]
 pub fn create_ecs_module() -> Result<Module, ContextError> {
-    let mut module = Module::new()?;
+    let mut module: Module = Module::new();
     
     // Entity component access
     module.function_meta(get_voltage)?;
