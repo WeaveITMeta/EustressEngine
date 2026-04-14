@@ -307,9 +307,11 @@ impl Plugin for KeyBindingsPlugin {
         app.insert_resource(bindings)
             .init_resource::<NudgeTimer>()
             .add_systems(Update, (
-                dispatch_keyboard_shortcuts,
+                dispatch_keyboard_shortcuts
+                    .after(crate::ui::slint_ui::update_slint_ui_focus),
                 handle_menu_action_events.after(dispatch_keyboard_shortcuts),
-                handle_nudge_keys,
+                handle_nudge_keys
+                    .after(crate::ui::slint_ui::update_slint_ui_focus),
             ));
     }
 }

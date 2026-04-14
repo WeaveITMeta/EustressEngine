@@ -2005,7 +2005,7 @@ fn forward_input_to_slint(
 ///
 /// This prevents phantom clicks: clicking a tool button in the ribbon no longer also fires
 /// a raycast into the 3D scene that could deselect objects or start an unintended drag.
-fn update_slint_ui_focus(
+pub fn update_slint_ui_focus(
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<super::ViewportBounds>>,
     mut ui_focus: ResMut<super::SlintUIFocus>,
