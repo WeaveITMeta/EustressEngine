@@ -30,62 +30,88 @@ export component UniverseBrowser inherits Rectangle {
     // Output: user clicked a Space entry
     callback space-selected(/* path */ string);
 
-    background: #1e1e1e;
+    background: Theme.panel-background;
     min-width: 200px;
 
     VerticalLayout {
         padding: 0px;
         spacing: 0px;
 
-        // Header bar
+        // Header bar — matches Explorer header style
         Rectangle {
             height: 32px;
-            background: #2d2d2d;
+            background: Theme.header-background;
+            border-width: 0px;
 
-            Text {
-                x: 10px;
-                text: "Universes";
-                color: #cccccc;
-                font-size: 12px;
-                font-weight: 700;
-                vertical-alignment: center;
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                alignment: start;
+
+                Text {
+                    text: "Universes";
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
             }
+        }
+
+        // Thin separator line
+        Rectangle {
+            height: 1px;
+            background: Theme.input-border;
         }
 
         // Scrollable list
         ScrollView {
             VerticalLayout {
                 padding: 4px;
-                spacing: 0px;
+                spacing: 2px;
                 alignment: start;
 
                 for universe in universe-items: VerticalLayout {
                     spacing: 0px;
 
                     // Universe row
-                    Rectangle {
+                    uni-row := Rectangle {
                         height: 28px;
-                        background: transparent;
+                        border-radius: 3px;
+                        background: uni-touch.has-hover ? Theme.explorer-item-hover : transparent;
+
+                        uni-touch := TouchArea {
+                            mouse-cursor: pointer;
+                        }
 
                         HorizontalLayout {
                             padding-left: 8px;
-                            spacing: 4px;
+                            spacing: 6px;
                             alignment: start;
 
-                            // Expand/collapse chevron (static — Bevy controls is-expanded)
+                            // Expand/collapse chevron
                             Text {
                                 text: universe.is-expanded ? "▾" : "▸";
-                                color: #888888;
-                                font-size: 11px;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                                width: 12px;
+                            }
+
+                            // Universe icon
+                            Text {
+                                text: "◆";
+                                color: Theme.accent-blue;
+                                font-size: 10px;
                                 vertical-alignment: center;
                                 width: 14px;
                             }
 
                             Text {
                                 text: universe.name;
-                                color: #d0d0d0;
+                                color: Theme.text-primary;
                                 font-size: 12px;
-                                font-weight: 700;
+                                font-weight: 600;
                                 vertical-alignment: center;
                             }
                         }
@@ -97,16 +123,24 @@ export component UniverseBrowser inherits Rectangle {
 
                         for space in universe.spaces: Rectangle {
                             height: 26px;
-                            background: space.is-active ? #094771 : transparent;
+                            border-radius: 3px;
+                            background: space.is-active ? Theme.explorer-item-selected :
+                                        space-touch.has-hover ? Theme.explorer-item-hover : transparent;
+
+                            space-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.space-selected(space.path); }
+                            }
 
                             HorizontalLayout {
-                                padding-left: 28px;
-                                spacing: 4px;
+                                padding-left: 30px;
+                                spacing: 6px;
                                 alignment: start;
 
+                                // Space icon — hexagon
                                 Text {
                                     text: "⬡";
-                                    color: space.is-active ? #ffffff : #888888;
+                                    color: space.is-active ? Theme.accent-blue : Theme.text-secondary;
                                     font-size: 10px;
                                     vertical-alignment: center;
                                     width: 14px;
@@ -114,23 +148,12 @@ export component UniverseBrowser inherits Rectangle {
 
                                 Text {
                                     text: space.name;
-                                    color: space.is-active ? #ffffff : #c0c0c0;
-                                    font-size: 12px;
+                                    color: space.is-active ? #ffffff : Theme.text-primary;
+                                    font-size: 11px;
                                     vertical-alignment: center;
+                                    overflow: elide;
                                 }
                             }
-
-                            // Click handler
-                            TouchArea {
-                                clicked => { root.space-selected(space.path); }
-                            }
-
-                            // Hover highlight
-                            states [
-                                hovered when !space.is-active: {
-                                    background: #2a2a2a;
-                                }
-                            ]
                         }
                     }
                 }
