@@ -1581,7 +1581,7 @@ pub fn execute_rune_oneshot(_source: &str) -> Result<Vec<eustress_common::luau::
 ///
 /// ## Rune: `let part = Instance::new("Part");`
 #[cfg(feature = "realism-scripting")]
-#[rune::function]
+#[rune::function(path = Instance::new)]
 fn instance_new(class_name: &str) -> Option<InstanceRune> {
     with_instance_registry(None, |registry| {
         let mut reg = registry.write().unwrap();
