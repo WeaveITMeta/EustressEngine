@@ -5516,26 +5516,43 @@ fn drain_slint_actions(
                             })
                             .unwrap_or_else(|| space_root.join(service));
 
-                        // Generate unique file name
+                        // GUI containers (Frame, ScrollingFrame, ScreenGui, BillboardGui, SurfaceGui)
+                        // are created as folders so they can hold child elements.
+                        // Leaf elements (TextLabel, TextButton, etc.) remain flat files.
+                        let is_container = matches!(class_name_str,
+                            "Frame" | "ScrollingFrame" | "ScreenGui" | "BillboardGui" | "SurfaceGui"
+                        );
+
                         let base_name = class_name_str;
-                        let instance_name = (0..1000u32).find_map(|i| {
-                            let candidate = if i == 0 {
-                                base_name.to_string()
-                            } else {
-                                format!("{}{}", base_name, i)
-                            };
-                            let path = write_dir.join(format!("{}.{}.toml", candidate, file_ext));
-                            if !path.exists() { Some(candidate) } else { None }
-                        }).unwrap_or_else(|| format!("{}_new", base_name));
+                        let (instance_name, toml_path) = if is_container {
+                            // Folder-based: Name/_instance.toml
+                            let name = (0..1000u32).find_map(|i| {
+                                let candidate = if i == 0 { base_name.to_string() }
+                                    else { format!("{}{}", base_name, i) };
+                                if !write_dir.join(&candidate).exists() { Some(candidate) } else { None }
+                            }).unwrap_or_else(|| format!("{}_new", base_name));
+                            let dir = write_dir.join(&name);
+                            let _ = std::fs::create_dir_all(&dir);
+                            let path = dir.join("_instance.toml");
+                            (name, path)
+                        } else {
+                            // Flat file: Name.textlabel.toml
+                            let name = (0..1000u32).find_map(|i| {
+                                let candidate = if i == 0 { base_name.to_string() }
+                                    else { format!("{}{}", base_name, i) };
+                                let path = write_dir.join(format!("{}.{}.toml", candidate, file_ext));
+                                if !path.exists() { Some(candidate) } else { None }
+                            }).unwrap_or_else(|| format!("{}_new", base_name));
+                            let path = write_dir.join(format!("{}.{}.toml", name, file_ext));
+                            let _ = std::fs::create_dir_all(&write_dir);
+                            (name, path)
+                        };
 
                         // Create GUI TOML with proper [instance]/[gui]/[text] format
                         let gui_def = crate::space::gui_loader::create_default_gui_toml(
                             class_name_str,
                             &instance_name,
                         );
-
-                        let _ = std::fs::create_dir_all(&write_dir);
-                        let toml_path = write_dir.join(format!("{}.{}.toml", instance_name, file_ext));
 
                         // Write GUI TOML to disk, then load + spawn with Bevy UI components
                         match crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
@@ -5549,12 +5566,19 @@ fn drain_slint_actions(
                                     commands.entity(entity).insert(ChildOf(parent));
                                 }
                                 if let Some(ref mut registry) = res.file_registry {
+                                    let (reg_path, reg_type) = if is_container {
+                                        // Folder-based: register the directory
+                                        let dir = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
+                                        (dir, crate::space::FileType::Directory)
+                                    } else {
+                                        (toml_path.clone(), crate::space::FileType::GuiElement)
+                                    };
                                     registry.register(
                                         toml_path.clone(),
                                         entity,
                                         crate::space::FileMetadata {
-                                            path: toml_path.clone(),
-                                            file_type: crate::space::FileType::GuiElement,
+                                            path: reg_path,
+                                            file_type: reg_type,
                                             service: service.to_string(),
                                             name: instance_name.clone(),
                                             size: 0,
