@@ -672,10 +672,10 @@ fn eustress_camera_controls(
         cam.distance = cam.distance.clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
     }
 
-    // Zoom (Mouse Wheel) - only when cursor is inside the 3D viewport.
-    // Blocked when mouse is over Explorer or Properties panels so they can scroll freely.
-    if scroll_delta != 0.0 && !cursor_in_viewport {
-        // Cursor is over a panel — discard zoom, let Slint handle the scroll
+    // Zoom (Mouse Wheel) - only when cursor is inside the 3D viewport and
+    // no Slint text input/editor has focus. This lets panels scroll freely
+    // and prevents zoom while editing scripts in the center tab.
+    if scroll_delta != 0.0 && (!cursor_in_viewport || ui_wants_keyboard) {
         scroll_delta = 0.0;
     }
     

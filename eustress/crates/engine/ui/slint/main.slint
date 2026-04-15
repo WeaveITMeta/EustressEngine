@@ -1437,13 +1437,22 @@ export component StudioWindow inherits Window {
                         y: 0px;
                         width: parent.width - root.tab-strip-space1-width;
                         height: parent.height;
-                        // Only sets drag-source on press; all other events fall through
+                        // Sets drag-source on press; selects tab on click (no drag)
                         pointer-event(event) => {
                             if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
                                 // Identify which tab was pressed from mouse-x
                                 let raw-idx = floor((self.mouse-x) / 190px);
                                 let clamped = max(0, min(raw-idx, root.center-tabs.length - 1));
                                 root.tab-drag-source = clamped;
+                            }
+                            if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                                // If no drag occurred, treat as a click to select
+                                if !root.tab-dragging && root.tab-drag-source >= 0 {
+                                    root.center-active-tab = root.tab-drag-source + 1;
+                                    root.select-center-tab(root.tab-drag-source + 1);
+                                }
+                                root.tab-drag-source = -1;
+                                root.tab-dragging = false;
                             }
                         }
                     }
