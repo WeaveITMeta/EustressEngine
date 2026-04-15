@@ -152,8 +152,10 @@ impl Plugin for StudioPluginSystem {
                 process_plugin_actions,
                 sync_mindspace_selection,
             ).chain())
-            // handle_plugin_action_events runs in PostUpdate to process messages written by apply_ui_actions
-            .add_systems(PostUpdate, handle_plugin_action_events);
+            // handle_plugin_action_events runs after SlintSystems::Drain to ensure
+            // PluginActionEvent messages written by drain_slint_actions are available.
+            .add_systems(Update, handle_plugin_action_events
+                .after(crate::ui::slint_ui::SlintSystems::Drain));
             // Plugin UI is now handled by Slint - see slint_ui.rs
     }
 }
