@@ -248,17 +248,25 @@ fn update_sun_position(
     }
 }
 
-/// Update ambient light based on LightingService
+/// Update ambient light based on LightingService and sun elevation.
+/// At night, ambient drops to near-zero so the sky darkens properly.
 fn update_ambient_light(
     lighting: Res<LightingService>,
+    sun_class_query: Query<&SunClass, With<SunMarker>>,
     mut ambient: ResMut<GlobalAmbientLight>,
 ) {
-    if !lighting.is_changed() {
-        return;
-    }
-    
+    let sun_dir = sun_class_query.iter().next()
+        .map(|sc| sc.direction())
+        .unwrap_or_else(|| lighting.sun_direction());
+    let sun_y = sun_dir.y;
+
+    // Night factor: 1.0 at day, fades to 0.02 at night
+    let night_factor = if sun_y > 0.1 { 1.0 }
+        else if sun_y > -0.15 { ((sun_y + 0.15) / 0.25).clamp(0.02, 1.0) }
+        else { 0.02 };
+
     ambient.color = arr_to_color(lighting.ambient);
-    ambient.brightness = lighting.brightness * 500.0;
+    ambient.brightness = lighting.brightness * 500.0 * night_factor;
 }
 
 /// Update moon position and properties using realistic orbital mechanics
