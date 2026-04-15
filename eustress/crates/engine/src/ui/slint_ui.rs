@@ -6179,6 +6179,24 @@ fn sync_bevy_to_slint(
             }).collect();
             let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
             ui.set_output_logs(slint::ModelRc::from(model_rc));
+
+            // Build all-text for the selectable output area
+            let source_filter = ui.get_output_source_filter().to_string();
+            let all_text: String = output.entries.iter().filter(|e| {
+                source_filter == "all"
+                    || (source_filter == "rune" && e.source == "rune")
+                    || (source_filter == "luau" && e.source == "luau")
+                    || (e.source != "rune" && e.source != "luau")
+            }).map(|e| {
+                let level_tag = match e.level {
+                    LogLevel::Info => "ℹ",
+                    LogLevel::Warn => "⚠",
+                    LogLevel::Error => "✗",
+                    LogLevel::Debug => "⚙",
+                };
+                format!("{} {} {}", e.timestamp, level_tag, e.message)
+            }).collect::<Vec<_>>().join("\n");
+            ui.set_output_all_text(slint::SharedString::from(all_text));
         }
     }
     

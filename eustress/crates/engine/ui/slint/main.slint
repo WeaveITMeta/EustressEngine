@@ -340,6 +340,8 @@ export component StudioWindow inherits Window {
     
     // Output console log data (pushed from Bevy each frame)
     in-out property <[LogData]> output-logs: [];
+    in-out property <string> output-all-text: "";
+    in-out property <string> output-source-filter: "all";
     
     // Unified explorer tree data: ECS entities + filesystem (pushed from Bevy)
     in-out property <[TreeNode]> tree-nodes: [];
@@ -2173,7 +2175,9 @@ export component StudioWindow inherits Window {
             OutputConsole {
                 vertical-stretch: 1;
                 logs: root.output-logs;
-                on-clear => { root.output-logs = []; }
+                all-text: root.output-all-text;
+                source-filter <=> root.output-source-filter;
+                on-clear => { root.output-logs = []; root.output-all-text = ""; }
                 on-close => { root.show-output = false; }
                 on-open-path(msg) => { root.open-path-from-log(msg); }
             }
