@@ -292,6 +292,7 @@ pub struct StudioState {
     pub last_selection_hash: u64,
     pub frames_since_selection_change: u32,
     pub last_log_count: usize,
+    pub last_output_filter: String,
 }
 
 impl Default for StudioState {
@@ -373,6 +374,7 @@ impl Default for StudioState {
             last_selection_hash: 0,
             frames_since_selection_change: 0,
             last_log_count: 0,
+            last_output_filter: String::new(),
         }
     }
 }

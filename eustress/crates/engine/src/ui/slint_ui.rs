@@ -6240,11 +6240,22 @@ fn sync_bevy_to_slint(
     }
     
     // Sync output console logs → Slint (last 200 entries)
-    // Only rebuild the model when log count changes to avoid flickering
+    // Rebuild when log count OR filter state changes
     if let Some(ref output) = output {
         let new_log_count = output.entries.len();
-        if new_log_count != state.last_log_count {
+        let filter_hash = {
+            let sf: String = ui.get_output_source_filter().into();
+            let si = ui.get_output_show_info();
+            let sw = ui.get_output_show_warnings();
+            let se = ui.get_output_show_errors();
+            let sd = ui.get_output_show_debug();
+            format!("{}{}{}{}{}", sf, si, sw, se, sd)
+        };
+        let prev_filter = state.last_output_filter.clone();
+        let needs_rebuild = new_log_count != state.last_log_count || filter_hash != prev_filter;
+        if needs_rebuild {
             state.last_log_count = new_log_count;
+            state.last_output_filter = filter_hash;
             let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
                 LogData {
                     id: i as i32,
@@ -6262,13 +6273,26 @@ fn sync_bevy_to_slint(
             let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
             ui.set_output_logs(slint::ModelRc::from(model_rc));
 
-            // Build all-text for the selectable output area
+            // Build all-text for the selectable output area — respects source + level filters
             let source_filter = ui.get_output_source_filter().to_string();
+            let show_info = ui.get_output_show_info();
+            let show_warn = ui.get_output_show_warnings();
+            let show_err = ui.get_output_show_errors();
+            let show_dbg = ui.get_output_show_debug();
             let all_text: String = output.entries.iter().filter(|e| {
-                source_filter == "all"
+                // Source filter
+                let source_ok = source_filter == "all"
                     || (source_filter == "rune" && e.source == "rune")
                     || (source_filter == "luau" && e.source == "luau")
-                    || (e.source != "rune" && e.source != "luau")
+                    || (e.source != "rune" && e.source != "luau");
+                // Level filter
+                let level_ok = match e.level {
+                    LogLevel::Info => show_info,
+                    LogLevel::Warn => show_warn,
+                    LogLevel::Error => show_err,
+                    LogLevel::Debug => show_dbg,
+                };
+                source_ok && level_ok
             }).map(|e| {
                 let level_tag = match e.level {
                     LogLevel::Info => "ℹ",
