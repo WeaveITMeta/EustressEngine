@@ -5292,6 +5292,88 @@ fn drain_slint_actions(
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
 
+                // Script insert → create folder with _instance.toml + empty .rune source
+                if action == "insert:script" || action == "insert:localscript" || action == "insert:modulescript" {
+                    // Determine parent directory from selected Explorer item
+                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
+                        match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
+                        }
+                    } else { None };
+
+                    let space_root = crate::space::default_space_root();
+                    let write_dir = selected_entity
+                        .and_then(|pe| queries.loaded_from_file.get(pe).ok())
+                        .map(|(_, lff)| {
+                            if lff.path.is_dir() { lff.path.clone() }
+                            else { lff.path.parent().unwrap_or(&space_root.join("SoulService")).to_path_buf() }
+                        })
+                        .unwrap_or_else(|| space_root.join("SoulService"));
+
+                    let base = "Script".to_string();
+                    let script_name = (0..1000u32).find_map(|i| {
+                        let candidate = if i == 0 { base.clone() } else { format!("{}{}", base, i) };
+                        if !write_dir.join(&candidate).exists() { Some(candidate) } else { None }
+                    }).unwrap_or_else(|| format!("Script_{}", chrono::Utc::now().timestamp()));
+
+                    let script_dir = write_dir.join(&script_name);
+                    let _ = std::fs::create_dir_all(&script_dir);
+
+                    // Write _instance.toml
+                    let instance_toml = "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"source.rune\"\n";
+                    let _ = std::fs::write(script_dir.join("_instance.toml"), instance_toml);
+
+                    // Write empty source file
+                    let _ = std::fs::write(script_dir.join("source.rune"), "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
+
+                    // Write empty Summary.md
+                    let _ = std::fs::write(script_dir.join("Summary.md"), format!("# {}\n\nNew script.\n", script_name));
+
+                    // Spawn ECS entity
+                    let entity = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: script_name.clone(),
+                            class_name: eustress_common::classes::ClassName::SoulScript,
+                            archivable: true, id: 0, ai: false, uuid: String::new(),
+                        },
+                        crate::soul::SoulScriptData {
+                            source: "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n".to_string(),
+                            dirty: false, ast: None, generated_code: None,
+                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                            errors: Vec::new(), run_context: Default::default(),
+                        },
+                        crate::space::file_loader::LoadedFromFile {
+                            path: script_dir.clone(),
+                            file_type: crate::space::FileType::Directory,
+                            service: "SoulService".to_string(),
+                        },
+                        Name::new(script_name.clone()),
+                    )).id();
+
+                    // Parent to selected entity
+                    if let Some(parent) = selected_entity {
+                        commands.entity(entity).insert(ChildOf(parent));
+                    }
+
+                    if let Some(ref mut registry) = res.file_registry {
+                        registry.register(script_dir.join("_instance.toml"), entity, crate::space::FileMetadata {
+                            path: script_dir.clone(),
+                            file_type: crate::space::FileType::Directory,
+                            service: "SoulService".to_string(),
+                            name: script_name.clone(),
+                            size: 0,
+                            modified: std::time::SystemTime::now(),
+                            children: Vec::new(),
+                        });
+                    }
+
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Created Script '{}'", script_name));
+                    }
+                    info!("📜 Created Script '{}' at {:?}", script_name, script_dir);
+                }
+
                 // Model / Folder inserts → create directory with _instance.toml
                 if action == "insert:model" || action == "insert:folder" {
                     let part_type_str = if action == "insert:model" { "Model" } else { "Folder" };
