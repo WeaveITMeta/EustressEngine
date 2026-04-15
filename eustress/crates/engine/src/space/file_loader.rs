@@ -861,7 +861,8 @@ pub fn spawn_directory_entry(
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .and_then(|v| v.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).map(|s| s.to_string()))
             .map(|cn| match cn.as_str() {
-                "Part" | "AdvancedPart" => eustress_common::classes::ClassName::Part,
+                "Part"           => eustress_common::classes::ClassName::Part,
+                "Script" | "SoulScript" => eustress_common::classes::ClassName::SoulScript,
                 "ScreenGui"      => eustress_common::classes::ClassName::ScreenGui,
                 "Frame"          => eustress_common::classes::ClassName::Frame,
                 "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,
@@ -1010,6 +1011,87 @@ pub fn spawn_directory_entry(
             Transform::from_translation(bb_offset),
             Visibility::default(),
         )).id()
+    } else if matches!(class_name, eustress_common::classes::ClassName::SoulScript) {
+        // Script folder — find the .rune/.luau/.soul source file inside and load it.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        // Read the "source" field from _instance.toml to find the script filename,
+        // or scan the folder for the first .rune/.luau/.soul file.
+        let source_file = std::fs::read_to_string(&instance_toml)
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+            .and_then(|v| v.get("script").and_then(|s| s.get("source")).and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .map(|rel| dir_meta.path.join(rel))
+            .or_else(|| {
+                // Fallback: scan folder for first script file
+                std::fs::read_dir(&dir_meta.path).ok()
+                    .and_then(|entries| entries.flatten().find(|e| {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        n.ends_with(".rune") || n.ends_with(".luau") || n.ends_with(".soul") || n.ends_with(".lua")
+                    }))
+                    .map(|e| e.path())
+            });
+
+        if let Some(ref src_path) = source_file {
+            if let Ok(source) = std::fs::read_to_string(src_path) {
+                let script_name = dir_meta.name.clone();
+                commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: script_name.clone(),
+                        class_name: eustress_common::classes::ClassName::SoulScript,
+                        archivable: true, id: 0, ai: false, uuid: String::new(),
+                    },
+                    crate::soul::SoulScriptData {
+                        source,
+                        dirty: false,
+                        ast: None,
+                        generated_code: None,
+                        build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                        errors: Vec::new(),
+                        run_context: Default::default(),
+                    },
+                    LoadedFromFile {
+                        path: dir_meta.path.clone(),
+                        file_type: FileType::Directory,
+                        service: dir_meta.service.clone(),
+                    },
+                    Name::new(script_name),
+                )).id()
+            } else {
+                warn!("Failed to read script source {:?}", src_path);
+                commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_meta.name.clone(),
+                        class_name: eustress_common::classes::ClassName::Folder,
+                        archivable: true, id: 0, ai: false, uuid: String::new(),
+                    },
+                    LoadedFromFile {
+                        path: dir_meta.path.clone(),
+                        file_type: FileType::Directory,
+                        service: dir_meta.service.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                )).id()
+            }
+        } else {
+            warn!("Script folder {:?} has no source file", dir_meta.path);
+            commands.spawn((
+                eustress_common::classes::Instance {
+                    name: dir_meta.name.clone(),
+                    class_name: eustress_common::classes::ClassName::Folder,
+                    archivable: true, id: 0, ai: false, uuid: String::new(),
+                },
+                LoadedFromFile {
+                    path: dir_meta.path.clone(),
+                    file_type: FileType::Directory,
+                    service: dir_meta.service.clone(),
+                },
+                Name::new(dir_meta.name.clone()),
+                Transform::default(),
+                Visibility::default(),
+            )).id()
+        }
     } else if matches!(class_name, eustress_common::classes::ClassName::Part) {
         // Part folder — load via spawn_instance (same path as flat .glb.toml files).
         // The _instance.toml inside contains the full InstanceDefinition with mesh, transform, etc.

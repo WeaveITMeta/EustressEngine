@@ -275,9 +275,10 @@ impl CenterTabManager {
         let tab_type = route_file_to_tab_type(path);
 
         // Read file content for code/text tabs
+        // For folder-based scripts, resolve the source file inside the folder
         let content = match &tab_type {
             CenterTabType::CodeEditor { .. } | CenterTabType::SoulScript { .. } => {
-                std::fs::read_to_string(path).unwrap_or_default()
+                resolve_script_source(path).unwrap_or_default()
             }
             CenterTabType::Document { doc_type: DocumentType::Text | DocumentType::Markdown } => {
                 std::fs::read_to_string(path).unwrap_or_default()
@@ -475,8 +476,38 @@ impl CenterTabManager {
 // File Extension Routing
 // ============================================================================
 
+/// Resolve the source content for a script path.
+/// If path is a directory (folder-based script), finds the .rune/.luau/.soul file inside.
+/// If path is a file, reads it directly.
+fn resolve_script_source(path: &Path) -> Option<String> {
+    if path.is_dir() {
+        // Folder-based script: find source file inside
+        let source_path = std::fs::read_dir(path).ok()
+            .and_then(|entries| entries.flatten().find(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.ends_with(".rune") || n.ends_with(".luau") || n.ends_with(".soul") || n.ends_with(".lua")
+            }))
+            .map(|e| e.path())?;
+        std::fs::read_to_string(source_path).ok()
+    } else {
+        std::fs::read_to_string(path).ok()
+    }
+}
+
 /// Route a file path to the appropriate tab type based on extension
 pub fn route_file_to_tab_type(path: &Path) -> CenterTabType {
+    // Folder-based scripts: check _instance.toml for class_name = "Script"
+    if path.is_dir() {
+        let inst = path.join("_instance.toml");
+        if inst.exists() {
+            if let Ok(content) = std::fs::read_to_string(&inst) {
+                if content.contains("\"Script\"") || content.contains("\"SoulScript\"") {
+                    return CenterTabType::SoulScript { mode: SoulScriptMode::Code };
+                }
+            }
+        }
+    }
+
     let ext = path.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
