@@ -432,6 +432,7 @@ fn handle_menu_action_events(
     mut file_registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     mut editor_settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
 ) {
     let (
         ref mut undo_events,
