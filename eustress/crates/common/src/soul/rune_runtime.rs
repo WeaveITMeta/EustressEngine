@@ -218,24 +218,45 @@ pub fn execute_oneshot(
         .map_err(|e| format!("Insert error: {}", e))?;
 
     let mut diagnostics = rune::Diagnostics::new();
-    let unit = rune::prepare(&mut sources)
+    let build_result = rune::prepare(&mut sources)
         .with_context(&ctx)
         .with_diagnostics(&mut diagnostics)
-        .build()
-        .map_err(|e| {
-            // Include diagnostic details in the error message
-            let mut diag_msgs = Vec::new();
-            if diagnostics.has_error() {
-                for diag in diagnostics.diagnostics() {
-                    diag_msgs.push(format!("{:?}", diag));
-                }
+        .build();
+
+    // Always check diagnostics first — they have the real error details
+    if diagnostics.has_error() || build_result.is_err() {
+        let mut error_lines = Vec::new();
+
+        // Method 1: emit via termcolor for formatted output
+        let mut buf = rune::termcolor::Buffer::no_color();
+        let _ = diagnostics.emit(&mut buf, &sources);
+        let rendered = String::from_utf8_lossy(buf.as_slice()).to_string();
+        if !rendered.trim().is_empty() {
+            error_lines.push(rendered.trim().to_string());
+        }
+
+        // Method 2: iterate diagnostics for raw messages
+        if error_lines.is_empty() {
+            for diag in diagnostics.diagnostics() {
+                error_lines.push(format!("{:#?}", diag));
             }
-            if diag_msgs.is_empty() {
-                format!("Compile error: {}", e)
-            } else {
-                format!("Compile error: {}\n{}", e, diag_msgs.join("\n"))
+        }
+
+        // Method 3: use the build error itself
+        if error_lines.is_empty() {
+            if let Err(ref e) = build_result {
+                error_lines.push(format!("{}", e));
             }
-        })?;
+        }
+
+        if error_lines.is_empty() {
+            error_lines.push("unknown error".to_string());
+        }
+
+        return Err(format!("Compile error:\n{}", error_lines.join("\n")));
+    }
+
+    let unit = build_result.unwrap();
 
     let mut vm = rune::Vm::new(
         std::sync::Arc::new(runtime_ctx),
