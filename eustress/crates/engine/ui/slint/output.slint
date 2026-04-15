@@ -24,6 +24,8 @@ export component OutputConsole inherits Rectangle {
     in-out property <bool> show-debug: false;
     in-out property <string> filter-text: "";
     in-out property <bool> auto-scroll: true;
+    // Source filter: "all", "rune", "luau"
+    in-out property <string> source-filter: "all";
     
     // Callbacks
     callback on-clear();
@@ -286,6 +288,92 @@ export component OutputConsole inherits Rectangle {
                     }
                 }
                 
+                // Separator between level and source filters
+                Rectangle {
+                    width: 9px;
+                    Rectangle {
+                        x: 4px;
+                        y: 6px;
+                        width: 1px;
+                        height: 18px;
+                        background: Theme.border-color;
+                    }
+                }
+
+                // Rune source filter
+                Rectangle {
+                    width: 46px;
+
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 44px;
+                        height: 22px;
+                        background: rune-touch.has-hover ? Theme.button-hover :
+                                    (root.source-filter == "rune" ? #2d4a1e : transparent);
+                        border-radius: 3px;
+                        border-width: root.source-filter == "rune" ? 1px : 0px;
+                        border-color: #4a7a2e;
+
+                        rune-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.source-filter == "rune" {
+                                    root.source-filter = "all";
+                                } else {
+                                    root.source-filter = "rune";
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Rune";
+                            color: root.source-filter == "rune" ? #8fce5a : Theme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Luau source filter
+                Rectangle {
+                    width: 46px;
+
+                    Rectangle {
+                        x: 1px;
+                        y: 4px;
+                        width: 44px;
+                        height: 22px;
+                        background: luau-touch.has-hover ? Theme.button-hover :
+                                    (root.source-filter == "luau" ? #1e3a5a : transparent);
+                        border-radius: 3px;
+                        border-width: root.source-filter == "luau" ? 1px : 0px;
+                        border-color: #2e6aaa;
+
+                        luau-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.source-filter == "luau" {
+                                    root.source-filter = "all";
+                                } else {
+                                    root.source-filter = "luau";
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Luau";
+                            color: root.source-filter == "luau" ? #5aadff : Theme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
                 // Clear button (next to filters)
                 Rectangle {
                     width: 54px;
@@ -502,6 +590,11 @@ export component OutputConsole inherits Rectangle {
                 alignment: start;
                 
                 for log in root.logs: LogEntry {
+                    // Filter by source: show if "all" or matching source
+                    visible: root.source-filter == "all"
+                        || (root.source-filter == "rune" && log.source == "rune")
+                        || (root.source-filter == "luau" && log.source == "luau")
+                        || (log.source != "rune" && log.source != "luau");
                     level: log.level;
                     timestamp: log.timestamp;
                     message: log.message;

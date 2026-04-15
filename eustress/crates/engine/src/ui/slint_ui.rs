@@ -486,36 +486,36 @@ pub struct OutputConsole {
 
 impl OutputConsole {
     pub fn info(&mut self, msg: impl Into<String>) {
-        self.push(LogLevel::Info, msg.into());
+        self.push_with_source(LogLevel::Info, msg.into(), "system");
     }
-    
+
     pub fn warn(&mut self, msg: impl Into<String>) {
-        self.push(LogLevel::Warn, msg.into());
+        self.push_with_source(LogLevel::Warn, msg.into(), "system");
     }
-    
+
     pub fn warning(&mut self, msg: impl Into<String>) {
-        self.push(LogLevel::Warn, msg.into());
+        self.push_with_source(LogLevel::Warn, msg.into(), "system");
     }
-    
+
     pub fn error(&mut self, msg: impl Into<String>) {
-        self.push(LogLevel::Error, msg.into());
+        self.push_with_source(LogLevel::Error, msg.into(), "system");
     }
-    
+
     pub fn debug(&mut self, msg: impl Into<String>) {
-        self.push(LogLevel::Debug, msg.into());
+        self.push_with_source(LogLevel::Debug, msg.into(), "system");
     }
-    
-    fn push(&mut self, level: LogLevel, message: String) {
+
+    /// Push with an explicit source tag for filtering (e.g. "rune", "luau")
+    pub fn push_with_source(&mut self, level: LogLevel, message: String, source: &str) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.entries.push(LogEntry { level, message, timestamp });
-        
-        // Trim old entries
+        self.entries.push(LogEntry { level, message, timestamp, source: source.to_string() });
+
         let max = if self.max_entries > 0 { self.max_entries } else { 1000 };
         while self.entries.len() > max {
             self.entries.remove(0);
         }
     }
-    
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -527,6 +527,8 @@ pub struct LogEntry {
     pub level: LogLevel,
     pub message: String,
     pub timestamp: String,
+    /// Source tag for filtering: "rune", "luau", "system", etc.
+    pub source: String,
 }
 
 /// Log level
@@ -4633,9 +4635,10 @@ fn drain_slint_actions(
                     }
                 };
 
-                // Drain print/warn output to Output panel
+                // Drain print/warn output to Output panel, tagged by language source
                 if let Some(ref mut out) = res.output {
-                    out.info(format!("[{}] > {}", language, script));
+                    let src = if language == "luau" { "luau" } else { "rune" };
+                    out.push_with_source(LogLevel::Info, format!("[{}] > {}", language, script), src);
 
                     let script_output = if language == "luau" {
                         eustress_common::luau::runtime::drain_luau_output()
@@ -4643,12 +4646,13 @@ fn drain_slint_actions(
                         eustress_common::soul::rune_runtime::drain_rune_output()
                     };
                     for (line, is_err) in script_output {
-                        if is_err { out.error(line); } else { out.info(line); }
+                        let level = if is_err { LogLevel::Error } else { LogLevel::Info };
+                        out.push_with_source(level, line, src);
                     }
 
                     match &result {
                         Ok(()) => {},
-                        Err(e) => out.error(format!("✗ {}", e)),
+                        Err(e) => out.push_with_source(LogLevel::Error, format!("✗ {}", e), src),
                     }
                 }
 
@@ -6140,7 +6144,7 @@ fn sync_bevy_to_slint(
                     },
                     timestamp: entry.timestamp.clone().into(),
                     message: entry.message.clone().into(),
-                    source: slint::SharedString::default(),
+                    source: entry.source.clone().into(),
                 }
             }).collect();
             let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
