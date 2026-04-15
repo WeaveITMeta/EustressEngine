@@ -3239,17 +3239,26 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::SummarizeComplete(name, summary) => {
-                // Summary came back from Claude — update the active tab's content
-                // and switch to Summary mode
+                // Summary came back from Claude — store in summary_content and switch view.
+                // Also save to Summary.md inside the script folder if it's folder-based.
+                let mut save_path: Option<std::path::PathBuf> = None;
                 if let Some(ref mut mgr) = res.tab_manager {
                     if let Some(tab) = mgr.active_mut() {
                         if let super::center_tabs::CenterTabType::SoulScript { ref mut mode } = tab.tab_type {
-                            // Prepend or replace summary content
-                            tab.content = summary.clone();
+                            tab.summary_content = summary.clone();
                             *mode = super::center_tabs::SoulScriptMode::Summary;
-                            mgr.dirty = true;
+                            if let Some(ref path) = tab.file_path {
+                                if path.is_dir() {
+                                    save_path = Some(path.join("Summary.md"));
+                                }
+                            }
                         }
                     }
+                    mgr.dirty = true;
+                }
+                if let Some(path) = save_path {
+                    let _ = std::fs::write(&path, &summary);
+                    info!("📝 Saved Summary.md to {:?}", path);
                 }
                 if let Some(ref mut state) = res.state {
                     state.script_editor_content = summary;
@@ -3331,6 +3340,20 @@ fn drain_slint_actions(
                 if let Some(ref mut mgr) = res.tab_manager {
                     let mgr_idx = studio_idx as usize;
                     mgr.toggle_mode(mgr_idx);
+                    // Push the correct content for the new mode
+                    if let Some(tab) = mgr.tabs.get(mgr_idx) {
+                        let is_summary = matches!(&tab.tab_type,
+                            super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
+                        );
+                        if let Some(ref mut s) = res.state {
+                            s.script_editor_content = if is_summary {
+                                tab.summary_content.clone()
+                            } else {
+                                tab.content.clone()
+                            };
+                            s.script_content_dirty = true;
+                        }
+                    }
                 }
             }
             
@@ -8936,11 +8959,18 @@ fn sync_tab_manager_to_studio_state(
         // This avoids the Slint recursion crash when refocusing an existing tab.
         state.active_center_tab = mgr.active_tab as i32;
 
-        // Sync content for the newly focused tab
+        // Sync content for the newly focused tab — use summary_content for Summary mode
         if let Some(active_tab) = mgr.active() {
             let tab_type_str = active_tab.tab_type.type_string();
             if tab_type_str == "script" || tab_type_str == "code" {
-                state.script_editor_content = active_tab.content.clone();
+                let is_summary = matches!(&active_tab.tab_type,
+                    super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
+                );
+                state.script_editor_content = if is_summary {
+                    active_tab.summary_content.clone()
+                } else {
+                    active_tab.content.clone()
+                };
                 state.script_content_dirty = true;
             }
         }
@@ -8966,7 +8996,14 @@ fn sync_tab_manager_to_studio_state(
     if let Some(active_tab) = mgr.active() {
         let tab_type_str = active_tab.tab_type.type_string();
         if tab_type_str == "script" || tab_type_str == "code" {
-            state.script_editor_content = active_tab.content.clone();
+            let is_summary = matches!(&active_tab.tab_type,
+                super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
+            );
+            state.script_editor_content = if is_summary {
+                active_tab.summary_content.clone()
+            } else {
+                active_tab.content.clone()
+            };
         }
     }
 

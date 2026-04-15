@@ -1182,6 +1182,16 @@ pub fn spawn_directory_entry(
     registry.register(dir_meta.path.clone(), folder_entity, dir_meta.clone());
     info!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
 
+    // Script and Part folders are leaf entities — their children are internal files
+    // (source code, Summary.md, meshes), not scene entities to display in Explorer.
+    let is_leaf_folder = matches!(class_name,
+        eustress_common::classes::ClassName::SoulScript
+        | eustress_common::classes::ClassName::Part
+    );
+    if is_leaf_folder {
+        return;
+    }
+
     // Spawn all children parented to this folder
     for child in &dir_meta.children {
         match child.file_type {

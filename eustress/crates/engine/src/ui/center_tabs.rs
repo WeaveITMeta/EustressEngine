@@ -149,8 +149,10 @@ pub struct CenterTabEntry {
     pub dirty: bool,
     /// Whether content is loading (web tabs)
     pub loading: bool,
-    /// Edit buffer content (for script/code tabs before Monaco is ready)
+    /// Edit buffer content — Code view for scripts, raw text for others
     pub content: String,
+    /// Summary markdown content — Summary view for SoulScript tabs
+    pub summary_content: String,
 }
 
 // ============================================================================
@@ -186,6 +188,7 @@ impl Default for CenterTabManager {
             dirty: false,
             loading: false,
             content: String::new(),
+            summary_content: String::new(),
         };
         Self {
             tabs: vec![scene_tab],
@@ -223,6 +226,7 @@ impl CenterTabManager {
             dirty: false,
             loading: false,
             content: source.to_string(),
+            summary_content: String::new(),
         })
     }
 
@@ -255,6 +259,7 @@ impl CenterTabManager {
             dirty: false,
             loading: false,
             content: String::new(),
+            summary_content: String::new(),
         })
     }
 
@@ -275,13 +280,21 @@ impl CenterTabManager {
         let tab_type = route_file_to_tab_type(path);
 
         // Read file content for code/text tabs
-        // For folder-based scripts, resolve the source file inside the folder
+        // For folder-based scripts, resolve both code source and Summary.md
         let content = match &tab_type {
             CenterTabType::CodeEditor { .. } | CenterTabType::SoulScript { .. } => {
                 resolve_script_source(path).unwrap_or_default()
             }
             CenterTabType::Document { doc_type: DocumentType::Text | DocumentType::Markdown } => {
                 std::fs::read_to_string(path).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+
+        // For SoulScript tabs, also load Summary.md if it exists
+        let summary_content = match &tab_type {
+            CenterTabType::SoulScript { .. } => {
+                resolve_script_summary(path).unwrap_or_default()
             }
             _ => String::new(),
         };
@@ -298,6 +311,7 @@ impl CenterTabManager {
             dirty: false,
             loading: false,
             content,
+            summary_content,
         })
     }
 
@@ -315,6 +329,7 @@ impl CenterTabManager {
             dirty: false,
             loading: url != "about:blank",
             content: String::new(),
+            summary_content: String::new(),
         })
     }
 
@@ -340,6 +355,7 @@ impl CenterTabManager {
             dirty: false,
             loading: false,
             content: String::new(),
+            summary_content: String::new(),
         })
     }
 
@@ -476,12 +492,11 @@ impl CenterTabManager {
 // File Extension Routing
 // ============================================================================
 
-/// Resolve the source content for a script path.
+/// Resolve the source code content for a script path.
 /// If path is a directory (folder-based script), finds the .rune/.luau/.soul file inside.
 /// If path is a file, reads it directly.
 fn resolve_script_source(path: &Path) -> Option<String> {
     if path.is_dir() {
-        // Folder-based script: find source file inside
         let source_path = std::fs::read_dir(path).ok()
             .and_then(|entries| entries.flatten().find(|e| {
                 let n = e.file_name().to_string_lossy().to_string();
@@ -492,6 +507,18 @@ fn resolve_script_source(path: &Path) -> Option<String> {
     } else {
         std::fs::read_to_string(path).ok()
     }
+}
+
+/// Resolve the Summary.md content for a script folder.
+/// Returns None if no Summary.md exists or path is not a directory.
+fn resolve_script_summary(path: &Path) -> Option<String> {
+    if path.is_dir() {
+        let summary_path = path.join("Summary.md");
+        if summary_path.exists() {
+            return std::fs::read_to_string(summary_path).ok();
+        }
+    }
+    None
 }
 
 /// Route a file path to the appropriate tab type based on extension
