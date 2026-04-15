@@ -279,14 +279,15 @@ fn spawn_star_field(
             ..default()
         });
 
-        // Scale based on brightness (brighter = slightly larger)
-        let scale = brightness * 8.0;
+        // Scale: small points — bright stars slightly larger
+        let scale = brightness * 3.0;
 
         commands.spawn((
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(mat),
             Transform::from_translation(*dir * sky_distance)
                 .with_scale(Vec3::splat(scale)),
+            Visibility::default(),
             StarFieldMarker { direction: *dir },
             bevy::light::NotShadowCaster,
             bevy::light::NotShadowReceiver,
@@ -309,21 +310,13 @@ fn sync_star_field(
         .map(|sc| sc.direction())
         .unwrap_or(Vec3::new(0.3, 0.8, 0.2).normalize());
 
-    // Stars visible when sun is below horizon, fade during twilight
-    let sun_y = sun_dir.y;
-    let visible = sun_y < 0.05;
-
     let sky_distance = 7500.0_f32;
 
     for (star, mut transform, mut visibility) in stars.iter_mut() {
-        if !visible {
-            *visibility = Visibility::Hidden;
-        } else {
-            *visibility = Visibility::Visible;
-            // Use the stored original direction — never derives from position
-            transform.translation = cam_pos + star.direction * sky_distance;
-            // Face camera (billboard)
-            transform.look_at(cam_pos, Vec3::Y);
-        }
+        *visibility = Visibility::Visible;
+        // Use the stored original direction — never derives from position
+        transform.translation = cam_pos + star.direction * sky_distance;
+        // Face camera (billboard)
+        transform.look_at(cam_pos, Vec3::Y);
     }
 }
