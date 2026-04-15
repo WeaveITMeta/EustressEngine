@@ -2156,14 +2156,15 @@ export component StudioWindow inherits Window {
                 background: Theme.border-color;
             }
             
-            // Resize handle
+            // Resize handle — 8px interactive strip on top edge with hover highlight
             Rectangle {
-                y: 0px;
+                y: -4px;
                 width: 100%;
-                height: 4px;
-                background: transparent;
-                
-                TouchArea {
+                height: 8px;
+                background: output-resize-ta.has-hover || output-resize-ta.pressed ? Theme.border-focus : transparent;
+                opacity: output-resize-ta.pressed ? 1.0 : 0.5;
+
+                output-resize-ta := TouchArea {
                     mouse-cursor: ns-resize;
                     moved => {
                         root.output-height = max(100px, min(400px, root.output-height - (self.mouse-y - self.pressed-y)));
