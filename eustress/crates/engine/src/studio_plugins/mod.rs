@@ -265,6 +265,7 @@ fn handle_plugin_action_events(
             }
             "mindspace:add_label" => {
                 let selected_ids = selection_manager.0.read().get_selected();
+                info!("🏷️ Add Label: selected_ids={:?}", selected_ids);
 
                 if selected_ids.is_empty() {
                     notifications.warning("Select an entity first to add a label");
@@ -277,9 +278,18 @@ fn handle_plugin_action_events(
                     .map(|(e, _)| e);
 
                 let Some(parent_entity) = target_entity else {
-                    notifications.warning("Could not find selected entity");
+                    notifications.warning(format!("Could not find entity '{}'", selected_id));
                     continue;
                 };
+
+                let has_inst_file = instance_files.get(parent_entity).is_ok();
+                let has_lff = loaded_from_file.get(parent_entity).is_ok();
+                info!("🏷️ Add Label: entity={:?}, has_InstanceFile={}, has_LoadedFromFile={}",
+                    parent_entity, has_inst_file, has_lff);
+                if has_inst_file {
+                    let inst = instance_files.get(parent_entity).unwrap();
+                    info!("🏷️   InstanceFile.toml_path={:?}", inst.toml_path);
+                }
 
                 let label_text = if studio_state.mindspace_edit_buffer.is_empty() {
                     "Label".to_string()
