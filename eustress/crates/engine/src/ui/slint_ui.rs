@@ -4675,7 +4675,14 @@ fn drain_slint_actions(
 
                     match &result {
                         Ok(()) => {},
-                        Err(e) => out.push_with_source(LogLevel::Error, format!("✗ {}", e), src),
+                        Err(e) => {
+                            // Split multiline errors into separate log entries
+                            for line in e.lines() {
+                                if !line.trim().is_empty() {
+                                    out.push_with_source(LogLevel::Error, line.to_string(), src);
+                                }
+                            }
+                        }
                     }
                 }
 

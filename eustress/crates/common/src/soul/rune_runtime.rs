@@ -223,34 +223,40 @@ pub fn execute_oneshot(
         .with_diagnostics(&mut diagnostics)
         .build();
 
-    // Always check diagnostics first — they have the real error details
     if diagnostics.has_error() || build_result.is_err() {
+        // Collect ALL error info — every method, concatenated
         let mut error_lines = Vec::new();
 
-        // Method 1: emit via termcolor for formatted output
+        // Termcolor formatted output
         let mut buf = rune::termcolor::Buffer::no_color();
-        let _ = diagnostics.emit(&mut buf, &sources);
+        let emit_result = diagnostics.emit(&mut buf, &sources);
         let rendered = String::from_utf8_lossy(buf.as_slice()).to_string();
         if !rendered.trim().is_empty() {
             error_lines.push(rendered.trim().to_string());
+        } else if let Err(e) = emit_result {
+            error_lines.push(format!("[emit failed: {}]", e));
         }
 
-        // Method 2: iterate diagnostics for raw messages
-        if error_lines.is_empty() {
-            for diag in diagnostics.diagnostics() {
-                error_lines.push(format!("{:#?}", diag));
-            }
+        // Raw diagnostics — always collect, not just as fallback
+        let diag_count = diagnostics.diagnostics().len();
+        for diag in diagnostics.diagnostics() {
+            error_lines.push(format!("{:#?}", diag));
         }
 
-        // Method 3: use the build error itself
-        if error_lines.is_empty() {
-            if let Err(ref e) = build_result {
-                error_lines.push(format!("{}", e));
-            }
+        // Build error
+        if let Err(ref e) = build_result {
+            error_lines.push(format!("[build error: {}]", e));
+        }
+
+        // Log everything for console debugging
+        tracing::error!("Rune compile failed: has_error={}, diag_count={}, build_ok={}, lines={}",
+            diagnostics.has_error(), diag_count, build_result.is_ok(), error_lines.len());
+        for line in &error_lines {
+            tracing::error!("  {}", line);
         }
 
         if error_lines.is_empty() {
-            error_lines.push("unknown error".to_string());
+            error_lines.push("unknown compile error (no diagnostics produced)".to_string());
         }
 
         return Err(format!("Compile error:\n{}", error_lines.join("\n")));
