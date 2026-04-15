@@ -380,7 +380,7 @@ fn derive_window_title(space_path: &std::path::Path) -> String {
     // Walk up: if immediate parent is "spaces/", skip it to get the Universe folder.
     let universe_name = space_path.parent().and_then(|p| {
         let pname = p.file_name()?.to_string_lossy().to_string();
-        if pname == "spaces" {
+        if pname == "Spaces" || pname == "spaces" {
             p.parent()?.file_name().map(|n| n.to_string_lossy().to_string())
         } else {
             Some(pname)

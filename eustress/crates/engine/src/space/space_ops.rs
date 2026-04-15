@@ -670,7 +670,7 @@ pub fn new_universe(world: &mut World) {
             copy_engine_default_parts(&requested_universe_root.join(".eustress").join("assets").join("parts"));
 
             // Scaffold default Space with full service structure
-            let spaces_dir = requested_universe_root.join("spaces");
+            let spaces_dir = requested_universe_root.join("Spaces");
             let author = world.get_resource::<crate::auth::AuthState>()
                 .and_then(|a| a.user.as_ref())
                 .map(|u| u.username.clone())

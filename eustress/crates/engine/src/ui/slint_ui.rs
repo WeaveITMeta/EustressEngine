@@ -2433,7 +2433,7 @@ fn populate_publish_dialog(ui: &StudioWindow, space_root: Option<&Path>, _space_
     // Populate Spaces list from Universe
     let mut space_names: Vec<slint::SharedString> = Vec::new();
     if let Some(ref universe) = universe_root {
-        let spaces_dir = universe.join("spaces");
+        let spaces_dir = if universe.join("Spaces").is_dir() { universe.join("Spaces") } else { universe.join("spaces") };
         if spaces_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&spaces_dir) {
                 let mut names: Vec<String> = entries

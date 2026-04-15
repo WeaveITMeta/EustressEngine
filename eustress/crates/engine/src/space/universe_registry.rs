@@ -162,8 +162,11 @@ fn is_space_marker(event: &notify::Event) -> bool {
 }
 
 fn collect_spaces(universe_path: &Path) -> Vec<SpaceInfo> {
-    let spaces_dir = universe_path.join("spaces");
-    let search_in = if spaces_dir.is_dir() { spaces_dir } else { universe_path.to_path_buf() };
+    let spaces_dir = universe_path.join("Spaces");
+    let legacy_dir = universe_path.join("spaces");
+    let search_in = if spaces_dir.is_dir() { spaces_dir }
+        else if legacy_dir.is_dir() { legacy_dir }
+        else { universe_path.to_path_buf() };
 
     let Ok(entries) = std::fs::read_dir(&search_in) else { return Vec::new() };
 

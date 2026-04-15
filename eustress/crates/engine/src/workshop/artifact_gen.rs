@@ -887,7 +887,7 @@ fn resolve_split_file_path(output_dir: &PathBuf, filename: &str, default_extensi
 fn resolve_universe_assets_dir(space_root: &std::path::Path, safe_product_name: &str) -> PathBuf {
     // Try standard layout: Universe/spaces/SpaceName/
     let universe_root = if let Some(spaces_dir) = space_root.parent() {
-        if spaces_dir.file_name().map(|n| n == "spaces").unwrap_or(false) {
+        if spaces_dir.file_name().map(|n| n == "Spaces" || n == "spaces").unwrap_or(false) {
             // Standard: space_root.parent() = "spaces", one more up = Universe root
             spaces_dir.parent().unwrap_or(space_root).to_path_buf()
         } else {

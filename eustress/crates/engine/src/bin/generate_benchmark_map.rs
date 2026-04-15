@@ -209,7 +209,7 @@ fn default_output_dir() -> PathBuf {
         let space_workspace = docs
             .join("Eustress")
             .join("Universe1")
-            .join("spaces")
+            .join("Spaces")
             .join("Space1")
             .join("Workspace")
             .join("BenchmarkGrid");

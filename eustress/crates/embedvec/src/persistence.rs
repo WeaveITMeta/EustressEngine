@@ -135,8 +135,8 @@ impl PersistenceConfig {
         let spaces_dir = space_root.parent()?;
         let universe_candidate = spaces_dir.parent()?;
 
-        // Validate: universe must contain a "spaces" subdirectory
-        if spaces_dir.file_name().map(|n| n == "spaces").unwrap_or(false)
+        // Validate: universe must contain a "Spaces" (or legacy "spaces") subdirectory
+        if spaces_dir.file_name().map(|n| n == "Spaces" || n == "spaces").unwrap_or(false)
             && universe_candidate.is_dir()
         {
             return Some(universe_candidate.to_path_buf());

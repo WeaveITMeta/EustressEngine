@@ -58,7 +58,13 @@ fn is_dir_empty(path: &Path) -> bool {
 /// Uses the full scaffold_new_space from space_ops for complete setup.
 fn scaffold_default_universe(root: &Path) {
     let universe = root.join("Universe1");
-    let spaces_dir = universe.join("spaces");
+    // Auto-migrate: rename lowercase "spaces" to "Spaces" if it exists
+    let legacy_spaces = universe.join("spaces");
+    let spaces_dir = universe.join("Spaces");
+    if legacy_spaces.is_dir() && !spaces_dir.exists() {
+        let _ = std::fs::rename(&legacy_spaces, &spaces_dir);
+        info!("📂 Migrated spaces/ → Spaces/");
+    }
     let _ = std::fs::create_dir_all(&spaces_dir);
 
     // Create Universe-level asset directories
@@ -105,8 +111,10 @@ pub fn first_universe_root() -> Option<PathBuf> {
 }
 
 pub fn first_space_root_in_universe(universe_root: &Path) -> Option<PathBuf> {
-    // First check the "spaces/" subdirectory (standard Universe structure)
-    let spaces_dir = universe_root.join("spaces");
+    // First check the "Spaces/" subdirectory (standard Universe structure)
+    // Also check legacy lowercase "spaces/" for backward compatibility
+    let spaces_dir = universe_root.join("Spaces");
+    let spaces_dir = if spaces_dir.is_dir() { spaces_dir } else { universe_root.join("spaces") };
     if spaces_dir.is_dir() {
         let mut spaces: Vec<PathBuf> = std::fs::read_dir(&spaces_dir)
             .ok()?
