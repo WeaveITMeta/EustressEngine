@@ -60,6 +60,8 @@ export component ExplorerPanel inherits Rectangle {
     in-out property <bool> drag-active: false;
     in-out property <int> drag-source-id: -1;
     in-out property <int> drag-target-id: -1;
+    in-out property <string> drag-source-name: "";
+    in-out property <length> drag-mouse-y: 0px;
     
     background: Theme.panel-background;
     
@@ -232,7 +234,12 @@ export component ExplorerPanel inherits Rectangle {
                     selected: node.selected;
                     show: node.visible;
                     node-id: node.id;
-                    drop-target: root.drag-active && root.drag-target-id == node.id;
+                    // Highlight as drop target when mouse Y is within this row's bounds
+                    drop-target: root.drag-active
+                        && node.id != root.drag-source-id
+                        && root.drag-mouse-y >= self.absolute-position.y
+                        && root.drag-mouse-y < self.absolute-position.y + self.height
+                        && node.visible;
                     ctrl-held: explorer-keys.ctrl-held;
                     shift-held: explorer-keys.shift-held;
 
@@ -261,17 +268,15 @@ export component ExplorerPanel inherits Rectangle {
                     }
                     context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
 
-                    // Drag-and-drop
+                    // Drag initiation
                     drag-started(id) => {
                         root.drag-active = true;
                         root.drag-source-id = id;
+                        root.drag-source-name = node.name;
                         root.drag-target-id = -1;
                     }
                     drag-moved(abs-y) => {
-                        // Find which row the cursor is over by index from absolute Y
-                        // Each visible row is 22px. We use the index to find the node ID.
-                        // This is approximate — good enough for a tree with uniform row height.
-                        root.drag-target-id = node.id;
+                        root.drag-mouse-y = abs-y;
                     }
                     drag-ended => {
                         if root.drag-active && root.drag-source-id >= 0 && root.drag-target-id >= 0
@@ -281,6 +286,7 @@ export component ExplorerPanel inherits Rectangle {
                         root.drag-active = false;
                         root.drag-source-id = -1;
                         root.drag-target-id = -1;
+                        root.drag-source-name = "";
                     }
                 }
 
@@ -292,6 +298,56 @@ export component ExplorerPanel inherits Rectangle {
                     TouchArea {
                         clicked => { root.on-deselect(); }
                         scroll-event(e) => { return reject; }
+                    }
+                }
+            }
+
+            // Drag overlay — tracks mouse position during drag to compute drop target
+            if root.drag-active: Rectangle {
+                x: 0px; y: 0px; width: 100%; height: 100%;
+                background: transparent;
+
+                drag-overlay := TouchArea {
+                    mouse-cursor: grabbing;
+                    moved => {
+                        root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
+                        // Compute target row: find which visible node the mouse is over.
+                        // Each visible row is 22px. Approximate by index into visible nodes.
+                        let row-idx = floor((self.mouse-y) / 22px);
+                        let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
+                        // Walk visible nodes to find the one at this index
+                        root.drag-target-id = root.tree-nodes[clamped].id;
+                    }
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                            if root.drag-source-id >= 0 && root.drag-target-id >= 0
+                                && root.drag-source-id != root.drag-target-id {
+                                root.on-reparent-node(root.drag-source-id, root.drag-target-id);
+                            }
+                            root.drag-active = false;
+                            root.drag-source-id = -1;
+                            root.drag-target-id = -1;
+                            root.drag-source-name = "";
+                        }
+                    }
+                }
+
+                // Ghost label following cursor
+                Rectangle {
+                    x: 20px;
+                    y: root.drag-mouse-y - self.parent.absolute-position.y - 10px;
+                    width: drag-ghost-text.preferred-width + 24px;
+                    height: 22px;
+                    background: Theme.accent-blue;
+                    opacity: 0.85;
+                    border-radius: 4px;
+
+                    drag-ghost-text := Text {
+                        x: 8px;
+                        text: root.drag-source-name;
+                        color: white;
+                        font-size: 11px;
+                        vertical-alignment: center;
                     }
                 }
             }

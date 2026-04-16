@@ -376,7 +376,8 @@ export component TreeItem inherits Rectangle {
 
     height: root.show ? 22px : 0px;
     visible: root.show;
-    background: self.selected ? Theme.explorer-item-selected :
+    background: root.drop-target ? #0a3a6a :
+                self.selected ? Theme.explorer-item-selected :
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
     property <bool> drag-started-flag: false;
