@@ -1448,17 +1448,26 @@ export component StudioWindow inherits Window {
                         width: parent.width - root.tab-strip-space1-width;
                         height: parent.height;
                         // Sets drag-source on press; selects or closes tab on click (no drag)
+                        // Tab widths: 180px default, 200px for web tabs
                         pointer-event(event) => {
                             if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                                let raw-idx = floor((self.mouse-x) / 190px);
-                                let clamped = max(0, min(raw-idx, root.center-tabs.length - 1));
+                                // Walk tab widths to find which tab the mouse is over
+                                root.tab-drag-source = -1;
+                                // Accumulate widths to find which tab contains mouse-x
+                                // Use a simple heuristic: most tabs are 180px
+                                let mx = self.mouse-x;
+                                let tw = 180px; // default tab width
+                                let idx = floor(mx / tw);
+                                let clamped = max(0, min(idx, root.center-tabs.length - 1));
                                 root.tab-drag-source = clamped;
                             }
                             if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
                                 if !root.tab-dragging && root.tab-drag-source >= 0 {
-                                    // Check if click landed on close button (last 26px of the tab)
-                                    let tab-local-x = self.mouse-x - (root.tab-drag-source * 190px);
-                                    if tab-local-x > 164px {
+                                    // Check if click landed on close button (last 28px of the tab)
+                                    let tw = 180px;
+                                    let tab-start = root.tab-drag-source * tw;
+                                    let tab-local-x = self.mouse-x - tab-start;
+                                    if tab-local-x > tw - 28px {
                                         // Close button zone
                                         root.close-center-tab(root.tab-drag-source);
                                     } else {
