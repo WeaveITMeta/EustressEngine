@@ -362,8 +362,8 @@ export component TreeItem inherits Rectangle {
     callback toggle-expanded();
     callback context-menu(length, length);
     // Drag callbacks — parent ExplorerPanel handles state
-    callback drag-started(int);         // node-id
-    callback drag-moved(length);        // mouse-y absolute
+    callback drag-started(int, length, length);  // node-id, initial abs-x, abs-y
+    callback drag-moved(length, length);         // abs-x, abs-y
     callback drag-ended();
 
     // Modifier key state — set by parent FocusScope key tracking
@@ -395,14 +395,16 @@ export component TreeItem inherits Rectangle {
         }
         double-clicked => { root.double-clicked(); }
         moved => {
-            // Only start drag with left button held
             if root.left-pressed {
                 if !root.drag-started-flag && abs(self.mouse-y - root.press-y) > 5px {
                     root.drag-started-flag = true;
-                    root.drag-started(root.node-id);
+                    root.drag-started(root.node-id,
+                        self.absolute-position.x + self.mouse-x,
+                        self.absolute-position.y + self.mouse-y);
                 }
                 if root.drag-started-flag {
-                    root.drag-moved(self.absolute-position.y + self.mouse-y);
+                    root.drag-moved(self.absolute-position.x + self.mouse-x,
+                                    self.absolute-position.y + self.mouse-y);
                 }
             }
         }

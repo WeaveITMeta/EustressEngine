@@ -267,16 +267,30 @@ export component ExplorerPanel inherits Rectangle {
                         }
                         context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
 
-                        drag-started(id) => {
+                        drag-started(id, abs-x, abs-y) => {
                             root.drag-active = true;
                             root.drag-source-id = id;
                             root.drag-source-name = node.name;
                             root.drag-source-icon = node.icon;
                             root.drag-target-id = -1;
+                            root.drag-mouse-x = abs-x;
+                            root.drag-mouse-y = abs-y;
                         }
-                        drag-moved(abs-y) => { root.drag-mouse-y = abs-y; }
+                        drag-moved(abs-x, abs-y) => {
+                            root.drag-mouse-x = abs-x;
+                            root.drag-mouse-y = abs-y;
+                        }
                         drag-ended => {
-                            // Handled by overlay pointer-event; nothing here
+                            // Drop handled by overlay pointer-event when it catches mouse-up.
+                            // If overlay never received events, commit the drop here.
+                            if root.drag-active && root.drag-source-id >= 0 && root.drag-target-id >= 0
+                                && root.drag-source-id != root.drag-target-id {
+                                root.on-reparent-node(root.drag-source-id, root.drag-target-id);
+                            }
+                            root.drag-active = false;
+                            root.drag-source-id = -1;
+                            root.drag-target-id = -1;
+                            root.drag-source-name = "";
                         }
                     }
 
@@ -293,16 +307,18 @@ export component ExplorerPanel inherits Rectangle {
                 }
             }
 
-            // Drag overlay — absolute sibling of ScrollView, covers the tree area.
-            // Shows only during drag; captures mouse-x/y relative to tree-scroll-area.
-            if root.drag-active: Rectangle {
+            // Drag overlay — sibling of ScrollView, covers the tree area during drag.
+            // Tracks mouse and handles drop on mouse-up. Ghost positioned from
+            // root.drag-mouse-x/y (absolute screen coords) minus this overlay's
+            // absolute-position (to get position local to overlay).
+            if root.drag-active: overlay-rect := Rectangle {
                 x: 0px; y: 0px; width: 100%; height: 100%;
                 background: #00000020;
 
                 drag-overlay := TouchArea {
                     mouse-cursor: grabbing;
                     moved => {
-                        root.drag-mouse-x = self.mouse-x;
+                        root.drag-mouse-x = self.absolute-position.x + self.mouse-x;
                         root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
                         let row-idx = floor(self.mouse-y / 22px);
                         let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
@@ -322,10 +338,10 @@ export component ExplorerPanel inherits Rectangle {
                     }
                 }
 
-                // Ghost follows cursor exactly (positioned by drag-overlay mouse coords)
+                // Ghost — position is absolute mouse coords minus overlay's absolute position.
                 Rectangle {
-                    x: drag-overlay.mouse-x + 14px;
-                    y: drag-overlay.mouse-y - 11px;
+                    x: root.drag-mouse-x - overlay-rect.absolute-position.x + 14px;
+                    y: root.drag-mouse-y - overlay-rect.absolute-position.y - 11px;
                     width: drag-ghost-text.preferred-width + 40px;
                     height: 22px;
                     background: Theme.accent-blue;
