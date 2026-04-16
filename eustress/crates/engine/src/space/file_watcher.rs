@@ -451,8 +451,24 @@ fn handle_file_created(
         return;
     }
     
+    // Skip files inside leaf entity folders (Script, Part).
+    // These are internal files (source code, Summary.md, meshes), not scene entities.
+    if let Some(parent) = event.path.parent() {
+        let instance_toml = parent.join("_instance.toml");
+        if instance_toml.exists() {
+            if let Ok(content) = std::fs::read_to_string(&instance_toml) {
+                if content.contains("\"Script\"") || content.contains("\"SoulScript\"")
+                    || content.contains("\"Part\"")
+                {
+                    debug!("Skipping {:?} (internal file of leaf entity folder)", event.path);
+                    return;
+                }
+            }
+        }
+    }
+
     info!("➕ New file detected: {:?}", event.path);
-    
+
     // Load the new file (same logic as initial scan)
     match event.file_type {
         FileType::Gltf => {

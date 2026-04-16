@@ -5321,13 +5321,13 @@ fn drain_slint_actions(
                     let _ = std::fs::create_dir_all(&script_dir);
 
                     // Write _instance.toml
-                    let instance_toml = "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"source.rune\"\n";
+                    let instance_toml = "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"Source.rune\"\n";
                     let _ = std::fs::write(script_dir.join("_instance.toml"), instance_toml);
 
-                    // Write empty source file
-                    let _ = std::fs::write(script_dir.join("source.rune"), "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
+                    // Write source file
+                    let _ = std::fs::write(script_dir.join("Source.rune"), "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
 
-                    // Write empty Summary.md
+                    // Write Summary.md
                     let _ = std::fs::write(script_dir.join("Summary.md"), format!("# {}\n\nNew script.\n", script_name));
 
                     // Spawn ECS entity
