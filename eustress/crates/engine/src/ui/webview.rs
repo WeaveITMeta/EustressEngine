@@ -13,6 +13,9 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
+#[cfg(feature = "webview")]
+use bevy::winit::WinitWindows;
+
 /// Bevy plugin for wry-based web browser tabs
 pub struct WebViewPlugin;
 
@@ -67,31 +70,70 @@ impl Default for WebViewInstance {
 }
 
 impl WebViewManager {
-    /// Create a new WebView for a tab
-    pub fn create_webview(&mut self, tab_index: usize, url: &str) {
-        // Without the webview feature, there is no real browser — never show loading state
-        #[cfg(not(feature = "webview"))]
-        let is_loading = false;
-        #[cfg(feature = "webview")]
-        let is_loading = url != "about:blank";
+    /// Create a new WebView for a tab.
+    /// `raw_window` is the parent HWND/NSWindow obtained from Bevy's WinitWindows.
+    #[cfg(feature = "webview")]
+    pub fn create_webview(&mut self, tab_index: usize, url: &str, raw_window: raw_window_handle::RawWindowHandle) {
+        use wry::WebViewBuilder;
 
+        let webview_result = match raw_window {
+            #[cfg(target_os = "windows")]
+            raw_window_handle::RawWindowHandle::Win32(handle) => {
+                use wry::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
+                let mut wh = Win32WindowHandle::new(handle.hwnd);
+                wh.hinstance = handle.hinstance;
+                let parent = RawWindowHandle::Win32(wh);
+                unsafe {
+                    WebViewBuilder::new()
+                        .with_url(url)
+                        .with_visible(true)
+                        .with_bounds(wry::Rect { position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(0.0, 0.0)), size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(800.0, 600.0)) })
+                        .build_as_child(&parent)
+                }
+            }
+            _ => {
+                warn!("Unsupported window handle for WebView");
+                return;
+            }
+        };
+
+        match webview_result {
+            Ok(webview) => {
+                let instance = WebViewInstance {
+                    url: url.to_string(),
+                    title: url.to_string(),
+                    loading: url != "about:blank",
+                    visible: true,
+                    webview: Some(webview),
+                    ..Default::default()
+                };
+                self.views.insert(tab_index, instance);
+                info!("🌐 Created WebView for tab {} with URL: {}", tab_index, url);
+            }
+            Err(e) => {
+                error!("Failed to create WebView: {}", e);
+                let instance = WebViewInstance {
+                    url: url.to_string(),
+                    title: "Error".to_string(),
+                    loading: false,
+                    ..Default::default()
+                };
+                self.views.insert(tab_index, instance);
+            }
+        }
+    }
+
+    /// Create a placeholder WebView (no webview feature)
+    #[cfg(not(feature = "webview"))]
+    pub fn create_webview(&mut self, tab_index: usize, url: &str) {
         let instance = WebViewInstance {
             url: url.to_string(),
             title: if url == "about:blank" { "New Tab".to_string() } else { url.to_string() },
-            loading: is_loading,
+            loading: false,
             ..Default::default()
         };
         self.views.insert(tab_index, instance);
-        
-        #[cfg(feature = "webview")]
-        {
-            // TODO: Create actual wry::WebView child window using Bevy's window handle
-            info!("Created WebView for tab {} with URL: {}", tab_index, url);
-        }
-        #[cfg(not(feature = "webview"))]
-        {
-            info!("Created WebView placeholder for tab {} (webview feature not enabled)", tab_index);
-        }
+        info!("Created WebView placeholder for tab {} (webview feature not enabled)", tab_index);
     }
 
     /// Navigate a WebView to a URL
@@ -149,6 +191,20 @@ impl WebViewManager {
         }
     }
 
+    /// Reposition and resize a WebView to match the center content area
+    #[cfg(feature = "webview")]
+    pub fn set_bounds(&mut self, tab_index: usize, x: f64, y: f64, width: f64, height: f64) {
+        if let Some(view) = self.views.get_mut(&tab_index) {
+            if let Some(ref webview) = view.webview {
+                let bounds = wry::Rect {
+                    position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(x, y)),
+                    size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(width, height)),
+                };
+                let _ = webview.set_bounds(bounds);
+            }
+        }
+    }
+
     /// Remove a WebView for a closed tab
     pub fn remove_webview(&mut self, tab_index: usize) {
         self.views.remove(&tab_index);
@@ -173,6 +229,12 @@ impl WebViewManager {
 fn sync_webviews(
     mut webview_mgr: ResMut<WebViewManager>,
     mut state: Option<ResMut<super::StudioState>>,
+    #[cfg(feature = "webview")]
+    winit_windows: Option<NonSend<WinitWindows>>,
+    #[cfg(feature = "webview")]
+    primary_window: Query<Entity, With<bevy::window::PrimaryWindow>>,
+    #[cfg(feature = "webview")]
+    viewport_bounds: Option<Res<super::ViewportBounds>>,
 ) {
     let Some(ref mut state) = state else { return };
 
@@ -187,6 +249,29 @@ fn sync_webviews(
     } else {
         None
     };
+
+    // Create WebView instances for tabs that don't have one yet
+    #[cfg(feature = "webview")]
+    if let Some(idx) = active_web_idx {
+        if !webview_mgr.views.contains_key(&idx) {
+            if let Some(ref winit) = winit_windows {
+                if let Ok(entity) = primary_window.single() {
+                    if let Some(winit_window) = winit.get_window(entity) {
+                        use raw_window_handle::HasWindowHandle;
+                        if let Ok(handle) = winit_window.window_handle() {
+                            let raw = handle.as_raw();
+                            let url = state.center_tabs.get(idx).map(|t| t.url.as_str()).unwrap_or("about:blank");
+                            webview_mgr.create_webview(idx, url, raw);
+                        }
+                    }
+                }
+            }
+        }
+        // Update bounds to match viewport area
+        if let Some(ref vb) = viewport_bounds {
+            webview_mgr.set_bounds(idx, vb.x as f64, vb.y as f64, vb.width as f64, vb.height as f64);
+        }
+    }
 
     // Show/hide WebViews
     webview_mgr.set_active_tab(active_web_idx);
