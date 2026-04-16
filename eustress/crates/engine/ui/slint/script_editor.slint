@@ -226,6 +226,7 @@ export component ScriptEditor inherits Rectangle {
                                     width: 14px; height: 14px;
                                     source: @image-url("../../assets/icons/ui/summary.svg");
                                     image-fit: contain;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                     colorize: root.is-summary ? white : #66bb6a;
                                 }
@@ -233,6 +234,7 @@ export component ScriptEditor inherits Rectangle {
                                     text: "Summary";
                                     font-size: 11px;
                                     color: root.is-summary ? white : #66bb6a;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
@@ -261,6 +263,7 @@ export component ScriptEditor inherits Rectangle {
                                     width: 14px; height: 14px;
                                     source: @image-url("../../assets/icons/script.svg");
                                     image-fit: contain;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                     colorize: !root.is-summary && root.is-soul-script ? white : #66bb6a;
                                 }
@@ -268,6 +271,7 @@ export component ScriptEditor inherits Rectangle {
                                     text: "Code";
                                     font-size: 11px;
                                     color: !root.is-summary && root.is-soul-script ? white : #66bb6a;
+                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
                             }
@@ -275,8 +279,11 @@ export component ScriptEditor inherits Rectangle {
                     }
                 }
 
-                // Build button — green, only in code mode for soul scripts
-                if !root.is-summary && root.is-soul-script: Rectangle {
+                // Spacer pushes action buttons to the far right
+                Rectangle { horizontal-stretch: 1; }
+
+                // Build button — only in Summary mode (build generates code from summary)
+                if root.is-summary && root.is-soul-script: Rectangle {
                     width: 70px;
                     height: 26px;
                     background: build-ta.has-hover ? #388e3c : #2e7d32;
@@ -287,25 +294,30 @@ export component ScriptEditor inherits Rectangle {
                         clicked => { root.on-build(); }
                     }
 
-                    HorizontalBox {
-                        padding: 4px;
+                    HorizontalLayout {
                         spacing: 4px;
+                        alignment: center;
+
                         Image {
                             width: 14px; height: 14px;
                             source: @image-url("../../assets/icons/ui/build.svg");
-                            image-fit: contain; vertical-alignment: center;
+                            image-fit: contain;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                             colorize: white;
                         }
                         Text {
                             text: "Build"; color: white;
-                            font-size: 12px; vertical-alignment: center;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
                         }
                     }
                 }
 
-                // Summarize button — generates summary from code via Claude API
+                // Summarize button — only in Code mode (generates summary from code)
                 if !root.is-summary && root.is-soul-script: Rectangle {
-                    width: 100px;
+                    width: 105px;
                     height: 26px;
                     background: summarize-ta.has-hover ? #1a4a2a : #152a1e;
                     border-radius: 4px;
@@ -325,21 +337,20 @@ export component ScriptEditor inherits Rectangle {
                             width: 14px; height: 14px;
                             source: @image-url("../../assets/icons/ui/summary.svg");
                             image-fit: contain;
+                            horizontal-alignment: center;
                             vertical-alignment: center;
                             colorize: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
                         }
                         Text {
-                            text: "Summary";
+                            text: "Summarize";
                             color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
                             font-size: 11px;
                             font-weight: 600;
+                            horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
                 }
-
-                // Spacer pushes Save + Ln/Col to the far right
-                Rectangle { horizontal-stretch: 1; }
 
                 // Save button — far right, only in code mode
                 if !root.is-summary: Rectangle {
