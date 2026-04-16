@@ -470,32 +470,59 @@ export component ScriptEditor inherits Rectangle {
                     background: #2a2a2a;
                 }
 
-                // Code editor — fills remaining width
-                // NOTE: Do NOT use `text <=> root.current-content` here.
-                // A two-way binding causes Slint property recursion when Rust
-                // programmatically sets content (set → edited → callback → set).
-                // Instead, use one-way `text: root.current-content` so Rust can
-                // push content without triggering `edited`, and let `edited`
-                // only fire on actual user keystrokes.
-                editor-area := TextEdit {
+                // Code editor with syntax highlighting
+                // Uses TextEdit for editing + colored line overlay for highlight
+                Rectangle {
                     horizontal-stretch: 1;
-                    text: root.current-content;
-                    font-size: 13px;
-                    font-family: "Consolas";
-                    wrap: no-wrap;
+                    clip: true;
 
-                    edited(text) => {
-                        root.current-content = text;
-                        root.on-content-changed(text);
+                    // Syntax-highlighted line overlay (visible when highlights available)
+                    if root.has-highlights: ScrollView {
+                        x: 0px; y: 0px; width: 100%; height: 100%;
+
+                        VerticalLayout {
+                            padding-top: 5px;
+                            padding-left: 12px;
+                            spacing: 0px;
+                            alignment: start;
+
+                            for hl in root.highlight-lines: Text {
+                                text: hl.text;
+                                color: rgba(hl.r, hl.g, hl.b, 1.0);
+                                font-size: 13px;
+                                font-family: "Consolas";
+                                font-weight: hl.bold ? 700 : 400;
+                                height: 18px;
+                                wrap: no-wrap;
+                            }
+                        }
                     }
-                }
 
-                // Invisible sentinel: watches scroll-to-top-trigger, jumps to line 1
-                if root.scroll-to-top-trigger: TouchArea {
-                    width: 0px; height: 0px;
-                    init => {
-                        editor-area.set-selection-offsets(0, 0);
-                        root.scroll-to-top-trigger = false;
+                    // Editable TextEdit — transparent text when highlights active so
+                    // user sees the colored overlay but still has full editing
+                    editor-area := TextEdit {
+                        x: 0px; y: 0px; width: 100%; height: 100%;
+                        text: root.current-content;
+                        font-size: 13px;
+                        font-family: "Consolas";
+                        wrap: no-wrap;
+                        // When highlights are active, make the TextEdit text transparent
+                        // so the colored overlay shows through, but the cursor still renders
+                        color: root.has-highlights ? transparent : Theme.text-primary;
+
+                        edited(text) => {
+                            root.current-content = text;
+                            root.on-content-changed(text);
+                        }
+                    }
+
+                    // Invisible sentinel: watches scroll-to-top-trigger, jumps to line 1
+                    if root.scroll-to-top-trigger: TouchArea {
+                        width: 0px; height: 0px;
+                        init => {
+                            editor-area.set-selection-offsets(0, 0);
+                            root.scroll-to-top-trigger = false;
+                        }
                     }
                 }
             }
