@@ -1259,16 +1259,31 @@ export component StudioWindow inherits Window {
                             
                             tab-hover := TouchArea {
                                 mouse-cursor: root.tab-dragging ? move : pointer;
-                                // Click to select (only when not dragging)
+                                property <bool> left-down: false;
+                                property <length> press-x: 0px;
+
                                 clicked => {
                                     if !root.tab-dragging {
                                         root.center-active-tab = index + 1;
                                         root.select-center-tab(index + 1);
                                     }
                                 }
-                                // Right-click context menu only — drag is handled by overlay
+                                moved => {
+                                    // Start drag after 5px horizontal movement
+                                    if self.left-down && !root.tab-dragging && abs(self.mouse-x - self.press-x) > 5px {
+                                        root.tab-drag-source = index;
+                                        root.tab-dragging = true;
+                                    }
+                                }
                                 pointer-event(event) => {
-                                    if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                        self.left-down = true;
+                                        self.press-x = self.mouse-x;
+                                    }
+                                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                                        self.left-down = false;
+                                    }
+                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
                                         root.tab-context-menu-index = index;
                                         root.tab-context-menu-x = self.absolute-position.x + self.mouse-x - tab-strip.absolute-position.x;
                                         root.tab-context-menu-y = 35px;
@@ -1368,7 +1383,7 @@ export component StudioWindow inherits Window {
                                 y: (parent.height - 22px) / 2;
                                 width: 22px;
                                 height: 22px;
-                                background: close-area.has-hover ? #ffffff18 : transparent;
+                                background: close-area.has-hover ? #c42b1c40 : transparent;
                                 border-radius: 4px;
 
                                 close-area := TouchArea {
@@ -1381,7 +1396,7 @@ export component StudioWindow inherits Window {
                                     height: 12px;
                                     source: @image-url("../../assets/icons/ui/close.svg");
                                     image-fit: contain;
-                                    colorize: close-area.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                    colorize: close-area.has-hover ? #ef5350 : Theme.text-secondary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
@@ -1439,48 +1454,8 @@ export component StudioWindow inherits Window {
                         }
                     }
 
-                    // Per-tab mouse-down: record which tab starts the drag
-                    // This has to live outside the for-loop overlay to fire before it.
-                    // We use a second transparent overlay that only records press-down.
-                    TouchArea {
-                        x: root.tab-strip-space1-width;
-                        y: 0px;
-                        width: parent.width - root.tab-strip-space1-width;
-                        height: parent.height;
-                        // Sets drag-source on press; selects or closes tab on click (no drag)
-                        // Tab widths: 180px default, 200px for web tabs
-                        pointer-event(event) => {
-                            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
-                                // Walk tab widths to find which tab the mouse is over
-                                root.tab-drag-source = -1;
-                                // Accumulate widths to find which tab contains mouse-x
-                                // Use a simple heuristic: most tabs are 180px
-                                let mx = self.mouse-x;
-                                let tw = 180px; // default tab width
-                                let idx = floor(mx / tw);
-                                let clamped = max(0, min(idx, root.center-tabs.length - 1));
-                                root.tab-drag-source = clamped;
-                            }
-                            if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
-                                if !root.tab-dragging && root.tab-drag-source >= 0 {
-                                    // Check if click landed on close button (last 28px of the tab)
-                                    let tw = 180px;
-                                    let tab-start = root.tab-drag-source * tw;
-                                    let tab-local-x = self.mouse-x - tab-start;
-                                    if tab-local-x > tw - 28px {
-                                        // Close button zone
-                                        root.close-center-tab(root.tab-drag-source);
-                                    } else {
-                                        // Select tab
-                                        root.center-active-tab = root.tab-drag-source + 1;
-                                        root.select-center-tab(root.tab-drag-source + 1);
-                                    }
-                                }
-                                root.tab-drag-source = -1;
-                                root.tab-dragging = false;
-                            }
-                        }
-                    }
+                    // Drag overlay removed — drag initiation is now handled by per-tab
+                    // tab-hover TouchAreas for proper hover feedback on close buttons.
 
                     } // end tab-strip Rectangle
                     
