@@ -221,102 +221,89 @@ export component ExplorerPanel inherits Rectangle {
                 return reject;
             }
 
-        ScrollView {
-            horizontal-scrollbar-policy: always-off;
+        tree-scroll-area := Rectangle {
+            vertical-stretch: 1;
+            clip: true;
 
-            VerticalLayout {
-                spacing: 0px;
+            ScrollView {
+                horizontal-scrollbar-policy: always-off;
 
-                for node[index] in root.tree-nodes: TreeItem {
-                    depth: node.depth;
-                    icon: node.icon;
-                    label: node.name;
-                    expandable: node.expandable;
-                    expanded: node.expanded;
-                    selected: node.selected;
-                    show: node.visible;
-                    node-id: node.id;
-                    // Highlight as drop target when mouse Y is within this row's bounds
-                    drop-target: root.drag-active
-                        && node.id != root.drag-source-id
-                        && root.drag-mouse-y >= self.absolute-position.y
-                        && root.drag-mouse-y < self.absolute-position.y + self.height
-                        && node.visible;
-                    ctrl-held: explorer-keys.ctrl-held;
-                    shift-held: explorer-keys.shift-held;
+                VerticalLayout {
+                    spacing: 0px;
 
-                    clicked(ctrl, shift) => {
-                        explorer-keys.focus();
-                        root.on-select-node(node.id, node.node-type, ctrl, shift);
-                    }
-                    double-clicked => {
-                        root.on-select-node(node.id, node.node-type, false, false);
-                        if node.expandable {
-                            if node.expanded {
-                                root.on-collapse-node(node.id, node.node-type);
+                    for node[index] in root.tree-nodes: TreeItem {
+                        depth: node.depth;
+                        icon: node.icon;
+                        label: node.name;
+                        expandable: node.expandable;
+                        expanded: node.expanded;
+                        selected: node.selected;
+                        show: node.visible;
+                        node-id: node.id;
+                        drop-target: root.drag-active
+                            && node.id != root.drag-source-id
+                            && root.drag-mouse-y >= self.absolute-position.y
+                            && root.drag-mouse-y < self.absolute-position.y + self.height
+                            && node.visible;
+                        ctrl-held: explorer-keys.ctrl-held;
+                        shift-held: explorer-keys.shift-held;
+
+                        clicked(ctrl, shift) => {
+                            explorer-keys.focus();
+                            root.on-select-node(node.id, node.node-type, ctrl, shift);
+                        }
+                        double-clicked => {
+                            root.on-select-node(node.id, node.node-type, false, false);
+                            if node.expandable {
+                                if node.expanded { root.on-collapse-node(node.id, node.node-type); }
+                                else { root.on-expand-node(node.id, node.node-type); }
                             } else {
-                                root.on-expand-node(node.id, node.node-type);
+                                root.on-open-node(node.id, node.node-type);
                             }
-                        } else {
-                            root.on-open-node(node.id, node.node-type);
                         }
-                    }
-                    toggle-expanded => {
-                        if node.expanded {
-                            root.on-collapse-node(node.id, node.node-type);
-                        } else {
-                            root.on-expand-node(node.id, node.node-type);
+                        toggle-expanded => {
+                            if node.expanded { root.on-collapse-node(node.id, node.node-type); }
+                            else { root.on-expand-node(node.id, node.node-type); }
                         }
-                    }
-                    context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
+                        context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
 
-                    // Drag initiation
-                    drag-started(id) => {
-                        root.drag-active = true;
-                        root.drag-source-id = id;
-                        root.drag-source-name = node.name;
-                        root.drag-source-icon = node.icon;
-                        root.drag-target-id = -1;
-                    }
-                    drag-moved(abs-y) => {
-                        root.drag-mouse-y = abs-y;
-                    }
-                    drag-ended => {
-                        if root.drag-active && root.drag-source-id >= 0 && root.drag-target-id >= 0
-                            && root.drag-source-id != root.drag-target-id {
-                            root.on-reparent-node(root.drag-source-id, root.drag-target-id);
+                        drag-started(id) => {
+                            root.drag-active = true;
+                            root.drag-source-id = id;
+                            root.drag-source-name = node.name;
+                            root.drag-source-icon = node.icon;
+                            root.drag-target-id = -1;
                         }
-                        root.drag-active = false;
-                        root.drag-source-id = -1;
-                        root.drag-target-id = -1;
-                        root.drag-source-name = "";
+                        drag-moved(abs-y) => { root.drag-mouse-y = abs-y; }
+                        drag-ended => {
+                            // Handled by overlay pointer-event; nothing here
+                        }
                     }
-                }
 
-                // Empty space fill — click to deselect
-                Rectangle {
-                    vertical-stretch: 1;
-                    min-height: 100px;
-                    background: transparent;
-                    TouchArea {
-                        clicked => { root.on-deselect(); }
-                        scroll-event(e) => { return reject; }
+                    // Empty space fill — click to deselect
+                    Rectangle {
+                        vertical-stretch: 1;
+                        min-height: 100px;
+                        background: transparent;
+                        TouchArea {
+                            clicked => { root.on-deselect(); }
+                            scroll-event(e) => { return reject; }
+                        }
                     }
                 }
             }
 
-            // Drag overlay — covers full panel, tracks mouse for drop target + ghost
-            if root.drag-active: drag-overlay-rect := Rectangle {
+            // Drag overlay — absolute sibling of ScrollView, covers the tree area.
+            // Shows only during drag; captures mouse-x/y relative to tree-scroll-area.
+            if root.drag-active: Rectangle {
                 x: 0px; y: 0px; width: 100%; height: 100%;
-                background: #00000020; // subtle dimming to indicate drag mode
+                background: #00000020;
 
                 drag-overlay := TouchArea {
                     mouse-cursor: grabbing;
                     moved => {
                         root.drag-mouse-x = self.mouse-x;
                         root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
-                        // The per-row drop-target binding handles highlighting.
-                        // Set drag-target-id by row index approximation (22px per visible row).
                         let row-idx = floor(self.mouse-y / 22px);
                         let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
                         root.drag-target-id = root.tree-nodes[clamped].id;
@@ -335,11 +322,11 @@ export component ExplorerPanel inherits Rectangle {
                     }
                 }
 
-                // Ghost preview — icon + name, follows mouse exactly
+                // Ghost follows cursor exactly (positioned by drag-overlay mouse coords)
                 Rectangle {
-                    x: drag-overlay.mouse-x + 12px;
+                    x: drag-overlay.mouse-x + 14px;
                     y: drag-overlay.mouse-y - 11px;
-                    width: drag-ghost-icon.width + drag-ghost-text.preferred-width + 16px;
+                    width: drag-ghost-text.preferred-width + 40px;
                     height: 22px;
                     background: Theme.accent-blue;
                     opacity: 0.9;
@@ -347,27 +334,24 @@ export component ExplorerPanel inherits Rectangle {
                     drop-shadow-blur: 4px;
                     drop-shadow-color: #00000060;
 
-                    HorizontalLayout {
-                        padding-left: 4px;
-                        padding-right: 8px;
-                        spacing: 4px;
-                        alignment: start;
+                    drag-ghost-icon := Image {
+                        x: 6px;
+                        y: 4px;
+                        width: 14px;
+                        height: 14px;
+                        source: root.drag-source-icon;
+                        image-fit: contain;
+                    }
 
-                        drag-ghost-icon := Image {
-                            width: 14px;
-                            height: 14px;
-                            source: root.drag-source-icon;
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-
-                        drag-ghost-text := Text {
-                            text: root.drag-source-name;
-                            color: white;
-                            font-size: 11px;
-                            font-weight: 500;
-                            vertical-alignment: center;
-                        }
+                    drag-ghost-text := Text {
+                        x: 24px;
+                        y: 0px;
+                        height: 22px;
+                        text: root.drag-source-name;
+                        color: white;
+                        font-size: 11px;
+                        font-weight: 500;
+                        vertical-alignment: center;
                     }
                 }
             }
