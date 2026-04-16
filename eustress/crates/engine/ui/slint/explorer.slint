@@ -61,6 +61,8 @@ export component ExplorerPanel inherits Rectangle {
     in-out property <int> drag-source-id: -1;
     in-out property <int> drag-target-id: -1;
     in-out property <string> drag-source-name: "";
+    in-out property <image> drag-source-icon;
+    in-out property <length> drag-mouse-x: 0px;
     in-out property <length> drag-mouse-y: 0px;
     
     background: Theme.panel-background;
@@ -273,6 +275,7 @@ export component ExplorerPanel inherits Rectangle {
                         root.drag-active = true;
                         root.drag-source-id = id;
                         root.drag-source-name = node.name;
+                        root.drag-source-icon = node.icon;
                         root.drag-target-id = -1;
                     }
                     drag-moved(abs-y) => {
@@ -302,20 +305,20 @@ export component ExplorerPanel inherits Rectangle {
                 }
             }
 
-            // Drag overlay — tracks mouse position during drag to compute drop target
+            // Drag overlay — covers full panel, tracks mouse for drop target + ghost
             if root.drag-active: drag-overlay-rect := Rectangle {
                 x: 0px; y: 0px; width: 100%; height: 100%;
-                background: transparent;
+                background: #00000020; // subtle dimming to indicate drag mode
 
                 drag-overlay := TouchArea {
                     mouse-cursor: grabbing;
                     moved => {
+                        root.drag-mouse-x = self.mouse-x;
                         root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
-                        // Compute target row: find which visible node the mouse is over.
-                        // Each visible row is 22px. Approximate by index into visible nodes.
-                        let row-idx = floor((self.mouse-y) / 22px);
+                        // The per-row drop-target binding handles highlighting.
+                        // Set drag-target-id by row index approximation (22px per visible row).
+                        let row-idx = floor(self.mouse-y / 22px);
                         let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
-                        // Walk visible nodes to find the one at this index
                         root.drag-target-id = root.tree-nodes[clamped].id;
                     }
                     pointer-event(event) => {
@@ -332,22 +335,39 @@ export component ExplorerPanel inherits Rectangle {
                     }
                 }
 
-                // Ghost label following cursor
+                // Ghost preview — icon + name, follows mouse exactly
                 Rectangle {
-                    x: 20px;
-                    y: root.drag-mouse-y - drag-overlay-rect.absolute-position.y - 10px;
-                    width: drag-ghost-text.preferred-width + 24px;
+                    x: drag-overlay.mouse-x + 12px;
+                    y: drag-overlay.mouse-y - 11px;
+                    width: drag-ghost-icon.width + drag-ghost-text.preferred-width + 16px;
                     height: 22px;
                     background: Theme.accent-blue;
-                    opacity: 0.85;
+                    opacity: 0.9;
                     border-radius: 4px;
+                    drop-shadow-blur: 4px;
+                    drop-shadow-color: #00000060;
 
-                    drag-ghost-text := Text {
-                        x: 8px;
-                        text: root.drag-source-name;
-                        color: white;
-                        font-size: 11px;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        padding-left: 4px;
+                        padding-right: 8px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        drag-ghost-icon := Image {
+                            width: 14px;
+                            height: 14px;
+                            source: root.drag-source-icon;
+                            image-fit: contain;
+                            vertical-alignment: center;
+                        }
+
+                        drag-ghost-text := Text {
+                            text: root.drag-source-name;
+                            color: white;
+                            font-size: 11px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }
