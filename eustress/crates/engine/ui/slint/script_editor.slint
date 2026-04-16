@@ -176,12 +176,12 @@ export component ScriptEditor inherits Rectangle {
                 padding-right: 8px;
                 spacing: 8px;
 
-                // Summary / Code mode toggle pill (only for SoulScript tabs)
+                // Summary / Code mode toggle pill — green theme (only for SoulScript tabs)
                 if root.is-soul-script: Rectangle {
-                    width: 140px;
-                    height: 24px;
+                    width: 150px;
+                    height: 26px;
                     border-radius: 4px;
-                    background: Theme.background-secondary;
+                    background: #1a2e1a;
 
                     HorizontalLayout {
                         padding: 2px;
@@ -191,9 +191,10 @@ export component ScriptEditor inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: root.is-summary ? Theme.button-primary : transparent;
+                            background: root.is-summary ? #2e7d32 : transparent;
 
                             summary-ta := TouchArea {
+                                mouse-cursor: pointer;
                                 clicked => {
                                     if !root.is-summary {
                                         root.on-toggle-mode(root.active-tab);
@@ -201,12 +202,23 @@ export component ScriptEditor inherits Rectangle {
                                 }
                             }
 
-                            Text {
-                                text: "Summary";
-                                font-size: 11px;
-                                color: root.is-summary ? white : Theme.text-secondary;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: center;
+
+                                Image {
+                                    width: 14px; height: 14px;
+                                    source: @image-url("../../assets/icons/ui/summary.svg");
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                    colorize: root.is-summary ? white : #66bb6a;
+                                }
+                                Text {
+                                    text: "Summary";
+                                    font-size: 11px;
+                                    color: root.is-summary ? white : #66bb6a;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
 
@@ -214,9 +226,10 @@ export component ScriptEditor inherits Rectangle {
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
-                            background: !root.is-summary && root.is-soul-script ? Theme.button-primary : transparent;
+                            background: !root.is-summary && root.is-soul-script ? #2e7d32 : transparent;
 
                             code-ta := TouchArea {
+                                mouse-cursor: pointer;
                                 clicked => {
                                     if root.is-summary {
                                         root.on-toggle-mode(root.active-tab);
@@ -224,25 +237,39 @@ export component ScriptEditor inherits Rectangle {
                                 }
                             }
 
-                            Text {
-                                text: "Code";
-                                font-size: 11px;
-                                color: !root.is-summary && root.is-soul-script ? white : Theme.text-secondary;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: center;
+
+                                Image {
+                                    width: 14px; height: 14px;
+                                    source: @image-url("../../assets/icons/ui/script.svg");
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                    colorize: !root.is-summary && root.is-soul-script ? white : #66bb6a;
+                                }
+                                Text {
+                                    text: "Code";
+                                    font-size: 11px;
+                                    color: !root.is-summary && root.is-soul-script ? white : #66bb6a;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }
                 }
 
-                // Build button — only in code mode for soul scripts
+                // Build button — green, only in code mode for soul scripts
                 if !root.is-summary && root.is-soul-script: Rectangle {
                     width: 70px;
-                    height: 24px;
-                    background: Theme.button-primary;
+                    height: 26px;
+                    background: build-ta.has-hover ? #388e3c : #2e7d32;
                     border-radius: 4px;
 
-                    TouchArea { clicked => { root.on-build(); } }
+                    build-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-build(); }
+                    }
 
                     HorizontalBox {
                         padding: 4px;
@@ -251,6 +278,7 @@ export component ScriptEditor inherits Rectangle {
                             width: 14px; height: 14px;
                             source: @image-url("../../assets/icons/ui/build.svg");
                             image-fit: contain; vertical-alignment: center;
+                            colorize: white;
                         }
                         Text {
                             text: "Build"; color: white;
@@ -261,8 +289,8 @@ export component ScriptEditor inherits Rectangle {
 
                 // Summarize button — generates summary from code via Claude API
                 if !root.is-summary && root.is-soul-script: Rectangle {
-                    width: 90px;
-                    height: 24px;
+                    width: 100px;
+                    height: 26px;
                     background: summarize-ta.has-hover ? #1a4a2a : #152a1e;
                     border-radius: 4px;
                     border-width: 1px;
@@ -273,13 +301,24 @@ export component ScriptEditor inherits Rectangle {
                         clicked => { root.on-summarize(); }
                     }
 
-                    Text {
-                        text: "+ Summary";
-                        color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
-                        font-size: 11px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+
+                        Image {
+                            width: 14px; height: 14px;
+                            source: @image-url("../../assets/icons/ui/summary.svg");
+                            image-fit: contain;
+                            vertical-alignment: center;
+                            colorize: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
+                        }
+                        Text {
+                            text: "Summary";
+                            color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
