@@ -335,6 +335,7 @@ pub enum SlintAction {
     
     // Center tab management
     CloseCenterTab(i32),
+    ReopenClosedTab,
     SelectCenterTab(i32),
     ScriptContentChanged(String),
     ReorderCenterTab(i32, i32), // (from_index, to_index)
@@ -1353,6 +1354,8 @@ fn setup_slint_overlay(world: &mut World) {
     // Center tab management
     let q = queue.clone();
     ui.on_close_center_tab(move |idx| q.push(SlintAction::CloseCenterTab(idx)));
+    let q = queue.clone();
+    ui.on_reopen_closed_tab(move || q.push(SlintAction::ReopenClosedTab));
     let q = queue.clone();
     ui.on_select_center_tab(move |idx| q.push(SlintAction::SelectCenterTab(idx)));
     let q = queue.clone();
@@ -3298,6 +3301,20 @@ fn drain_slint_actions(
                     mgr.close_tab(mgr_idx);
                 } else if let Some(ref mut s) = res.state {
                     s.pending_close_tab = Some(idx);
+                }
+            }
+            SlintAction::ReopenClosedTab => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    if mgr.reopen_last_closed() {
+                        if let Some(ref mut out) = res.output {
+                            let name = mgr.active().map(|t| t.name.clone()).unwrap_or_default();
+                            out.info(format!("Reopened tab: {}", name));
+                        }
+                    } else {
+                        if let Some(ref mut out) = res.output {
+                            out.info("No recently closed tabs".to_string());
+                        }
+                    }
                 }
             }
             SlintAction::SelectCenterTab(idx) => {

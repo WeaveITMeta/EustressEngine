@@ -554,6 +554,7 @@ export component StudioWindow inherits Window {
     
     // Center tab management
     callback close-center-tab(int);
+    callback reopen-closed-tab();
     callback select-center-tab(int);
     callback script-content-changed(string);
     callback reorder-center-tab(int, int); // (from-index, to-index)
@@ -1611,6 +1612,11 @@ export component StudioWindow inherits Window {
                                     root.center-active-tab = root.center-tabs.length;
                                 }
                             }
+                            return accept;
+                        }
+                        // Ctrl+Shift+T: reopen last closed tab
+                        if event.modifiers.control && event.modifiers.shift && event.text == "T" {
+                            root.reopen-closed-tab();
                             return accept;
                         }
                         // Ctrl+T: open new web tab (only when not on Scene/3D tab)

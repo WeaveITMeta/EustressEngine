@@ -172,6 +172,8 @@ pub struct CenterTabManager {
     pub dirty: bool,
     /// True when only the active tab changed (refocus), not the tab list itself
     pub focus_only: bool,
+    /// Recently closed tabs (stack — most recent on top, max 20)
+    pub closed_tabs: Vec<CenterTabEntry>,
 }
 
 impl Default for CenterTabManager {
@@ -196,6 +198,7 @@ impl Default for CenterTabManager {
             next_id: 1,
             dirty: true,
             focus_only: false,
+            closed_tabs: Vec::new(),
         }
     }
 }
@@ -363,13 +366,31 @@ impl CenterTabManager {
         if index == 0 || index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(index);
+        // Save to closed stack before removing (max 20)
+        let closed = self.tabs.remove(index);
+        self.closed_tabs.push(closed);
+        if self.closed_tabs.len() > 20 {
+            self.closed_tabs.remove(0);
+        }
         if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         } else if self.active_tab > index {
             self.active_tab -= 1;
         }
         self.dirty = true;
+    }
+
+    /// Reopen the most recently closed tab (Ctrl+Shift+T)
+    pub fn reopen_last_closed(&mut self) -> bool {
+        if let Some(mut tab) = self.closed_tabs.pop() {
+            tab.id = self.next_id();
+            self.tabs.push(tab);
+            self.active_tab = self.tabs.len() - 1;
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// Close all tabs except the given index (and Scene tab)

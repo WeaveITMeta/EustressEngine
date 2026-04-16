@@ -303,7 +303,7 @@ export component ExplorerPanel inherits Rectangle {
             }
 
             // Drag overlay — tracks mouse position during drag to compute drop target
-            if root.drag-active: Rectangle {
+            if root.drag-active: drag-overlay-rect := Rectangle {
                 x: 0px; y: 0px; width: 100%; height: 100%;
                 background: transparent;
 
@@ -335,7 +335,7 @@ export component ExplorerPanel inherits Rectangle {
                 // Ghost label following cursor
                 Rectangle {
                     x: 20px;
-                    y: root.drag-mouse-y - self.parent.absolute-position.y - 10px;
+                    y: root.drag-mouse-y - drag-overlay-rect.absolute-position.y - 10px;
                     width: drag-ghost-text.preferred-width + 24px;
                     height: 22px;
                     background: Theme.accent-blue;
