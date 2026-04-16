@@ -518,6 +518,7 @@ export component StudioWindow inherits Window {
     callback collapse-node(int, string);
     callback open-node(int, string);
     callback rename-node(int, string, string);
+    callback reparent-node(int, int);  // Drag-and-drop: move source node into target node
     callback add-service();  // (+) button — add a new service to the Space
     callback expand-all();   // Expand all explorer tree nodes
     callback collapse-all(); // Collapse all explorer tree nodes
@@ -974,6 +975,7 @@ export component StudioWindow inherits Window {
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
                             on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
                             on-open-node(id, node-type) => { root.open-node(id, node-type); }
+                            on-reparent-node(source, target) => { root.reparent-node(source, target); }
                             on-add-service() => { root.add-service(); }
                             on-expand-all() => { root.expand-all(); }
                             on-collapse-all() => { root.collapse-all(); }

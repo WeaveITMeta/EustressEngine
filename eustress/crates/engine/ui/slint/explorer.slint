@@ -53,6 +53,13 @@ export component ExplorerPanel inherits Rectangle {
     callback navigate-down();   // Arrow down — select next visible node
     callback navigate-collapse(); // Arrow left — collapse current node
     callback navigate-expand();   // Arrow right — expand current node
+    // Drag-and-drop reparenting: source node dragged onto target node
+    callback on-reparent-node(/* source-id */ int, /* target-id */ int);
+
+    // Drag state
+    in-out property <bool> drag-active: false;
+    in-out property <int> drag-source-id: -1;
+    in-out property <int> drag-target-id: -1;
     
     background: Theme.panel-background;
     
@@ -216,7 +223,7 @@ export component ExplorerPanel inherits Rectangle {
             VerticalLayout {
                 spacing: 0px;
 
-                for node in root.tree-nodes: TreeItem {
+                for node[index] in root.tree-nodes: TreeItem {
                     depth: node.depth;
                     icon: node.icon;
                     label: node.name;
@@ -224,6 +231,8 @@ export component ExplorerPanel inherits Rectangle {
                     expanded: node.expanded;
                     selected: node.selected;
                     show: node.visible;
+                    node-id: node.id;
+                    drop-target: root.drag-active && root.drag-target-id == node.id;
                     ctrl-held: explorer-keys.ctrl-held;
                     shift-held: explorer-keys.shift-held;
 
@@ -232,9 +241,7 @@ export component ExplorerPanel inherits Rectangle {
                         root.on-select-node(node.id, node.node-type, ctrl, shift);
                     }
                     double-clicked => {
-                        // Select first so the node is highlighted
                         root.on-select-node(node.id, node.node-type, false, false);
-                        // Then expand/collapse or open
                         if node.expandable {
                             if node.expanded {
                                 root.on-collapse-node(node.id, node.node-type);
@@ -253,6 +260,28 @@ export component ExplorerPanel inherits Rectangle {
                         }
                     }
                     context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
+
+                    // Drag-and-drop
+                    drag-started(id) => {
+                        root.drag-active = true;
+                        root.drag-source-id = id;
+                        root.drag-target-id = -1;
+                    }
+                    drag-moved(abs-y) => {
+                        // Find which row the cursor is over by index from absolute Y
+                        // Each visible row is 22px. We use the index to find the node ID.
+                        // This is approximate — good enough for a tree with uniform row height.
+                        root.drag-target-id = node.id;
+                    }
+                    drag-ended => {
+                        if root.drag-active && root.drag-source-id >= 0 && root.drag-target-id >= 0
+                            && root.drag-source-id != root.drag-target-id {
+                            root.on-reparent-node(root.drag-source-id, root.drag-target-id);
+                        }
+                        root.drag-active = false;
+                        root.drag-source-id = -1;
+                        root.drag-target-id = -1;
+                    }
                 }
 
                 // Empty space fill — click to deselect

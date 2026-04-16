@@ -248,6 +248,7 @@ pub enum SlintAction {
     CollapseNode(i32, String),    // (id, node_type)
     OpenNode(i32, String),        // (id, node_type) — double-click to open
     RenameNode(i32, String, String), // (id, new_name, node_type)
+    ReparentNode(i32, i32),       // (source_id, target_id) — drag-and-drop reparent
     AddService,                   // (+) button — open add-service dialog
     ExpandAll,                    // Expand all tree nodes in explorer
     CollapseAll,                  // Collapse all tree nodes in explorer
@@ -1154,6 +1155,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_open_node(move |id, node_type| q.push(SlintAction::OpenNode(id, node_type.to_string())));
     let q = queue.clone();
     ui.on_rename_node(move |id, name, node_type| q.push(SlintAction::RenameNode(id, name.to_string(), node_type.to_string())));
+    let q = queue.clone();
+    ui.on_reparent_node(move |source, target| q.push(SlintAction::ReparentNode(source, target)));
     let q = queue.clone();
     ui.on_add_service(move || q.push(SlintAction::AddService));
     let q = queue.clone();
@@ -3854,6 +3857,75 @@ fn drain_slint_actions(
                 }
             }
             
+            SlintAction::ReparentNode(source_id, target_id) => {
+                // Drag-and-drop reparent: move source entity into target entity
+                let source_entity = res.explorer_state.as_ref()
+                    .and_then(|es| es.entity_id_cache.get(&source_id).copied());
+                let target_entity = res.explorer_state.as_ref()
+                    .and_then(|es| es.entity_id_cache.get(&target_id).copied());
+
+                if let (Some(source), Some(target)) = (source_entity, target_entity) {
+                    // 1. Update ECS hierarchy
+                    commands.entity(source).insert(ChildOf(target));
+
+                    // 2. Move on disk: source folder → inside target folder
+                    let source_path = queries.loaded_from_file.get(source).ok()
+                        .map(|(_, lff)| lff.path.clone());
+                    let target_path = queries.loaded_from_file.get(target).ok()
+                        .map(|(_, lff)| lff.path.clone());
+
+                    if let (Some(src), Some(tgt)) = (source_path, target_path) {
+                        let tgt_dir = if tgt.is_dir() { tgt.clone() }
+                            else { tgt.parent().unwrap_or(&tgt).to_path_buf() };
+                        let src_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let dest = tgt_dir.join(&src_name);
+
+                        if src != dest && !dest.exists() {
+                            // Suppress file watcher for the source path
+                            if let Some(ref mut registry) = res.file_registry {
+                                registry.rename_in_progress.insert(src.clone());
+                            }
+                            match std::fs::rename(&src, &dest) {
+                                Ok(_) => {
+                                    info!("📂 Reparented '{}' → '{}'", src.display(), dest.display());
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!("Moved {} into {}", src_name,
+                                            tgt_dir.file_name().unwrap_or_default().to_string_lossy()));
+                                    }
+                                    // Update LoadedFromFile path
+                                    if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
+                                        lff.path = dest.clone();
+                                    }
+                                    // Update InstanceFile path if present
+                                    if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
+                                        if inst_file.toml_path.starts_with(&src) {
+                                            let relative = inst_file.toml_path.strip_prefix(&src).unwrap_or(std::path::Path::new("_instance.toml"));
+                                            inst_file.toml_path = dest.join(relative);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Some(ref mut registry) = res.file_registry {
+                                        registry.rename_in_progress.remove(&src);
+                                    }
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Move failed: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(ref mut es) = res.explorer_state {
+                        es.dirty = true;
+                    }
+                } else {
+                    if let Some(ref mut out) = res.output {
+                        out.warn("Reparent: could not find source or target entity".to_string());
+                    }
+                }
+            }
+
             SlintAction::AddService => {
                 // (+) button — log intent; actual service creation requires user to pick
                 // a name/type via command bar or future dialog. For now, print available services.

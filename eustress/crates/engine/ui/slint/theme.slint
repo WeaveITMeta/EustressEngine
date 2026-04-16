@@ -353,11 +353,18 @@ export component TreeItem inherits Rectangle {
     in property <bool> expanded: false;
     in property <bool> selected: false;
     in property <bool> show: true;
-    
+    in property <int> node-id: -1;
+    // Drop target highlight — set by parent when this row is the drop target
+    in property <bool> drop-target: false;
+
     callback clicked(/* ctrl */ bool, /* shift */ bool);
     callback double-clicked();
     callback toggle-expanded();
     callback context-menu(length, length);
+    // Drag callbacks — parent ExplorerPanel handles state
+    callback drag-started(int);         // node-id
+    callback drag-moved(length);        // mouse-y absolute
+    callback drag-ended();
 
     // Modifier key state — set by parent FocusScope key tracking
     in property <bool> ctrl-held: false;
@@ -372,28 +379,54 @@ export component TreeItem inherits Rectangle {
     background: self.selected ? Theme.explorer-item-selected :
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
-    // Full-row touch area for selection and context menu
+    property <bool> drag-started-flag: false;
+    property <length> press-y: 0px;
+
+    // Full-row touch area for selection, context menu, and drag-and-drop
     row-touch := TouchArea {
         clicked => {
-            // Use pointer-event latched modifiers OR FocusScope tracked modifiers
-            root.clicked(root.pe-ctrl || root.ctrl-held, root.pe-shift || root.shift-held);
-            // Reset latched state
+            if !root.drag-started-flag {
+                root.clicked(root.pe-ctrl || root.ctrl-held, root.pe-shift || root.shift-held);
+            }
             root.pe-ctrl = false;
             root.pe-shift = false;
         }
         double-clicked => { root.double-clicked(); }
+        moved => {
+            if !root.drag-started-flag && abs(self.mouse-y - root.press-y) > 5px {
+                root.drag-started-flag = true;
+                root.drag-started(root.node-id);
+            }
+            if root.drag-started-flag {
+                root.drag-moved(self.absolute-position.y + self.mouse-y);
+            }
+        }
         pointer-event(event) => {
-            // Latch modifier state on mouse-down so clicked handler can read it
             if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
                 root.pe-ctrl = event.modifiers.control;
                 root.pe-shift = event.modifiers.shift;
+                root.press-y = self.mouse-y;
+                root.drag-started-flag = false;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                if root.drag-started-flag {
+                    root.drag-ended();
+                    root.drag-started-flag = false;
+                }
             }
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
                 root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
-        // Allow scroll events to bubble up to parent ScrollView
         scroll-event(e) => { return reject; }
+    }
+
+    // Drop target indicator — blue line at top of row
+    if root.drop-target: Rectangle {
+        y: 0px;
+        width: 100%;
+        height: 2px;
+        background: Theme.accent-blue;
     }
     
     // Expand/collapse arrow
