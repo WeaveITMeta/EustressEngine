@@ -152,7 +152,7 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     
     // Instance API — Roblox-compatible instance manipulation
     module.ty::<InstanceRune>()?;
-    module.function_meta(instance_new)?;
+    module.function_meta(InstanceRune::instance_new)?;
     
     // TweenService API — Property animation
     module.ty::<TweenInfoRune>()?;
@@ -1285,8 +1285,10 @@ where
 }
 
 /// Rune-compatible Instance reference.
+/// Exposed to Rune as `Instance` (not `InstanceRune`).
 #[cfg(feature = "realism-scripting")]
 #[derive(Debug, Clone, rune::Any)]
+#[rune(name = Instance)]
 pub struct InstanceRune {
     #[rune(get)]
     pub entity_id: i64,
@@ -1301,6 +1303,17 @@ impl rune::alloc::clone::TryClone for InstanceRune {
 
 #[cfg(feature = "realism-scripting")]
 impl InstanceRune {
+    /// Create a new instance of the given class.
+    /// ## Rune: `let part = Instance::new("Part");`
+    #[rune::function(path = Self::new)]
+    pub fn instance_new(class_name: &str) -> Option<InstanceRune> {
+        with_instance_registry(None, |registry| {
+            let mut reg = registry.write().unwrap();
+            let entity_id = reg.create(class_name, None);
+            Some(InstanceRune { entity_id: entity_id as i64 })
+        })
+    }
+
     /// Get the instance name
     #[rune::function(instance)]
     pub fn name(&self) -> String {
@@ -1577,18 +1590,7 @@ pub fn execute_rune_oneshot(_source: &str) -> Result<Vec<eustress_common::luau::
     Err("Rune scripting requires the realism-scripting feature. Use Luau instead.".to_string())
 }
 
-/// Create a new instance of the given class.
-///
-/// ## Rune: `let part = Instance::new("Part");`
-#[cfg(feature = "realism-scripting")]
-#[rune::function(path = Instance::new)]
-fn instance_new(class_name: &str) -> Option<InstanceRune> {
-    with_instance_registry(None, |registry| {
-        let mut reg = registry.write().unwrap();
-        let entity_id = reg.create(class_name, None);
-        Some(InstanceRune { entity_id: entity_id as i64 })
-    })
-}
+// instance_new is now inside impl InstanceRune (see below)
 
 // ============================================================================
 // TweenService API — Property Animation (P1)
