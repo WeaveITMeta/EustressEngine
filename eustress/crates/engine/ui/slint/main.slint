@@ -13,7 +13,7 @@ import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
 import { SoulPanel } from "soul_panel.slint";
-import { ScriptEditor, ScriptTab, CenterTab, HighlightLine } from "script_editor.slint";
+import { ScriptEditor, ScriptTab, CenterTab, HighlightLine, TokenSpan } from "script_editor.slint";
 import { WebBrowser } from "web_browser.slint";
 import { Notifications } from "notifications.slint";
 import { ViewSelector } from "view_selector.slint";
@@ -423,6 +423,7 @@ export component StudioWindow inherits Window {
     // Syntax-highlighted lines pushed from Rust (one per source line).
     // Empty when no file is open or language is unsupported.
     in property <[HighlightLine]> script-highlight-lines: [];
+    in property <[TokenSpan]> script-token-spans: [];
     
     // Active tab type helper (set by Rust sync system)
     in-out property <string> active-tab-type: "scene"; // "scene", "script", "web"
@@ -1802,6 +1803,8 @@ export component StudioWindow inherits Window {
                         scroll-to-top-trigger <=> root.script-scroll-to-top;
                         highlight-lines: root.script-highlight-lines;
                         has-highlights: root.script-highlight-lines.length > 0;
+                        token-spans: root.script-token-spans;
+                        has-token-spans: root.script-token-spans.length > 0;
 
                         on-tab-selected(idx) => {
                             root.center-active-tab = idx + 1;

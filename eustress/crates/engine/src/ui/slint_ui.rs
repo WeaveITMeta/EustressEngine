@@ -24,7 +24,7 @@ use slint::{LogicalPosition, PhysicalSize, Model};
 use slint::platform::WindowEvent;
 
 use crate::commands::{SelectionManager, TransformManager};
-use crate::ui::highlight::{highlight_to_lines, language_for_ext, HighlightLine as ComputedHighlightLine};
+use crate::ui::highlight::{highlight_to_lines, highlight_to_token_spans, language_for_ext, HighlightLine as ComputedHighlightLine, TokenSpanData};
 use super::file_dialogs::{SceneFile, FileEvent, PublishRequest};
 use super::file_icons::load_file_icon;
 use super::spawn_events::SpawnEventsPlugin;
@@ -9455,11 +9455,27 @@ fn sync_center_tabs_to_slint(
             })
             .collect();
 
+        // Per-token spans for true syntax highlighting
+        let token_spans: Vec<TokenSpan> = highlight_to_token_spans(&state.script_editor_content, &language)
+            .into_iter()
+            .map(|s| TokenSpan {
+                line: s.line,
+                x: s.x,
+                text: s.text.into(),
+                r: s.r,
+                g: s.g,
+                b: s.b,
+                bold: s.bold,
+            })
+            .collect();
+
         ui.set_script_editor_content(state.script_editor_content.as_str().into());
         let nums = build_line_numbers_text(&state.script_editor_content);
         ui.set_script_line_numbers(nums.into());
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
         ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+        let token_model = std::rc::Rc::new(slint::VecModel::from(token_spans));
+        ui.set_script_token_spans(slint::ModelRc::from(token_model));
         // On tab switch (not on every keystroke): reset editor scroll to line 1
         if tabs_changed {
             ui.set_script_scroll_to_top(true);
@@ -9468,6 +9484,8 @@ fn sync_center_tabs_to_slint(
         state.script_highlight_lines.clear();
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
         ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+        let token_model = std::rc::Rc::new(slint::VecModel::from(Vec::<TokenSpan>::new()));
+        ui.set_script_token_spans(slint::ModelRc::from(token_model));
     }
 
     // Always sync web browser properties when a web tab is active (loading can change each frame)

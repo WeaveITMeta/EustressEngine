@@ -16,6 +16,19 @@ export struct HighlightLine {
     bold: bool,    // true for headings, keywords, etc.
 }
 
+// Per-token span for true syntax highlighting.
+// Each token has its own color and is positioned by character offset.
+// Monospace: x = col * char_width (computed Rust-side for pixel precision).
+export struct TokenSpan {
+    line: int,     // 0-based line index
+    x: float,      // x pixel offset from left edge
+    text: string,  // token text
+    r: float,      // foreground [0..1]
+    g: float,
+    b: float,
+    bold: bool,
+}
+
 // Center tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
 // Tab data model for the center tabbed viewer
 export struct CenterTab {
@@ -121,6 +134,9 @@ export component ScriptEditor inherits Rectangle {
     // One entry per source line. Empty = highlighting inactive (plain TextEdit).
     in property <[HighlightLine]> highlight-lines: [];
     in property <bool> has-highlights: false;
+    // Per-token spans for true syntax highlighting (replaces per-line coloring)
+    in property <[TokenSpan]> token-spans: [];
+    in property <bool> has-token-spans: false;
 
     // Callbacks
     callback on-tab-selected(int);
@@ -421,26 +437,39 @@ export component ScriptEditor inherits Rectangle {
                 // Separator
                 Rectangle { width: 1px; background: #2a2a2a; }
 
-                // Editable markdown text area
-                ScrollView {
+                // Editable markdown text area with per-token highlighting
+                Rectangle {
                     horizontal-stretch: 1;
+                    clip: true;
 
-                    summary-edit := TextInput {
-                        x: 12px;
-                        y: 5px;
-                        width: parent.width - 24px;
-                        min-height: parent.height;
+                    // Per-token colored overlay for markdown
+                    if root.has-token-spans: Rectangle {
+                        x: 0px; y: 0px; width: 100%; height: 100%;
+
+                        for span in root.token-spans: Text {
+                            x: span.x * 1px + 12px;
+                            y: span.line * 18px + 5px;
+                            text: span.text;
+                            color: rgba(span.r, span.g, span.b, 1.0);
+                            font-size: 13px;
+                            font-family: "Consolas";
+                            font-weight: span.bold ? 700 : 400;
+                            height: 18px;
+                            wrap: no-wrap;
+                        }
+                    }
+
+                    summary-edit := TextEdit {
+                        x: 0px; y: 0px; width: 100%; height: 100%;
                         text: root.current-content;
-                        color: Theme.text-primary;
                         font-size: 13px;
                         font-family: "Consolas";
-                        single-line: false;
                         wrap: no-wrap;
-                        read-only: false;
-                        selection-background-color: #264f78;
-                        selection-foreground-color: #ffffff;
-                        edited => {
-                            root.on-content-changed(self.text);
+                        color: root.has-token-spans ? transparent : Theme.text-primary;
+
+                        edited(text) => {
+                            root.current-content = text;
+                            root.on-content-changed(text);
                         }
                     }
                 }
@@ -509,45 +538,36 @@ export component ScriptEditor inherits Rectangle {
                     background: #2a2a2a;
                 }
 
-                // Code editor with syntax highlighting
-                // Uses TextEdit for editing + colored line overlay for highlight
+                // Code editor with per-token syntax highlighting
                 Rectangle {
                     horizontal-stretch: 1;
                     clip: true;
 
-                    // Syntax-highlighted line overlay (visible when highlights available)
-                    if root.has-highlights: ScrollView {
+                    // Per-token colored overlay — absolutely positioned Text elements
+                    if root.has-token-spans: Rectangle {
                         x: 0px; y: 0px; width: 100%; height: 100%;
 
-                        VerticalLayout {
-                            padding-top: 5px;
-                            padding-left: 12px;
-                            spacing: 0px;
-                            alignment: start;
-
-                            for hl in root.highlight-lines: Text {
-                                text: hl.text;
-                                color: rgba(hl.r, hl.g, hl.b, 1.0);
-                                font-size: 13px;
-                                font-family: "Consolas";
-                                font-weight: hl.bold ? 700 : 400;
-                                height: 18px;
-                                wrap: no-wrap;
-                            }
+                        for span in root.token-spans: Text {
+                            x: span.x * 1px + 12px;
+                            y: span.line * 18px + 5px;
+                            text: span.text;
+                            color: rgba(span.r, span.g, span.b, 1.0);
+                            font-size: 13px;
+                            font-family: "Consolas";
+                            font-weight: span.bold ? 700 : 400;
+                            height: 18px;
+                            wrap: no-wrap;
                         }
                     }
 
-                    // Editable TextEdit — transparent text when highlights active so
-                    // user sees the colored overlay but still has full editing
+                    // Editable TextEdit — transparent when token spans active
                     editor-area := TextEdit {
                         x: 0px; y: 0px; width: 100%; height: 100%;
                         text: root.current-content;
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
-                        // When highlights are active, make the TextEdit text transparent
-                        // so the colored overlay shows through, but the cursor still renders
-                        color: root.has-highlights ? transparent : Theme.text-primary;
+                        color: root.has-token-spans ? transparent : Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;
@@ -555,7 +575,7 @@ export component ScriptEditor inherits Rectangle {
                         }
                     }
 
-                    // Invisible sentinel: watches scroll-to-top-trigger, jumps to line 1
+                    // Invisible sentinel: scroll-to-top-trigger
                     if root.scroll-to-top-trigger: TouchArea {
                         width: 0px; height: 0px;
                         init => {

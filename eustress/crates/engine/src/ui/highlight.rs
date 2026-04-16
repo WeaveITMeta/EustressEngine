@@ -222,6 +222,50 @@ pub struct HighlightLine {
     pub bold: bool,
 }
 
+/// Per-token span with pixel position for Slint overlay rendering.
+#[derive(Debug, Clone)]
+pub struct TokenSpanData {
+    pub line: i32,
+    pub x: f32,       // pixel x offset (monospace char_width * col)
+    pub text: String,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub bold: bool,
+}
+
+/// Monospace character width at 13px Consolas (measured).
+const CHAR_WIDTH: f32 = 7.8;
+
+/// Convert `highlight_source` into a flat list of positioned token spans.
+/// Each token gets a pixel x-offset computed from its character column.
+/// Used for true per-token syntax highlighting in the Slint code editor.
+pub fn highlight_to_token_spans(source: &str, language: &str) -> Vec<TokenSpanData> {
+    let is_markdown = language.eq_ignore_ascii_case("Markdown");
+    highlight_source(source, language)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(line_idx, spans)| {
+            let mut col: f32 = 0.0;
+            spans.into_iter().map(move |s| {
+                let x = col * CHAR_WIDTH;
+                col += s.text.len() as f32;
+                let trimmed = s.text.trim();
+                let bold = is_markdown && (trimmed.starts_with('#') || trimmed.starts_with("```"));
+                TokenSpanData {
+                    line: line_idx as i32,
+                    x,
+                    text: s.text,
+                    r: s.r,
+                    g: s.g,
+                    b: s.b,
+                    bold,
+                }
+            }).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Convert token spans into one highlight entry per source line.
 ///
 /// The dominant color is taken from the first non-empty token on the line.
