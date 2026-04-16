@@ -306,8 +306,8 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
                 .unwrap_or("Unknown")
                 .to_string();
 
-            // Skip hidden/system directories (.eustress, .git, node_modules, target)
-            if name.starts_with('.') || name == "node_modules" || name == "target" {
+            // Skip hidden/system directories (.eustress, .git, node_modules, target, trash)
+            if name.starts_with('.') || name == "node_modules" || name == "target" || name == "trash" {
                 continue;
             }
             let children = scan_dir_entries(&path, service);
