@@ -253,9 +253,15 @@ fn handle_plugin_action_events(
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
 ) {
+    // Log BEFORE the early-return to diagnose whether the system runs at all
+    let event_count = events.len();
+    if event_count > 0 {
+        info!("🔌 handle_plugin_action_events: {} events pending, sel_mgr={}",
+            event_count, selection_manager.is_some());
+    }
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
-    
+
     for event in events.read() {
         info!("🔌 Processing plugin action: {}", event.action_id);
         
