@@ -2520,4 +2520,186 @@ export component StudioWindow inherits Window {
         on-add-output-binding => { root.add-sim-output-binding(); }
         on-remove-output-binding(i) => { root.remove-sim-output-binding(i); }
     }
+
+    // ====================================================================
+    // Context Menu Overlay — appears at cursor position for Explorer/3D
+    // ====================================================================
+    if root.show-context-menu: Rectangle {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        background: transparent;
+
+        // Click-away dismisses the menu
+        TouchArea {
+            clicked => { root.show-context-menu = false; }
+        }
+
+        // Menu panel
+        Rectangle {
+            x: root.context-menu-x;
+            y: root.context-menu-y;
+            width: 220px;
+            height: ctx-menu-layout.preferred-height + 8px;
+            background: #1e1e1e;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000080;
+
+            ctx-menu-layout := VerticalLayout {
+                padding: 4px;
+                spacing: 0px;
+
+                // Default entity menu items
+                if root.context-menu-node-type == "entity" || root.context-menu-node-type == "": Rectangle {
+                    height: ctx-entity-layout.preferred-height;
+                    ctx-entity-layout := VerticalLayout {
+                        spacing: 0px;
+                        // Insert submenu
+                        Rectangle {
+                            height: 28px;
+                            background: insert-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            insert-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.show-context-menu = false;
+                                    // Open Insert menu (same as ribbon Insert dropdown)
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Insert Object..."; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                            }
+                        }
+                        // Separator
+                        Rectangle { height: 1px; background: #3a3a3a; }
+                        // Cut
+                        Rectangle {
+                            height: 26px;
+                            background: cut-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            cut-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("cut"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Cut"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+X"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Copy
+                        Rectangle {
+                            height: 26px;
+                            background: copy-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            copy-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("copy"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Copy"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+C"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Paste Into
+                        Rectangle {
+                            height: 26px;
+                            background: paste-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            paste-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("paste"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Paste Into"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+V"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Duplicate
+                        Rectangle {
+                            height: 26px;
+                            background: dup-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            dup-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("duplicate"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Duplicate"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+D"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Separator
+                        Rectangle { height: 1px; background: #3a3a3a; }
+                        // Delete
+                        Rectangle {
+                            height: 26px;
+                            background: del-touch.has-hover ? #3a1515 : transparent;
+                            border-radius: 3px;
+                            del-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("delete"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Delete"; color: #ef5350; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Del"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Separator
+                        Rectangle { height: 1px; background: #3a3a3a; }
+                        // Rename
+                        Rectangle {
+                            height: 26px;
+                            background: rename-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            rename-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("rename"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Rename"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "F2"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Group
+                        Rectangle {
+                            height: 26px;
+                            background: group-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            group-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("group"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Group"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+G"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                        // Ungroup
+                        Rectangle {
+                            height: 26px;
+                            background: ungroup-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 3px;
+                            ungroup-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("ungroup"); root.show-context-menu = false; } }
+                            HorizontalLayout {
+                                padding-left: 8px; spacing: 8px; alignment: start;
+                                Text { text: "Ungroup"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                Text { text: "Ctrl+U"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+
+                // File context menu items
+                for item in root.context-menu-items: Rectangle {
+                    height: item.separator-after ? 28px : 26px;
+                    background: item-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                    border-radius: 3px;
+                    opacity: item.enabled ? 1.0 : 0.4;
+                    item-touch := TouchArea {
+                        mouse-cursor: item.enabled ? pointer : default;
+                        clicked => {
+                            if item.enabled {
+                                root.context-action(item.id);
+                                root.show-context-menu = false;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 8px; alignment: start;
+                        Image { width: 16px; height: 16px; source: item.icon; image-fit: contain; vertical-alignment: center; }
+                        Text { text: item.label; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                        if item.shortcut != "": Text { text: item.shortcut; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+    }
 }
