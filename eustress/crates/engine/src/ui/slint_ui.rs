@@ -1276,7 +1276,10 @@ fn setup_slint_overlay(world: &mut World) {
 
     // Generic plugin action — routes all ribbon plugin buttons through PluginActionEvent
     let q = queue.clone();
-    ui.on_plugin_action(move |action| q.push(SlintAction::PluginAction(action.to_string())));
+    ui.on_plugin_action(move |action| {
+        tracing::info!("🔌 on_plugin_action callback fired: '{}'", action);
+        q.push(SlintAction::PluginAction(action.to_string()));
+    });
 
     // Auth — SPI (Sign in with Private Identity)
     let q = queue.clone();
@@ -2962,6 +2965,7 @@ fn drain_slint_actions(
                 // Route the action string through to the plugin system.
                 // Normalize Slint kebab-case to Rust snake_case (dashes → underscores).
                 let normalized = action_id.replace('-', "_");
+                info!("🔌 PluginAction received: '{}' → '{}'", action_id, normalized);
                 events.plugin_action.write(crate::studio_plugins::PluginActionEvent {
                     action_id: normalized,
                 });
