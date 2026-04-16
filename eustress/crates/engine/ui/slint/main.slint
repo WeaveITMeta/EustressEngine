@@ -1613,8 +1613,8 @@ export component StudioWindow inherits Window {
                             }
                             return accept;
                         }
-                        // Ctrl+T: open new web tab
-                        if event.modifiers.control && event.text == "t" {
+                        // Ctrl+T: open new web tab (only when not on Scene/3D tab)
+                        if event.modifiers.control && event.text == "t" && root.center-active-tab > 0 {
                             root.open-web-tab("https://eustress.dev/learn");
                             return accept;
                         }
