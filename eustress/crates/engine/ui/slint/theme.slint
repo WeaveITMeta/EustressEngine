@@ -380,6 +380,7 @@ export component TreeItem inherits Rectangle {
                 row-touch.has-hover ? Theme.explorer-item-hover : transparent;
 
     property <bool> drag-started-flag: false;
+    property <bool> left-pressed: false;
     property <length> press-y: 0px;
 
     // Full-row touch area for selection, context menu, and drag-and-drop
@@ -393,12 +394,15 @@ export component TreeItem inherits Rectangle {
         }
         double-clicked => { root.double-clicked(); }
         moved => {
-            if !root.drag-started-flag && abs(self.mouse-y - root.press-y) > 5px {
-                root.drag-started-flag = true;
-                root.drag-started(root.node-id);
-            }
-            if root.drag-started-flag {
-                root.drag-moved(self.absolute-position.y + self.mouse-y);
+            // Only start drag with left button held
+            if root.left-pressed {
+                if !root.drag-started-flag && abs(self.mouse-y - root.press-y) > 5px {
+                    root.drag-started-flag = true;
+                    root.drag-started(root.node-id);
+                }
+                if root.drag-started-flag {
+                    root.drag-moved(self.absolute-position.y + self.mouse-y);
+                }
             }
         }
         pointer-event(event) => {
@@ -406,9 +410,11 @@ export component TreeItem inherits Rectangle {
                 root.pe-ctrl = event.modifiers.control;
                 root.pe-shift = event.modifiers.shift;
                 root.press-y = self.mouse-y;
+                root.left-pressed = true;
                 root.drag-started-flag = false;
             }
             if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                root.left-pressed = false;
                 if root.drag-started-flag {
                     root.drag-ended();
                     root.drag-started-flag = false;
