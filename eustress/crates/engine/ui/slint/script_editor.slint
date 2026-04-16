@@ -465,7 +465,6 @@ export component ScriptEditor inherits Rectangle {
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
-                        color: root.has-token-spans ? transparent : Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;
@@ -567,7 +566,6 @@ export component ScriptEditor inherits Rectangle {
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
-                        color: root.has-token-spans ? transparent : Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;
