@@ -140,8 +140,8 @@ impl MonacoInstance {
 /// Shared IPC message queue (Monaco → Rust direction)
 pub type IpcMessageQueue = Arc<Mutex<Vec<MonacoIpcMessage>>>;
 
-/// Bevy Resource managing all Monaco editor WebView instances
-#[derive(Resource)]
+/// Manages all Monaco editor WebView instances.
+/// NonSend because wry::WebView contains raw window handles (not Send/Sync).
 pub struct MonacoBridge {
     /// Map of tab_id → Monaco editor instance
     pub editors: HashMap<u32, MonacoInstance>,
@@ -250,14 +250,14 @@ pub struct MonacoBridgePlugin;
 
 impl Plugin for MonacoBridgePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<MonacoBridge>()
+        app.insert_non_send_resource(MonacoBridge::default())
             .add_systems(Update, process_monaco_ipc_messages);
     }
 }
 
 /// System that drains Monaco IPC messages and applies them to tab state
 fn process_monaco_ipc_messages(
-    bridge: Res<MonacoBridge>,
+    bridge: NonSend<MonacoBridge>,
     mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
     mut output: Option<ResMut<super::OutputConsole>>,
 ) {

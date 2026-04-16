@@ -21,13 +21,14 @@ pub struct WebViewPlugin;
 
 impl Plugin for WebViewPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<WebViewManager>()
+        app.insert_non_send_resource(WebViewManager::default())
             .add_systems(Update, sync_webviews);
     }
 }
 
-/// Manages all active WebView instances
-#[derive(Resource, Default)]
+/// Manages all active WebView instances.
+/// NonSend because wry::WebView contains raw window handles (not Send/Sync).
+#[derive(Default)]
 pub struct WebViewManager {
     /// Map of tab index -> WebView state
     pub views: HashMap<usize, WebViewInstance>,
@@ -70,32 +71,19 @@ impl Default for WebViewInstance {
 }
 
 impl WebViewManager {
-    /// Create a new WebView for a tab.
-    /// `raw_window` is the parent HWND/NSWindow obtained from Bevy's WinitWindows.
+    /// Create a new WebView for a tab as a child of the given window.
     #[cfg(feature = "webview")]
-    pub fn create_webview(&mut self, tab_index: usize, url: &str, raw_window: raw_window_handle::RawWindowHandle) {
+    pub fn create_webview(&mut self, tab_index: usize, url: &str, window: &winit::window::Window) {
         use wry::WebViewBuilder;
 
-        let webview_result = match raw_window {
-            #[cfg(target_os = "windows")]
-            raw_window_handle::RawWindowHandle::Win32(handle) => {
-                use wry::raw_window_handle::{RawWindowHandle, Win32WindowHandle};
-                let mut wh = Win32WindowHandle::new(handle.hwnd);
-                wh.hinstance = handle.hinstance;
-                let parent = RawWindowHandle::Win32(wh);
-                unsafe {
-                    WebViewBuilder::new()
-                        .with_url(url)
-                        .with_visible(true)
-                        .with_bounds(wry::Rect { position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(0.0, 0.0)), size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(800.0, 600.0)) })
-                        .build_as_child(&parent)
-                }
-            }
-            _ => {
-                warn!("Unsupported window handle for WebView");
-                return;
-            }
-        };
+        let webview_result = WebViewBuilder::new()
+            .with_url(url)
+            .with_visible(true)
+            .with_bounds(wry::Rect {
+                position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(0.0, 0.0)),
+                size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(800.0, 600.0)),
+            })
+            .build_as_child(window);
 
         match webview_result {
             Ok(webview) => {
@@ -227,7 +215,7 @@ impl WebViewManager {
 
 /// Bevy system that syncs WebView state with StudioState
 fn sync_webviews(
-    mut webview_mgr: ResMut<WebViewManager>,
+    mut webview_mgr: NonSendMut<WebViewManager>,
     mut state: Option<ResMut<super::StudioState>>,
     #[cfg(feature = "webview")]
     winit_windows: Option<NonSend<WinitWindows>>,
@@ -257,12 +245,8 @@ fn sync_webviews(
             if let Some(ref winit) = winit_windows {
                 if let Ok(entity) = primary_window.single() {
                     if let Some(winit_window) = winit.get_window(entity) {
-                        use raw_window_handle::HasWindowHandle;
-                        if let Ok(handle) = winit_window.window_handle() {
-                            let raw = handle.as_raw();
-                            let url = state.center_tabs.get(idx).map(|t| t.url.as_str()).unwrap_or("about:blank");
-                            webview_mgr.create_webview(idx, url, raw);
-                        }
+                        let url = state.center_tabs.get(idx).map(|t| t.url.as_str()).unwrap_or("about:blank");
+                        webview_mgr.create_webview(idx, url, winit_window);
                     }
                 }
             }
@@ -312,6 +296,7 @@ fn sync_webviews(
     }
 
     // Ensure WebViews exist for all web tabs
+    #[cfg(not(feature = "webview"))]
     for (idx, tab) in state.center_tabs.iter().enumerate() {
         if tab.tab_type == "web" && !webview_mgr.views.contains_key(&idx) {
             webview_mgr.create_webview(idx, &tab.url);
