@@ -1174,7 +1174,7 @@ pub fn handle_command_bar_builds(
 /// Note: CommandBar builds are handled by handle_command_bar_builds, not this system
 pub fn apply_build_results(
     mut pipeline: ResMut<SoulBuildPipeline>,
-    mut query: Query<&mut crate::soul::SoulScriptData>,
+    mut query: Query<(&mut crate::soul::SoulScriptData, Option<&crate::space::file_loader::LoadedFromFile>)>,
 ) {
     while let Some(result) = pipeline.peek_result() {
         // Skip CommandBar builds - they're handled by handle_command_bar_builds
@@ -1185,10 +1185,10 @@ pub fn apply_build_results(
         // Consume the result now that we know it's not a CommandBar build
         let result = pipeline.poll_result().unwrap();
         
-        if let Ok(mut script_data) = query.get_mut(result.entity) {
+        if let Ok((mut script_data, loaded_from)) = query.get_mut(result.entity) {
             if result.success {
                 script_data.build_status = crate::soul::SoulBuildStatus::Built;
-                
+
                 // Store and log generated code for debugging
                 if let Some(ref generated) = result.generated_code {
                     let code_preview = if generated.source.len() > 200 {
@@ -1198,6 +1198,26 @@ pub fn apply_build_results(
                     };
                     info!("📝 Generated code preview:\n{}", code_preview);
                     script_data.generated_code = Some(generated.source.clone());
+
+                    // Write generated code to Source file on disk
+                    if let Some(lff) = loaded_from {
+                        let dir = if lff.path.is_dir() { lff.path.clone() }
+                            else { lff.path.parent().unwrap_or(&lff.path).to_path_buf() };
+                        // Find the source file (.rune/.luau/.lua) inside the folder
+                        if let Ok(entries) = std::fs::read_dir(&dir) {
+                            for entry in entries.flatten() {
+                                let n = entry.file_name().to_string_lossy().to_string();
+                                if n.ends_with(".rune") || n.ends_with(".luau") || n.ends_with(".lua") {
+                                    if let Err(e) = std::fs::write(entry.path(), &generated.source) {
+                                        error!("Failed to write generated code to {:?}: {}", entry.path(), e);
+                                    } else {
+                                        info!("💾 Wrote generated code to {:?}", entry.path());
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 
                 script_data.errors.clear();
