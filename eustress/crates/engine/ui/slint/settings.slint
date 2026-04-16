@@ -45,7 +45,21 @@ component SettingsHint inherits Rectangle {
 
 export component SettingsDialog inherits Rectangle {
     // Properties
-    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul
+    in-out property <int> active-tab: 0; // 0=General, 1=Graphics, 2=Audio, 3=Soul, 4=Notifications
+
+    // Notifications settings (wired to Bevy NotificationSettings resource)
+    in-out property <bool> notifications-enabled: true;
+    in-out property <bool> notifications-show-dismiss: true;
+    in-out property <bool> notifications-mute-file: false;
+    in-out property <bool> notifications-mute-script: false;
+    in-out property <bool> notifications-mute-editor: false;
+    in-out property <bool> notifications-mute-simulation: false;
+    in-out property <bool> notifications-mute-network: false;
+    in-out property <bool> notifications-mute-task: false;
+    in-out property <bool> notifications-mute-general: false;
+    in-out property <bool> notifications-mute-info: false;
+    in-out property <bool> notifications-mute-warning: false;
+    callback on-notifications-changed();
 
     // General settings
     in-out property <bool> auto-save: true;
@@ -191,6 +205,7 @@ export component SettingsDialog inherits Rectangle {
                         { name: "Graphics" },
                         { name: "Audio" },
                         { name: "Soul" },
+                        { name: "Notifications" },
                     ] : Rectangle {
                         width: stab-t.preferred-width + 24px;
                         height: 36px;
@@ -659,6 +674,78 @@ export component SettingsDialog inherits Rectangle {
                                     vertical-alignment: center;
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Notifications tab
+                if root.active-tab == 4: ScrollView {
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 4px;
+                        alignment: start;
+
+                        SettingsSection { title: "GENERAL"; }
+                        CheckBox {
+                            text: "Enable notifications";
+                            checked <=> root.notifications-enabled;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Show dismiss (X) button on toasts";
+                            checked <=> root.notifications-show-dismiss;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+
+                        Rectangle { height: 8px; }
+                        SettingsSection { title: "MUTE BY LEVEL"; }
+                        CheckBox {
+                            text: "Mute Info";
+                            checked <=> root.notifications-mute-info;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Mute Warnings";
+                            checked <=> root.notifications-mute-warning;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+
+                        Rectangle { height: 8px; }
+                        SettingsSection { title: "MUTE BY CATEGORY"; }
+                        CheckBox {
+                            text: "File (save / load / rename)";
+                            checked <=> root.notifications-mute-file;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Script (build / compile / run)";
+                            checked <=> root.notifications-mute-script;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Editor (selection / transform)";
+                            checked <=> root.notifications-mute-editor;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Simulation (play mode)";
+                            checked <=> root.notifications-mute-simulation;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Network (replication / auth)";
+                            checked <=> root.notifications-mute-network;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "Task (imports / exports / background)";
+                            checked <=> root.notifications-mute-task;
+                            toggled => { root.on-notifications-changed(); }
+                        }
+                        CheckBox {
+                            text: "General";
+                            checked <=> root.notifications-mute-general;
+                            toggled => { root.on-notifications-changed(); }
                         }
                     }
                 }

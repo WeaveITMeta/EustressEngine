@@ -312,6 +312,10 @@ pub enum SlintAction {
 
     // Generic plugin action (from ribbon buttons)
     PluginAction(String),
+    /// User clicked the X on a toast — remove it from the queue.
+    DismissNotification(u32),
+    /// User toggled one of the File > Settings > Notifications checkboxes.
+    NotificationSettingsChanged,
     
     // Auth
     Login,
@@ -962,6 +966,10 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
             // Asset Manager sync: scan Universe + Space directories (throttled internally)
             .add_systems(Update, sync_asset_manager_to_slint)
+            // Push notification queue to Slint (dirty-flag gated)
+            .add_systems(Update, sync_notifications_to_slint.after(SlintSystems::Drain))
+            // Push Soul Panel script list to Slint (hash-gated)
+            .add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain))
             // Output log → EustressStream topic "log/output" (fires only when console changes)
             .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
@@ -1359,6 +1367,12 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_close_center_tab(move |idx| q.push(SlintAction::CloseCenterTab(idx)));
     let q = queue.clone();
     ui.on_reopen_closed_tab(move || q.push(SlintAction::ReopenClosedTab));
+    let q = queue.clone();
+    ui.on_dismiss_notification(move |id| q.push(SlintAction::DismissNotification(id.max(0) as u32)));
+    let q = queue.clone();
+    ui.on_notification_settings_changed(move || q.push(SlintAction::NotificationSettingsChanged));
+    let q = queue.clone();
+    ui.on_soul_build_all(move || q.push(SlintAction::PluginAction("soul:build_all".to_string())));
     let q = queue.clone();
     ui.on_select_center_tab(move |idx| q.push(SlintAction::SelectCenterTab(idx)));
     let q = queue.clone();
@@ -2300,6 +2314,10 @@ struct DrainResources<'w> {
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
     /// API Reference filter state (search, category, language, status)
     api_filter: Option<ResMut<'w, ApiFilterState>>,
+    /// Toast notification queue (dismiss/push from drain handlers)
+    notification_queue: Option<ResMut<'w, super::notifications_impl::NotificationQueue>>,
+    /// User-facing notification preferences mirrored from File > Settings
+    notification_settings: Option<ResMut<'w, super::notifications_impl::NotificationSettings>>,
 }
 
 /// Perform Ed25519 challenge-response auth against the API.
@@ -3191,13 +3209,21 @@ fn drain_slint_actions(
             }
 
             // Scripts
-            SlintAction::BuildScript(_id) => {
-                // Find the entity for this script by matching the active tab's entity
-                let entity = res.tab_manager.as_ref()
-                    .and_then(|mgr| mgr.active())
-                    .and_then(|tab| tab.entity);
+            SlintAction::BuildScript(id) => {
+                // `id` is the entity index published by the Soul Panel sync. If
+                // the Build button was hit inside the script editor (not the
+                // panel), the id is 0/invalid — fall back to the active tab's
+                // entity in that case.
+                let entity = if id > 0 {
+                    queries.instances.iter()
+                        .find(|(e, _)| e.index().index() as i32 == id)
+                        .map(|(e, _)| e)
+                } else {
+                    res.tab_manager.as_ref()
+                        .and_then(|mgr| mgr.active())
+                        .and_then(|tab| tab.entity)
+                };
                 if let Some(entity) = entity {
-                    // Store pending build entity — picked up by build_pipeline system
                     if let Some(ref mut s) = res.state {
                         s.pending_build_entity = Some(entity);
                     }
@@ -3206,7 +3232,7 @@ fn drain_slint_actions(
                     }
                 } else {
                     if let Some(ref mut out) = res.output {
-                        out.warn("Build: no entity associated with active tab".to_string());
+                        out.warn("Build: no entity associated with action".to_string());
                     }
                 }
             }
@@ -3319,6 +3345,28 @@ fn drain_slint_actions(
                             out.info("No recently closed tabs".to_string());
                         }
                     }
+                }
+            }
+            SlintAction::DismissNotification(id) => {
+                if let Some(ref mut q) = res.notification_queue {
+                    q.dismiss(id);
+                }
+            }
+            SlintAction::NotificationSettingsChanged => {
+                if let (Some(ui), Some(ref mut settings)) = (ui, res.notification_settings.as_mut()) {
+                    settings.enabled = ui.get_notifications_enabled();
+                    settings.show_dismiss = ui.get_notifications_show_dismiss();
+                    settings.muted_categories.clear();
+                    if ui.get_notifications_mute_file() { settings.muted_categories.insert("file".into()); }
+                    if ui.get_notifications_mute_script() { settings.muted_categories.insert("script".into()); }
+                    if ui.get_notifications_mute_editor() { settings.muted_categories.insert("editor".into()); }
+                    if ui.get_notifications_mute_simulation() { settings.muted_categories.insert("simulation".into()); }
+                    if ui.get_notifications_mute_network() { settings.muted_categories.insert("network".into()); }
+                    if ui.get_notifications_mute_task() { settings.muted_categories.insert("task".into()); }
+                    if ui.get_notifications_mute_general() { settings.muted_categories.insert("general".into()); }
+                    settings.muted_levels.clear();
+                    if ui.get_notifications_mute_info() { settings.muted_levels.insert("info".into()); }
+                    if ui.get_notifications_mute_warning() { settings.muted_levels.insert("warning".into()); }
                 }
             }
             SlintAction::SelectCenterTab(idx) => {
@@ -5390,10 +5438,44 @@ fn drain_slint_actions(
                     "insert" => {
                         // TODO: Open insert submenu or switch to toolbox tab
                     }
+                    // Soul Panel context menu actions — target entity id is encoded
+                    // into the action_id (no payload field on PluginActionEvent).
+                    "soul-reveal" => {
+                        if let Some(ui) = ui {
+                            let id = ui.get_context_menu_target_id();
+                            events.plugin_action.write(
+                                crate::studio_plugins::PluginActionEvent::new(format!("soul:reveal_in_explorer:{}", id))
+                            );
+                        }
+                    }
+                    "soul-open-summary" => {
+                        if let Some(ui) = ui {
+                            let id = ui.get_context_menu_target_id();
+                            events.plugin_action.write(
+                                crate::studio_plugins::PluginActionEvent::new(format!("soul:open_summary:{}", id))
+                            );
+                        }
+                    }
+                    "soul-open-code" => {
+                        if let Some(ui) = ui {
+                            let id = ui.get_context_menu_target_id();
+                            events.plugin_action.write(
+                                crate::studio_plugins::PluginActionEvent::new(format!("soul:open_code:{}", id))
+                            );
+                        }
+                    }
+                    "soul-build" => {
+                        if let Some(ui) = ui {
+                            let id = ui.get_context_menu_target_id();
+                            events.plugin_action.write(
+                                crate::studio_plugins::PluginActionEvent::new(format!("soul:build:{}", id))
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
-            
+
             // Ribbon menu actions — route insert:* to InsertPart or log unsupported
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
@@ -9910,4 +9992,162 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
         .join("icons")
         .join(format!("{}.svg", filename));
     slint::Image::load_from_path(&icon_path).unwrap_or_default()
+}
+
+/// Push all script entities (Rune Soul + Luau Server/Client/Module) to the
+/// Soul Panel. Rebuilds the Slint model whenever the count or any status
+/// changes; otherwise a no-op.
+fn sync_soul_panel_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    soul_scripts: Query<(Entity, &eustress_common::classes::Instance, &crate::soul::SoulScriptData)>,
+    luau_scripts: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauScript)>,
+    luau_locals: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauLocalScript)>,
+    luau_modules: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauModuleScript)>,
+    mut last_hash: Local<u64>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    soul_scripts.iter().count().hash(&mut hasher);
+    luau_scripts.iter().count().hash(&mut hasher);
+    luau_locals.iter().count().hash(&mut hasher);
+    luau_modules.iter().count().hash(&mut hasher);
+    for (e, _, data) in soul_scripts.iter() {
+        e.index().hash(&mut hasher);
+        std::mem::discriminant(&data.build_status).hash(&mut hasher);
+        data.errors.len().hash(&mut hasher);
+    }
+    for (e, _, s) in luau_scripts.iter() {
+        e.index().hash(&mut hasher);
+        s.error.is_some().hash(&mut hasher);
+        s.loaded.hash(&mut hasher);
+    }
+    for (e, _, s) in luau_locals.iter() {
+        e.index().hash(&mut hasher);
+        s.error.is_some().hash(&mut hasher);
+        s.loaded.hash(&mut hasher);
+    }
+    for (e, _, s) in luau_modules.iter() {
+        e.index().hash(&mut hasher);
+        s.error.is_some().hash(&mut hasher);
+        s.loaded.hash(&mut hasher);
+    }
+    let new_hash = hasher.finish();
+    if new_hash == *last_hash { return; }
+    *last_hash = new_hash;
+
+    let mut items: Vec<SoulScriptData> = Vec::new();
+    let mut rune_count = 0i32;
+    let mut luau_server_count = 0i32;
+    let mut luau_client_count = 0i32;
+    let mut luau_module_count = 0i32;
+
+    for (entity, inst, data) in soul_scripts.iter() {
+        use crate::soul::SoulBuildStatus;
+        let status: &str = match data.build_status {
+            SoulBuildStatus::NotBuilt => "not-built",
+            SoulBuildStatus::Building => "building",
+            SoulBuildStatus::Built    => "success",
+            SoulBuildStatus::Failed   => "error",
+            SoulBuildStatus::Stale    => "idle",
+        };
+        items.push(SoulScriptData {
+            entity_id: entity.index().index() as i32,
+            name: inst.name.clone().into(),
+            status: status.into(),
+            last_build: "".into(),
+            error_message: data.errors.join("\n").into(),
+            line_count: data.source.lines().count() as i32,
+            language: "rune".into(),
+            file_path: "".into(),
+        });
+        rune_count += 1;
+    }
+    for (entity, inst, s) in luau_scripts.iter() {
+        let (status, err) = match (&s.error, s.loaded) {
+            (Some(e), _) => ("error", e.clone()),
+            (None, true) => ("success", String::new()),
+            (None, false) => ("not-built", String::new()),
+        };
+        items.push(SoulScriptData {
+            entity_id: entity.index().index() as i32,
+            name: inst.name.clone().into(),
+            status: status.into(),
+            last_build: "".into(),
+            error_message: err.into(),
+            line_count: s.source.lines().count() as i32,
+            language: "luau-server".into(),
+            file_path: s.source_path.clone().into(),
+        });
+        luau_server_count += 1;
+    }
+    for (entity, inst, s) in luau_locals.iter() {
+        let (status, err) = match (&s.error, s.loaded) {
+            (Some(e), _) => ("error", e.clone()),
+            (None, true) => ("success", String::new()),
+            (None, false) => ("not-built", String::new()),
+        };
+        items.push(SoulScriptData {
+            entity_id: entity.index().index() as i32,
+            name: inst.name.clone().into(),
+            status: status.into(),
+            last_build: "".into(),
+            error_message: err.into(),
+            line_count: s.source.lines().count() as i32,
+            language: "luau-client".into(),
+            file_path: s.source_path.clone().into(),
+        });
+        luau_client_count += 1;
+    }
+    for (entity, inst, s) in luau_modules.iter() {
+        let (status, err) = match (&s.error, s.loaded) {
+            (Some(e), _) => ("error", e.clone()),
+            (None, true) => ("success", String::new()),
+            (None, false) => ("not-built", String::new()),
+        };
+        items.push(SoulScriptData {
+            entity_id: entity.index().index() as i32,
+            name: inst.name.clone().into(),
+            status: status.into(),
+            last_build: "".into(),
+            error_message: err.into(),
+            line_count: s.source.lines().count() as i32,
+            language: "luau-module".into(),
+            file_path: s.source_path.clone().into(),
+        });
+        luau_module_count += 1;
+    }
+
+    let model = std::rc::Rc::new(slint::VecModel::from(items));
+    ui.set_soul_scripts(slint::ModelRc::from(model));
+    ui.set_soul_rune_count(rune_count);
+    ui.set_soul_luau_server_count(luau_server_count);
+    ui.set_soul_luau_client_count(luau_client_count);
+    ui.set_soul_luau_module_count(luau_module_count);
+}
+
+/// Push the notification queue to Slint whenever it changes. Cheap no-op
+/// when the queue hasn't been mutated since the last frame (`dirty` flag).
+fn sync_notifications_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut queue: Option<ResMut<super::notifications_impl::NotificationQueue>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(ref mut queue) = queue else { return };
+    if !queue.dirty { return; }
+    queue.dirty = false;
+
+    let ui = &slint_context.window;
+    let items: Vec<NotificationData> = queue.items.iter().map(|n| NotificationData {
+        id: n.id as i32,
+        level: n.level.as_str().into(),
+        title: n.title.clone().into(),
+        message: n.message.clone().into(),
+        duration_ms: 0, // animation handled on Bevy side; toast displays until expires_at
+        dismissible: n.dismissible,
+    }).collect();
+    let model = std::rc::Rc::new(slint::VecModel::from(items));
+    ui.set_notifications(slint::ModelRc::from(model));
 }

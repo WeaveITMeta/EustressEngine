@@ -129,26 +129,26 @@ component NotificationToast inherits Rectangle {
 }
 
 export component Notifications inherits Rectangle {
-    // Properties
     in property <[NotificationData]> notifications: [];
-    
-    // Callbacks
     callback on-dismiss(int);
-    
+
     width: 320px;
+    // Auto-size height so the container hugs its stack — 72px per toast + 8px
+    // spacing. Caller can anchor bottom-right via y positioning.
+    height: root.notifications.length * 80px;
     background: transparent;
-    
-    VerticalBox {
+
+    VerticalLayout {
         padding: 0px;
         spacing: 8px;
-        alignment: start;
-        
+        alignment: end;
+
         for notification in root.notifications: NotificationToast {
             level: notification.level;
             title: notification.title;
             message: notification.message;
             dismissible: notification.dismissible;
-            
+
             dismissed => { root.on-dismiss(notification.id); }
         }
     }

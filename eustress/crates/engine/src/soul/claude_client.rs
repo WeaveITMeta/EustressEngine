@@ -1338,20 +1338,20 @@ impl ClaudeClient {
         );
         
         // Make the API call
-        let response = self.call_vision_api(&request)?;
+        let (response, tokens_used) = self.call_vision_api_with_usage(&request)?;
         let code = self.extract_code(&response);
 
-        info!("📝 Generated {} chars of Rune code", code.len());
+        info!("📝 Generated {} chars of Rune code ({} tokens)", code.len(), tokens_used);
 
         // Validate Rune syntax
         let validation = validator.validate_rune_syntax(&code);
-        
+
         Ok(GenerationResult {
             code,
             model: self.config.model_for_tier(tier).to_string(),
             duration_ms: start.elapsed().as_millis() as u64,
             fix_iterations: 0,
-            tokens_used: 0, // TODO: Extract from response
+            tokens_used,
             warnings: validation.warnings,
             was_fixed: false,
         })
@@ -1739,33 +1739,43 @@ Start with pub fn main() { ... }"#.to_string()
     
     /// Call the Claude Vision API
     fn call_vision_api(&self, request: &VisionRequest) -> Result<String, ClaudeError> {
+        self.call_vision_api_with_usage(request).map(|(text, _)| text)
+    }
+
+    /// Same as [`call_vision_api`] but also returns the token usage from the
+    /// response. Used by generators that want to populate `GenerationResult::tokens_used`.
+    fn call_vision_api_with_usage(&self, request: &VisionRequest) -> Result<(String, u32), ClaudeError> {
         let api_key = self.config.api_key.as_ref()
             .ok_or(ClaudeError::NoApiKey)?;
-        
-        let timeout = Duration::from_secs(120); // Vision requests can take longer
-        
+
+        let timeout = Duration::from_secs(120);
+
         let response = ureq::post("https://api.anthropic.com/v1/messages")
             .set("x-api-key", api_key)
             .set("anthropic-version", "2023-06-01")
             .set("content-type", "application/json")
             .timeout(timeout)
             .send_json(request);
-        
+
         match response {
             Ok(resp) => {
                 let body: ClaudeResponse = resp.into_json()
                     .map_err(|e| ClaudeError::InvalidResponse(e.to_string()))?;
-                
+
                 let text = body.content.iter()
                     .filter_map(|c| c.text.clone())
                     .collect::<Vec<_>>()
                     .join("");
-                
+
                 if text.is_empty() {
                     return Err(ClaudeError::InvalidResponse("Empty response".to_string()));
                 }
-                
-                Ok(text)
+
+                let tokens = body.usage
+                    .map(|u| u.input_tokens.saturating_add(u.output_tokens))
+                    .unwrap_or(0);
+
+                Ok((text, tokens))
             }
             Err(ureq::Error::Status(429, _)) => {
                 Err(ClaudeError::RateLimited { retry_after: None })

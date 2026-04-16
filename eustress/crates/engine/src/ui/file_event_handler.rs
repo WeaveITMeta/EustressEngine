@@ -214,15 +214,94 @@ fn do_save_space(world: &mut World) {
     }
 }
 
-/// Prompt for a new Space folder name, copy current Space structure, then switch.
-/// For now: save in place and notify the user — full "Save As" (copy) is Phase 2.
+/// Prompt for a new Space folder name + parent, copy the current Space
+/// directory to that location, then switch `SpaceRoot` so all subsequent
+/// saves/loads target the new folder. The file watcher is paused during the
+/// copy to avoid phantom delete/create events.
 fn do_save_space_as(world: &mut World) {
-    // Phase 1: save in place (identical to Save)
-    // TODO Phase 2: pick a new parent folder + name, copy files, switch SpaceRoot
+    // 1. Commit everything in-memory to disk at the current location first.
     do_save_space(world);
-    if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
-        n.info("Save As: saved in current location. Rename the Space folder to move it.");
+
+    // 2. Capture the current SpaceRoot so we have a source to copy from.
+    let Some(src_root) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) else {
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.error("Save As: no active Space to copy from.");
+        }
+        return;
+    };
+
+    // 3. Prompt for a destination folder. The picker returns the *parent*
+    //    directory; the new Space keeps the source's folder name (user can
+    //    rename after via Explorer if desired).
+    let default_name = src_root.file_name().and_then(|n| n.to_str()).unwrap_or("Space").to_string();
+    let picked = rfd::FileDialog::new()
+        .set_title("Save Space As — pick parent folder")
+        .pick_folder();
+    let Some(parent) = picked else {
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.info("Save As cancelled.");
+        }
+        return;
+    };
+    let dst_root = parent.join(&default_name);
+
+    // 4. Refuse to overwrite an existing folder — this avoids silently merging
+    //    into another Space and corrupting both.
+    if dst_root.exists() {
+        if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+            n.error(format!("Save As: '{}' already exists. Pick a different parent or rename first.", dst_root.display()));
+        }
+        return;
     }
+
+    // 5. Pause the file watcher so the copy doesn't generate spurious events.
+    if let Some(mut registry) = world.get_resource_mut::<crate::space::file_loader::SpaceFileRegistry>() {
+        registry.rename_in_progress.insert(src_root.clone());
+    }
+
+    // 6. Recursive directory copy.
+    let copy_result = copy_dir_recursive(&src_root, &dst_root);
+
+    if let Some(mut registry) = world.get_resource_mut::<crate::space::file_loader::SpaceFileRegistry>() {
+        registry.rename_in_progress.remove(&src_root);
+    }
+
+    match copy_result {
+        Ok(()) => {
+            // 7. Switch SpaceRoot. File loaders watching the new root will
+            //    re-bind on next scan; open tabs keep their in-memory state.
+            if let Some(mut sr) = world.get_resource_mut::<crate::space::SpaceRoot>() {
+                sr.0 = dst_root.clone();
+            }
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.success(format!("Saved Space as '{}'", dst_root.display()));
+            }
+        }
+        Err(e) => {
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Save As failed: {}", e));
+            }
+        }
+    }
+}
+
+/// Recursively copy `src` to `dst`. Creates `dst` if missing.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let name = entry.file_name();
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if ty.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if ty.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+        // Skip symlinks — safer default for Space folders.
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -378,6 +457,7 @@ pub fn auto_save_system(
     play_mode: Option<Res<State<crate::play_mode::PlayModeState>>>,
     mut last_save: Local<Option<std::time::Instant>>,
     mut output: Option<ResMut<super::slint_ui::OutputConsole>>,
+    mut file_events: bevy::ecs::message::MessageWriter<super::FileEvent>,
 ) {
     // Only auto-save in editing mode
     if let Some(ref pms) = play_mode {
@@ -402,12 +482,12 @@ pub fn auto_save_system(
 
     *last_save = Some(now);
 
-    // Auto-save is non-exclusive, so we can't call save_space(&mut World).
-    // Instead, set a flag that the exclusive system picks up.
-    // For now, just log — the user should Ctrl+S manually.
-    // TODO: trigger save via event
+    // Auto-save is non-exclusive, so we can't call save_space(&mut World) here.
+    // Fire a SaveScene event — `drain_file_events` + `execute_file_actions`
+    // will pick it up and perform the exclusive save on the next tick.
+    file_events.write(super::FileEvent::SaveScene);
     if let Some(ref mut out) = output {
-        out.info("Auto-save reminder: press Ctrl+S to save your work.".to_string());
+        out.info("Auto-save triggered.".to_string());
     }
 }
 

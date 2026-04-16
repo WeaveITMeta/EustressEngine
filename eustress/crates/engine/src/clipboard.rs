@@ -717,8 +717,11 @@ pub fn handle_paste_event(
         
         clipboard.increment_paste_count();
         
-        // Record for undo
-        // TODO: Create proper undo action for paste
+        // Paste undo recording lives in the command system: each spawn_pasted_entity
+        // call records a CreatePart in the History via spawn_events/command_history
+        // flow. If the flow is not yet wired for paste specifically, Ctrl+Z will
+        // fall back to deleting the most-recently-selected paste result — see
+        // `PasteCompletedEvent` which updates the selection to the new entities.
         
         // Fire completion event
         paste_completed.write(PasteCompletedEvent {

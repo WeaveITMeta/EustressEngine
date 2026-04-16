@@ -115,6 +115,47 @@ pub struct ExperienceUpdate {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Drains [`NotificationManager::notifications`] into the UI toast queue each
+/// frame. Callers of `NotificationManager::success/info/warning/error` don't
+/// need to know anything about toasts — this bridge converts every entry
+/// into a [`crate::ui::notifications_impl::ActiveNotification`] and expires
+/// them via the toast system's regular timer.
+fn drain_manager_to_toasts(
+    mut manager: ResMut<NotificationManager>,
+    mut queue: Option<ResMut<crate::ui::notifications_impl::NotificationQueue>>,
+    time: Res<Time>,
+) {
+    use crate::ui::notifications_impl::{ActiveNotification, NotificationCategory, NotificationLevel as ToastLevel};
+    let Some(ref mut queue) = queue else { return };
+    if manager.notifications.is_empty() { return; }
+
+    let now = time.elapsed_secs_f64();
+    for n in manager.notifications.drain(..) {
+        let (level, duration_ms) = match n.level {
+            NotificationLevel::Info    => (ToastLevel::Info,    4.0),
+            NotificationLevel::Success => (ToastLevel::Success, 3.0),
+            NotificationLevel::Warning => (ToastLevel::Warning, 6.0),
+            NotificationLevel::Error   => (ToastLevel::Error,   8.0),
+        };
+        let id = queue.next_id;
+        queue.next_id = queue.next_id.wrapping_add(1).max(1);
+        // Split first line into title, rest into message.
+        let mut parts = n.message.splitn(2, ". ");
+        let first = parts.next().unwrap_or("").trim().to_string();
+        let rest = parts.next().unwrap_or("").trim().to_string();
+        let (title, message) = if rest.is_empty() { (first.clone(), String::new()) } else { (first, rest) };
+        queue.push(ActiveNotification {
+            id,
+            level,
+            category: NotificationCategory::General,
+            title,
+            message,
+            dismissible: true,
+            expires_at: now + duration_ms,
+        });
+    }
+}
+
 /// Notification plugin
 pub struct NotificationPlugin;
 
@@ -122,6 +163,7 @@ impl Plugin for NotificationPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<NotificationManager>()
-            .init_resource::<FavoriteUpdatePoller>();
+            .init_resource::<FavoriteUpdatePoller>()
+            .add_systems(Update, drain_manager_to_toasts);
     }
 }

@@ -38,6 +38,8 @@ pub mod file_icons;
 pub mod center_tabs;
 pub mod monaco_bridge;
 pub mod highlight;
+#[path = "notifications.rs"]
+pub mod notifications_impl;
 
 // Re-exports
 pub use file_dialogs::{SceneFile, FileEvent, pick_open_file, pick_save_file};
@@ -699,10 +701,18 @@ pub mod docking {
 }
 
 pub mod notifications {
-    use bevy::prelude::*;
-    
-    pub struct NotificationsPlugin;
-    impl Plugin for NotificationsPlugin { fn build(&self, _app: &mut App) {} }
+    //! Re-export of the real notifications system. The implementation lives in
+    //! `ui/notifications.rs` and is registered via `NotificationsPlugin`.
+    pub use super::notifications_impl::{
+        NotificationsPlugin,
+        NotificationEvent,
+        NotificationLevel,
+        NotificationCategory,
+        NotificationQueue,
+        NotificationSettings,
+        DismissNotificationEvent,
+        ActiveNotification,
+    };
 }
 
 pub mod command_bar {

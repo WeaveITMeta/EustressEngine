@@ -12,10 +12,10 @@ import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
-import { SoulPanel } from "soul_panel.slint";
+import { SoulPanel, SoulScriptData } from "soul_panel.slint";
 import { ScriptEditor, ScriptTab, CenterTab, HighlightLine, TokenSpan } from "script_editor.slint";
 import { WebBrowser } from "web_browser.slint";
-import { Notifications } from "notifications.slint";
+import { Notifications, NotificationData } from "notifications.slint";
 import { ViewSelector } from "view_selector.slint";
 import { AIGeneration } from "ai_generation.slint";
 import { PublishDialog } from "publish.slint";
@@ -311,6 +311,9 @@ export component StudioWindow inherits Window {
     in-out property <length> context-menu-y: 0px;
     in-out property <string> context-menu-node-type: ""; // "entity" or "file"
     in-out property <[MenuItem]> context-menu-items: [];
+    // Soul Panel context menu — target script entity id + target-type tag
+    in-out property <int> context-menu-target-id: -1;
+    in-out property <string> context-menu-target-type: "";
     
     // Current tool
     in-out property <string> current-tool: "select";
@@ -346,6 +349,34 @@ export component StudioWindow inherits Window {
     in-out property <bool> output-show-warnings: true;
     in-out property <bool> output-show-errors: true;
     in-out property <bool> output-show-debug: false;
+
+    // Notifications (pushed from Bevy — bottom-right stack above output panel)
+    in-out property <[NotificationData]> notifications: [];
+    callback dismiss-notification(int);
+
+    // Soul Panel — full script audit view (Rune + Luau, grouped)
+    in-out property <[SoulScriptData]> soul-scripts: [];
+    in-out property <int> soul-selected-script: -1;
+    in-out property <string> soul-api-key-status: "not-set";
+    in-out property <int> soul-rune-count: 0;
+    in-out property <int> soul-luau-server-count: 0;
+    in-out property <int> soul-luau-client-count: 0;
+    in-out property <int> soul-luau-module-count: 0;
+    callback soul-build-all();
+
+    // Notification settings (mirrored into File > Settings > Notifications)
+    in-out property <bool> notifications-enabled: true;
+    in-out property <bool> notifications-show-dismiss: true;
+    in-out property <bool> notifications-mute-file: false;
+    in-out property <bool> notifications-mute-script: false;
+    in-out property <bool> notifications-mute-editor: false;
+    in-out property <bool> notifications-mute-simulation: false;
+    in-out property <bool> notifications-mute-network: false;
+    in-out property <bool> notifications-mute-task: false;
+    in-out property <bool> notifications-mute-general: false;
+    in-out property <bool> notifications-mute-info: false;
+    in-out property <bool> notifications-mute-warning: false;
+    callback notification-settings-changed();
     
     // Unified explorer tree data: ECS entities + filesystem (pushed from Bevy)
     in-out property <[TreeNode]> tree-nodes: [];
@@ -2107,9 +2138,31 @@ export component StudioWindow inherits Window {
                         }
                         
                         if root.right-tab-index == 2: SoulPanel {
+                            scripts: root.soul-scripts;
+                            selected-script: root.soul-selected-script;
+                            api-key-status: root.soul-api-key-status;
+                            rune-count: root.soul-rune-count;
+                            luau-server-count: root.soul-luau-server-count;
+                            luau-client-count: root.soul-luau-client-count;
+                            luau-module-count: root.soul-luau-module-count;
+                            on-select-script(id) => { root.soul-selected-script = id; }
                             on-build-script(id) => { root.build-script(id); }
                             on-open-script(id) => { root.open-script(id); }
-                            on-configure-api() => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
+                            on-build-all => { root.soul-build-all(); }
+                            on-configure-api => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
+                            on-script-context-menu(id, x, y) => {
+                                root.show-context-menu = true;
+                                root.context-menu-x = x;
+                                root.context-menu-y = y;
+                                root.context-menu-target-id = id;
+                                root.context-menu-target-type = "soul-script";
+                                root.context-menu-items = [
+                                    { id: "soul-reveal", label: "Reveal in Explorer", shortcut: "", enabled: true, separator-after: false },
+                                    { id: "soul-open-summary", label: "Open Summary", shortcut: "", enabled: true, separator-after: false },
+                                    { id: "soul-open-code", label: "Open Code", shortcut: "", enabled: true, separator-after: true },
+                                    { id: "soul-build", label: "Build", shortcut: "", enabled: true, separator-after: false },
+                                ];
+                            }
                         }
                         
                         if root.right-tab-index == 3: WorkshopPanel {
@@ -2215,10 +2268,18 @@ export component StudioWindow inherits Window {
     // ========================================================================
     
     
-    // Notifications (toast messages)
+    // Notifications (toast messages) — anchored bottom-right, above the
+    // output panel + command bar. Stack grows upward from bottom.
     Notifications {
-        x: parent.width - 320px;
-        y: 80px;
+        width: 320px;
+        x: parent.width - 336px;
+        y: parent.height
+            - (root.show-output ? root.output-height : 0px)
+            - 36px  // command bar height
+            - self.height
+            - 16px; // bottom padding
+        notifications: root.notifications;
+        on-dismiss(id) => { root.dismiss-notification(id); }
     }
     
     // Layout dropdown overlay (click anywhere outside to dismiss)
@@ -2349,8 +2410,20 @@ export component StudioWindow inherits Window {
         active-tab <=> root.settings-active-tab;
         show-help-icons <=> root.show-help-icons;
         help-opens-in-tab <=> root.help-opens-in-tab;
+        notifications-enabled <=> root.notifications-enabled;
+        notifications-show-dismiss <=> root.notifications-show-dismiss;
+        notifications-mute-file <=> root.notifications-mute-file;
+        notifications-mute-script <=> root.notifications-mute-script;
+        notifications-mute-editor <=> root.notifications-mute-editor;
+        notifications-mute-simulation <=> root.notifications-mute-simulation;
+        notifications-mute-network <=> root.notifications-mute-network;
+        notifications-mute-task <=> root.notifications-mute-task;
+        notifications-mute-general <=> root.notifications-mute-general;
+        notifications-mute-info <=> root.notifications-mute-info;
+        notifications-mute-warning <=> root.notifications-mute-warning;
         on-help-icons-changed(val) => { root.help-icons-changed(val); }
         on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
+        on-notifications-changed => { root.notification-settings-changed(); }
         on-save => { root.show-settings-dialog = false; }
         on-close => { root.show-settings-dialog = false; }
     }

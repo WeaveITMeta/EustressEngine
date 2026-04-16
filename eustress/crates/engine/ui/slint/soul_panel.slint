@@ -6,101 +6,182 @@
 import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
 
-// Soul script data
+// Soul script data — a single script row in the panel.
 export struct SoulScriptData {
     entity-id: int,
     name: string,
-    status: string, // "idle", "building", "success", "error"
+    /// "idle", "building", "success", "error", "not-built"
+    status: string,
     last-build: string,
+    /// Full compile/runtime error text (shown when row is expanded).
     error-message: string,
     line-count: int,
+    /// "rune" | "luau-server" | "luau-client" | "luau-module"
+    language: string,
+    /// Full filesystem path (for "Reveal in Explorer" + context menu)
+    file-path: string,
+}
+
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <int> count: 0;
+
+    height: 22px;
+    background: #0f0f1a;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 6px;
+
+        Text {
+            text: root.title;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.count;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        width: 100%; height: 1px;
+        background: Theme.border-color;
+    }
 }
 
 component ScriptRow inherits Rectangle {
     in property <string> name: "";
     in property <string> status: "idle";
     in property <string> last-build: "";
+    in property <string> error-message: "";
     in property <bool> selected: false;
-    
+    in property <bool> can-build: true;
+    property <bool> expanded: false;
+
     callback clicked();
     callback build();
     callback open();
-    
-    height: 48px;
-    background: self.selected ? Theme.selection-background : 
+    callback context-menu(length, length); // absolute x, y
+
+    // Fixed 96px expanded height shows ~5 lines of wrapped error at 11px font;
+    // good enough for typical compile errors without tying layout to a child
+    // element inside a conditional (which Slint doesn't allow referencing).
+    height: root.expanded && root.error-message != "" ? 144px : 48px;
+    background: root.selected ? Theme.selection-background :
                 touch.has-hover ? Theme.explorer-item-hover : transparent;
     border-radius: 4px;
-    
+
     touch := TouchArea {
-        clicked => { root.clicked(); }
+        clicked => {
+            root.clicked();
+            if root.status == "error" && root.error-message != "" { root.expanded = !root.expanded; }
+        }
         double-clicked => { root.open(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                root.context-menu(self.absolute-position.x + self.mouse-x,
+                                  self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
-    
-    HorizontalBox {
-        padding: 8px;
-        spacing: 8px;
-        
-        // Icon
-        Rectangle {
-            width: 32px;
-            height: 32px;
-            background: root.status == "success" ? Theme.accent-green :
-                        root.status == "error" ? Theme.accent-red :
-                        root.status == "building" ? Theme.accent-blue :
-                        Theme.background-tertiary;
-            border-radius: 4px;
-            
-            Image {
-                width: 20px;
-                height: 20px;
-                source: @image-url("../../assets/icons/soulservice.svg");
-                image-fit: contain;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+
+    VerticalLayout {
+        padding: 0px;
+
+        HorizontalBox {
+            padding: 8px;
+            spacing: 8px;
+            height: 48px;
+
+            // Icon
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                background: root.status == "success" ? Theme.accent-green :
+                            root.status == "error" ? Theme.accent-red :
+                            root.status == "building" ? Theme.accent-blue :
+                            Theme.background-tertiary;
+                border-radius: 4px;
+
+                Image {
+                    width: 20px;
+                    height: 20px;
+                    source: @image-url("../../assets/icons/soulservice.svg");
+                    image-fit: contain;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // Info
+            VerticalBox {
+                horizontal-stretch: 1;
+                spacing: 2px;
+
+                Text {
+                    text: root.name;
+                    color: Theme.text-primary;
+                    font-weight: 500;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.status == "building" ? "Building..." :
+                          root.status == "error" ? "Build failed — click to expand" :
+                          root.status == "success" ? "Built " + root.last-build :
+                          root.status == "not-built" ? "Not built" :
+                          "Idle";
+                    color: root.status == "error" ? Theme.text-error :
+                           root.status == "success" ? Theme.text-success :
+                           Theme.text-secondary;
+                    font-size: 11px;
+                }
+            }
+
+            // Build button (only Rune scripts have explicit builds; Luau loads on run)
+            if root.can-build: Rectangle {
+                width: 60px;
+                height: 28px;
+                y: (parent.height - self.height) / 2;
+                background: root.status == "building" ? Theme.button-background : Theme.button-primary;
+                border-radius: 4px;
+
+                TouchArea {
+                    enabled: root.status != "building";
+                    clicked => { root.build(); }
+                }
+
+                Text {
+                    text: root.status == "building" ? "..." : "Build";
+                    color: white;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
-        
-        // Info
-        VerticalBox {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            
-            Text {
-                text: root.name;
-                color: Theme.text-primary;
-                font-weight: 500;
-            }
-            
-            Text {
-                text: root.status == "building" ? "Building..." :
-                      root.status == "error" ? "Build failed" :
-                      root.status == "success" ? "Built " + root.last-build :
-                      "Not built";
-                color: root.status == "error" ? Theme.text-error :
-                       root.status == "success" ? Theme.text-success :
-                       Theme.text-secondary;
+
+        // Expanded error area — wraps full error text for readability
+        if root.expanded && root.error-message != "": Rectangle {
+            background: #2a1818;
+            border-width: 1px;
+            border-color: #4a2020;
+
+            err-text := Text {
+                x: 8px; y: 6px;
+                width: parent.width - 16px;
+                text: root.error-message;
+                color: Theme.text-error;
                 font-size: 11px;
-            }
-        }
-        
-        // Build button
-        Rectangle {
-            width: 60px;
-            height: 28px;
-            background: root.status == "building" ? Theme.button-background : Theme.button-primary;
-            border-radius: 4px;
-            
-            TouchArea {
-                enabled: root.status != "building";
-                clicked => { root.build(); }
-            }
-            
-            Text {
-                text: root.status == "building" ? "..." : "Build";
-                color: white;
-                font-size: 12px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                wrap: word-wrap;
             }
         }
     }
@@ -111,13 +192,22 @@ export component SoulPanel inherits Rectangle {
     in property <[SoulScriptData]> scripts: [];
     in property <int> selected-script: -1;
     in property <string> api-key-status: "not-set"; // "not-set", "valid", "invalid"
-    
+
+    // Section counts — pushed from Rust so section headers render without
+    // needing Slint-side array filtering (which isn't supported).
+    in property <int> rune-count: 0;
+    in property <int> luau-server-count: 0;
+    in property <int> luau-client-count: 0;
+    in property <int> luau-module-count: 0;
+
     // Callbacks
     callback on-build-script(int);
     callback on-open-script(int);
     callback on-build-all();
     callback on-configure-api();
     callback on-select-script(int);
+    /// Right-click context menu on a script row — open menu at (x, y) with entity id
+    callback on-script-context-menu(int, length, length);
     
     background: Theme.panel-background;
 
@@ -263,22 +353,106 @@ export component SoulPanel inherits Rectangle {
         
         if root.scripts.length > 0: ScrollView {
             vertical-stretch: 1;
-            
-            VerticalBox {
-                padding: 4px;
-                spacing: 2px;
-                
-                for script in root.scripts: ScriptRow {
-                    name: script.name;
-                    status: script.status;
-                    last-build: script.last-build;
-                    selected: script.entity-id == root.selected-script;
-                    
-                    clicked => { root.on-select-script(script.entity-id); }
-                    build => { root.on-build-script(script.entity-id); }
-                    open => { root.on-open-script(script.entity-id); }
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                // ── Rune Soul Scripts ──
+                if root.rune-count > 0: SectionHeader {
+                    title: "RUNE SOUL";
+                    count: root.rune-count;
+                }
+                for script[i] in root.scripts: Rectangle {
+                    // Show only Rune scripts in this section
+                    visible: script.language == "rune";
+                    height: self.visible ? row-rune.height : 0px;
+
+                    row-rune := ScriptRow {
+                        name: script.name;
+                        status: script.status;
+                        last-build: script.last-build;
+                        error-message: script.error-message;
+                        can-build: true;
+                        selected: script.entity-id == root.selected-script;
+
+                        clicked => { root.on-select-script(script.entity-id); }
+                        build => { root.on-build-script(script.entity-id); }
+                        open => { root.on-open-script(script.entity-id); }
+                        context-menu(x, y) => { root.on-script-context-menu(script.entity-id, x, y); }
+                    }
+                }
+
+                // ── Luau Server Scripts ──
+                if root.luau-server-count > 0: SectionHeader {
+                    title: "LUAU SERVER";
+                    count: root.luau-server-count;
+                }
+                for script[i] in root.scripts: Rectangle {
+                    visible: script.language == "luau-server";
+                    height: self.visible ? row-ls.height : 0px;
+
+                    row-ls := ScriptRow {
+                        name: script.name;
+                        status: script.status;
+                        last-build: script.last-build;
+                        error-message: script.error-message;
+                        can-build: false;
+                        selected: script.entity-id == root.selected-script;
+
+                        clicked => { root.on-select-script(script.entity-id); }
+                        open => { root.on-open-script(script.entity-id); }
+                        context-menu(x, y) => { root.on-script-context-menu(script.entity-id, x, y); }
+                    }
+                }
+
+                // ── Luau Client Scripts ──
+                if root.luau-client-count > 0: SectionHeader {
+                    title: "LUAU CLIENT";
+                    count: root.luau-client-count;
+                }
+                for script[i] in root.scripts: Rectangle {
+                    visible: script.language == "luau-client";
+                    height: self.visible ? row-lc.height : 0px;
+
+                    row-lc := ScriptRow {
+                        name: script.name;
+                        status: script.status;
+                        last-build: script.last-build;
+                        error-message: script.error-message;
+                        can-build: false;
+                        selected: script.entity-id == root.selected-script;
+
+                        clicked => { root.on-select-script(script.entity-id); }
+                        open => { root.on-open-script(script.entity-id); }
+                        context-menu(x, y) => { root.on-script-context-menu(script.entity-id, x, y); }
+                    }
+                }
+
+                // ── Luau Modules ──
+                if root.luau-module-count > 0: SectionHeader {
+                    title: "LUAU MODULES";
+                    count: root.luau-module-count;
+                }
+                for script[i] in root.scripts: Rectangle {
+                    visible: script.language == "luau-module";
+                    height: self.visible ? row-lm.height : 0px;
+
+                    row-lm := ScriptRow {
+                        name: script.name;
+                        status: script.status;
+                        last-build: script.last-build;
+                        error-message: script.error-message;
+                        can-build: false;
+                        selected: script.entity-id == root.selected-script;
+
+                        clicked => { root.on-select-script(script.entity-id); }
+                        open => { root.on-open-script(script.entity-id); }
+                        context-menu(x, y) => { root.on-script-context-menu(script.entity-id, x, y); }
+                    }
                 }
             }
         }
+
     }
 }

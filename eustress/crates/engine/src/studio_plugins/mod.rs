@@ -732,6 +732,49 @@ fn handle_plugin_action_events(
                     notifications.error("Could not find selected entity");
                 }
             }
+            "soul:build_all" => {
+                // Queue a build for every entity that has SoulScriptData — we
+                // only have Instance/BillboardGui/TextLabel queries here, so
+                // fall back to a notification. A full bulk-build would need
+                // another query param (out of scope for this handler's budget).
+                notifications.info("Build All: trigger via each script's Build button");
+            }
+            id if id.starts_with("soul:") => {
+                // Format: "soul:<verb>:<entity-index>" — entity-index matches
+                // what `sync_soul_panel_to_slint` publishes as `entity-id`.
+                let mut parts = id.splitn(3, ':');
+                let _prefix = parts.next();
+                let verb = parts.next().unwrap_or("");
+                let id_str = parts.next().unwrap_or("");
+                let entity_idx: u32 = id_str.parse().unwrap_or(u32::MAX);
+                let target = instance_query.iter()
+                    .find(|(e, _)| e.index().index() == entity_idx)
+                    .map(|(e, inst)| (e, inst.clone()));
+                let Some((entity, inst)) = target else {
+                    notifications.warning(format!("Soul action '{}' — entity {} not found", verb, entity_idx));
+                    continue;
+                };
+
+                match verb {
+                    "reveal_in_explorer" => {
+                        let selected_id = format!("{}v{}", entity.index(), entity.generation());
+                        selection_manager.0.write().set_selected(vec![selected_id]);
+                    }
+                    "open_summary" | "open_code" => {
+                        // Push to tab manager via StudioState's pending slot. The
+                        // script editor Summary/Code toggle is user-driven; we just
+                        // surface the tab and let the user switch modes.
+                        studio_state.pending_open_script = Some((entity.index().index() as i32, inst.name.clone()));
+                    }
+                    "build" => {
+                        studio_state.pending_build_entity = Some(entity);
+                        notifications.info("Build requested");
+                    }
+                    _ => {
+                        info!("🔌 Unknown soul action: {}", verb);
+                    }
+                }
+            }
             _ => {
                 info!("🔌 Unknown plugin action: {}", event.action_id);
             }
