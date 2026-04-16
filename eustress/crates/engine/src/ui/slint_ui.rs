@@ -966,10 +966,6 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
             // Asset Manager sync: scan Universe + Space directories (throttled internally)
             .add_systems(Update, sync_asset_manager_to_slint)
-            // Push notification queue to Slint (dirty-flag gated)
-            .add_systems(Update, sync_notifications_to_slint.after(SlintSystems::Drain))
-            // Push Soul Panel script list to Slint (hash-gated)
-            .add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain))
             // Output log → EustressStream topic "log/output" (fires only when console changes)
             .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
@@ -992,6 +988,18 @@ impl Plugin for SlintUiPlugin {
             ).chain())
             .add_systems(Update, crate::auth::auth_poll_system)
             .add_systems(Startup, try_restore_auth_session);
+
+        // ── Feature-gated sync systems ────────────────────────────────────────
+        // Each lives in its own `#[cfg]` block because Rust's cfg attribute
+        // can't gate individual method calls inside a builder chain.
+        #[cfg(feature = "notifications")]
+        {
+            app.add_systems(Update, sync_notifications_to_slint.after(SlintSystems::Drain));
+        }
+        #[cfg(feature = "soul-panel")]
+        {
+            app.add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain));
+        }
     }
 }
 
@@ -9997,6 +10005,7 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
 /// Push all script entities (Rune Soul + Luau Server/Client/Module) to the
 /// Soul Panel. Rebuilds the Slint model whenever the count or any status
 /// changes; otherwise a no-op.
+#[cfg(feature = "soul-panel")]
 fn sync_soul_panel_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     soul_scripts: Query<(Entity, &eustress_common::classes::Instance, &crate::soul::SoulScriptData)>,
@@ -10130,6 +10139,7 @@ fn sync_soul_panel_to_slint(
 
 /// Push the notification queue to Slint whenever it changes. Cheap no-op
 /// when the queue hasn't been mutated since the last frame (`dirty` flag).
+#[cfg(feature = "notifications")]
 fn sync_notifications_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     mut queue: Option<ResMut<super::notifications_impl::NotificationQueue>>,

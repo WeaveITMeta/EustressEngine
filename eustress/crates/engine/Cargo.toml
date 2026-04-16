@@ -141,15 +141,50 @@ png = "0.17"
 slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
 
 [features]
-default = ["realism-scripting", "webview"]
+# ── Build tiers ───────────────────────────────────────────────────────────────
+# "core" is the stable release tier: currently enables every feature so builds
+# from the Core branch match main until we intentionally strip features. When a
+# module needs to be excluded from Core, remove it from this list — the module
+# itself stays gated by its individual feature flag.
+default = ["core"]
+core = [
+    "realism-scripting",
+    "webview",
+    "streaming",
+    "notifications",
+    "soul-panel",
+    "mindspace",
+    "workshop",
+    "ai-integration",
+    "forge",
+    "bliss",
+]
+
+# ── Individual feature gates ──────────────────────────────────────────────────
+# Rune scripting with VM pooling and ECS bindings
+realism-scripting = []
+# Wry webview support (Windows/macOS/Linux)
+webview = ["wry"]
+# EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail
+streaming = ["eustress-common/streaming"]
+# Toast notifications (bottom-right stack + Settings tab)
+notifications = []
+# Soul Panel — script audit view with Rune/Luau split
+soul-panel = []
+# MindSpace panel — BillboardGui label authoring
+mindspace = []
+# Workshop panel — AI-driven ideation pipeline (implies ai-integration)
+workshop = ["ai-integration"]
+# Claude API integration — Soul code generation, Workshop, summary builds
+ai-integration = []
+# Forge orchestration (deployment + remote publishing)
+forge = []
+# Bliss node (Bliss token economy integration)
+bliss = []
+
+# ── Build profile toggles ─────────────────────────────────────────────────────
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]
 debug = ["bevy/bevy_debug_stepping"]
 # CEF webview support (macOS only currently)
 cef = ["bevy_cef"]
-# Wry webview support (Windows/macOS/Linux)
-webview = ["wry"]
-# Rune scripting with VM pooling and ECS bindings
-realism-scripting = []
-# EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail
-streaming = ["eustress-common/streaming"]

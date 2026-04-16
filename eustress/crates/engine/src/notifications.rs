@@ -120,6 +120,7 @@ pub struct ExperienceUpdate {
 /// need to know anything about toasts — this bridge converts every entry
 /// into a [`crate::ui::notifications_impl::ActiveNotification`] and expires
 /// them via the toast system's regular timer.
+#[cfg(feature = "notifications")]
 fn drain_manager_to_toasts(
     mut manager: ResMut<NotificationManager>,
     mut queue: Option<ResMut<crate::ui::notifications_impl::NotificationQueue>>,
@@ -163,7 +164,12 @@ impl Plugin for NotificationPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<NotificationManager>()
-            .init_resource::<FavoriteUpdatePoller>()
-            .add_systems(Update, drain_manager_to_toasts);
+            .init_resource::<FavoriteUpdatePoller>();
+
+        // Bridge drain → toasts is only useful when the notifications UI is
+        // compiled in. Without the feature, `NotificationManager.success/…`
+        // still accumulates entries but no toast ever renders.
+        #[cfg(feature = "notifications")]
+        app.add_systems(Update, drain_manager_to_toasts);
     }
 }

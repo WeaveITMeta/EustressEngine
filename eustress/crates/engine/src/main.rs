@@ -203,7 +203,8 @@ fn main() {
         .init_resource::<PlayerService>()
         // Startup args
         .insert_resource(args.clone())
-        // Notifications (must be before SlintUiPlugin which uses NotificationManager)
+        // NotificationManager resource — always registered. The toast bridge
+        // system inside this plugin is itself gated on `notifications`.
         .add_plugins(NotificationPlugin)
         // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
         .add_plugins(UndoPlugin)

@@ -5,6 +5,20 @@ incremental = true
 # Use all cores
 jobs = 8
 
+# ── Build tier aliases ────────────────────────────────────────────────────────
+# These match the [features] tiers in crates/engine/Cargo.toml.
+# `cargo core` / `cargo studio-dev` / etc. run from the eustress/ workspace root.
+[alias]
+# Core: stable release build (all features currently, strip later)
+core          = "build --release -p eustress-engine --no-default-features --features core"
+core-dev      = "build -p eustress-engine --no-default-features --features core"
+# Studio: active development build with default features (= core today)
+studio        = "build --release -p eustress-engine"
+studio-dev    = "build -p eustress-engine"
+# Run shortcuts
+run-core      = "run --release -p eustress-engine --no-default-features --features core"
+run-studio    = "run -p eustress-engine"
+
 # Uncomment for faster local builds on Windows (requires rust-lld in PATH):
 # [target.x86_64-pc-windows-msvc]
 # linker = "rust-lld.exe"
