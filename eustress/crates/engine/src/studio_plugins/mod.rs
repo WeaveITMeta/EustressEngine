@@ -242,7 +242,7 @@ fn handle_plugin_menu_actions(
 fn handle_plugin_action_events(
     mut commands: Commands,
     mut events: MessageReader<PluginActionEvent>,
-    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     mut studio_state: ResMut<crate::ui::StudioState>,
     instance_query: Query<(Entity, &crate::classes::Instance)>,
     billboard_query: Query<&crate::classes::BillboardGui>,
@@ -806,7 +806,7 @@ fn process_plugin_actions(
     mut commands: Commands,
     mut manager: ResMut<PluginManager>,
     mut clock: ResMut<SimClock>,
-    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
@@ -1069,7 +1069,7 @@ fn process_plugin_actions(
 /// When selection changes, populate the edit buffer with the TextLabel text (if present)
 fn sync_mindspace_selection(
     mut studio_state: ResMut<crate::ui::StudioState>,
-    selection_manager: Option<Res<crate::ui::BevySelectionManager>>,
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     // Query to find entities by their Instance component
     instance_query: Query<(Entity, &crate::classes::Instance)>,
     // Query to find BillboardGui children
