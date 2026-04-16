@@ -1107,7 +1107,7 @@ export component StudioWindow inherits Window {
                         
                         home-btn-touch := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.open-web-tab("https://eustress.dev"); }
+                            clicked => { root.open-web-tab("https://eustress.dev/learn"); }
                         }
                         
                         Image {
@@ -1615,7 +1615,7 @@ export component StudioWindow inherits Window {
                         }
                         // Ctrl+T: open new web tab
                         if event.modifiers.control && event.text == "t" {
-                            root.open-web-tab("about:blank");
+                            root.open-web-tab("https://eustress.dev/learn");
                             return accept;
                         }
                         // Ctrl+L: focus URL bar (when on web tab)
