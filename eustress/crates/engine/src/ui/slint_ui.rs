@@ -5446,22 +5446,34 @@ fn drain_slint_actions(
                     info!("📜 Created Script '{}' at {:?}", script_name, script_dir);
                 }
 
-                // Model / Folder inserts → create directory with _instance.toml
+                // Model / Folder inserts → create directory as child of selected item
                 if action == "insert:model" || action == "insert:folder" {
                     let part_type_str = if action == "insert:model" { "Model" } else { "Folder" };
-                    let space_root = crate::space::default_space_root();
-                    let workspace_dir = space_root.join("Workspace");
-                    let _ = std::fs::create_dir_all(&workspace_dir);
-                    let base = part_type_str.to_string();
-                    let dir_name = {
-                        let test = workspace_dir.join(&base);
-                        if !test.exists() { base.clone() } else {
-                            (1..1000).map(|i| format!("{}{}", base, i))
-                                .find(|c| !workspace_dir.join(c).exists())
-                                .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
+
+                    // Resolve parent: selected entity's directory, or Workspace root
+                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
+                        match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
                         }
-                    };
-                    let dir_path = workspace_dir.join(&dir_name);
+                    } else { None };
+
+                    let space_root = crate::space::default_space_root();
+                    let write_dir = selected_entity
+                        .and_then(|pe| queries.loaded_from_file.get(pe).ok())
+                        .map(|(_, lff)| {
+                            if lff.path.is_dir() { lff.path.clone() }
+                            else { lff.path.parent().unwrap_or(&space_root.join("Workspace")).to_path_buf() }
+                        })
+                        .unwrap_or_else(|| space_root.join("Workspace"));
+
+                    let base = part_type_str.to_string();
+                    let dir_name = (0..1000u32).find_map(|i| {
+                        let c = if i == 0 { base.clone() } else { format!("{}{}", base, i) };
+                        if !write_dir.join(&c).exists() { Some(c) } else { None }
+                    }).unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()));
+
+                    let dir_path = write_dir.join(&dir_name);
                     if let Err(e) = std::fs::create_dir_all(&dir_path) {
                         error!("Failed to create {} directory: {}", part_type_str, e);
                     } else {
@@ -5481,10 +5493,7 @@ fn drain_slint_actions(
                                 eustress_common::classes::Instance {
                                     name: dir_name.clone(),
                                     class_name: class_enum,
-                                    archivable: true,
-                                    id: 0,
-                                    ai: false,
-                uuid: String::new(),
+                                    archivable: true, id: 0, ai: false, uuid: String::new(),
                                 },
                                 crate::space::file_loader::LoadedFromFile {
                                     path: dir_path.clone(),
@@ -5495,7 +5504,24 @@ fn drain_slint_actions(
                                 Transform::default(),
                                 Visibility::default(),
                             )).id();
+
+                            // Parent to selected entity
+                            if let Some(parent) = selected_entity {
+                                commands.entity(entity).insert(ChildOf(parent));
+                            }
+
+                            // Register + suppress file watcher duplicate
                             if let Some(ref mut registry) = res.file_registry {
+                                registry.register(dir_path.join("_instance.toml"), entity, crate::space::FileMetadata {
+                                    path: dir_path.clone(),
+                                    file_type: crate::space::FileType::Directory,
+                                    service: "Workspace".to_string(),
+                                    name: dir_name.clone(),
+                                    size: 0,
+                                    modified: std::time::SystemTime::now(),
+                                    children: Vec::new(),
+                                });
+                                // Also register the directory itself to prevent file watcher from re-spawning
                                 registry.register(dir_path.clone(), entity, crate::space::FileMetadata {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
@@ -5509,7 +5535,6 @@ fn drain_slint_actions(
                             if let Some(ref mut out) = res.output {
                                 out.info(format!("Created {} '{}'", part_type_str, dir_name));
                             }
-                            info!("📁 Created {} '{}' at {:?}", part_type_str, dir_name, dir_path);
                         }
                     }
                     continue;
@@ -5541,18 +5566,10 @@ fn drain_slint_actions(
                         [0.0, 0.5, 0.0]
                     };
 
-                    // Parent entity: selected Folder/Model or Workspace service root
+                    // Parent entity: any selected entity (unrestricted hierarchy)
                     let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
                         match &es.selected {
-                            SelectedItem::Entity(e) => {
-                                queries.instances.get(*e).ok().and_then(|(ent, inst)| {
-                                    match inst.class_name {
-                                        eustress_common::classes::ClassName::Folder
-                                        | eustress_common::classes::ClassName::Model => Some(ent),
-                                        _ => None,
-                                    }
-                                })
-                            }
+                            SelectedItem::Entity(e) => Some(*e),
                             _ => None,
                         }
                     } else { None };
