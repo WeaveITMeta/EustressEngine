@@ -3314,11 +3314,24 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ScriptContentChanged(text) => {
-                // Update CenterTabManager content first (before moving text)
+                // Update the correct field based on current mode (Summary or Code)
                 if let Some(ref mut mgr) = res.tab_manager {
                     let idx = mgr.active_tab;
                     if let Some(active) = mgr.tabs.get_mut(idx) {
-                        active.content = text.clone();
+                        let is_summary = matches!(&active.tab_type,
+                            super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
+                        );
+                        if is_summary {
+                            active.summary_content = text.clone();
+                            // Auto-save Summary.md to disk
+                            if let Some(ref path) = active.file_path {
+                                if path.is_dir() {
+                                    let _ = std::fs::write(path.join("Summary.md"), &text);
+                                }
+                            }
+                        } else {
+                            active.content = text.clone();
+                        }
                     }
                 }
                 // Store updated script content and mark dirty so

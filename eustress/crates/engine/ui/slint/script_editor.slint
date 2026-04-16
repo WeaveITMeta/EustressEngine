@@ -351,33 +351,59 @@ export component ScriptEditor inherits Rectangle {
         }
 
         // Summary / Markdown preview mode
-        if root.tabs.length > 0 && root.is-summary: ScrollView {
+        // Summary mode — full markdown editor (editable, monospace, line numbers)
+        if root.tabs.length > 0 && root.is-summary: Rectangle {
             vertical-stretch: 1;
+            background: #1a1a1a;
 
-            VerticalLayout {
-                padding: 24px;
-                spacing: 2px;
-                alignment: start;
+            HorizontalLayout {
+                spacing: 0px;
 
-                // When highlights are available, render each line with its color
-                if root.has-highlights: VerticalLayout {
-                    spacing: 2px;
-                    alignment: start;
-                    for hl in root.highlight-lines: Text {
-                        text: hl.text;
-                        color: rgba(hl.r, hl.g, hl.b, 1.0);
-                        font-size: hl.bold ? 15px : 14px;
-                        font-weight: hl.bold ? 700 : 400;
-                        wrap: word-wrap;
+                // Line number gutter
+                Rectangle {
+                    width: 52px;
+                    background: #141414;
+
+                    Text {
+                        x: 0px;
+                        y: 5px;
+                        width: parent.width - 10px;
+                        height: parent.height - 10px;
+                        text: root.line-numbers-text;
+                        color: Theme.text-secondary;
+                        font-size: 13px;
+                        font-family: "Consolas";
+                        horizontal-alignment: right;
+                        vertical-alignment: top;
+                        wrap: no-wrap;
                     }
                 }
 
-                // Fallback: plain text when no highlight data is available
-                if !root.has-highlights: Text {
-                    text: root.current-content;
-                    color: Theme.text-primary;
-                    font-size: 14px;
-                    wrap: word-wrap;
+                // Separator
+                Rectangle { width: 1px; background: #2a2a2a; }
+
+                // Editable markdown text area
+                ScrollView {
+                    horizontal-stretch: 1;
+
+                    summary-edit := TextInput {
+                        x: 12px;
+                        y: 5px;
+                        width: parent.width - 24px;
+                        min-height: parent.height;
+                        text: root.current-content;
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-family: "Consolas";
+                        single-line: false;
+                        wrap: no-wrap;
+                        read-only: false;
+                        selection-background-color: #264f78;
+                        selection-foreground-color: #ffffff;
+                        edited => {
+                            root.on-content-changed(self.text);
+                        }
+                    }
                 }
             }
         }
