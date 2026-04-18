@@ -13,7 +13,8 @@ import { Toolbox } from "toolbox.slint";
 import { AssetManager, AssetNode } from "asset_manager.slint";
 import { Collaboration } from "collaboration.slint";
 import { SoulPanel, SoulScriptData } from "soul_panel.slint";
-import { ScriptEditor, ScriptTab, CenterTab, HighlightLine, TokenSpan } from "script_editor.slint";
+import { ScriptEditor, ScriptTab, CenterTab, HighlightLine, TokenSpan, DiagnosticSpan } from "script_editor.slint";
+import { ProblemsPanel, ProblemItem } from "problems_panel.slint";
 import { WebBrowser } from "web_browser.slint";
 import { Notifications, NotificationData } from "notifications.slint";
 import { ViewSelector } from "view_selector.slint";
@@ -40,7 +41,7 @@ import { DataSourcesDialog } from "data_sources.slint";
 import { KeybindingsDialog } from "keybindings.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
-import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary } from "workshop_panel.slint";
+import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
@@ -236,6 +237,18 @@ export component StudioWindow inherits Window {
     in-out property <int> workshop-tool-count: 0;
     in-out property <string> workshop-active-tool: "";
 
+    // @ Mention autocomplete state — backed by MentionIndex in Bevy
+    in-out property <[MentionItemData]> workshop-mention-items: [];
+    in-out property <bool> workshop-mention-popup-visible: false;
+    in-out property <int> workshop-mention-selected-index: 0;
+    in-out property <string> workshop-mention-query: "";
+
+    // Problems panel (Rune analyzer diagnostics — right-side tab 4)
+    in property <[ProblemItem]> problem-items: [];
+    in property <int> problem-error-count: 0;
+    in property <int> problem-warning-count: 0;
+    in property <bool> problems-can-fix-with-workshop: false;
+
     // API Reference Panel (browsable scripting API catalog — opens as center tab)
     in property <[ApiEntryData]> api-entries: [];
     in property <[string]> api-categories: [];
@@ -350,6 +363,29 @@ export component StudioWindow inherits Window {
     in-out property <bool> output-show-errors: true;
     in-out property <bool> output-show-debug: false;
 
+    // Dynamic keyboard shortcuts — pushed from Bevy's KeyBindings resource
+    // on startup and on every change. Empty string hides the subtitle.
+    in-out property <string> shortcut-new: "";
+    in-out property <string> shortcut-open: "";
+    in-out property <string> shortcut-save: "";
+    in-out property <string> shortcut-undo: "";
+    in-out property <string> shortcut-redo: "";
+    in-out property <string> shortcut-cut: "";
+    in-out property <string> shortcut-copy: "";
+    in-out property <string> shortcut-paste: "";
+    in-out property <string> shortcut-duplicate: "";
+    in-out property <string> shortcut-delete: "";
+    in-out property <string> shortcut-select: "";
+    in-out property <string> shortcut-move: "";
+    in-out property <string> shortcut-scale: "";
+    in-out property <string> shortcut-rotate: "";
+    in-out property <string> shortcut-group: "";
+    in-out property <string> shortcut-ungroup: "";
+    in-out property <string> shortcut-lock: "";
+    in-out property <string> shortcut-unlock: "";
+    in-out property <string> shortcut-anchor: "";
+    in-out property <string> shortcut-focus: "";
+
     // Notifications (pushed from Bevy — bottom-right stack above output panel)
     in-out property <[NotificationData]> notifications: [];
     callback dismiss-notification(int);
@@ -357,7 +393,17 @@ export component StudioWindow inherits Window {
     // Soul Panel — full script audit view (Rune + Luau, grouped)
     in-out property <[SoulScriptData]> soul-scripts: [];
     in-out property <int> soul-selected-script: -1;
+    // "not-set" | "valid" | "invalid" — drives the Soul & Workshop banners.
+    // Written by a Bevy sync system that reads SoulServiceSettings.
     in-out property <string> soul-api-key-status: "not-set";
+
+    // Shared Soul API key — Settings dialog edits it, sync system pushes
+    // whatever is in `SoulServiceSettings`/`GlobalSoulSettings` on the way
+    // in, the save action pushes it back out. BYOK: never leaves the
+    // machine until the user makes an API call themselves.
+    in-out property <string> soul-api-key: "";
+    in-out property <bool> soul-api-key-valid: false;
+    callback soul-api-key-saved();
     in-out property <int> soul-rune-count: 0;
     in-out property <int> soul-luau-server-count: 0;
     in-out property <int> soul-luau-client-count: 0;
@@ -449,12 +495,20 @@ export component StudioWindow inherits Window {
     in-out property <int> center-active-tab: 0;
     in-out property <string> script-editor-content: "";
     in property <string> script-line-numbers: "1";  // Pre-computed "1\n2\n3...N" pushed by Rust
+    // One entry per source line ("1", "2", …) so the gutter can render each
+    // on the same 18px grid as the code overlay. Pushed by Rust alongside
+    // `script-line-numbers`.
+    in property <[string]> script-line-numbers-array: ["1"];
     // Pulsed true by Rust on tab switch/load to reset the editor scroll to line 1
     in-out property <bool> script-scroll-to-top: false;
     // Syntax-highlighted lines pushed from Rust (one per source line).
     // Empty when no file is open or language is unsupported.
     in property <[HighlightLine]> script-highlight-lines: [];
     in property <[TokenSpan]> script-token-spans: [];
+    in property <[DiagnosticSpan]> script-diagnostic-spans: [];
+    // Set by Rust when go-to-definition / problem-jump wants the editor to
+    // scroll to a specific line. One-shot: Slint resets to 0 after applying.
+    in-out property <int> script-scroll-to-line: 0;
     
     // Active tab type helper (set by Rust sync system)
     in-out property <string> active-tab-type: "scene"; // "scene", "script", "web"
@@ -651,6 +705,17 @@ export component StudioWindow inherits Window {
     
     // Workshop Panel (System 0: Ideation)
     callback workshop-send-message(string);
+    callback workshop-mention-query-changed(string);
+    callback workshop-mention-commit(int);
+    callback workshop-mention-cancel();
+
+    // Problems panel callbacks
+    callback problems-jump-to(string, int, int);   // file_path, line, column
+    callback problems-fix-with-workshop();
+
+    // Script editor IDE features (Phase 3-4)
+    callback script-go-to-definition(int, int);    // line, col (1-based)
+    callback script-find-references(int, int);     // line, col (1-based)
     callback workshop-approve-mcp(int);
     callback workshop-skip-mcp(int);
     callback workshop-edit-mcp(int);
@@ -701,7 +766,7 @@ export component StudioWindow inherits Window {
             transform-mode: root.transform-mode;
             play-state: root.play-state;
             has-unsaved-changes: root.has-unsaved-changes;
-            
+
             // Bind View menu panel visibility (two-way)
             show-explorer <=> root.show-explorer;
             show-properties <=> root.show-properties;
@@ -709,6 +774,29 @@ export component StudioWindow inherits Window {
             show-assets <=> root.show-assets;
             show-collaboration <=> root.show-collaboration;
             show-command-bar <=> root.show-command-bar;
+
+            // Pipe dynamic keyboard shortcuts into the ribbon subtitles
+            shortcut-new: root.shortcut-new;
+            shortcut-open: root.shortcut-open;
+            shortcut-save: root.shortcut-save;
+            shortcut-undo: root.shortcut-undo;
+            shortcut-redo: root.shortcut-redo;
+            shortcut-cut: root.shortcut-cut;
+            shortcut-copy: root.shortcut-copy;
+            shortcut-paste: root.shortcut-paste;
+            shortcut-duplicate: root.shortcut-duplicate;
+            shortcut-delete: root.shortcut-delete;
+            shortcut-select: root.shortcut-select;
+            shortcut-move: root.shortcut-move;
+            shortcut-scale: root.shortcut-scale;
+            shortcut-rotate: root.shortcut-rotate;
+            shortcut-group: root.shortcut-group;
+            shortcut-ungroup: root.shortcut-ungroup;
+            shortcut-lock: root.shortcut-lock;
+            shortcut-unlock: root.shortcut-unlock;
+            shortcut-anchor: root.shortcut-anchor;
+            shortcut-focus: root.shortcut-focus;
+
             account-name: root.account-name;
             account-status: root.account-status;
             sync-status: root.sync-status;
@@ -1519,13 +1607,15 @@ export component StudioWindow inherits Window {
                                         clicked => { root.close-center-tab(root.tab-context-menu-index); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/close.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Close"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                         Rectangle { horizontal-stretch: 1; }
                                         Text { text: "Ctrl+W"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
                                     }
                                 }
-                                
+
                                 // Close Others
                                 Rectangle {
                                     height: 28px;
@@ -1536,11 +1626,13 @@ export component StudioWindow inherits Window {
                                         clicked => { root.close-other-tabs(root.tab-context-menu-index); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/close.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Close Others"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
-                                
+
                                 // Close All
                                 Rectangle {
                                     height: 28px;
@@ -1551,11 +1643,13 @@ export component StudioWindow inherits Window {
                                         clicked => { root.close-all-tabs(); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/close.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Close All"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
-                                
+
                                 // Close to the Right
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
@@ -1566,14 +1660,16 @@ export component StudioWindow inherits Window {
                                         clicked => { root.close-tabs-to-right(root.tab-context-menu-index); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/close.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Close to the Right"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
-                                
+
                                 // Separator
                                 Rectangle { height: 1px; background: Theme.border-color; }
-                                
+
                                 // Copy Path
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
@@ -1584,11 +1680,13 @@ export component StudioWindow inherits Window {
                                         clicked => { root.copy-tab-path(root.tab-context-menu-index); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/ui/link.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Copy Path"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
-                                
+
                                 // Reveal in Explorer
                                 if root.tab-context-menu-index >= 0: Rectangle {
                                     height: 28px;
@@ -1599,7 +1697,9 @@ export component StudioWindow inherits Window {
                                         clicked => { root.reveal-tab-in-explorer(root.tab-context-menu-index); }
                                     }
                                     HorizontalLayout {
-                                        padding-left: 10px; padding-right: 10px;
+                                        padding-left: 8px; padding-right: 10px;
+                                        spacing: 8px;
+                                        Image { width: 14px; height: 14px; source: @image-url("../../assets/icons/folder.svg"); image-fit: contain; colorize: Theme.text-secondary; vertical-alignment: center; }
                                         Text { text: "Reveal in Explorer"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
@@ -1821,11 +1921,13 @@ export component StudioWindow inherits Window {
                         active-tab: root.center-active-tab - 1;
                         current-content: root.script-editor-content;
                         line-numbers-text: root.script-line-numbers;
+                        line-numbers-array: root.script-line-numbers-array;
                         scroll-to-top-trigger <=> root.script-scroll-to-top;
                         highlight-lines: root.script-highlight-lines;
                         has-highlights: root.script-highlight-lines.length > 0;
                         token-spans: root.script-token-spans;
                         has-token-spans: root.script-token-spans.length > 0;
+                        diagnostic-spans: root.script-diagnostic-spans;
 
                         on-tab-selected(idx) => {
                             root.center-active-tab = idx + 1;
@@ -1840,6 +1942,8 @@ export component StudioWindow inherits Window {
                         on-toggle-mode(idx) => {
                             root.toggle-mode(idx + 1);
                         }
+                        on-go-to-definition(line, col) => { root.script-go-to-definition(line, col); }
+                        on-find-references(line, col) => { root.script-find-references(line, col); }
                         on-save => { }
                         on-build => {
                             if root.center-active-tab > 0 && root.center-active-tab <= root.center-tabs.length {
@@ -2031,78 +2135,182 @@ export component StudioWindow inherits Window {
                                 background: root.right-tab-index == 0 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.right-tab-index = 0; }
                                 }
-                                
-                                Text {
-                                    text: "Properties";
-                                    color: root.right-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Properties";
+                                        color: root.right-tab-index == 0 ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
-                            
+
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.right-tab-index == 1 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.right-tab-index = 1; }
                                 }
-                                
-                                Text {
-                                    text: "History";
-                                    color: root.right-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: "History";
+                                        color: root.right-tab-index == 1 ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
-                            
+
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.right-tab-index == 2 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.right-tab-index = 2; }
                                 }
-                                
-                                Text {
-                                    text: "Soul";
-                                    color: root.right-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Soul";
+                                        color: root.right-tab-index == 2 ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
-                            
+
                             Rectangle {
                                 horizontal-stretch: 1;
                                 background: root.right-tab-index == 3 ? Theme.panel-background : Theme.tab-inactive;
                                 border-top-left-radius: 4px;
                                 border-top-right-radius: 4px;
-                                
+
                                 TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.right-tab-index = 3; }
                                 }
-                                
-                                Text {
-                                    text: "Workshop";
-                                    color: root.right-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
-                                    font-size: 12px;
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    padding-right: 6px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Workshop";
+                                        color: root.right-tab-index == 3 ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            // Overflow chevron → dropdown with additional panels
+                            // (mirrors the left-panel Terrain overflow pattern).
+                            // Houses the Problems panel; we can add more as other
+                            // analyzer surfaces come online.
+                            Rectangle {
+                                width: 24px;
+                                background: right-more-touch.has-hover ? Theme.button-hover : Theme.tab-inactive;
+                                border-top-left-radius: 4px;
+                                border-top-right-radius: 4px;
+
+                                right-more-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { right-more-popup.show(); }
+                                }
+
+                                // Error badge overlay on the chevron — makes it
+                                // obvious when the Problems panel has unseen
+                                // errors without needing the user to open it.
+                                if root.problem-error-count > 0 && root.right-tab-index != 4: Rectangle {
+                                    x: 2px; y: 2px;
+                                    width: 8px; height: 8px;
+                                    background: #e53935;
+                                    border-radius: 4px;
+                                }
+
+                                Image {
+                                    width: 12px;
+                                    height: 12px;
+                                    source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                                    image-fit: contain;
+                                    colorize: Theme.text-secondary;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
+                                }
+
+                                right-more-popup := PopupWindow {
+                                    x: -120px;
+                                    y: parent.height;
+                                    width: 160px;
+
+                                    Rectangle {
+                                        background: #1e1e1e;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: #3a3a3a;
+                                        drop-shadow-blur: 8px;
+                                        drop-shadow-color: #00000080;
+                                        width: 160px;
+
+                                        VerticalLayout {
+                                            padding-top: 4px;
+                                            padding-bottom: 4px;
+
+                                            // Problems toggle
+                                            Rectangle {
+                                                height: 26px;
+                                                background: problems-item-touch.has-hover ? Theme.button-hover : transparent;
+
+                                                problems-item-touch := TouchArea {
+                                                    mouse-cursor: pointer;
+                                                    clicked => { root.right-tab-index = 4; }
+                                                }
+
+                                                HorizontalLayout {
+                                                    padding-left: 10px;
+                                                    padding-right: 10px;
+                                                    spacing: 6px;
+
+                                                    Text {
+                                                        text: "Problems";
+                                                        color: root.right-tab-index == 4 ? Theme.text-primary : Theme.text-secondary;
+                                                        font-size: 11px;
+                                                        vertical-alignment: center;
+                                                        horizontal-stretch: 1;
+                                                    }
+                                                    if root.problem-error-count > 0: Text {
+                                                        text: root.problem-error-count;
+                                                        color: #ef5350;
+                                                        font-size: 10px;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -2157,10 +2365,11 @@ export component StudioWindow inherits Window {
                                 root.context-menu-target-id = id;
                                 root.context-menu-target-type = "soul-script";
                                 root.context-menu-items = [
-                                    { id: "soul-reveal", label: "Reveal in Explorer", shortcut: "", enabled: true, separator-after: false },
-                                    { id: "soul-open-summary", label: "Open Summary", shortcut: "", enabled: true, separator-after: false },
-                                    { id: "soul-open-code", label: "Open Code", shortcut: "", enabled: true, separator-after: true },
-                                    { id: "soul-build", label: "Build", shortcut: "", enabled: true, separator-after: false },
+                                    { id: "soul-reveal", label: "Reveal in Explorer", shortcut: "", icon: @image-url("../../assets/icons/folder.svg"), enabled: true, separator-after: false },
+                                    { id: "soul-open-summary", label: "Open Summary", shortcut: "", icon: @image-url("../../assets/icons/ui/new-file.svg"), enabled: true, separator-after: false },
+                                    { id: "soul-open-code", label: "Open Code", shortcut: "", icon: @image-url("../../assets/icons/script.svg"), enabled: true, separator-after: true },
+                                    { id: "soul-build", label: "Build", shortcut: "", icon: @image-url("../../assets/icons/ui/settings.svg"), enabled: true, separator-after: true },
+                                    { id: "copy-path", label: "Copy Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
                                 ];
                             }
                         }
@@ -2178,6 +2387,12 @@ export component StudioWindow inherits Window {
                             tool-count: root.workshop-tool-count;
                             active-tool: root.workshop-active-tool;
 
+                            // @ Mention autocomplete plumbing
+                            mention-items: root.workshop-mention-items;
+                            mention-popup-visible <=> root.workshop-mention-popup-visible;
+                            mention-selected-index <=> root.workshop-mention-selected-index;
+                            mention-query <=> root.workshop-mention-query;
+
                             on-send-message(text) => { root.workshop-send-message(text); }
                             on-approve-mcp(id) => { root.workshop-approve-mcp(id); }
                             on-skip-mcp(id) => { root.workshop-skip-mcp(id); }
@@ -2192,6 +2407,18 @@ export component StudioWindow inherits Window {
                             on-execute-command(cmd) => { root.workshop-send-message(cmd); }
                             on-load-conversation(id) => { root.workshop-load-conversation(id); }
                             on-new-conversation() => { root.workshop-new-conversation(); }
+                            on-mention-query-changed(text) => { root.workshop-mention-query-changed(text); }
+                            on-mention-commit(index) => { root.workshop-mention-commit(index); }
+                            on-mention-cancel() => { root.workshop-mention-cancel(); }
+                        }
+
+                        if root.right-tab-index == 4: ProblemsPanel {
+                            items: root.problem-items;
+                            error-count: root.problem-error-count;
+                            warning-count: root.problem-warning-count;
+                            can-fix-with-workshop: root.problems-can-fix-with-workshop;
+                            jump-to(path, line, col) => { root.problems-jump-to(path, line, col); }
+                            fix-with-workshop() => { root.problems-fix-with-workshop(); }
                         }
 
                     }
@@ -2268,16 +2495,19 @@ export component StudioWindow inherits Window {
     // ========================================================================
     
     
-    // Notifications (toast messages) — anchored bottom-right, above the
-    // output panel + command bar. Stack grows upward from bottom.
-    Notifications {
+    // Notifications (toast messages) — only rendered when the queue is
+    // non-empty. Previous version was always-on and used `self.height` in
+    // its y-binding, which triggered a Slint property-recursion crash at
+    // startup.
+    if root.notifications.length > 0: Notifications {
         width: 320px;
         x: parent.width - 336px;
-        y: parent.height
+        y: 80px;
+        height: parent.height
             - (root.show-output ? root.output-height : 0px)
-            - 36px  // command bar height
-            - self.height
-            - 16px; // bottom padding
+            - 36px   // command bar
+            - 80px   // top offset matches self.y
+            - 16px;  // bottom padding
         notifications: root.notifications;
         on-dismiss(id) => { root.dismiss-notification(id); }
     }
@@ -2410,6 +2640,8 @@ export component StudioWindow inherits Window {
         active-tab <=> root.settings-active-tab;
         show-help-icons <=> root.show-help-icons;
         help-opens-in-tab <=> root.help-opens-in-tab;
+        soul-api-key <=> root.soul-api-key;
+        soul-api-key-valid: root.soul-api-key-valid;
         notifications-enabled <=> root.notifications-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
         notifications-mute-file <=> root.notifications-mute-file;
@@ -2424,7 +2656,13 @@ export component StudioWindow inherits Window {
         on-help-icons-changed(val) => { root.help-icons-changed(val); }
         on-help-opens-in-tab-changed(val) => { root.help-opens-in-tab-changed(val); }
         on-notifications-changed => { root.notification-settings-changed(); }
-        on-save => { root.show-settings-dialog = false; }
+        on-save => {
+            // Commit the typed API key to Bevy so Soul/Workshop panels stop
+            // showing the Configure banner. Settings dialog already wrote
+            // root.soul-api-key via two-way binding.
+            root.soul-api-key-saved();
+            root.show-settings-dialog = false;
+        }
         on-close => { root.show-settings-dialog = false; }
     }
     
@@ -2587,185 +2825,9 @@ export component StudioWindow inherits Window {
         on-remove-output-binding(i) => { root.remove-sim-output-binding(i); }
     }
 
-    // ====================================================================
-    // Context Menu Overlay — appears at cursor position for Explorer/3D
-    // ====================================================================
-    if root.show-context-menu: Rectangle {
-        x: 0px; y: 0px; width: 100%; height: 100%;
-        background: transparent;
-
-        // Click-away dismisses the menu
-        TouchArea {
-            clicked => { root.show-context-menu = false; }
-        }
-
-        // Menu panel
-        Rectangle {
-            x: root.context-menu-x;
-            y: root.context-menu-y;
-            width: 220px;
-            height: ctx-menu-layout.preferred-height + 8px;
-            background: #1e1e1e;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: #3a3a3a;
-            drop-shadow-blur: 8px;
-            drop-shadow-color: #00000080;
-
-            ctx-menu-layout := VerticalLayout {
-                padding: 4px;
-                spacing: 0px;
-
-                // Default entity menu items
-                if root.context-menu-node-type == "entity" || root.context-menu-node-type == "": Rectangle {
-                    height: ctx-entity-layout.preferred-height;
-                    ctx-entity-layout := VerticalLayout {
-                        spacing: 0px;
-                        // Insert submenu
-                        Rectangle {
-                            height: 28px;
-                            background: insert-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            insert-touch := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.show-context-menu = false;
-                                    // Open Insert menu (same as ribbon Insert dropdown)
-                                }
-                            }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Insert Object..."; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
-                            }
-                        }
-                        // Separator
-                        Rectangle { height: 1px; background: #3a3a3a; }
-                        // Cut
-                        Rectangle {
-                            height: 26px;
-                            background: cut-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            cut-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("cut"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Cut"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+X"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Copy
-                        Rectangle {
-                            height: 26px;
-                            background: copy-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            copy-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("copy"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Copy"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+C"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Paste Into
-                        Rectangle {
-                            height: 26px;
-                            background: paste-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            paste-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("paste"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Paste Into"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+V"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Duplicate
-                        Rectangle {
-                            height: 26px;
-                            background: dup-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            dup-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("duplicate"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Duplicate"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+D"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Separator
-                        Rectangle { height: 1px; background: #3a3a3a; }
-                        // Delete
-                        Rectangle {
-                            height: 26px;
-                            background: del-touch.has-hover ? #3a1515 : transparent;
-                            border-radius: 3px;
-                            del-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("delete"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Delete"; color: #ef5350; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Del"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Separator
-                        Rectangle { height: 1px; background: #3a3a3a; }
-                        // Rename
-                        Rectangle {
-                            height: 26px;
-                            background: rename-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            rename-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("rename"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Rename"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "F2"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Group
-                        Rectangle {
-                            height: 26px;
-                            background: group-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            group-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("group"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Group"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+G"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                        // Ungroup
-                        Rectangle {
-                            height: 26px;
-                            background: ungroup-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                            border-radius: 3px;
-                            ungroup-touch := TouchArea { mouse-cursor: pointer; clicked => { root.context-action("ungroup"); root.show-context-menu = false; } }
-                            HorizontalLayout {
-                                padding-left: 8px; spacing: 8px; alignment: start;
-                                Text { text: "Ungroup"; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                Text { text: "Ctrl+U"; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                            }
-                        }
-                    }
-                }
-
-                // File context menu items
-                for item in root.context-menu-items: Rectangle {
-                    height: item.separator-after ? 28px : 26px;
-                    background: item-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                    border-radius: 3px;
-                    opacity: item.enabled ? 1.0 : 0.4;
-                    item-touch := TouchArea {
-                        mouse-cursor: item.enabled ? pointer : default;
-                        clicked => {
-                            if item.enabled {
-                                root.context-action(item.id);
-                                root.show-context-menu = false;
-                            }
-                        }
-                    }
-                    HorizontalLayout {
-                        padding-left: 8px; padding-right: 8px; spacing: 8px; alignment: start;
-                        Image { width: 16px; height: 16px; source: item.icon; image-fit: contain; vertical-alignment: center; }
-                        Text { text: item.label; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                        if item.shortcut != "": Text { text: item.shortcut; color: Theme.text-secondary; font-size: 11px; vertical-alignment: center; }
-                    }
-                }
-            }
-        }
-    }
+    // (Duplicate hand-rolled context menu removed. The single source of
+    // truth for the right-click popup is the `ContextMenu` component
+    // invoked at the top of this `StudioWindow` — see around line 2438.
+    // Keeping this placeholder comment so a future diff reader knows why
+    // there isn't a second overlay here.)
 }

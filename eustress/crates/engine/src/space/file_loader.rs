@@ -892,7 +892,7 @@ pub fn spawn_directory_entry(
             true // default: visible
         };
 
-        let mut entity_cmds = commands.spawn((
+        let entity_cmds = commands.spawn((
             eustress_common::classes::Instance {
                 name: dir_meta.name.clone(),
                 class_name,
@@ -1351,6 +1351,7 @@ impl Plugin for SpaceFileLoaderPlugin {
                 super::file_watcher::process_file_changes,
                 super::instance_loader::write_instance_changes_system,
                 super::space_ops::apply_space_rescan,
+                super::instance_loader::update_base_part_size_from_mesh,
             ));
     }
 }

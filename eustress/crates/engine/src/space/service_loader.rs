@@ -93,6 +93,13 @@ pub struct ServiceMetadata {
     pub created: String,
     #[serde(default)]
     pub last_modified: String,
+    /// Original creator — stamped once on first signed write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<crate::space::instance_loader::CreatorStamp>,
+    /// Append-only signed modification chain (never capped — doubles as AI
+    /// training signal for "who is capable of what" attribution).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifications: Vec<crate::space::instance_loader::CreatorStamp>,
 }
 
 /// ECS component for service entities - stores ALL properties dynamically
@@ -311,15 +318,46 @@ pub fn spawn_service_as_ui_root(
     entity
 }
 
-/// Save service properties back to _service.toml file
-/// Preserves all dynamic properties
+/// Save service properties back to _service.toml file.
+/// Unsigned variant — leaves the audit chain untouched.
 pub fn save_service_to_file(service: &ServiceComponent) -> Result<(), String> {
+    save_service_to_file_signed(service, None)
+}
+
+/// Signed variant: if `stamp` is `Some`, appends to `metadata.modifications`
+/// and sets `created_by` when missing. The `created` timestamp and existing
+/// audit chain are preserved by reading the current file first.
+pub fn save_service_to_file_signed(
+    service: &ServiceComponent,
+    stamp: Option<&crate::space::instance_loader::CreatorStamp>,
+) -> Result<(), String> {
+    // Preserve existing metadata (created, created_by, modifications) by reading
+    // the current file. Fresh services just use defaults.
+    let existing_metadata = std::fs::read_to_string(&service.toml_path)
+        .ok()
+        .and_then(|s| toml::from_str::<ServiceDefinition>(&s).ok())
+        .map(|d| d.metadata)
+        .unwrap_or_default();
+
     // Convert properties back to TOML values
     let mut toml_properties = HashMap::new();
     for (key, value) in &service.properties {
         toml_properties.insert(key.clone(), property_value_to_toml(value));
     }
-    
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let created = if existing_metadata.created.is_empty() { now.clone() } else { existing_metadata.created };
+
+    let (created_by, modifications, last_modified) = match stamp {
+        Some(s) => {
+            let created_by = existing_metadata.created_by.or_else(|| Some(s.clone()));
+            let mut chain = existing_metadata.modifications;
+            chain.push(s.clone());
+            (created_by, chain, s.timestamp.clone())
+        }
+        None => (existing_metadata.created_by, existing_metadata.modifications, now),
+    };
+
     let definition = ServiceDefinition {
         service: ServiceProperties {
             class_name: service.class_name.clone(),
@@ -330,18 +368,20 @@ pub fn save_service_to_file(service: &ServiceComponent) -> Result<(), String> {
         },
         metadata: ServiceMetadata {
             id: format!("{}-service", service.class_name.to_lowercase()),
-            created: String::new(), // Preserve existing if possible
-            last_modified: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            created,
+            last_modified,
+            created_by,
+            modifications,
         },
         properties: HashMap::new(),
     };
-    
+
     let toml_str = toml::to_string_pretty(&definition)
         .map_err(|e| format!("Failed to serialize service: {}", e))?;
-    
+
     std::fs::write(&service.toml_path, toml_str)
         .map_err(|e| format!("Failed to write {}: {}", service.toml_path.display(), e))?;
-    
+
     info!("💾 Saved service to {:?}", service.toml_path);
     Ok(())
 }

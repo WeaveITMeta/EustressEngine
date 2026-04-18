@@ -25,8 +25,6 @@ pub struct GizmoToolsPlugin;
 
 impl Plugin for GizmoToolsPlugin {
     fn build(&self, app: &mut App) {
-        use bevy::camera::visibility::RenderLayers;
-
         app.init_gizmo_group::<TransformGizmoGroup>()
            .add_systems(Startup, configure_gizmos)
            .add_systems(Update, diagnose_gizmos_once.run_if(

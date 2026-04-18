@@ -1,0 +1,215 @@
+// ============================================================================
+// Workshop @ Mention — Popup + Chip components
+// ============================================================================
+//
+// Drops into the Workshop chat input. When the user types `@`, the chat
+// buffers the query; the backend searches the MentionIndex and pushes
+// results into `items`. The popup renders filtered results; keyboard nav
+// is handled by the host (WorkshopPanel intercepts Up/Down/Enter/Escape).
+//
+// MentionChip is a standalone pill that can be rendered inline in
+// chat messages (for resolved @references).
+
+import { Theme } from "theme.slint";
+
+// ─ Data structs ────────────────────────────────────────────────────────────
+
+export struct MentionItemData {
+    /// Unique id (u64, rendered as i64 into Slint). Returned on commit.
+    id: int,
+    /// Primary label (entity name, filename).
+    name: string,
+    /// Secondary text ("Part · Space1/V-Cell" etc.).
+    qualifier: string,
+    /// Machine-readable canonical path — the actual @ref inserted into text.
+    canonical: string,
+    /// Icon key for class_name_to_icon_filename lookup.
+    icon: image,
+    /// Kind tag ("entity" | "file" | "script" | "service") — colorizes pill.
+    kind: string,
+}
+
+// ─ MentionChip ─────────────────────────────────────────────────────────────
+// Standalone pill representing a resolved @reference inside chat content.
+// Used both in the popup (as selected-item highlight) and inline in
+// messages.
+
+export component MentionChip inherits Rectangle {
+    in property <string> name;
+    in property <string> kind; // "entity" | "file" | "script" | "service"
+    in property <image> icon;
+    in property <bool> highlighted: false;
+
+    // Colors keyed by kind so users visually distinguish entity/file/etc.
+    property <color> accent: {
+        if root.kind == "entity" { return Theme.accent-blue; }
+        if root.kind == "file"   { return Theme.accent-purple; }
+        if root.kind == "script" { return Theme.accent-yellow; }
+        if root.kind == "service" { return Theme.accent-green; }
+        return Theme.accent-blue;
+    };
+
+    height: 22px;
+    width: chip-text.preferred-width + 30px;
+    background: root.highlighted
+        ? root.accent
+        : root.accent.with-alpha(0.18);
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: root.accent.with-alpha(0.6);
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 10px;
+        spacing: 4px;
+        alignment: center;
+
+        Image {
+            width: 12px;
+            height: 12px;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.highlighted ? white : root.accent;
+            vertical-alignment: center;
+        }
+
+        chip-text := Text {
+            text: "@" + root.name;
+            color: root.highlighted ? white : Theme.text-primary;
+            font-size: 11px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ─ MentionPopup ────────────────────────────────────────────────────────────
+// Floating list above the chat input. Driven by the backend-pushed `items`
+// slice; never does its own filtering. Keyboard nav flags via
+// `selected-index` (0-based) — host manages Up/Down.
+
+export component MentionPopup inherits Rectangle {
+    in property <[MentionItemData]> items: [];
+    in property <int> selected-index: 0;
+    /// When `items` is empty AND `show-recent-header` is true, we render
+    /// a "Recent" header even before items load — avoids a brief empty
+    /// flash when the user first types `@`.
+    in property <bool> show-recent-header: false;
+    /// Empty state copy when there's nothing to show.
+    in property <string> empty-hint: "No matches";
+
+    callback on-select(int); // item index committed
+
+    width: 360px;
+    height: items.length > 0
+        ? min(28px + items.length * 42px, 360px)
+        : 60px;
+    background: Theme.panel-background;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: #00000080;
+    drop-shadow-offset-y: 4px;
+    clip: true;
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 0px;
+
+        if root.show-recent-header: Rectangle {
+            height: 20px;
+            Text {
+                x: 8px;
+                text: root.items.length > 0 ? "RECENT" : "START TYPING TO SEARCH";
+                color: Theme.text-secondary;
+                font-size: 9px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.items.length == 0 && !root.show-recent-header: Rectangle {
+            height: 40px;
+            Text {
+                text: root.empty-hint;
+                color: Theme.text-disabled;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        for item[i] in root.items: Rectangle {
+            height: 42px;
+            background: i == root.selected-index ? Theme.selection-background : transparent;
+            border-radius: 4px;
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.on-select(i); }
+            }
+
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 10px;
+                alignment: center;
+
+                Image {
+                    width: 18px;
+                    height: 18px;
+                    source: item.icon;
+                    image-fit: contain;
+                    vertical-alignment: center;
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 1px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+
+                    Text {
+                        text: item.name;
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        font-weight: 500;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: item.qualifier;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        overflow: elide;
+                    }
+                }
+
+                // Right-side kind tag (small badge)
+                Rectangle {
+                    width: kind-text.preferred-width + 12px;
+                    height: 16px;
+                    background: {
+                        if item.kind == "entity" { return Theme.accent-blue.with-alpha(0.2); }
+                        if item.kind == "file"   { return Theme.accent-purple.with-alpha(0.2); }
+                        if item.kind == "script" { return Theme.accent-yellow.with-alpha(0.2); }
+                        if item.kind == "service" { return Theme.accent-green.with-alpha(0.2); }
+                        Theme.accent-blue.with-alpha(0.2)
+                    };
+                    border-radius: 8px;
+                    y: (parent.height - self.height) / 2;
+
+                    kind-text := Text {
+                        text: item.kind;
+                        color: Theme.text-secondary;
+                        font-size: 9px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

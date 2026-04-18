@@ -1749,6 +1749,11 @@ Start with pub fn main() { ... }"#.to_string()
             .ok_or(ClaudeError::NoApiKey)?;
 
         let timeout = Duration::from_secs(120);
+        let started = std::time::Instant::now();
+        // Best-effort prompt extraction for the audit log — pull text content
+        // from the first user message. Vision payloads can include image parts
+        // which we skip to keep the log readable.
+        let audit_prompt = extract_prompt_text(request);
 
         let response = ureq::post("https://api.anthropic.com/v1/messages")
             .set("x-api-key", api_key)
@@ -1771,9 +1776,25 @@ Start with pub fn main() { ... }"#.to_string()
                     return Err(ClaudeError::InvalidResponse("Empty response".to_string()));
                 }
 
-                let tokens = body.usage
-                    .map(|u| u.input_tokens.saturating_add(u.output_tokens))
-                    .unwrap_or(0);
+                let (tokens_in, tokens_out) = body.usage
+                    .map(|u| (u.input_tokens, u.output_tokens))
+                    .unwrap_or((0, 0));
+                let tokens = tokens_in.saturating_add(tokens_out);
+
+                // ── Constitutional audit (KL-10 + Section 7.3) ──
+                // Every successful Claude call writes a .log.toml into
+                // {SpaceRoot}/SoulService/Logs/ so the full reasoning chain
+                // is inspectable from inside the editor.
+                super::audit_log::log_claude_call(&super::audit_log::ClaudeCallRecord {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    model: body.model.clone(),
+                    caller: "claude-client/vision".to_string(),
+                    prompt: audit_prompt,
+                    response: text.clone(),
+                    tokens_input: tokens_in,
+                    tokens_output: tokens_out,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                });
 
                 Ok((text, tokens))
             }
@@ -1796,6 +1817,29 @@ Start with pub fn main() { ... }"#.to_string()
             }
         }
     }
+}
+
+/// Collect the text portions of a vision request's messages, joined into one
+/// human-readable prompt. Image parts are summarised as `[image: <media>]`
+/// so the audit log stays readable.
+fn extract_prompt_text(req: &VisionRequest) -> String {
+    let mut buf = String::new();
+    if let Some(sys) = &req.system {
+        buf.push_str("[system]\n");
+        buf.push_str(sys);
+        buf.push_str("\n\n");
+    }
+    for msg in &req.messages {
+        buf.push_str(&format!("[{}]\n", msg.role));
+        for content in &msg.content {
+            match content {
+                VisionContent::Text(t) => { buf.push_str(&t.text); buf.push('\n'); }
+                VisionContent::Image(_) => { buf.push_str("[image]\n"); }
+            }
+        }
+        buf.push('\n');
+    }
+    buf
 }
 
 // ============================================================================

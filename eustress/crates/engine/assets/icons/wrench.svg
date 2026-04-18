@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Wrench — maintenance / audit / tools metaphor -->
+  <path d="M 11.2 2.3
+           A 3 3 0 0 0 8.2 6.0
+           L 2.8 11.4
+           A 1 1 0 0 0 2.8 12.8
+           L 3.2 13.2
+           A 1 1 0 0 0 4.6 13.2
+           L 10.0 7.8
+           A 3 3 0 0 0 13.7 4.8
+           L 11.5 7.0
+           L 9.8 6.4
+           L 9.2 4.7
+           Z"
+        fill="#C8D0D8" stroke="#A0A8B0" stroke-width="0.5"
+        stroke-linejoin="round"/>
+</svg>

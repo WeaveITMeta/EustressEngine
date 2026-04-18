@@ -6,6 +6,154 @@
 import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EustressTextEdit — local replacement for std-widgets TextEdit.
+//
+// Slint's TextEdit bakes its own ContextMenuArea inside, so we can't add icons
+// or our own items (Copy Path, future Find / Go To Line, etc.) to its Cut /
+// Copy / Paste menu. The token-span syntax-highlighting overlay we draw on
+// top of TextEdit is also a thing we own already, so owning the editor itself
+// is the smaller step.
+//
+// This component mirrors TextEditBase's public surface (text / font / wrap /
+// edited / key-pressed / set-selection-offsets / cut / copy / paste /
+// select-all / has-focus) so existing callers swap in without changes, and
+// wraps the inner TextInput in our own ContextMenuArea with MenuItem + icon.
+// ─────────────────────────────────────────────────────────────────────────────
+component EustressTextEdit inherits Rectangle {
+    in-out property <string> text;
+    in property <length> font-size;
+    in property <string> font-family;
+    in property <TextWrap> wrap: word-wrap;
+    in property <bool> read-only: false;
+    in property <brush> foreground: Theme.text-primary;
+    out property <bool> has-focus: text-input.has-focus;
+
+    callback edited(text: string);
+    callback key-pressed(event: KeyEvent) -> EventResult;
+    /// Fired when the user picks "Go to Definition". `line` and `column`
+    /// are 1-based and derived from the right-click position via monospace
+    /// math (CHAR_WIDTH = 7.8px, LINE_HEIGHT = 18px). Rust resolves the
+    /// symbol at that cursor position via the analyzer's SymbolIndex.
+    callback go-to-definition(int, int);
+    /// Fired when the user picks "Find References". Same coord convention.
+    callback find-references(int, int);
+
+    // Public API matching TextEditBase so scroll-to-top-trigger and friends
+    // keep working with the same call sites.
+    public function set-selection-offsets(start: int, end: int) {
+        text-input.set-selection-offsets(start, end);
+    }
+    public function select-all() { text-input.select-all(); }
+    public function clear-selection() { text-input.clear-selection(); }
+    public function cut() { text-input.cut(); }
+    public function copy() { text-input.copy(); }
+    public function paste() { text-input.paste(); }
+
+    forward-focus: text-input;
+
+    // Tracks the last known caret line/col (1-based) so F12 / Shift+F12
+    // can dispatch Go-to-Def / Find-Refs without needing pixel coords
+    // from a right-click. Updated by `cursor-position-changed` on the
+    // inner TextInput.
+    property <int> caret-line: 1;
+    property <int> caret-col: 1;
+
+    // Slint's `ContextMenuArea` owns the right-click hook AND the popup
+    // rendering; the popup's width is floored by the active style's
+    // `MenuFrame.layout-min-width` (fluent = 280px). We can't narrow it
+    // without shipping a custom style, so we live with the 280px and
+    // use real Slint `MenuItem`s here — icons render because the
+    // fluent MenuItem honours the `icon: image` property at 12px.
+    //
+    // Go-to-Definition and Find-References don't belong in this menu
+    // because they need the caret position, not the mouse position —
+    // see F12 / Shift+F12 bindings in the TextInput below.
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "Cut";
+                icon: @image-url("../../assets/icons/ui/cut.svg");
+                enabled: !root.read-only;
+                activated => { text-input.cut(); }
+            }
+            MenuItem {
+                title: "Copy";
+                icon: @image-url("../../assets/icons/ui/copy.svg");
+                enabled: !root.text.is-empty;
+                activated => { text-input.copy(); }
+            }
+            MenuItem {
+                title: "Paste";
+                icon: @image-url("../../assets/icons/ui/paste.svg");
+                enabled: !root.read-only;
+                activated => { text-input.paste(); }
+            }
+            MenuSeparator {}
+            MenuItem {
+                title: "Select All";
+                icon: @image-url("../../assets/icons/ui/select.svg");
+                enabled: !root.text.is-empty;
+                activated => { text-input.select-all(); }
+            }
+        }
+
+        // Flickable is transparent by default — the overlay token-span Text
+        // elements underneath show through. std-widgets' ScrollView would
+        // paint fluent's opaque `Palette.background` over them.
+        flick := Flickable {
+            x: 0px; y: 0px;
+            width: parent.width;
+            height: parent.height;
+            viewport-width: root.wrap == TextWrap.no-wrap
+                ? max(self.width, text-input.preferred-width)
+                : self.width;
+            viewport-height: max(self.height, text-input.preferred-height);
+
+            text-input := TextInput {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height;
+                enabled: true;
+                single-line: false;
+                wrap <=> root.wrap;
+                font-size <=> root.font-size;
+                font-family <=> root.font-family;
+                color <=> root.foreground;
+                text <=> root.text;
+                read-only <=> root.read-only;
+                page-height: flick.height;
+                accessible-role: none;
+
+                edited => { root.edited(self.text); }
+
+                // Track caret via pixel position → 1-based line/col.
+                // Monospace math: line = y/18 + 1, col = x/7.8 + 1.
+                cursor-position-changed(pos) => {
+                    root.caret-line = (pos.y / 18px) + 1;
+                    root.caret-col = max(1, (pos.x / 7.8px) + 1);
+                }
+
+                // F12 = Go to Definition, Shift+F12 = Find References.
+                // These use the caret we just tracked, which is the
+                // VS Code convention and also removes our dependency on
+                // a right-click menu for those actions.
+                key-pressed(event) => {
+                    if (event.text == Key.F12) {
+                        if (event.modifiers.shift) {
+                            root.find-references(root.caret-line, root.caret-col);
+                        } else {
+                            root.go-to-definition(root.caret-line, root.caret-col);
+                        }
+                        return accept;
+                    }
+                    root.key-pressed(event)
+                }
+            }
+        }
+    }
+}
+
 // One highlighted line: Rust pre-joins all tokens for the line into a single
 // text string and picks the dominant (first non-whitespace token) color.
 export struct HighlightLine {
@@ -27,6 +175,18 @@ export struct TokenSpan {
     g: float,
     b: float,
     bold: bool,
+}
+
+// One analyzer diagnostic, positioned for drawing as an underline squiggle
+// under the offending text. `line` is 0-based; `x_start`/`x_end` are pixel
+// offsets. `severity` is one of "error" | "warning" | "info" | "hint" — the
+// renderer picks the color. Populated by Rust from `ScriptAnalysis`.
+export struct DiagnosticSpan {
+    line: int,
+    x_start: float,
+    x_end: float,
+    severity: string,
+    message: string,
 }
 
 // Center tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
@@ -125,8 +285,15 @@ export component ScriptEditor inherits Rectangle {
     in property <int> cursor-line: 1;
     in property <int> cursor-column: 1;
     in property <bool> show-tab-bar: true;
-    // Pre-computed line number string pushed from Rust (e.g. "1\n2\n3\n...N")
+    // Pre-computed line number string pushed from Rust (e.g. "1\n2\n3\n...N").
+    // Kept for backwards compatibility with any other consumers; the gutter
+    // itself now uses `line-numbers-array` so each digit sits on the same
+    // 18px grid as the token-span overlay (no font-metric drift).
     in property <string> line-numbers-text: "1";
+    // One entry per source line, e.g. ["1", "2", "3", ...]. The gutter
+    // renders one Text per entry at `y: idx * 18px + 5px`, locking
+    // alignment to the code overlay.
+    in property <[string]> line-numbers-array: ["1"];
     // Set to true by Rust after loading new tab content; resets editor scroll to line 1.
     // Slint watches this and calls set-selection-offsets(0,0) on the TextEdit.
     in-out property <bool> scroll-to-top-trigger: false;
@@ -137,6 +304,9 @@ export component ScriptEditor inherits Rectangle {
     // Per-token spans for true syntax highlighting (replaces per-line coloring)
     in property <[TokenSpan]> token-spans: [];
     in property <bool> has-token-spans: false;
+    // Analyzer diagnostics rendered as colored underlines under offending text.
+    // Colors: error = red, warning = amber, info = blue, hint = grey.
+    in property <[DiagnosticSpan]> diagnostic-spans: [];
 
     // Callbacks
     callback on-tab-selected(int);
@@ -146,6 +316,8 @@ export component ScriptEditor inherits Rectangle {
     callback on-build();
     callback on-summarize();        // Reverse build: generate summary from code via Claude
     callback on-toggle-mode(int);   // Toggle summary/code for tab at index
+    callback on-go-to-definition(int, int);   // line, col (1-based)
+    callback on-find-references(int, int);    // line, col (1-based)
 
     // Derived: active tab mode ("summary" | "code" | "")
     property <string> active-mode: root.tabs.length > 0 && root.active-tab >= 0 && root.active-tab < root.tabs.length
@@ -203,7 +375,11 @@ export component ScriptEditor inherits Rectangle {
                         padding: 2px;
                         spacing: 2px;
 
-                        // Summary button
+                        // Summary button. We center the icon+text pair using a
+                        // HorizontalLayout with leading and trailing spacer
+                        // Rectangles — simpler than fighting Text's default
+                        // horizontal-stretch, which would otherwise push the
+                        // label right and leave the icon hugging the left edge.
                         Rectangle {
                             horizontal-stretch: 1;
                             border-radius: 3px;
@@ -220,13 +396,15 @@ export component ScriptEditor inherits Rectangle {
 
                             HorizontalLayout {
                                 spacing: 4px;
-                                alignment: center;
-
+                                Rectangle { horizontal-stretch: 1; }
                                 Image {
-                                    width: 14px; height: 14px;
+                                    // Drop explicit height so the layout cell's
+                                    // full height is the Image element bounds;
+                                    // `image-fit: contain` + `vertical-alignment: center`
+                                    // then center the glyph within that taller bound.
+                                    width: 14px;
                                     source: @image-url("../../assets/icons/ui/summary.svg");
                                     image-fit: contain;
-                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                     colorize: root.is-summary ? white : #66bb6a;
                                 }
@@ -234,9 +412,10 @@ export component ScriptEditor inherits Rectangle {
                                     text: "Summary";
                                     font-size: 11px;
                                     color: root.is-summary ? white : #66bb6a;
-                                    horizontal-alignment: center;
                                     vertical-alignment: center;
+                                    horizontal-stretch: 0;
                                 }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                         }
 
@@ -257,13 +436,11 @@ export component ScriptEditor inherits Rectangle {
 
                             HorizontalLayout {
                                 spacing: 4px;
-                                alignment: center;
-
+                                Rectangle { horizontal-stretch: 1; }
                                 Image {
-                                    width: 14px; height: 14px;
+                                    width: 14px;
                                     source: @image-url("../../assets/icons/script.svg");
                                     image-fit: contain;
-                                    horizontal-alignment: center;
                                     vertical-alignment: center;
                                     colorize: !root.is-summary && root.is-soul-script ? white : #66bb6a;
                                 }
@@ -271,9 +448,10 @@ export component ScriptEditor inherits Rectangle {
                                     text: "Code";
                                     font-size: 11px;
                                     color: !root.is-summary && root.is-soul-script ? white : #66bb6a;
-                                    horizontal-alignment: center;
                                     vertical-alignment: center;
+                                    horizontal-stretch: 0;
                                 }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                         }
                     }
@@ -296,22 +474,21 @@ export component ScriptEditor inherits Rectangle {
 
                     HorizontalLayout {
                         spacing: 4px;
-                        alignment: center;
-
+                        Rectangle { horizontal-stretch: 1; }
                         Image {
-                            width: 14px; height: 14px;
+                            width: 14px;
                             source: @image-url("../../assets/icons/ui/build.svg");
                             image-fit: contain;
-                            horizontal-alignment: center;
                             vertical-alignment: center;
                             colorize: white;
                         }
                         Text {
                             text: "Build"; color: white;
                             font-size: 12px;
-                            horizontal-alignment: center;
                             vertical-alignment: center;
+                            horizontal-stretch: 0;
                         }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
 
@@ -331,13 +508,11 @@ export component ScriptEditor inherits Rectangle {
 
                     HorizontalLayout {
                         spacing: 4px;
-                        alignment: center;
-
+                        Rectangle { horizontal-stretch: 1; }
                         Image {
-                            width: 14px; height: 14px;
+                            width: 14px;
                             source: @image-url("../../assets/icons/ui/summary.svg");
                             image-fit: contain;
-                            horizontal-alignment: center;
                             vertical-alignment: center;
                             colorize: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
                         }
@@ -346,9 +521,10 @@ export component ScriptEditor inherits Rectangle {
                             color: summarize-ta.has-hover ? #a5d6a7 : #66bb6a;
                             font-size: 11px;
                             font-weight: 600;
-                            horizontal-alignment: center;
                             vertical-alignment: center;
+                            horizontal-stretch: 0;
                         }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
 
@@ -425,22 +601,24 @@ export component ScriptEditor inherits Rectangle {
             HorizontalLayout {
                 spacing: 0px;
 
-                // Line number gutter
+                // Line number gutter — one Text per line, explicitly
+                // positioned on the shared 18px grid.
                 Rectangle {
                     width: 52px;
                     background: #141414;
+                    clip: true;
 
-                    Text {
+                    for num[idx] in root.line-numbers-array: Text {
                         x: 0px;
-                        y: 5px;
+                        y: idx * 18px + 5px;
                         width: parent.width - 10px;
-                        height: parent.height - 10px;
-                        text: root.line-numbers-text;
+                        height: 18px;
+                        text: num;
                         color: Theme.text-secondary;
                         font-size: 13px;
                         font-family: "Consolas";
                         horizontal-alignment: right;
-                        vertical-alignment: top;
+                        vertical-alignment: center;
                         wrap: no-wrap;
                     }
                 }
@@ -470,7 +648,7 @@ export component ScriptEditor inherits Rectangle {
                         }
                     }
 
-                    summary-edit := TextEdit {
+                    summary-edit := EustressTextEdit {
                         x: 0px; y: 0px; width: 100%; height: 100%;
                         text: root.current-content;
                         font-size: 13px;
@@ -520,23 +698,25 @@ export component ScriptEditor inherits Rectangle {
                         }
                     }
 
-                    // Line number text
+                    // Line number text — one Text per line on the same
+                    // 18px grid as the code overlay so the gutter never
+                    // drifts against the code as you scroll.
                     Rectangle {
                         x: 0; y: 0;
                         width: 100%; height: 100%;
                         background: transparent;
 
-                        Text {
+                        for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
-                            y: 5px;
+                            y: idx * 18px + 5px;
                             width: parent.width - 10px;
-                            height: parent.height - 10px;
-                            text: root.line-numbers-text;
+                            height: 18px;
+                            text: num;
                             color: Theme.text-secondary;
                             font-size: 13px;
                             font-family: "Consolas";
                             horizontal-alignment: right;
-                            vertical-alignment: top;
+                            vertical-alignment: center;
                             wrap: no-wrap;
                         }
                     }
@@ -570,17 +750,88 @@ export component ScriptEditor inherits Rectangle {
                         }
                     }
 
-                    // Editable TextEdit — transparent when token spans active
-                    editor-area := TextEdit {
+                    // Diagnostic squiggles + hover tooltip. The squiggle is a
+                    // thin colored bar under the offending range; the
+                    // invisible TouchArea sits OVER the offending text to
+                    // register hover. On hover, a floating tooltip renders
+                    // the diagnostic message above the squiggle.
+                    for diag in root.diagnostic-spans: Rectangle {
+                        x: diag.x_start * 1px + 12px;
+                        y: diag.line * 18px + 5px;
+                        width: max(4px, (diag.x_end - diag.x_start) * 1px);
+                        height: 18px;
+
+                        // Underline bar (at the bottom of the hovered area).
+                        Rectangle {
+                            x: 0px;
+                            y: 16px;
+                            width: parent.width;
+                            height: 2px;
+                            background: diag.severity == "error"   ? #e53935
+                                      : diag.severity == "warning" ? #fb8c00
+                                      : diag.severity == "info"    ? #1e88e5
+                                      :                               #757575;
+                        }
+
+                        diag-hover := TouchArea {
+                            mouse-cursor: text;
+                        }
+
+                        // Tooltip — only renders on hover. Wraps long
+                        // messages; sits above the squiggle so the line
+                        // being annotated stays visible.
+                        if diag-hover.has-hover: Rectangle {
+                            x: 0px;
+                            y: -6px - tooltip-text.preferred-height;
+                            width: min(420px, max(160px, tooltip-text.preferred-width + 16px));
+                            height: tooltip-text.preferred-height + 10px;
+                            background: #1e1f2e;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: diag.severity == "error"   ? #e53935
+                                        : diag.severity == "warning" ? #fb8c00
+                                        : diag.severity == "info"    ? #1e88e5
+                                        :                               #555;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: #00000088;
+                            z: 100;
+
+                            tooltip-text := Text {
+                                x: 8px;
+                                y: 5px;
+                                width: parent.width - 16px;
+                                text: diag.message;
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Editable EustressTextEdit — transparent when token spans
+                    // are active so the syntax-highlight overlay above shows
+                    // through. Owns its own right-click menu (Cut/Copy/Paste/
+                    // Select All / Go to Def / Find References with icons).
+                    editor-area := EustressTextEdit {
                         x: 0px; y: 0px; width: 100%; height: 100%;
                         text: root.current-content;
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
+                        // When syntax highlighting is active we hide the
+                        // TextInput's own glyphs so the overlay is the only
+                        // source of color, matching the old TextEdit behavior.
+                        foreground: root.has-token-spans ? transparent : Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;
                             root.on-content-changed(text);
+                        }
+                        go-to-definition(line, col) => {
+                            root.on-go-to-definition(line, col);
+                        }
+                        find-references(line, col) => {
+                            root.on-find-references(line, col);
                         }
                     }
 

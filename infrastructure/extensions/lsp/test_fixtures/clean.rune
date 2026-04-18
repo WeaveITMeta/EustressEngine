@@ -1,0 +1,25 @@
+// clean.rune — well-formed script for smoke-testing the LSP.
+//
+// What to verify in the editor:
+//   * No squiggles anywhere.
+//   * Outline view lists `on_init`, `on_update`, `clamp`.
+//   * F12 on `clamp(soc, 0.0, 1.0)` jumps to `fn clamp` below.
+//   * Shift+F12 on `clamp` shows 2 references (definition + callsite).
+//   * F2 on `clamp` rename-refactors both occurrences.
+//   * Ctrl+Space after `clam` completes to `clamp`.
+
+pub fn on_init() {
+    log_info("cycle_life ready");
+}
+
+pub fn on_update(dt) {
+    let soc = get_sim_value("battery.soc");
+    let safe = clamp(soc, 0.0, 1.0);
+    set_sim_value("battery.soc_safe", safe);
+}
+
+fn clamp(value, lo, hi) {
+    if value < lo { lo }
+    else if value > hi { hi }
+    else { value }
+}

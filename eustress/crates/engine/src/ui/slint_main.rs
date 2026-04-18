@@ -276,6 +276,22 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_workshop_resume_pipeline(move || q.push(SlintAction::WorkshopResumePipeline));
     let q = queue.clone(); ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
     let q = queue.clone(); ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
+    // @-mention autocomplete
+    let q = queue.clone(); ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
+    let q = queue.clone(); ui.on_workshop_mention_commit(move |idx| q.push(SlintAction::WorkshopMentionCommit(idx)));
+    let q = queue.clone(); ui.on_workshop_mention_cancel(move || q.push(SlintAction::WorkshopMentionCancel));
+
+    // Problems panel
+    let q = queue.clone(); ui.on_problems_jump_to(move |path, line, col|
+        q.push(SlintAction::ProblemsJumpTo(path.to_string(), line, col)));
+    let q = queue.clone(); ui.on_problems_fix_with_workshop(move ||
+        q.push(SlintAction::ProblemsFixWithWorkshop));
+
+    // Script editor IDE features — Phases 3 & 4
+    let q = queue.clone(); ui.on_script_go_to_definition(move |line, col|
+        q.push(SlintAction::ScriptGoToDefinition(line, col)));
+    let q = queue.clone(); ui.on_script_find_references(move |line, col|
+        q.push(SlintAction::ScriptFindReferences(line, col)));
 
     // API Reference panel
     let q = queue.clone(); ui.on_api_search_changed(move |text| q.push(SlintAction::ApiSearchChanged(text.to_string())));
@@ -457,6 +473,20 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
         }).collect();
         let model = slint::ModelRc::new(slint::VecModel::from(entries));
         ui.set_script_output_log(model);
+    }
+
+    // Viewport (3D) right-click menu request. We reuse the shared
+    // `show-context-menu` + `context-menu-items = []` path so the result is
+    // identical to an Explorer entity right-click — the same drain handler
+    // catches `on-action` and dispatches Cut/Copy/Delete/Copy Path/etc.
+    if let Some((cx, cy)) = state.request_viewport_context_menu {
+        ui.set_context_menu_x(cx);
+        ui.set_context_menu_y(cy);
+        ui.set_context_menu_target_id(-1);
+        ui.set_context_menu_target_type("viewport".into());
+        let empty: Vec<MenuItem> = Vec::new();
+        ui.set_context_menu_items(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(empty))));
+        ui.set_show_context_menu(true);
     }
 
     // Universe browser

@@ -19,7 +19,6 @@
 //! child elements (Frame, TextLabel, TextButton) are positioned absolutely within it.
 
 use bevy::prelude::*;
-use bevy::ui::{self};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

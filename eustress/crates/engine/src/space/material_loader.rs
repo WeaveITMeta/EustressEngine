@@ -204,7 +204,9 @@ impl MaterialRegistry {
     }
 
     /// Look up or insert a deduplicated material handle by cache key.
-    pub fn dedup_get_or_insert(
+    /// Crate-private: `MaterialCacheKey` is intentionally module-private,
+    /// so the callers live inside `space::material_loader` too.
+    pub(crate) fn dedup_get_or_insert(
         &mut self,
         key: MaterialCacheKey,
         handle: Handle<StandardMaterial>,

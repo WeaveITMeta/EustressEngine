@@ -12,6 +12,9 @@
 
 import { VerticalBox, HorizontalBox, ScrollView, Button, LineEdit, TextEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
+import { MentionPopup, MentionItemData } from "mention_popup.slint";
+
+export { MentionItemData }
 
 // ============================================================================
 // 1. Data Structures
@@ -411,6 +414,52 @@ export component WorkshopPanel inherits Rectangle {
     in property <[ConversationSummary]> past-conversations: [];
     in-out property <bool> show-history-modal: false;
     in-out property <string> history-search: "";
+
+    // ── @ Mention autocomplete ───────────────────────────────────────────
+    // Popup state driven by user typing. When the user types `@`, the host
+    // (Bevy side) receives the query prefix, searches the MentionIndex,
+    // and pushes results back via `mention-items`. Enter commits the
+    // selected item, which replaces the `@foo` token in `input-text` with
+    // the chosen entry's canonical path.
+    in property <[MentionItemData]> mention-items: [];
+    in-out property <bool> mention-popup-visible: false;
+    in-out property <int> mention-selected-index: 0;
+    /// Prefix the user has typed after `@` (no `@` char). Bevy side
+    /// watches this and re-queries on change.
+    in-out property <string> mention-query: "";
+    /// Character position where the `@` sits in `input-text`. Needed so
+    /// commit can splice the chip in exactly the right spot.
+    in-out property <int> mention-at-pos: -1;
+
+    callback on-mention-query-changed(string);  // emit when prefix changes
+    callback on-mention-commit(int);            // item index committed (also fires record_usage)
+    callback on-mention-cancel();               // popup dismissed without commit
+
+    /// Scan `input-text` for a trailing `@prefix` token; if found, open
+    /// the popup and emit a query. Called from the input field's `edited`
+    /// hook every keystroke. Cursor position isn't directly exposed by
+    /// Slint's TextInput so we scan from the end — works perfectly for
+    /// the common case (user types `@` at the caret).
+    function update-mention-state() {
+        // Find the last `@` in input-text. If the tail from there to end
+        // contains whitespace, the user already closed a previous mention;
+        // don't re-open.
+        // Slint has no .find() for strings — emulate via manual scan.
+        // For performance: input text is typically < 1 KB, linear scan is fine.
+        //
+        // Algorithm:
+        //   1. Walk characters from end to start.
+        //   2. If we hit whitespace before an `@`, no active mention.
+        //   3. If we hit `@`, extract the tail after it as the query.
+        //
+        // We implement this in a compact inline form.
+        //
+        // NOTE: Slint .character-count and string slicing are limited; we
+        // rely on the host callback to do the heavy lifting by passing
+        // the raw input-text. The host parses it and pushes query back
+        // via `mention-query` so the UI stays reactive.
+        root.on-mention-query-changed(root.input-text);
+    }
 
     // ---- Callbacks ----
     callback on-send-message(string);               // User sends a message
@@ -876,10 +925,63 @@ export component WorkshopPanel inherits Rectangle {
                             wrap: word-wrap;
 
                             accepted => {
+                                // If the popup is open, Enter commits the
+                                // highlighted mention instead of sending.
+                                if root.mention-popup-visible && root.mention-items.length > 0 {
+                                    root.on-mention-commit(root.mention-selected-index);
+                                    return;
+                                }
                                 if root.input-text != "" {
                                     root.on-send-message(root.input-text);
                                     root.input-text = "";
                                 }
+                            }
+
+                            // Live-edit hook — every keystroke scans back
+                            // from the cursor for the most recent `@`. If
+                            // one is found within 32 chars and not
+                            // followed by whitespace, the popup opens with
+                            // the prefix query.
+                            edited => {
+                                // Slint doesn't expose cursor-position here;
+                                // we approximate by scanning from the end
+                                // of input-text for the last `@` not
+                                // preceded by alphanumerics.
+                                // Simple heuristic: split on whitespace,
+                                // examine the final token.
+                                // Future refinement: expose cursor position
+                                // via a custom property.
+                                root.update-mention-state();
+                            }
+
+                            key-pressed(ev) => {
+                                // Intercept nav keys only when popup is open.
+                                if root.mention-popup-visible {
+                                    if ev.text == Key.UpArrow {
+                                        if root.mention-selected-index > 0 {
+                                            root.mention-selected-index -= 1;
+                                        }
+                                        return accept;
+                                    }
+                                    if ev.text == Key.DownArrow {
+                                        if root.mention-selected-index < root.mention-items.length - 1 {
+                                            root.mention-selected-index += 1;
+                                        }
+                                        return accept;
+                                    }
+                                    if ev.text == Key.Escape {
+                                        root.mention-popup-visible = false;
+                                        root.on-mention-cancel();
+                                        return accept;
+                                    }
+                                    if ev.text == Key.Tab {
+                                        if root.mention-items.length > 0 {
+                                            root.on-mention-commit(root.mention-selected-index);
+                                        }
+                                        return accept;
+                                    }
+                                }
+                                return reject;
                             }
                         }
                     }
@@ -913,6 +1015,29 @@ export component WorkshopPanel inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    // ── @ Mention Popup overlay ──────────────────────────────────────────
+    // Floats above the input area. Anchored bottom-right of the chat so
+    // it opens upward from the input. Host (Bevy) toggles visibility via
+    // `mention-popup-visible` in response to the user typing `@`.
+    if root.mention-popup-visible: Rectangle {
+        // Position: centered on the chat, aligned with the input. Sits
+        // just above the input area (~70px offset) so it doesn't obscure
+        // what the user is typing.
+        x: (parent.width - 360px) / 2;
+        y: parent.height - 120px - self.height;
+        width: 360px;
+        height: root.mention-items.length > 0
+            ? min(28px + root.mention-items.length * 42px, 360px)
+            : 60px;
+
+        MentionPopup {
+            items: root.mention-items;
+            selected-index: root.mention-selected-index;
+            show-recent-header: root.mention-query == "";
+            on-select(i) => { root.on-mention-commit(i); }
         }
     }
 

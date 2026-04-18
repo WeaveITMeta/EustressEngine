@@ -50,6 +50,8 @@ pub fn handle_spawn_part_events(
     mut camera_query: Query<&mut EustressCamera>,
     play_mode_state: Option<Res<State<PlayModeState>>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
+    mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     let Some(mut notifications) = notifications else { return };
@@ -184,6 +186,43 @@ pub fn handle_spawn_part_events(
                             name: part_name.to_string(),
                         }
                     );
+
+                    // Tag with LoadedFromFile so Explorer classification routes
+                    // this entity into the Workspace service bucket — otherwise
+                    // the spawned part ends up as an unclassified root node.
+                    commands.entity(spawned_entity).insert(
+                        crate::space::file_loader::LoadedFromFile {
+                            path: final_path.clone(),
+                            file_type: crate::space::file_loader::FileType::Toml,
+                            service: "Workspace".to_string(),
+                        }
+                    );
+
+                    // Register in SpaceFileRegistry so the file watcher's
+                    // `is_loaded(path)` check returns true when it sees the
+                    // newly-written TOML — prevents duplicate spawning.
+                    if let Some(ref mut registry) = file_registry {
+                        registry.register(
+                            final_path.clone(),
+                            spawned_entity,
+                            crate::space::file_loader::FileMetadata {
+                                path: final_path.clone(),
+                                file_type: crate::space::file_loader::FileType::Toml,
+                                service: "Workspace".to_string(),
+                                name: part_name.to_string(),
+                                size: toml_content.len() as u64,
+                                modified: std::time::SystemTime::now(),
+                                children: Vec::new(),
+                            },
+                        );
+                    }
+
+                    // Force the Explorer to re-sync next frame so the new
+                    // entity appears immediately without the 30-frame throttle.
+                    if let Some(ref mut es) = explorer_state {
+                        es.needs_immediate_sync = true;
+                    }
+
                     info!("💾 Auto-saved {:?}", final_path.file_name().unwrap_or_default());
                 }
             }

@@ -1,0 +1,213 @@
+// ============================================================================
+// Problems Panel — VS Code-style list of analyzer diagnostics for Rune
+// scripts. Backed by `ScriptAnalysis` (Rune compiler output). Each row is
+// clickable to jump to the offending line; header button "Fix with Workshop"
+// starts a new Workshop session seeded with the full problem list so Claude
+// (via Soul Settings API key) can resolve them.
+// ============================================================================
+
+import { Theme } from "theme.slint";
+
+// One row in the Problems list. Mirrors `script_editor::Diagnostic` after
+// flattening file path + line/col into display-friendly strings.
+export struct ProblemItem {
+    severity: string,   // "error" | "warning" | "info" | "hint"
+    file: string,       // display name (basename, e.g. "cycle_life.rune")
+    file_path: string,  // full path, for click routing
+    line: int,          // 1-based
+    column: int,        // 1-based
+    message: string,
+    source: string,     // "rune" | "rune-warning" | "rune-link"
+}
+
+export component ProblemsPanel inherits Rectangle {
+    in property <[ProblemItem]> items: [];
+    in property <int> error-count: 0;
+    in property <int> warning-count: 0;
+    /// True when Workshop has an active Claude API key in Soul Settings.
+    /// Controls whether the "Fix with Workshop" button is enabled.
+    in property <bool> can-fix-with-workshop: false;
+
+    callback jump-to(string, int, int);       // (file_path, line, column)
+    callback fix-with-workshop();              // open Workshop, seed with items
+    callback clear-filter();                   // (future) clear severity filter
+
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // ── Header: counts + Fix with Workshop button ────────────────────
+        Rectangle {
+            height: 32px;
+            background: Theme.header-background;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 6px;
+
+                // Error badge
+                Rectangle {
+                    width: err-lbl.preferred-width + 18px;
+                    height: 20px;
+                    y: 6px;
+                    background: root.error-count > 0 ? #3a1515 : transparent;
+                    border-radius: 10px;
+                    HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px; spacing: 4px;
+                        Rectangle {
+                            width: 8px; height: 8px; y: 6px;
+                            background: #e53935;
+                            border-radius: 4px;
+                        }
+                        err-lbl := Text {
+                            text: root.error-count + " errors";
+                            color: root.error-count > 0 ? #ef5350 : Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // Warning badge
+                Rectangle {
+                    width: warn-lbl.preferred-width + 18px;
+                    height: 20px;
+                    y: 6px;
+                    background: root.warning-count > 0 ? #3a2a15 : transparent;
+                    border-radius: 10px;
+                    HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px; spacing: 4px;
+                        Rectangle {
+                            width: 8px; height: 8px; y: 6px;
+                            background: #fb8c00;
+                            border-radius: 4px;
+                        }
+                        warn-lbl := Text {
+                            text: root.warning-count + " warnings";
+                            color: root.warning-count > 0 ? #ffb74d : Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // Fix with Workshop button — only shows when there's something
+                // to fix AND Workshop has a key configured.
+                Rectangle {
+                    width: 150px;
+                    height: 22px;
+                    y: 5px;
+                    background: fix-ta.has-hover && root.can-fix-with-workshop
+                        ? #388e3c
+                        : (root.can-fix-with-workshop ? #2e7d32 : #252525);
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.can-fix-with-workshop ? #4caf50 : #3a3a3a;
+                    visible: root.items.length > 0;
+
+                    fix-ta := TouchArea {
+                        mouse-cursor: root.can-fix-with-workshop ? pointer : default;
+                        enabled: root.can-fix-with-workshop;
+                        clicked => { root.fix-with-workshop(); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px; spacing: 4px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Image {
+                            width: 12px;
+                            source: @image-url("../../assets/icons/wrench.svg");
+                            image-fit: contain;
+                            vertical-alignment: center;
+                            colorize: root.can-fix-with-workshop ? white : Theme.text-disabled;
+                        }
+                        Text {
+                            text: root.can-fix-with-workshop ? "Fix with Workshop" : "Needs API key";
+                            color: root.can-fix-with-workshop ? white : Theme.text-disabled;
+                            font-size: 11px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+            }
+        }
+
+        // ── Problem list ────────────────────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: list-col.preferred-height;
+            viewport-width: self.width;
+
+            list-col := VerticalLayout {
+                spacing: 0px;
+
+                // Empty state
+                if root.items.length == 0: Rectangle {
+                    height: 60px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Text {
+                            text: "No problems detected.";
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                for item in root.items: Rectangle {
+                    height: 28px;
+                    background: row-ta.has-hover ? Theme.explorer-item-hover : transparent;
+                    border-radius: 2px;
+
+                    row-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.jump-to(item.file_path, item.line, item.column); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+
+                        // Severity dot
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            y: 9px;
+                            background: item.severity == "error"   ? #e53935
+                                      : item.severity == "warning" ? #fb8c00
+                                      : item.severity == "info"    ? #1e88e5
+                                      :                              #757575;
+                            border-radius: 5px;
+                        }
+
+                        // Message
+                        Text {
+                            text: item.message;
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        // Location (file:line:col)
+                        Text {
+                            text: item.file + ":" + item.line + ":" + item.column;
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

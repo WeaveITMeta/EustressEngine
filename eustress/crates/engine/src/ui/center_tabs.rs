@@ -518,28 +518,86 @@ impl CenterTabManager {
 /// If path is a file, reads it directly.
 fn resolve_script_source(path: &Path) -> Option<String> {
     if path.is_dir() {
-        let source_path = std::fs::read_dir(path).ok()
-            .and_then(|entries| entries.flatten().find(|e| {
-                let n = e.file_name().to_string_lossy().to_string();
-                n.ends_with(".rune") || n.ends_with(".luau") || n.ends_with(".soul") || n.ends_with(".lua")
-            }))
-            .map(|e| e.path())?;
+        let source_path = script_source_path(path)?;
         std::fs::read_to_string(source_path).ok()
     } else {
         std::fs::read_to_string(path).ok()
     }
 }
 
-/// Resolve the Summary.md content for a script folder.
-/// Returns None if no Summary.md exists or path is not a directory.
+/// Resolve the summary (`<name>.md`) content for a script folder.
+/// Returns None if no summary exists or path is not a directory.
 fn resolve_script_summary(path: &Path) -> Option<String> {
     if path.is_dir() {
-        let summary_path = path.join("Summary.md");
+        let summary_path = script_summary_path(path);
         if summary_path.exists() {
             return std::fs::read_to_string(summary_path).ok();
         }
     }
     None
+}
+
+// ─── Canonical script-file path helpers ─────────────────────────────
+//
+// Scripts are folder-based. The canonical layout is
+//   <folder>/<folder>.rune   ← source
+//   <folder>/<folder>.md     ← summary
+// so the files carry the same identity as the script itself — rename
+// the folder and users immediately see the matching file rename.
+//
+// For backwards compatibility we fall back to legacy names
+// (`Source.rune`, any other `.rune`/`.luau`/`.soul`/`.lua`, `Summary.md`)
+// when the canonical file doesn't exist. New writes always use the
+// canonical path.
+
+/// Source-file path for a script folder. Returns `None` if neither the
+/// canonical nor any legacy source file exists. Callers that are about
+/// to *write* should use `script_source_path_canonical` instead.
+pub fn script_source_path(folder: &Path) -> Option<std::path::PathBuf> {
+    let canonical = script_source_path_canonical(folder);
+    if canonical.exists() { return Some(canonical) }
+
+    // Legacy: accept any script-ish file. This is what the old codebase
+    // shipped and we don't want to break existing projects.
+    std::fs::read_dir(folder).ok()
+        .and_then(|entries| entries.flatten().find(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.ends_with(".rune") || n.ends_with(".luau")
+                || n.ends_with(".soul") || n.ends_with(".lua")
+        }))
+        .map(|e| e.path())
+}
+
+/// Canonical source path — `<folder>/<folder_name>.rune`. Always
+/// returns a path, even if the file doesn't exist yet. Use for writes.
+pub fn script_source_path_canonical(folder: &Path) -> std::path::PathBuf {
+    let name = folder.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Source");
+    folder.join(format!("{}.rune", name))
+}
+
+/// Summary-file path for a script folder. Prefers `<folder>/<folder>.md`
+/// and falls back to the legacy `Summary.md`. Always returns a path —
+/// the caller checks `exists()` for reads. For writes, use
+/// `script_summary_path_canonical` to always land on the new layout.
+pub fn script_summary_path(folder: &Path) -> std::path::PathBuf {
+    let canonical = script_summary_path_canonical(folder);
+    if canonical.exists() { return canonical }
+    let legacy = folder.join("Summary.md");
+    if legacy.exists() { return legacy }
+    // Neither exists — hand back the canonical so a subsequent
+    // `read_to_string` fails cleanly (returning None in the caller).
+    canonical
+}
+
+/// Canonical summary path — `<folder>/<folder_name>.md`. Used for writes
+/// and new-script creation so names stay in lock-step with the folder.
+pub fn script_summary_path_canonical(folder: &Path) -> std::path::PathBuf {
+    let name = folder.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Summary");
+    folder.join(format!("{}.md", name))
 }
 
 /// Route a file path to the appropriate tab type based on extension

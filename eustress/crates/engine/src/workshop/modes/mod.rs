@@ -169,7 +169,7 @@ impl WorkshopMode {
 /// Tracks which modes are currently active based on conversation context.
 /// General is always active. Domain modes activate when the AI detects
 /// relevant topics and can stack (e.g. Manufacturing + SupplyChain).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveModes {
     /// Currently active domain modes (General is implicit).
     pub domains: Vec<WorkshopMode>,

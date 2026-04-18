@@ -7,7 +7,6 @@
 use super::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::workshop::modes::WorkshopMode;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // Diff Entry (staged change)

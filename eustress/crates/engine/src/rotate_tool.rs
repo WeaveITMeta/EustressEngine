@@ -191,7 +191,7 @@ fn handle_rotate_interaction(
             bmin = bmin.min(mn); bmax = bmax.max(mx);
         }
         let center = (bmin + bmax) * 0.5;
-        let radius = compute_ring_radius(center, (bmax - bmin), camera_transform, projection);
+        let radius = compute_ring_radius(center, bmax - bmin, camera_transform, projection);
 
         if let Some(axis) = detect_ring_hit(&ray, center, radius) {
             state.dragged_axis = Some(axis);

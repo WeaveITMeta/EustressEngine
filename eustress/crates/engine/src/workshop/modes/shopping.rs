@@ -38,7 +38,7 @@ impl ToolHandler for PriceProductTool {
             .map(|a| { let sum: f64 = a.iter().filter_map(|v| v.as_f64()).sum(); sum / a.len().max(1) as f64 })
             .unwrap_or(cost_plus);
         let value_based = competitive_avg * premium;
-        let recommended = (cost_plus * 0.3 + competitive_avg * 0.3 + value_based * 0.4);
+        let recommended = cost_plus * 0.3 + competitive_avg * 0.3 + value_based * 0.4;
 
         ToolResult {
             tool_name: "price_product".to_string(), tool_use_id: String::new(),

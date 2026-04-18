@@ -6,6 +6,7 @@
 //! - Each .toml references a mesh asset and defines instance-specific properties
 
 use bevy::prelude::*;
+use bevy::camera::primitives::MeshAabb;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -243,6 +244,20 @@ impl Default for InstanceProperties {
     }
 }
 
+/// Signed attribution for a create or modify event. Lightweight by design —
+/// we keep every signature (no cap, no consolidation) because the modification
+/// history doubles as AI training data: the system learns "who is capable of
+/// what kinds of changes" by reading the full stamp chain.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreatorStamp {
+    /// Display name at time of edit (AuthUser.username; "anonymous" if offline).
+    pub name: String,
+    /// Stable identity (AuthUser.id today; upgrade to full public key later).
+    pub public_key: String,
+    /// RFC 3339 timestamp of the edit.
+    pub timestamp: String,
+}
+
 /// Instance metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceMetadata {
@@ -258,6 +273,14 @@ pub struct InstanceMetadata {
     pub created: String,
     #[serde(default)]
     pub last_modified: String,
+    /// Original creator — stamped once on first write by a logged-in user.
+    /// Absent for entities created offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<CreatorStamp>,
+    /// Append-only record of every signed modification. Never capped — the full
+    /// chain is kept as training signal for Bliss attribution + AI learning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifications: Vec<CreatorStamp>,
 }
 
 fn default_class_name() -> String {
@@ -272,6 +295,8 @@ impl Default for InstanceMetadata {
             name: None,
             created: String::new(),
             last_modified: String::new(),
+            created_by: None,
+            modifications: Vec::new(),
         }
     }
 }
@@ -655,6 +680,15 @@ pub struct InstanceFile {
     pub name: String,
 }
 
+/// Marker placed on custom-mesh Parts so a polling system can update their
+/// `BasePart.size` once the mesh asset has finished loading. Without this,
+/// custom-mesh parts keep the TOML's `transform.scale` value (typically
+/// 1×1×1) as their collision + gizmo size — which is correct for unit
+/// primitives but wrong for anything with real geometry. The marker is
+/// removed after the size is applied so the system becomes a no-op.
+#[derive(Component, Debug)]
+pub struct NeedsMeshSize;
+
 /// Load instance definition from .glb.toml file
 pub fn load_instance_definition(toml_path: &Path) -> Result<InstanceDefinition, String> {
     load_instance_definition_with_defaults(toml_path, None)
@@ -715,11 +749,56 @@ pub fn write_instance_definition(
 ) -> Result<(), String> {
     let toml_str = toml::to_string_pretty(instance)
         .map_err(|e| format!("Failed to serialize instance: {}", e))?;
-    
+
     std::fs::write(toml_path, toml_str)
         .map_err(|e| format!("Failed to write {}: {}", toml_path.display(), e))?;
-    
+
     Ok(())
+}
+
+/// Return a [`CreatorStamp`] for the currently-authenticated user, or `None`
+/// if the user is offline / not logged in. Offline edits stay unsigned so the
+/// Bliss-eligible audit trail only records provable identities.
+pub fn current_stamp(auth: &crate::auth::AuthState) -> Option<CreatorStamp> {
+    use crate::auth::AuthStatus;
+    if auth.status != AuthStatus::LoggedIn { return None; }
+    let user = auth.user.as_ref()?;
+    Some(CreatorStamp {
+        name: user.username.clone(),
+        public_key: user.id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+/// Write an instance definition, stamping the modification audit trail.
+///
+/// Behaviour:
+/// - If `stamp` is `Some` and `metadata.created_by` is `None`, sets `created_by`.
+/// - If `stamp` is `Some`, appends a new entry to `modifications`. Every signed
+///   save is preserved — no cap, no consolidation — because the chain serves
+///   both Bliss attribution and AI training signal.
+/// - Updates `metadata.last_modified` to the stamp's timestamp (or "now" if
+///   unsigned).
+///
+/// Offline (`stamp == None`) writes leave the audit chain untouched.
+pub fn write_instance_definition_signed(
+    toml_path: &Path,
+    instance: &mut InstanceDefinition,
+    stamp: Option<&CreatorStamp>,
+) -> Result<(), String> {
+    match stamp {
+        Some(s) => {
+            if instance.metadata.created_by.is_none() {
+                instance.metadata.created_by = Some(s.clone());
+            }
+            instance.metadata.modifications.push(s.clone());
+            instance.metadata.last_modified = s.timestamp.clone();
+        }
+        None => {
+            instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
+        }
+    }
+    write_instance_definition(toml_path, instance)
 }
 
 /// Convert a raw `toml::Value` (the `value` field extracted from a rich-schema
@@ -763,6 +842,41 @@ const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
     ("corner_wedge", "parts/corner_wedge.glb", eustress_common::classes::PartType::CornerWedge),
     ("cone", "parts/cone.glb", eustress_common::classes::PartType::Cone),
 ];
+
+/// Bevy system — once a custom-mesh Part's asset finishes loading, compute
+/// the mesh AABB and set `BasePart.size` to the AABB dimensions. Removes
+/// the `NeedsMeshSize` marker so the work happens exactly once per entity.
+/// Works for any Part that references a custom `.glb` — V-Cell was the
+/// visible symptom but this generalises.
+pub fn update_base_part_size_from_mesh(
+    mut commands: Commands,
+    meshes: Res<Assets<Mesh>>,
+    mut query: Query<(
+        Entity,
+        &Mesh3d,
+        &mut eustress_common::classes::BasePart,
+        Option<&mut Transform>,
+    ), With<NeedsMeshSize>>,
+) {
+    for (entity, mesh_handle, mut base_part, transform) in query.iter_mut() {
+        let Some(mesh) = meshes.get(&mesh_handle.0) else { continue; };
+        let Some(aabb) = mesh.compute_aabb() else { continue; };
+
+        // Mesh AABB half-extents → full size. Scale from the existing
+        // Transform is preserved so the user can still stretch a part
+        // beyond its natural size if desired.
+        let half = aabb.half_extents;
+        let natural_size = Vec3::new(half.x * 2.0, half.y * 2.0, half.z * 2.0);
+        let scale_factor = transform.as_ref().map(|t| t.scale).unwrap_or(Vec3::ONE);
+        base_part.size = Vec3::new(
+            natural_size.x * scale_factor.x,
+            natural_size.y * scale_factor.y,
+            natural_size.z * scale_factor.z,
+        );
+
+        commands.entity(entity).remove::<NeedsMeshSize>();
+    }
+}
 
 /// Cache of loaded primitive mesh handles to avoid repeated asset_server.load()
 /// calls for the same GLB path across thousands of entities.
@@ -894,9 +1008,30 @@ pub fn spawn_instance(
         (true, eustress_common::classes::PartType::Block)
     };
     
-    // Determine the absolute path for the GLB mesh file
+    // Determine the absolute path for the GLB mesh file. We normalize the
+    // result so `..` segments (common when a folder-based Part references
+    // `../meshes/Foo.glb`) don't leak into the asset URL. Without this,
+    // Bevy's `space://` reader treats the `..` literally on some platforms
+    // and the mesh fails to load silently — V-Cell's sub-parts all use this
+    // relative shape, so they were the visible symptom.
+    //
+    // We normalize manually instead of using `canonicalize()` because on
+    // Windows canonicalize prepends the `\\?\` verbatim prefix, which would
+    // then fail `strip_prefix(&space_root)` downstream.
+    fn normalize_path(p: &Path) -> PathBuf {
+        use std::path::Component;
+        let mut out = PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                Component::ParentDir => { out.pop(); }
+                Component::CurDir => {} // skip "."
+                _ => out.push(comp.as_os_str()),
+            }
+        }
+        out
+    }
     let toml_dir = toml_path.parent().unwrap_or(Path::new("."));
-    let absolute_mesh_path = toml_dir.join(&asset_ref.mesh);
+    let absolute_mesh_path = normalize_path(&toml_dir.join(&asset_ref.mesh));
     
     debug!("🔍 Instance '{}': mesh_ref='{}', is_custom={}, absolute_path={:?}, exists={}",
         name, mesh_ref, is_custom_mesh, absolute_mesh_path, absolute_mesh_path.exists());
@@ -980,6 +1115,10 @@ pub fn spawn_instance(
                 name: name.clone(),
             },
             Name::new(name.clone()),
+            // Mark this entity so `update_base_part_size_from_mesh` computes
+            // `BasePart.size` from the mesh AABB once the asset finishes
+            // loading. Works for any custom-mesh part, not just V-Cell.
+            NeedsMeshSize,
         )).id();
         let part_id = format!("{}v{}", entity.index(), entity.generation());
         let mut ec = commands.entity(entity);

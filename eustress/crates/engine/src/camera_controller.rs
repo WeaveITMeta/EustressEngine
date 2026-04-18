@@ -349,8 +349,9 @@ fn camera_view_input_system(
         snap_events.write(SnapToViewEvent { view, animate: true });
     }
     
-    // Num5: Toggle Orthographic/Perspective
-    if keys.just_pressed(KeyCode::Numpad5) {
+    // 5 / Num5: Toggle Orthographic/Perspective. Accept both the top-row and
+    // numpad keys since most keyboards don't have a numpad.
+    if keys.just_pressed(KeyCode::Numpad5) || keys.just_pressed(KeyCode::Digit5) {
         toggle_events.write(ToggleProjectionEvent);
     }
     

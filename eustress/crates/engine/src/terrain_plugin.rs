@@ -150,26 +150,32 @@ fn handle_editor_shortcuts(
     if terrain_query.is_empty() {
         return;
     }
-    
-    if keys.just_pressed(KeyCode::Digit1) {
-        brush.mode = BrushMode::Raise;
-        info!("🖌️ Brush: Raise");
-    }
-    if keys.just_pressed(KeyCode::Digit2) {
-        brush.mode = BrushMode::Lower;
-        info!("🖌️ Brush: Lower");
-    }
-    if keys.just_pressed(KeyCode::Digit3) {
-        brush.mode = BrushMode::Smooth;
-        info!("🖌️ Brush: Smooth");
-    }
-    if keys.just_pressed(KeyCode::Digit4) {
-        brush.mode = BrushMode::Flatten;
-        info!("🖌️ Brush: Flatten");
-    }
-    if keys.just_pressed(KeyCode::Digit5) {
-        brush.mode = BrushMode::PaintTexture;
-        info!("🖌️ Brush: Paint Texture");
+
+    // Brush shortcuts only apply while the terrain editor is active. Without
+    // this guard, 1-5 would mutate brush state (and fight shortcuts like
+    // camera-ortho on Digit5) even though the user never opened the editor.
+    let editor_active = matches!(*mode, TerrainMode::Editor);
+    if editor_active {
+        if keys.just_pressed(KeyCode::Digit1) {
+            brush.mode = BrushMode::Raise;
+            info!("🖌️ Brush: Raise");
+        }
+        if keys.just_pressed(KeyCode::Digit2) {
+            brush.mode = BrushMode::Lower;
+            info!("🖌️ Brush: Lower");
+        }
+        if keys.just_pressed(KeyCode::Digit3) {
+            brush.mode = BrushMode::Smooth;
+            info!("🖌️ Brush: Smooth");
+        }
+        if keys.just_pressed(KeyCode::Digit4) {
+            brush.mode = BrushMode::Flatten;
+            info!("🖌️ Brush: Flatten");
+        }
+        if keys.just_pressed(KeyCode::Digit5) {
+            brush.mode = BrushMode::PaintTexture;
+            info!("🖌️ Brush: Paint Texture");
+        }
     }
     
     if keys.just_pressed(KeyCode::KeyT) {

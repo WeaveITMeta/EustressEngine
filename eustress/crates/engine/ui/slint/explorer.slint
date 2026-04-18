@@ -320,9 +320,18 @@ export component ExplorerPanel inherits Rectangle {
                     moved => {
                         root.drag-mouse-x = self.absolute-position.x + self.mouse-x;
                         root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
-                        let row-idx = floor(self.mouse-y / 22px);
-                        let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
-                        root.drag-target-id = root.tree-nodes[clamped].id;
+                        // Subtract the 30px search-bar header to get the
+                        // tree-local y, then bucket into 22px rows. Fixes
+                        // the 1-2 row offset between hover-highlight and
+                        // drop target.
+                        let tree-y = self.mouse-y - 30px;
+                        if tree-y > 0px {
+                            let row-idx = floor(tree-y / 22px);
+                            let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
+                            root.drag-target-id = root.tree-nodes[clamped].id;
+                        } else {
+                            root.drag-target-id = -1;
+                        }
                     }
                     pointer-event(event) => {
                         if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {

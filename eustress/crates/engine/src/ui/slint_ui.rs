@@ -44,7 +44,7 @@ pub type SlintHighlightLine = HighlightLine;
 
 /// Window adapter that bridges Slint to Bevy using software rendering.
 /// Renders to a pixel buffer that Bevy uploads to a GPU texture.
-struct BevyWindowAdapter {
+pub struct BevyWindowAdapter {
     /// Current physical size of the window in pixels
     size: Cell<slint::PhysicalSize>,
     /// Display scale factor (1.0 for standard, 2.0 for HiDPI)
@@ -316,6 +316,10 @@ pub enum SlintAction {
     DismissNotification(u32),
     /// User toggled one of the File > Settings > Notifications checkboxes.
     NotificationSettingsChanged,
+    /// User clicked Save on File > Settings — commit the typed Soul API key
+    /// into `SoulServiceSettings` + `GlobalSoulSettings` so Soul/Workshop
+    /// panels see it immediately and the "Configure" banner dismisses.
+    SoulApiKeySaved,
     
     // Auth
     Login,
@@ -407,6 +411,26 @@ pub enum SlintAction {
     WorkshopOptimizeAndBuild,
     WorkshopLoadConversation(String),
     WorkshopNewConversation,
+    /// User typed a character in the Workshop input — parse the active
+    /// `@token` (if any) and push ranked results to the popup.
+    WorkshopMentionQueryChanged(String),
+    /// User committed the popup row at the given index.
+    WorkshopMentionCommit(i32),
+    /// User hit Escape or clicked outside the popup.
+    WorkshopMentionCancel,
+
+    // Problems panel — VS Code-style diagnostic list
+    /// Click a row → jump the editor to that file/line/column.
+    ProblemsJumpTo(String, i32, i32),
+    /// Click "Fix with Workshop" → start a Workshop session seeded with
+    /// the full diagnostic list so Claude resolves them in one pass.
+    ProblemsFixWithWorkshop,
+
+    // Script editor IDE features (Phase 3-4)
+    /// "Go to Definition" in the editor context menu.
+    ScriptGoToDefinition(i32, i32),
+    /// "Find References" in the editor context menu.
+    ScriptFindReferences(i32, i32),
 
     // API Reference panel
     ApiSearchChanged(String),
@@ -941,6 +965,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, forward_keyboard_to_slint.before(SlintSystems::Drain))
             .add_systems(Update, update_slint_ui_focus)
             .add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain))
+            .init_resource::<super::viewport_context_menu::ViewportRightClickState>()
+            .add_systems(Update, super::viewport_context_menu::detect_viewport_right_click)
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
@@ -970,6 +996,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
+            // Script analyzer → squiggle spans on the script editor
+            .add_systems(Update, sync_analyzer_to_slint.after(SlintSystems::Drain))
             // API Reference Panel sync: ApiCatalog + ApiFilterState → Slint
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
@@ -988,6 +1016,14 @@ impl Plugin for SlintUiPlugin {
             ).chain())
             .add_systems(Update, crate::auth::auth_poll_system)
             .add_systems(Startup, try_restore_auth_session);
+
+        // Ribbon keyboard-shortcut subtitles — pushes formatted binding
+        // strings to Slint on startup and whenever user remaps.
+        app.add_systems(Update, sync_keybindings_to_slint.after(SlintSystems::Drain));
+
+        // Soul API key + banner status — pushes the stored key to Settings
+        // on startup, flips Soul/Workshop banners off once a key is saved.
+        app.add_systems(Update, sync_soul_api_key_to_slint.after(SlintSystems::Drain));
 
         // ── Feature-gated sync systems ────────────────────────────────────────
         // Each lives in its own `#[cfg]` block because Rust's cfg attribute
@@ -1379,6 +1415,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_dismiss_notification(move |id| q.push(SlintAction::DismissNotification(id.max(0) as u32)));
     let q = queue.clone();
     ui.on_notification_settings_changed(move || q.push(SlintAction::NotificationSettingsChanged));
+    let q = queue.clone();
+    ui.on_soul_api_key_saved(move || q.push(SlintAction::SoulApiKeySaved));
     let q = queue.clone();
     ui.on_soul_build_all(move || q.push(SlintAction::PluginAction("soul:build_all".to_string())));
     let q = queue.clone();
@@ -2294,6 +2332,10 @@ struct DrainResources<'w> {
     selection_manager: Option<Res<'w, crate::rendering::BevySelectionManager>>,
     /// Workshop pipeline resource for cancel/pause/resume actions
     workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
+    /// Workshop @ mention index — Universe-scoped searcher backing the popup
+    mention_index: Option<ResMut<'w, crate::workshop::mention::MentionIndex>>,
+    /// Rune analyzer output — read by Problems panel handlers.
+    script_analysis: Option<Res<'w, crate::script_editor::ScriptAnalysis>>,
     /// Material registry for resolving material names on spawned parts
     material_registry: Option<ResMut<'w, crate::space::material_loader::MaterialRegistry>>,
     /// Primitive mesh handle cache — avoids per-entity asset_server.load() for same GLB
@@ -3284,7 +3326,8 @@ fn drain_slint_actions(
             }
             SlintAction::SummarizeComplete(name, summary) => {
                 // Summary came back from Claude — store in summary_content and switch view.
-                // Also save to Summary.md inside the script folder if it's folder-based.
+                // Also save to the canonical `<folder>/<folder>.md` inside the script
+                // folder if it's folder-based.
                 let mut save_path: Option<std::path::PathBuf> = None;
                 if let Some(ref mut mgr) = res.tab_manager {
                     if let Some(tab) = mgr.active_mut() {
@@ -3293,7 +3336,9 @@ fn drain_slint_actions(
                             *mode = super::center_tabs::SoulScriptMode::Summary;
                             if let Some(ref path) = tab.file_path {
                                 if path.is_dir() {
-                                    save_path = Some(path.join("Summary.md"));
+                                    save_path = Some(
+                                        super::center_tabs::script_summary_path_canonical(path)
+                                    );
                                 }
                             }
                         }
@@ -3302,7 +3347,7 @@ fn drain_slint_actions(
                 }
                 if let Some(path) = save_path {
                     let _ = std::fs::write(&path, &summary);
-                    info!("📝 Saved Summary.md to {:?}", path);
+                    info!("📝 Saved summary to {:?}", path);
                 }
                 if let Some(ref mut state) = res.state {
                     state.script_editor_content = summary;
@@ -3377,6 +3422,33 @@ fn drain_slint_actions(
                     if ui.get_notifications_mute_warning() { settings.muted_levels.insert("warning".into()); }
                 }
             }
+            SlintAction::SoulApiKeySaved => {
+                // Pull the typed key out of Slint and commit it to both the
+                // space-level and global Soul Settings resources so Workshop +
+                // Soul panels observe it immediately. Also persist globally to
+                // disk so the key survives restarts.
+                if let Some(ui) = ui {
+                    let key: String = ui.get_soul_api_key().to_string().trim().to_string();
+                    if let Some(ref mut ss) = res.soul_settings {
+                        ss.claude_api_key = key.clone();
+                    }
+                    if let Some(ref mut gs) = res.global_soul_settings {
+                        gs.global_api_key = key.clone();
+                        if let Err(e) = gs.save() {
+                            if let Some(ref mut out) = res.output {
+                                out.warn(format!("Soul: failed to persist API key: {}", e));
+                            }
+                        }
+                    }
+                    if let Some(ref mut out) = res.output {
+                        if key.is_empty() {
+                            out.info("Soul API key cleared".to_string());
+                        } else {
+                            out.info("Soul API key saved".to_string());
+                        }
+                    }
+                }
+            }
             SlintAction::SelectCenterTab(idx) => {
                 // idx from Slint: 0 = Scene, 1+ = other tabs
                 if let Some(ref mut mgr) = res.tab_manager {
@@ -3400,10 +3472,12 @@ fn drain_slint_actions(
                         );
                         if is_summary {
                             active.summary_content = text.clone();
-                            // Auto-save Summary.md to disk
+                            // Auto-save summary to disk using canonical
+                            // `<folder>/<folder>.md` path.
                             if let Some(ref path) = active.file_path {
                                 if path.is_dir() {
-                                    let _ = std::fs::write(path.join("Summary.md"), &text);
+                                    let target = super::center_tabs::script_summary_path_canonical(path);
+                                    let _ = std::fs::write(&target, &text);
                                 }
                             }
                         } else {
@@ -3688,7 +3762,7 @@ fn drain_slint_actions(
                             let target_pos = order.iter().position(|&n| n == id);
                             if let (Some(a), Some(b)) = (anchor_pos, target_pos) {
                                 let (start, end) = if a <= b { (a, b) } else { (b, a) };
-                                let mut sel = sel_mgr.0.write();
+                                let sel = sel_mgr.0.write();
                                 sel.clear();
                                 // Always include the anchor node first
                                 if let Some(entity) = es.entity_id_cache.get(&anchor_id).copied() {
@@ -3923,13 +3997,104 @@ fn drain_slint_actions(
                         }
                     }
                 } else {
-                    // File rename — filesystem operation
+                    // File / folder rename — filesystem operation.
+                    // When the target is a script folder, cascade the rename
+                    // to the canonical `<folder>.rune` + `<folder>.md` files
+                    // inside so the source + summary track the folder name.
                     let file_path = res.explorer_state.as_ref()
                         .and_then(|es| es.file_path_cache.get(&id).cloned());
                     if let Some(old_path) = file_path {
+                        let old_name = old_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
                         let new_path = old_path.with_file_name(&name);
                         match std::fs::rename(&old_path, &new_path) {
                             Ok(_) => {
+                                // Cascade: inside the just-renamed folder,
+                                // migrate both `<old_name>.<ext>` AND the
+                                // legacy `Source.<ext>` / `Summary.md` pair
+                                // to the canonical `<new_name>.<ext>`. This
+                                // is also the one-time migration path for
+                                // scripts that predate folder-matching
+                                // naming.
+                                if new_path.is_dir() {
+                                    let code_exts = ["rune", "luau", "soul", "lua"];
+                                    let mut migrated_source = false;
+
+                                    // A. `<old_name>.<ext>` → `<new_name>.<ext>` for code + summary.
+                                    if !old_name.is_empty() {
+                                        for ext in code_exts.iter().chain(std::iter::once(&"md")) {
+                                            let old_child = new_path.join(format!("{}.{}", old_name, ext));
+                                            let new_child = new_path.join(format!("{}.{}", name, ext));
+                                            if old_child.exists() && !new_child.exists() {
+                                                if let Err(e) = std::fs::rename(&old_child, &new_child) {
+                                                    if let Some(ref mut out) = res.output {
+                                                        out.warn(format!(
+                                                            "Cascade rename failed for {}: {}",
+                                                            old_child.display(), e,
+                                                        ));
+                                                    }
+                                                } else if code_exts.contains(ext) {
+                                                    migrated_source = true;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // B. Legacy `Source.<ext>` → `<new_name>.<ext>`.
+                                    for ext in &code_exts {
+                                        let legacy = new_path.join(format!("Source.{}", ext));
+                                        let target = new_path.join(format!("{}.{}", name, ext));
+                                        if legacy.exists() && !target.exists() {
+                                            if std::fs::rename(&legacy, &target).is_ok() {
+                                                migrated_source = true;
+                                            }
+                                        }
+                                    }
+
+                                    // C. Legacy `Summary.md` → `<new_name>.md`.
+                                    let legacy_summary = new_path.join("Summary.md");
+                                    let canonical_summary = new_path.join(format!("{}.md", name));
+                                    if legacy_summary.exists() && !canonical_summary.exists() {
+                                        let _ = std::fs::rename(&legacy_summary, &canonical_summary);
+                                    }
+
+                                    // D. Patch `_instance.toml`'s `source = "..."`
+                                    // to whatever canonical file now exists. Covers
+                                    // both A (old name → new name) and B (legacy
+                                    // Source.rune → new name) without reading the
+                                    // previous source line.
+                                    if migrated_source {
+                                        let instance_toml = new_path.join("_instance.toml");
+                                        if let Ok(contents) = std::fs::read_to_string(&instance_toml) {
+                                            // Find whichever code ext actually landed on disk
+                                            // and rewrite any `source = "..."` line to point at
+                                            // `<new_name>.<ext>`. Manual scan keeps us regex-free.
+                                            let target_ext = code_exts.iter().find(|ext|
+                                                new_path.join(format!("{}.{}", name, ext)).exists()
+                                            );
+                                            if let Some(ext) = target_ext {
+                                                let new_source = format!("source = \"{}.{}\"", name, ext);
+                                                let patched: String = contents.lines().map(|line| {
+                                                    let trimmed = line.trim_start();
+                                                    if trimmed.starts_with("source = \"") && trimmed.ends_with('"') {
+                                                        new_source.clone()
+                                                    } else {
+                                                        line.to_string()
+                                                    }
+                                                }).collect::<Vec<_>>().join("\n");
+                                                if patched != contents {
+                                                    // Preserve trailing newline if the original had one.
+                                                    let final_text = if contents.ends_with('\n') && !patched.ends_with('\n') {
+                                                        format!("{}\n", patched)
+                                                    } else { patched };
+                                                    let _ = std::fs::write(&instance_toml, final_text);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 if let Some(ref mut out) = res.output {
                                     out.info(format!("Renamed: {} → {}", old_path.display(), new_path.display()));
                                 }
@@ -4616,9 +4781,11 @@ fn drain_slint_actions(
                             }
                         }
                         
-                        // Save to _service.toml file
+                        // Save to _service.toml file — sign the edit when logged in
                         if changed {
-                            if let Err(e) = crate::space::service_loader::save_service_to_file(&service) {
+                            let stamp = res.auth_state.as_deref()
+                                .and_then(crate::space::instance_loader::current_stamp);
+                            if let Err(e) = crate::space::service_loader::save_service_to_file_signed(&service, stamp.as_ref()) {
                                 if let Some(ref mut out) = res.output {
                                     out.error(format!("Failed to save service: {}", e));
                                 }
@@ -4898,6 +5065,7 @@ fn drain_slint_actions(
                                 name: Some(inst.name.clone()),
                                 created: now.clone(),
                                 last_modified: now,
+                                ..Default::default()
                             },
                             material: None,
                             thermodynamic: None,
@@ -5085,6 +5253,202 @@ fn drain_slint_actions(
                     pipeline.reset();
                     if let Some(ref mut out) = res.output {
                         out.info("Workshop: New conversation started".to_string());
+                    }
+                }
+            }
+
+            // @ Mention autocomplete — query / commit / cancel
+            //
+            // The popup state is driven entirely from Rust. The Slint side
+            // only stores the visible item list + selection index; every
+            // keystroke fires `WorkshopMentionQueryChanged`, and every commit
+            // fires `WorkshopMentionCommit`. This handler owns the splice so
+            // the canonical `@kind:space/path` lands in the input exactly.
+            SlintAction::WorkshopMentionQueryChanged(text) => {
+                let Some(ui) = ui else { continue; };
+                let active = crate::workshop::mention_ui::find_active_mention(&text);
+                match (active, res.mention_index.as_deref()) {
+                    (Some((_at, query)), Some(index)) => {
+                        let results = index.search(&query, 10);
+                        let items: Vec<MentionItemData> = results.iter()
+                            .map(|e| mention_entry_to_slint_item(e))
+                            .collect();
+                        let len = items.len() as i32;
+                        let model = std::rc::Rc::new(slint::VecModel::from(items));
+                        ui.set_workshop_mention_items(slint::ModelRc::from(model));
+                        ui.set_workshop_mention_popup_visible(len > 0);
+                        ui.set_workshop_mention_query(query.into());
+                        // Clamp selection into range (user may have deleted items).
+                        let sel = ui.get_workshop_mention_selected_index();
+                        if sel >= len { ui.set_workshop_mention_selected_index(0); }
+                    }
+                    _ => {
+                        // No active @token or no index yet → close popup.
+                        ui.set_workshop_mention_popup_visible(false);
+                        let empty: Vec<MentionItemData> = Vec::new();
+                        let model = std::rc::Rc::new(slint::VecModel::from(empty));
+                        ui.set_workshop_mention_items(slint::ModelRc::from(model));
+                    }
+                }
+            }
+            SlintAction::WorkshopMentionCommit(idx) => {
+                let Some(ui) = ui else { continue; };
+                let Some(ref mut index) = res.mention_index else { continue; };
+                let input = ui.get_workshop_input_text().to_string();
+                let Some((at, query)) = crate::workshop::mention_ui::find_active_mention(&input)
+                    else { continue; };
+                // Re-query rather than trusting a stale model — keeps the
+                // commit atomic against a possible background rescan.
+                let results = index.search(&query, 10);
+                let Some(entry) = results.get(idx as usize) else { continue; };
+                let canonical = entry.canonical_path.clone();
+                let id = entry.id;
+                let new_text = crate::workshop::mention_ui::splice_mention(&input, at, &canonical);
+                ui.set_workshop_input_text(new_text.into());
+                ui.set_workshop_mention_popup_visible(false);
+                ui.set_workshop_mention_selected_index(0);
+                index.record_usage(id);
+            }
+            SlintAction::WorkshopMentionCancel => {
+                if let Some(ui) = ui {
+                    ui.set_workshop_mention_popup_visible(false);
+                    ui.set_workshop_mention_selected_index(0);
+                }
+            }
+
+            // Problems panel — jump to the click location in the script editor.
+            //
+            // The panel tracks `file_path` for each diagnostic; clicking a row
+            // fires here with the full path plus 1-based (line, col). We open
+            // that file as a tab (if not already), then scroll/select the line.
+            SlintAction::ProblemsJumpTo(path, line, column) => {
+                // Open the file (reuses the same event path as "Open Recent";
+                // its handler treats any existing path as an open request).
+                events.file_events.write(FileEvent::OpenRecent(
+                    std::path::PathBuf::from(path)
+                ));
+                if let Some(ui) = ui {
+                    // Editor jumps to the start on next tick; a proper
+                    // scroll-to-line property is a Phase 3 polish item.
+                    ui.set_script_scroll_to_top(true);
+                    let _ = (line, column);
+                }
+            }
+            // Go to Definition — look up identifier at cursor in the symbol
+            // index. Scrolls the editor to the definition line and logs the
+            // jump to Output. Cross-file jump is a Phase 4 extension.
+            SlintAction::ScriptGoToDefinition(line, column) => {
+                let Some(ref analysis) = res.script_analysis else { continue; };
+                let source = analysis.source.clone();
+                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
+                    &source, line as u32, column as u32,
+                ) else {
+                    if let Some(ref mut out) = res.output {
+                        out.info("Go to Definition: no identifier under cursor".to_string());
+                    }
+                    continue;
+                };
+                let defs = analysis.result.symbols.resolve(&ident);
+                if defs.is_empty() {
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Go to Definition: '{}' — no definition in this file", ident));
+                    }
+                    continue;
+                }
+                let target = &defs[0];
+                if let Some(ui) = ui {
+                    ui.set_script_scroll_to_line(target.range.start_line as i32);
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!(
+                        "Go to Definition: '{}' → line {}:{}",
+                        ident, target.range.start_line, target.range.start_column,
+                    ));
+                }
+            }
+            // Find References — list all occurrences of the identifier in
+            // the current file's symbol index, write to Output. Cross-file
+            // is a later extension (Phase 4 full-workspace scan).
+            SlintAction::ScriptFindReferences(line, column) => {
+                let Some(ref analysis) = res.script_analysis else { continue; };
+                let source = analysis.source.clone();
+                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
+                    &source, line as u32, column as u32,
+                ) else {
+                    if let Some(ref mut out) = res.output {
+                        out.info("Find References: no identifier under cursor".to_string());
+                    }
+                    continue;
+                };
+                let refs = analysis.result.symbols.resolve(&ident);
+                if let Some(ref mut out) = res.output {
+                    if refs.is_empty() {
+                        out.info(format!("Find References: no matches for '{}'", ident));
+                    } else {
+                        out.info(format!("Find References: '{}' — {} match(es)", ident, refs.len()));
+                        for r in refs {
+                            out.info(format!(
+                                "  {}:{}  [{:?}]",
+                                r.range.start_line, r.range.start_column, r.kind,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // "Fix with Workshop" — seed a new Workshop session with the
+            // current problem list and a standing instruction for Claude to
+            // resolve them. Uses the existing BYOK API key.
+            SlintAction::ProblemsFixWithWorkshop => {
+                if let Some(ref mut pipeline) = res.workshop_pipeline {
+                    // Start a fresh conversation so problem-fixing doesn't
+                    // get tangled with whatever was being ideated before.
+                    let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                    let _ = crate::workshop::persistence::save_session_to_space(pipeline, space);
+                    pipeline.reset();
+
+                    // Build the seed message from the current diagnostics.
+                    let problem_block = res.script_analysis.as_ref()
+                        .map(|a| {
+                            let mut buf = String::new();
+                            for (i, d) in a.result.diagnostics.iter().enumerate() {
+                                buf.push_str(&format!(
+                                    "{}. [{}] {}:{}:{}  {}\n",
+                                    i + 1,
+                                    match d.severity {
+                                        crate::script_editor::Severity::Error => "ERROR",
+                                        crate::script_editor::Severity::Warning => "WARN",
+                                        crate::script_editor::Severity::Info => "INFO",
+                                        crate::script_editor::Severity::Hint => "HINT",
+                                    },
+                                    a.active_path.as_deref().unwrap_or("<unknown>"),
+                                    d.range.start_line,
+                                    d.range.start_column,
+                                    d.message,
+                                ));
+                            }
+                            buf
+                        })
+                        .unwrap_or_default();
+
+                    let seed = format!(
+                        "I have the following problems in my Rune script. Please \
+                         propose minimal edits (as a single code block per file) \
+                         that resolve them. Explain each fix in one short line.\n\n\
+                         {}",
+                        problem_block,
+                    );
+
+                    pipeline.add_user_message(seed);
+                    pipeline.state = crate::workshop::IdeationState::Conversing;
+
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!(
+                            "Workshop: Fix with Workshop session seeded with {} problem(s)",
+                            res.script_analysis.as_ref()
+                                .map(|a| a.result.diagnostics.len())
+                                .unwrap_or(0)
+                        ));
                     }
                 }
             }
@@ -5386,19 +5750,75 @@ fn drain_slint_actions(
                         }
                     }
                     "copy-path" => {
-                        if let Some(ref es) = res.explorer_state {
-                            if let SelectedItem::File(ref path) = es.selected {
-                                #[cfg(feature = "clipboard")]
-                                {
-                                    use arboard::Clipboard;
-                                    if let Ok(mut clipboard) = Clipboard::new() {
-                                        let _ = clipboard.set_text(path.to_string_lossy().to_string());
-                                        info!("Copied path to clipboard: {}", path.display());
-                                    }
-                                }
-                                #[cfg(not(feature = "clipboard"))]
-                                info!("Clipboard feature not enabled");
+                        // Resolve the clipboard payload by looking at which menu
+                        // the right-click came from. The Soul Panel sets
+                        // `context-menu-target-type = "soul-script"` and stashes
+                        // the script entity-index in `context-menu-target-id`;
+                        // everything else falls back to the Explorer selection.
+                        //
+                        // Payload shapes:
+                        // * File:        absolute filesystem path
+                        // * Entity:      `@entity:Space/.../Name`   (from MentionIndex)
+                        // * Service:     `@service:Space/Name`
+                        // * Soul script: `@script:Space/.../Name`   (from MentionIndex)
+                        let soul_entity_idx: Option<u32> = ui.and_then(|u| {
+                            if u.get_context_menu_target_type().as_str() == "soul-script" {
+                                let id = u.get_context_menu_target_id();
+                                if id >= 0 { Some(id as u32) } else { None }
+                            } else {
+                                None
                             }
+                        });
+
+                        let payload: Option<String> = if let Some(idx) = soul_entity_idx {
+                            // Soul Panel right-click → script canonical from MentionIndex.
+                            res.mention_index.as_ref().and_then(|index| {
+                                index.entries().values()
+                                    .find(|e| e.entity.map(|ent| ent.index().index()) == Some(idx))
+                                    .map(|e| format!("@{}", e.canonical_path))
+                            })
+                        } else if let Some(ref es) = res.explorer_state {
+                            match &es.selected {
+                                SelectedItem::File(path) => {
+                                    Some(path.to_string_lossy().to_string())
+                                }
+                                SelectedItem::Entity(ent) => {
+                                    let from_index = res.mention_index.as_ref()
+                                        .and_then(|idx| {
+                                            idx.entries().values()
+                                                .find(|e| e.entity == Some(*ent))
+                                                .map(|e| format!("@{}", e.canonical_path))
+                                        });
+                                    from_index.or_else(|| {
+                                        let space = res.space_root.as_ref()
+                                            .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
+                                            .unwrap_or_default();
+                                        Some(format!("@entity:{}/@ecs/{}", space, ent.index().index()))
+                                    })
+                                }
+                                SelectedItem::Service(name) => {
+                                    let space = res.space_root.as_ref()
+                                        .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
+                                        .unwrap_or_default();
+                                    Some(format!("@service:{}/{}", space, name))
+                                }
+                                SelectedItem::None => None,
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(text) = payload {
+                            #[cfg(feature = "clipboard")]
+                            {
+                                use arboard::Clipboard;
+                                if let Ok(mut clipboard) = Clipboard::new() {
+                                    let _ = clipboard.set_text(text.clone());
+                                    info!("Copied to clipboard: {}", text);
+                                }
+                            }
+                            #[cfg(not(feature = "clipboard"))]
+                            info!("Clipboard feature not enabled; would copy: {}", text);
                         }
                     }
                     "copy-relative-path" => {
@@ -5516,15 +5936,25 @@ fn drain_slint_actions(
                     let script_dir = write_dir.join(&script_name);
                     let _ = std::fs::create_dir_all(&script_dir);
 
+                    // Canonical file names track the folder — rename-follows-rename
+                    // without needing a separate cascade for newly-created scripts.
+                    let source_file = format!("{}.rune", script_name);
+                    let summary_file = format!("{}.md", script_name);
+
                     // Write _instance.toml
-                    let instance_toml = "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"Source.rune\"\n";
+                    let instance_toml = format!(
+                        "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"{}\"\n",
+                        source_file,
+                    );
                     let _ = std::fs::write(script_dir.join("_instance.toml"), instance_toml);
 
                     // Write source file
-                    let _ = std::fs::write(script_dir.join("Source.rune"), "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
+                    let _ = std::fs::write(script_dir.join(&source_file),
+                        "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
 
-                    // Write Summary.md
-                    let _ = std::fs::write(script_dir.join("Summary.md"), format!("# {}\n\nNew script.\n", script_name));
+                    // Write summary
+                    let _ = std::fs::write(script_dir.join(&summary_file),
+                        format!("# {}\n\nNew script.\n", script_name));
 
                     // Spawn ECS entity
                     let entity = commands.spawn((
@@ -5981,6 +6411,48 @@ fn drain_slint_actions(
                             filter.dirty = true;
                         }
                         info!("Help: Opened API Browser center tab");
+                    } else if action == "help:constitution" {
+                        // Open the Eustress Constitution PDF in the OS default viewer.
+                        // The document lives in the repo at docs/documents/ so every
+                        // build ships with it and every user can access it without
+                        // a network connection.
+                        let candidates = [
+                            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                                .join("../../..")
+                                .join("docs/documents/eustress_constitution.pdf"),
+                            std::path::PathBuf::from("docs/documents/eustress_constitution.pdf"),
+                        ];
+                        let found = candidates.iter()
+                            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+                            .find(|p| p.exists());
+                        match found {
+                            Some(path) => {
+                                let path_str = path.to_string_lossy().to_string();
+                                #[cfg(target_os = "windows")]
+                                let spawn = std::process::Command::new("cmd").args(["/C", "start", "", &path_str]).spawn();
+                                #[cfg(target_os = "macos")]
+                                let spawn = std::process::Command::new("open").arg(&path_str).spawn();
+                                #[cfg(target_os = "linux")]
+                                let spawn = std::process::Command::new("xdg-open").arg(&path_str).spawn();
+                                match spawn {
+                                    Ok(_) => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("📜 Opened constitution: {}", path.display()));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.warn(format!("Failed to open constitution: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                if let Some(ref mut out) = res.output {
+                                    out.warn("Constitution PDF not found. Expected at docs/documents/eustress_constitution.pdf".to_string());
+                                }
+                            }
+                        }
                     } else {
                         // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
                         if let Some(ref mut out) = res.output {
@@ -6563,8 +7035,12 @@ fn sync_workshop_to_slint(
 ) {
     let Some(pipeline) = pipeline else { return };
     let Some(bridge) = bridge else { return };
-    // Only sync when the pipeline resource was actually mutated this frame
-    if !pipeline.is_changed() { return; }
+    // Re-sync when pipeline OR the Soul settings change. Without the soul
+    // trigger, saving an API key in File > Settings wouldn't clear the
+    // Workshop panel's "Configure" banner until the next pipeline mutation.
+    let soul_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
+        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
+    if !pipeline.is_changed() && !soul_changed { return; }
 
     // Check API key validity
     let api_key_valid = match (&global_settings, &space_settings) {
@@ -7287,9 +7763,15 @@ fn sync_unified_explorer_to_slint(
             let is_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == entity)
                 || selected_entity_ids.contains(&entity_id_str);
 
-            // Use ServiceComponent icon if available, otherwise fall back to class icon
+            // Use ServiceComponent icon if available, otherwise fall back to class icon.
+            // Special-case: Folder named "Logs" uses the log-stack icon (Claude
+            // audit trail per constitutional KL-10).
             let icon = if let Ok(service) = service_components.get(entity) {
                 load_service_icon(&service.icon)
+            } else if instance.class_name == eustress_common::classes::ClassName::Folder
+                && instance.name == "Logs"
+            {
+                load_service_icon("log")
             } else {
                 load_class_icon(&instance.class_name)
             };
@@ -7878,6 +8360,36 @@ fn load_service_icon(name: &str) -> slint::Image {
         .join("icons")
         .join(format!("{}.svg", name));
     slint::Image::load_from_path(&icon_path).unwrap_or_default()
+}
+
+/// Convert a `MentionEntry` (Rust side) into the Slint `MentionItemData`
+/// struct the popup renders. The icon is loaded here on the Slint main
+/// thread since `slint::Image` isn't `Send`.
+fn mention_entry_to_slint_item(
+    entry: &crate::workshop::mention::MentionEntry,
+) -> MentionItemData {
+    use crate::workshop::mention::MentionKind;
+    let icon_name = if entry.icon_hint.is_empty() {
+        match entry.kind {
+            MentionKind::Entity => "instance",
+            MentionKind::File => "filetypes",
+            MentionKind::Script => "soulservice",
+            MentionKind::Service => "folder",
+        }
+    } else {
+        entry.icon_hint.as_str()
+    };
+    MentionItemData {
+        // Slint's `int` is i32; truncate the stable u64 id. Collisions here
+        // only matter for the current popup — `canonical` is the source of
+        // truth for commit.
+        id: entry.id.0 as i32,
+        name: entry.name.as_str().into(),
+        qualifier: entry.qualifier.as_str().into(),
+        canonical: entry.canonical_path.as_str().into(),
+        icon: load_service_icon(icon_name),
+        kind: entry.kind.as_str().into(),
+    }
 }
 
 /// Recursively build filesystem TreeNodes from a directory.
@@ -9357,6 +9869,100 @@ fn sync_tab_manager_to_studio_state(
 
 /// Syncs center tab state (Space1 + script/web tabs) from StudioState to Slint.
 /// Processes pending open/close/reorder tab requests each frame.
+/// Push the current analyzer output to Slint as squiggle spans on the
+/// script editor. The diagnostic span list is O(diagnostics) not O(source),
+/// so we rebuild it on every analyzer-generation change without caching.
+///
+/// Char width stays in lock-step with `highlight_to_token_spans` to keep
+/// underlines aligned with the text they annotate.
+pub fn sync_analyzer_to_slint(
+    analysis: Option<Res<crate::script_editor::ScriptAnalysis>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    mut last_generation: Local<u64>,
+) {
+    const CHAR_WIDTH: f32 = 7.8;
+    let Some(analysis) = analysis else { return };
+    let Some(ctx) = slint_context else { return };
+    if analysis.generation == *last_generation {
+        return;
+    }
+    *last_generation = analysis.generation;
+
+    // ── Squiggle spans on the editor overlay ──────────────────────────
+    let spans: Vec<DiagnosticSpan> = analysis.result.diagnostics.iter()
+        .map(|d| {
+            // 1-based → 0-based for Slint rendering.
+            let line = d.range.start_line.saturating_sub(1) as i32;
+            let x_start = (d.range.start_column.saturating_sub(1)) as f32 * CHAR_WIDTH;
+            // If the diagnostic crosses lines, clip to end of start line.
+            let end_col_same_line = if d.range.end_line == d.range.start_line {
+                d.range.end_column.saturating_sub(1)
+            } else {
+                // Fall back to +1 character when multi-line — visible hint
+                // without needing the full source to measure.
+                d.range.start_column
+            };
+            let x_end = (end_col_same_line as f32 * CHAR_WIDTH).max(x_start + CHAR_WIDTH);
+            DiagnosticSpan {
+                line,
+                x_start,
+                x_end,
+                severity: match d.severity {
+                    crate::script_editor::Severity::Error => "error".into(),
+                    crate::script_editor::Severity::Warning => "warning".into(),
+                    crate::script_editor::Severity::Info => "info".into(),
+                    crate::script_editor::Severity::Hint => "hint".into(),
+                },
+                message: d.message.as_str().into(),
+            }
+        })
+        .collect();
+
+    let model = std::rc::Rc::new(slint::VecModel::from(spans));
+    ctx.window.set_script_diagnostic_spans(slint::ModelRc::from(model));
+
+    // ── Problems panel list ───────────────────────────────────────────
+    // Flatten file path into basename for the compact display column
+    // while keeping the full path for click-to-jump routing.
+    let file_full = analysis.active_path.clone().unwrap_or_default();
+    let file_short = std::path::Path::new(&file_full)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    let items: Vec<ProblemItem> = analysis.result.diagnostics.iter()
+        .map(|d| ProblemItem {
+            severity: match d.severity {
+                crate::script_editor::Severity::Error => "error".into(),
+                crate::script_editor::Severity::Warning => "warning".into(),
+                crate::script_editor::Severity::Info => "info".into(),
+                crate::script_editor::Severity::Hint => "hint".into(),
+            },
+            file: file_short.as_str().into(),
+            file_path: file_full.as_str().into(),
+            line: d.range.start_line as i32,
+            column: d.range.start_column as i32,
+            message: d.message.as_str().into(),
+            source: d.source.into(),
+        })
+        .collect();
+
+    let problem_model = std::rc::Rc::new(slint::VecModel::from(items));
+    ctx.window.set_problem_items(slint::ModelRc::from(problem_model));
+    ctx.window.set_problem_error_count(analysis.error_count() as i32);
+    ctx.window.set_problem_warning_count(analysis.warning_count() as i32);
+
+    // "Fix with Workshop" is only live when Soul Settings has a usable key.
+    let has_key = match (&global_settings, &space_settings) {
+        (Some(g), Some(s)) => !s.effective_api_key(g).is_empty(),
+        _ => false,
+    };
+    ctx.window.set_problems_can_fix_with_workshop(has_key);
+}
+
 fn sync_center_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     mut state: Option<ResMut<StudioState>>,
@@ -9517,6 +10123,9 @@ fn sync_center_tabs_to_slint(
             ui.set_script_editor_content(state.script_editor_content.as_str().into());
             let nums = build_line_numbers_text(&state.script_editor_content);
             ui.set_script_line_numbers(nums.into());
+            let nums_arr = build_line_numbers_array(&state.script_editor_content);
+            let model = std::rc::Rc::new(slint::VecModel::from(nums_arr));
+            ui.set_script_line_numbers_array(slint::ModelRc::from(model));
         }
     } else {
         // Steady state: no deferred updates pending — sync normally
@@ -9583,6 +10192,9 @@ fn sync_center_tabs_to_slint(
         ui.set_script_editor_content(state.script_editor_content.as_str().into());
         let nums = build_line_numbers_text(&state.script_editor_content);
         ui.set_script_line_numbers(nums.into());
+        let nums_arr = build_line_numbers_array(&state.script_editor_content);
+        let nums_model = std::rc::Rc::new(slint::VecModel::from(nums_arr));
+        ui.set_script_line_numbers_array(slint::ModelRc::from(nums_model));
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
         ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
         let token_model = std::rc::Rc::new(slint::VecModel::from(token_spans));
@@ -9677,6 +10289,15 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
 fn build_line_numbers_text(content: &str) -> String {
     let count = content.chars().filter(|&c| c == '\n').count() + 1;
     (1..=count).map(|n| n.to_string()).collect::<Vec<_>>().join("\n")
+}
+
+/// Build a `[SharedString]` array with one entry per source line. Rendered
+/// by the gutter as individually-positioned Text elements on the same 18px
+/// grid the token-span overlay uses — avoids the font-metric line-spacing
+/// drift the previous single-Text gutter had.
+fn build_line_numbers_array(content: &str) -> Vec<slint::SharedString> {
+    let count = content.chars().filter(|&c| c == '\n').count() + 1;
+    (1..=count).map(|n| n.to_string().into()).collect()
 }
 
 // ============================================================================
@@ -9812,7 +10433,7 @@ fn sync_asset_manager_to_slint(
     let mut asset_nodes: Vec<(i32, String, slint::Image, String, i32, bool, bool, bool, String, String)> = Vec::new();
     let mut next_id: i32 = 1;
     let mut universe_count: i32 = 0;
-    let mut space_count: i32;
+    let space_count: i32;
 
     // Section IDs (negative to avoid collision with file IDs)
     let universe_section_id: i32 = -1;
@@ -10000,6 +10621,96 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
         .join("icons")
         .join(format!("{}.svg", filename));
     slint::Image::load_from_path(&icon_path).unwrap_or_default()
+}
+
+/// Push the current Soul API key + its computed validity status to Slint so
+/// File > Settings shows the actual stored key, and the Soul/Workshop panels
+/// dismiss the "Configure API key" banner once a key is present. Validity
+/// here is a presence check only — full validation happens when the user
+/// runs "Test Connection" in Settings. Fires on resource change (and once at
+/// startup) so the banner updates immediately after Save.
+fn sync_soul_api_key_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    mut first_run: Local<bool>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(global) = global_settings else { return };
+    let Some(space) = space_settings else { return };
+
+    if !*first_run {
+        *first_run = true;
+    } else if !global.is_changed() && !space.is_changed() {
+        return;
+    }
+
+    let effective_key = space.effective_api_key(&global);
+    let status = if effective_key.is_empty() { "not-set" } else { "valid" };
+
+    let ui = &slint_context.window;
+    // Only overwrite the Slint key field with the stored key when the dialog
+    // isn't currently showing — otherwise we'd wipe whatever the user is
+    // typing every sync. Slint's Settings dialog is `if show-settings-dialog`
+    // so we check the root flag.
+    if !ui.get_show_settings_dialog() {
+        ui.set_soul_api_key(effective_key.clone().into());
+    }
+    ui.set_soul_api_key_valid(!effective_key.is_empty());
+    ui.set_soul_api_key_status(status.into());
+}
+
+/// Push formatted keybinding strings to the Slint ribbon so each IconButton
+/// can render its shortcut as a dim subtitle (e.g. "Alt+Z" under "Select").
+/// Only runs when the `KeyBindings` resource changes — in practice that's
+/// once at startup and again only when the user remaps in File > Settings.
+fn sync_keybindings_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    bindings: Option<Res<crate::keybindings::KeyBindings>>,
+    mut first_run: Local<bool>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(bindings) = bindings else { return };
+
+    // Push on first frame + whenever the resource changes.
+    if !*first_run {
+        *first_run = true;
+    } else if !bindings.is_changed() {
+        return;
+    }
+
+    use crate::keybindings::Action;
+    let ui = &slint_context.window;
+
+    let s = |a: Action| -> slint::SharedString {
+        bindings.get(a)
+            .map(|b| b.display())
+            .unwrap_or_default()
+            .into()
+    };
+
+    ui.set_shortcut_undo(s(Action::Undo));
+    ui.set_shortcut_redo(s(Action::Redo));
+    ui.set_shortcut_cut(s(Action::Cut));
+    ui.set_shortcut_copy(s(Action::Copy));
+    ui.set_shortcut_paste(s(Action::Paste));
+    ui.set_shortcut_duplicate(s(Action::Duplicate));
+    ui.set_shortcut_delete(s(Action::Delete));
+    ui.set_shortcut_select(s(Action::SelectTool));
+    ui.set_shortcut_move(s(Action::MoveTool));
+    ui.set_shortcut_scale(s(Action::ScaleTool));
+    ui.set_shortcut_rotate(s(Action::RotateTool));
+    ui.set_shortcut_group(s(Action::Group));
+    ui.set_shortcut_ungroup(s(Action::Ungroup));
+    ui.set_shortcut_lock(s(Action::LockSelection));
+    ui.set_shortcut_unlock(s(Action::UnlockSelection));
+    ui.set_shortcut_anchor(s(Action::ToggleAnchor));
+    ui.set_shortcut_focus(s(Action::FocusSelection));
+    // File operations don't currently have Action enum entries — hardcode
+    // the conventional bindings until they're promoted to the remappable set.
+    ui.set_shortcut_new("Ctrl+N".into());
+    ui.set_shortcut_open("Ctrl+O".into());
+    ui.set_shortcut_save("Ctrl+S".into());
 }
 
 /// Push all script entities (Rune Soul + Luau Server/Client/Module) to the

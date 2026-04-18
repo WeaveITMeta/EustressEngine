@@ -248,10 +248,12 @@ fn handle_plugin_action_events(
     billboard_query: Query<&crate::classes::BillboardGui>,
     text_label_query: Query<&crate::classes::TextLabel>,
     children_query: Query<&Children>,
+    child_of_query: Query<&ChildOf>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
+    mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
 ) {
     // Log BEFORE the early-return to diagnose whether the system runs at all
     let event_count = events.len();
@@ -431,6 +433,12 @@ fn handle_plugin_action_events(
                 text_label.font_size = font_size;
                 text_label.text_color3 = [1.0, 1.0, 1.0];
                 text_label.background_transparency = 0.5;
+                // Default TextLabel size is 1×1 — the CPU rasterizer clips all
+                // glyphs to that box and the text vanishes. Fill the parent
+                // BillboardGui (200×50, set a few lines above) so the glyphs
+                // have room to draw.
+                text_label.size = [200.0, 50.0];
+                text_label.position = [0.0, 0.0];
 
                 let text_entity = spawn_text_label(&mut commands, text_instance, text_label);
                 commands.entity(text_entity).insert(bevy::prelude::ChildOf(billboard_entity));
@@ -450,6 +458,17 @@ fn handle_plugin_action_events(
                             children: Vec::new(),
                         },
                     );
+                }
+
+                // Force the Explorer to (a) re-sync right away so the new
+                // BillboardGui appears without waiting for the 30-frame throttle,
+                // and (b) auto-expand the parent Part so the freshly-created
+                // child is visible under it instead of hidden behind a collapsed
+                // node. Without this, the label appeared to "do nothing" in the
+                // tree even though it was spawned correctly on disk + in ECS.
+                if let Some(ref mut es) = explorer_state {
+                    es.expanded_entities.insert(parent_entity);
+                    es.needs_immediate_sync = true;
                 }
 
                 notifications.success(format!("Added label '{}' to selected part", label_text));
@@ -497,67 +516,72 @@ fn handle_plugin_action_events(
                     continue;
                 };
 
-                // Find BillboardGui children of the selected entity
-                let mut removed = 0usize;
-                if let Ok(children) = children_query.get(parent_entity) {
-                    let billboard_children: Vec<Entity> = children.iter()
-                        .filter(|&child| {
-                            instance_query.get(child)
-                                .map(|(_, i)| i.class_name == ClassName::BillboardGui)
-                                .unwrap_or(false)
-                        })
-                        .collect();
+                // Semantic: "Remove Label" strips ALL BillboardGui children of
+                // the selected entity. If the user selects a part with one
+                // label, one label goes. If they've added three labels, all
+                // three go. If they selected a BillboardGui directly, just
+                // that one is removed.
+                //
+                // Use `ChildOf` (authoritative parent-pointer) instead of
+                // `Children` (lazily-populated relation) because the latter
+                // can be empty immediately after a spawn, making the button
+                // appear to silently do nothing.
+                let mut billboard_victims: Vec<Entity> = Vec::new();
 
-                    for billboard_entity in billboard_children {
-                        // Find the TOML directory from InstanceFile or LoadedFromFile
-                        let bb_dir = instance_files.get(billboard_entity)
-                            .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
-                            .or_else(|_| loaded_from_file.get(billboard_entity).map(|lff| lff.path.clone()))
-                            .ok();
-
-                        if let Some(ref dir) = bb_dir {
-                            if dir.exists() && dir.is_dir() {
-                                if let Err(e) = std::fs::remove_dir_all(dir) {
-                                    warn!("Failed to delete BillboardGui directory {:?}: {}", dir, e);
-                                } else {
-                                    info!("🗑️ Deleted BillboardGui directory {:?}", dir);
-                                }
-                            }
-                            if let Some(ref mut registry) = file_registry {
-                                registry.unregister_file(&dir.join("_instance.toml"));
-                            }
-                        }
-
-                        commands.entity(billboard_entity).despawn();
-                        removed += 1;
+                // Case 1: selected is a BillboardGui itself
+                if let Ok((_, inst)) = instance_query.get(parent_entity) {
+                    if inst.class_name == ClassName::BillboardGui {
+                        billboard_victims.push(parent_entity);
                     }
                 }
 
-                // Also check if the selected entity IS a BillboardGui (direct selection)
-                if removed == 0 {
-                    if let Ok((_, inst)) = instance_query.get(parent_entity) {
-                        if inst.class_name == ClassName::BillboardGui {
-                            let bb_dir = instance_files.get(parent_entity)
-                                .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
-                                .or_else(|_| loaded_from_file.get(parent_entity).map(|lff| lff.path.clone()))
-                                .ok();
-
-                            if let Some(ref dir) = bb_dir {
-                                if dir.exists() && dir.is_dir() {
-                                    if let Err(e) = std::fs::remove_dir_all(dir) {
-                                        warn!("Failed to delete BillboardGui directory {:?}: {}", dir, e);
-                                    } else {
-                                        info!("🗑️ Deleted BillboardGui directory {:?}", dir);
-                                    }
-                                }
-                                if let Some(ref mut registry) = file_registry {
-                                    registry.unregister_file(&dir.join("_instance.toml"));
-                                }
+                // Case 2: selected is a Part (or anything else) — scan all
+                // entities whose ChildOf points at it AND class is BillboardGui.
+                if billboard_victims.is_empty() {
+                    for (entity, inst) in instance_query.iter() {
+                        if inst.class_name != ClassName::BillboardGui { continue; }
+                        if let Ok(child_of) = child_of_query.get(entity) {
+                            if child_of.0 == parent_entity {
+                                billboard_victims.push(entity);
                             }
-
-                            commands.entity(parent_entity).despawn();
-                            removed = 1;
                         }
+                    }
+                }
+
+                let mut removed = 0usize;
+                for billboard_entity in billboard_victims {
+                    let bb_dir = instance_files.get(billboard_entity)
+                        .map(|f| f.toml_path.parent().unwrap_or(f.toml_path.as_path()).to_path_buf())
+                        .or_else(|_| loaded_from_file.get(billboard_entity).map(|lff| lff.path.clone()))
+                        .ok();
+
+                    if let Some(ref dir) = bb_dir {
+                        // Suppress the file-watcher delete so it doesn't try
+                        // to despawn an entity we're already removing.
+                        if let Some(ref mut registry) = file_registry {
+                            registry.rename_in_progress.insert(dir.clone());
+                            registry.rename_in_progress.insert(dir.join("_instance.toml"));
+                        }
+                        if dir.exists() && dir.is_dir() {
+                            if let Err(e) = std::fs::remove_dir_all(dir) {
+                                warn!("Failed to delete BillboardGui directory {:?}: {}", dir, e);
+                            } else {
+                                info!("🗑️ Deleted BillboardGui directory {:?}", dir);
+                            }
+                        }
+                        if let Some(ref mut registry) = file_registry {
+                            registry.unregister_file(&dir.join("_instance.toml"));
+                        }
+                    }
+
+                    commands.entity(billboard_entity).despawn();
+                    removed += 1;
+                }
+
+                // Kick Explorer so the removed labels disappear immediately.
+                if removed > 0 {
+                    if let Some(ref mut es) = explorer_state {
+                        es.needs_immediate_sync = true;
                     }
                 }
 

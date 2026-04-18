@@ -178,14 +178,14 @@ pub fn pick_asset_files() -> Vec<PathBuf> {
 
 /// Get the default scenes directory
 pub fn default_scenes_dir() -> PathBuf {
-    // Try to use Documents/Eustress/Scenes
-    if let Some(docs) = dirs::document_dir() {
+    // Prefer local Documents on Windows (avoid OneDrive KFM redirection)
+    if let Some(docs) = crate::space::default_documents_root() {
         let scenes_dir = docs.join("Eustress").join("Scenes");
         if scenes_dir.exists() || std::fs::create_dir_all(&scenes_dir).is_ok() {
             return scenes_dir;
         }
     }
-    
+
     // Fallback to current directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

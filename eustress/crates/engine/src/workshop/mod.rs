@@ -22,6 +22,16 @@
 
 pub mod persistence;
 pub mod normalizer;
+pub mod mention;
+pub mod mention_scanner;
+pub mod mention_persistence;
+pub mod mention_ui;
+pub mod mention_resolver;
+/// Vortex-backed semantic searcher. Compiled only under the
+/// `workshop-vortex-embeddings` feature; the plugin installs it in place
+/// of the default [`mention::SubstringSearcher`] when the feature is on.
+#[cfg(feature = "workshop-vortex-embeddings")]
+pub mod mention_searcher_vortex;
 pub mod claude_bridge;
 pub mod artifact_gen;
 pub mod modes;
@@ -47,7 +57,7 @@ pub struct WorkshopCoreSystems;
 // ============================================================================
 
 /// A single message in the ideation conversation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     /// Unique message identifier
     pub id: u32,
@@ -78,13 +88,33 @@ pub struct ChatMessage {
     /// Actual cost after completion (in USD, if known)
     #[serde(default)]
     pub actual_cost: Option<f64>,
+
+    // ── Agentic tool-use fields (new) ──────────────────────────────────
+    // Populated when the message represents a Claude `tool_use` block or
+    // the user-facing approval/execution card for one.
+
+    /// Anthropic `tool_use.id` — links this message to its `tool_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// JSON input object Claude sent for this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<serde_json::Value>,
+    /// Result string produced by `ToolRegistry.dispatch()`, fed back to
+    /// Claude as the matching `tool_result` block on the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<String>,
+    /// True when this message represents the assistant's `tool_use` block
+    /// that spawned an Mcp card, so history reconstruction groups them.
+    #[serde(default)]
+    pub is_assistant_turn: bool,
 }
 
 /// Who sent a message in the conversation
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     /// User typed this message
+    #[default]
     User,
     /// System (Workshop AI) response
     System,
@@ -582,6 +612,13 @@ pub struct IdeationPipeline {
     pub total_cost: f64,
     /// Conversation context for Claude (accumulated user messages for richer prompts)
     pub conversation_context: String,
+    /// Active domain modes inferred from conversation context. General is
+    /// always implicit. Multiple modes stack additively.
+    pub active_modes: modes::ActiveModes,
+    /// True while a Claude tool-use round-trip is waiting on user approval
+    /// for one or more MCP cards. Dispatch is suppressed until all
+    /// pending approvals resolve (approved → executed, or skipped).
+    pub awaiting_tool_approval: bool,
     /// Whether the pipeline has unsaved changes
     pub dirty: bool,
 }
@@ -600,6 +637,8 @@ impl Default for IdeationPipeline {
             artifacts: Vec::new(),
             total_cost: 0.0,
             conversation_context: String::new(),
+            active_modes: modes::ActiveModes::default(),
+            awaiting_tool_approval: false,
             dirty: false,
         }
     }
@@ -720,6 +759,7 @@ impl IdeationPipeline {
             artifact_type: None,
             estimated_cost: 0.0,
             actual_cost: None,
+            ..Default::default()
         });
         self.dirty = true;
         id
@@ -747,6 +787,7 @@ impl IdeationPipeline {
             artifact_type: None,
             estimated_cost: cost,
             actual_cost: Some(cost),
+            ..Default::default()
         });
         self.dirty = true;
         id
@@ -774,6 +815,7 @@ impl IdeationPipeline {
             artifact_type: None,
             estimated_cost,
             actual_cost: None,
+            ..Default::default()
         });
         self.dirty = true;
         id
@@ -799,6 +841,7 @@ impl IdeationPipeline {
             artifact_type: Some(artifact_type),
             estimated_cost: 0.0,
             actual_cost: None,
+            ..Default::default()
         });
         self.dirty = true;
         id
@@ -820,6 +863,7 @@ impl IdeationPipeline {
             artifact_type: None,
             estimated_cost: 0.0,
             actual_cost: None,
+            ..Default::default()
         });
         self.dirty = true;
         id
@@ -894,6 +938,7 @@ impl IdeationPipeline {
                 artifact_type: None, // TODO: parse from string
                 estimated_cost: entry.cost,
                 actual_cost: None,
+                ..Default::default()
             });
         }
 
@@ -1010,9 +1055,23 @@ fn handle_send_message(
             continue;
         }
         
-        // Add user message to conversation
+        // Mode detection runs FIRST (keyword scan against the incoming
+        // text). Any newly-activated mode gets a system badge appended
+        // *before* the user message so that after we push the user msg,
+        // the pipeline still ends with a User role — `dispatch_chat_request`'s
+        // `last_is_user` guard needs that invariant.
+        let newly_activated = pipeline.active_modes.detect_from_message(&content);
+        for mode in &newly_activated {
+            pipeline.add_system_message(
+                format!("{} — mode activated. {}", mode.badge(), mode.greeting()),
+                0.0,
+            );
+            info!("Workshop: Activated {} mode from user message", mode.display_name());
+        }
+
+        // Add user message to conversation (must be last so dispatch guard passes)
         pipeline.add_user_message(content.clone());
-        
+
         // Check if API key is available
         let has_key = match (&global_settings, &space_settings) {
             (Some(global), Some(space)) => {
@@ -1020,44 +1079,115 @@ fn handle_send_message(
             }
             _ => false,
         };
-        
+
         if !has_key {
             pipeline.add_error_message(
                 "No API key configured. Open Soul Settings to add your BYOK key.".to_string()
             );
             continue;
         }
-        
-        // If pipeline is idle, start a new session with the user's idea
+
+        // If pipeline is idle, start a new session with the user's idea.
+        // State MUST be Conversing for `dispatch_chat_request` to pick this
+        // up on the next tick.
         if pipeline.state == IdeationState::Idle {
             pipeline.state = IdeationState::Conversing;
             info!("Workshop: Started new ideation session {}", pipeline.session_id);
         }
 
         info!("Workshop: User message queued for Claude: {} chars", content.len());
-
-        // Check if the Claude bridge has dispatched — if not, the agentic loop
-        // isn't wired yet. Give the user feedback so they know the system received it.
-        // Once the agentic loop is implemented, this message will be replaced by
-        // the actual Claude response.
-        pipeline.add_system_message(
-            "Message received. The agentic tool-use loop is not yet connected — \
-             your message was recorded but Claude cannot respond yet. \
-             This will be wired in the Workshop architecture unification.".to_string(),
-            0.0,
-        );
     }
 }
 
-/// Process MCP command approvals — advance the pipeline
+/// Process MCP command approvals — mark approved and, when the card is a
+/// tool-use from the agentic loop, immediately dispatch the tool via
+/// [`ToolRegistry`] and store the result on the same message so the next
+/// `dispatch_chat_request` sees it and continues the Claude conversation.
 fn handle_approve_mcp(
     mut events: MessageReader<WorkshopApproveMcpEvent>,
     mut pipeline: ResMut<IdeationPipeline>,
+    tool_registry: Option<Res<tools::ToolRegistry>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    auth: Option<Res<crate::auth::AuthState>>,
 ) {
     for event in events.read() {
         pipeline.update_mcp_status(event.message_id, McpCommandStatus::Approved);
         info!("Workshop: MCP command {} approved", event.message_id);
-        // The actual execution will be handled by the async task system
+
+        // Extract the tool-use metadata from the approved card.
+        let (tool_name, tool_use_id, tool_input) = {
+            let Some(msg) = pipeline.messages.iter().find(|m| m.id == event.message_id) else {
+                continue;
+            };
+            match (msg.mcp_endpoint.clone(), msg.tool_use_id.clone(), msg.tool_input.clone()) {
+                (Some(n), Some(id), Some(input)) if msg.mcp_method.as_deref() == Some("tool_use") => {
+                    (n, id, input)
+                }
+                _ => {
+                    // Not an agentic tool_use card (e.g. legacy normalize/artifact
+                    // step). Dispatch stays on the old approval flow via
+                    // dispatch_normalize_request / dispatch_artifact_request.
+                    continue;
+                }
+            }
+        };
+
+        // Build the ToolContext for dispatch.
+        let ctx = match (&space_root, &auth) {
+            (Some(sr), auth_opt) => {
+                let universe_root = crate::space::universe_root_for_path(&sr.0)
+                    .unwrap_or_else(|| sr.0.clone());
+                let (user_id, username) = auth_opt.as_ref()
+                    .and_then(|a| a.user.as_ref())
+                    .map(|u| (Some(u.id.clone()), Some(u.username.clone())))
+                    .unwrap_or((None, None));
+                tools::ToolContext {
+                    space_root: sr.0.clone(),
+                    universe_root,
+                    user_id,
+                    username,
+                }
+            }
+            _ => {
+                pipeline.add_error_message(
+                    "Workshop: tool approval received but no Space is loaded.".to_string()
+                );
+                continue;
+            }
+        };
+
+        let result = match tool_registry.as_ref() {
+            Some(reg) => reg.dispatch(&tool_name, &tool_use_id, tool_input, &ctx),
+            None => {
+                pipeline.add_error_message(
+                    "Workshop: ToolRegistry missing — cannot dispatch approved tool.".to_string()
+                );
+                continue;
+            }
+        };
+
+        let new_status = if result.success {
+            McpCommandStatus::Done
+        } else {
+            McpCommandStatus::Error
+        };
+        pipeline.update_mcp_status(event.message_id, new_status);
+        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == event.message_id) {
+            msg.tool_result = Some(result.content.clone());
+        }
+        info!("Workshop: dispatched approved tool '{}' → success={}", tool_name, result.success);
+
+        // Clear the approval gate if every agentic tool_use card now has a
+        // result. Dispatch will re-fire on the next tick and Claude will see
+        // the tool_result in the next turn.
+        let all_resolved = pipeline.messages.iter().all(|m| {
+            m.mcp_method.as_deref() != Some("tool_use")
+                || m.tool_result.is_some()
+                || m.mcp_status == Some(McpCommandStatus::Skipped)
+        });
+        if all_resolved {
+            pipeline.awaiting_tool_approval = false;
+        }
     }
 }
 
@@ -1068,6 +1198,24 @@ fn handle_skip_mcp(
 ) {
     for event in events.read() {
         pipeline.update_mcp_status(event.message_id, McpCommandStatus::Skipped);
+
+        // For agentic tool_use cards, Claude still expects a tool_result
+        // block paired with the tool_use — otherwise the conversation is
+        // malformed on the next turn. Synthesize a "skipped by user" result
+        // and mark the approval gate as resolved if all cards are settled.
+        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == event.message_id) {
+            if msg.mcp_method.as_deref() == Some("tool_use") && msg.tool_result.is_none() {
+                msg.tool_result = Some("User skipped this tool call.".to_string());
+            }
+        }
+        let all_resolved = pipeline.messages.iter().all(|m| {
+            m.mcp_method.as_deref() != Some("tool_use")
+                || m.tool_result.is_some()
+                || m.mcp_status == Some(McpCommandStatus::Skipped)
+        });
+        if all_resolved {
+            pipeline.awaiting_tool_approval = false;
+        }
 
         // Find which step this MCP command belongs to by checking content for "step=" param
         let step_idx = pipeline.messages.iter()
@@ -1338,6 +1486,35 @@ fn autosave_conversation(
 }
 
 // ============================================================================
+// 4b. Vortex searcher installer (feature-gated)
+// ============================================================================
+
+/// Swap the MentionIndex's active searcher to the Vortex-backed one as
+/// soon as the Universe root becomes available. The swap is one-shot per
+/// Universe; tracking happens in a local `Option<PathBuf>` resource-
+/// like closure state.
+#[cfg(feature = "workshop-vortex-embeddings")]
+fn install_vortex_searcher_on_universe_load(
+    mut last_installed: Local<Option<std::path::PathBuf>>,
+    mut index: ResMut<mention::MentionIndex>,
+) {
+    let Some(universe) = index.universe_root().map(|p| p.to_path_buf()) else { return };
+    if last_installed.as_deref() == Some(&universe) { return; }
+
+    let knowledge_dir = mention_persistence::knowledge_dir(&universe);
+    match mention_searcher_vortex::VortexSearcher::try_open(&knowledge_dir) {
+        Ok(searcher) => {
+            index.swap_searcher(Box::new(searcher));
+            info!("Workshop: Vortex mention searcher installed for {}", universe.display());
+        }
+        Err(e) => {
+            warn!("Workshop: Vortex searcher unavailable ({}); falling back to substring", e);
+        }
+    }
+    *last_installed = Some(universe);
+}
+
+// ============================================================================
 // 5. WorkshopPlugin
 // ============================================================================
 
@@ -1423,6 +1600,13 @@ impl Plugin for WorkshopPlugin {
             // Legacy resources (kept for Manufacturing mode compatibility)
             .init_resource::<IdeationPipeline>()
             .init_resource::<claude_bridge::WorkshopClaudeTasks>()
+            // @-mention index — backs the Workshop chat autocomplete.
+            // The default searcher is a substring scanner; when the
+            // `workshop-vortex-embeddings` feature is on, the plugin
+            // attempts to install the Vortex-backed semantic searcher
+            // below (post-init, after the Universe root is known).
+            .init_resource::<mention::MentionIndex>()
+            .init_resource::<mention_scanner::UniverseScanTask>()
             // Events
             .add_message::<WorkshopSendMessageEvent>()
             .add_message::<WorkshopApproveMcpEvent>()
@@ -1450,6 +1634,7 @@ impl Plugin for WorkshopPlugin {
                 claude_bridge::dispatch_chat_request,
                 claude_bridge::dispatch_normalize_request,
                 claude_bridge::poll_claude_responses,
+                claude_bridge::poll_agentic_responses,
             ).after(WorkshopCoreSystems))
             // Artifact generation: dispatch per-step requests + handle completions
             .add_systems(Update, (
@@ -1457,7 +1642,31 @@ impl Plugin for WorkshopPlugin {
                 artifact_gen::handle_artifact_completion,
             ).after(WorkshopCoreSystems))
             // Autosave: check dirty flag each frame (cheap when not dirty)
-            .add_systems(Update, autosave_conversation);
+            .add_systems(Update, autosave_conversation)
+            // Mention index systems — see workshop/mention.rs and
+            // workshop/mention_scanner.rs for architecture notes.
+            //
+            // Live ECS mirror: reactive enumeration of the currently-loaded
+            // Space's entities/services/scripts. Runs every frame but only
+            // touches `Added`/`Changed`/`Removed` entities.
+            .add_systems(Update, mention::update_mention_index_live)
+            // Pull AuthState → MentionIndex.active_user so MRU persists
+            // under the correct bucket across sessions.
+            .add_systems(Update, mention::sync_mention_active_user)
+            // Static scanner: walks the entire Universe for TOMLs + media
+            // on Universe switch. Runs on IoTaskPool so large scans don't
+            // stall the main thread.
+            .add_systems(Update, (
+                mention_scanner::trigger_rescan_on_universe_change,
+                mention_scanner::poll_universe_scan,
+                mention_persistence::autosave_index,
+            ));
+
+        // Feature-gated: swap in the Vortex semantic searcher once the
+        // Universe root is known. Runs at most once per Universe load;
+        // falls back silently to the substring searcher on init failure.
+        #[cfg(feature = "workshop-vortex-embeddings")]
+        app.add_systems(Update, install_vortex_searcher_on_universe_load);
         
         info!("WorkshopPlugin initialized — System 0: Ideation ready");
     }

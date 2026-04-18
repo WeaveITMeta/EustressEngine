@@ -113,24 +113,31 @@ export global Theme {
     out property <length> font-xxl: 24px;
 }
 
-// Icon button component for consistent styling with hover tooltip and label
+// Icon button component for consistent styling with hover tooltip and label.
+// Shortcut (when present) renders as a dim subtitle below the label so users
+// learn the keyboard accelerator without hovering for the tooltip. The
+// shortcut string is driven by the Keybindings resource so remapping in
+// File > Settings > Keybindings propagates live.
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label: "";
+    in property <string> shortcut: ""; // e.g. "Alt+Z", "Ctrl+S" — empty hides subtitle
     in property <string> tooltip: "";
     in property <bool> selected: false;
     in property <bool> enabled: true;
     in property <color> tint: #d4d4d4; // Tint color for SVG icon (default matches base icon grey)
-    
+
     callback clicked();
     callback right-clicked();
     callback long-pressed();
-    
+
     property <bool> is-pressing: false;
     property <bool> tooltip-visible: false;
-    
+
     width: root.label != "" ? (label-measure.preferred-width > 34px ? label-measure.preferred-width + 10px : 44px) : 36px;
-    height: root.label != "" ? 52px : 36px;
+    // Grow the button vertically by 10px when a shortcut is shown, so the
+    // subtitle has room without clipping the icon or squeezing the label.
+    height: root.label != "" ? (root.shortcut != "" ? 62px : 52px) : 36px;
     
     // Hidden text for width measurement — positioned absolutely so it doesn't affect layout
     label-measure := Text {
@@ -220,6 +227,14 @@ export component IconButton inherits Rectangle {
             text: root.label;
             color: Theme.text-secondary;
             font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        if root.label != "" && root.shortcut != "": Text {
+            text: root.shortcut;
+            color: Theme.text-disabled;
+            font-size: 8px;
             horizontal-alignment: center;
             overflow: elide;
         }

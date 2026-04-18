@@ -99,6 +99,7 @@ use clipboard::ClipboardPlugin;
 use material_sync::MaterialSyncPlugin;
 use terrain_plugin::EngineTerrainPlugin;
 use play_mode::PlayModePlugin;
+use eustress_engine::script_editor;
 use window_focus::WindowFocusPlugin;
 use startup::{StartupPlugin, StartupArgs};
 // ServicePropertiesPlugin removed - now handled by Slint UI
@@ -211,6 +212,8 @@ fn main() {
         // (Streaming registered below — cfg-block required, not inline chain)
         // Play mode (must be before SlintUiPlugin which uses PlayModeState)
         .add_plugins(PlayModePlugin)
+        // Script analyzer (Rune diagnostics + symbol index on AsyncComputeTaskPool)
+        .add_plugins(script_editor::ScriptAnalysisPlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
         // Floating windows

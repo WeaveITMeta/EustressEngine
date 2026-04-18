@@ -73,7 +73,7 @@ impl Plugin for UpdaterPlugin {
 }
 
 /// Check for updates on startup (async, non-blocking)
-fn check_for_updates(mut state: ResMut<UpdateState>) {
+fn check_for_updates(state: ResMut<UpdateState>) {
     info!("🔄 Checking for updates (current: v{})", CURRENT_VERSION);
 
     let async_state = state.async_state.clone();

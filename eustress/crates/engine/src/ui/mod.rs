@@ -22,6 +22,7 @@ use crate::commands::{SelectionManager, TransformManager};
 pub mod slint_ui;
 pub mod slint_native;
 pub mod slint_bridge;
+pub mod viewport_context_menu;
 pub mod floating_windows;
 pub mod runtime_ui;
 pub mod rune_bindings;

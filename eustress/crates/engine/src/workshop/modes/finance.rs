@@ -48,7 +48,7 @@ impl ToolHandler for CalculateCostTool {
         let returns_cost = subtotal * returns;
         let total = subtotal + duties + returns_cost;
 
-        let margin = retail.map(|r| ((r - total) / r * 100.0));
+        let margin = retail.map(|r| (r - total) / r * 100.0);
 
         ToolResult {
             tool_name: "calculate_cost".to_string(), tool_use_id: String::new(),

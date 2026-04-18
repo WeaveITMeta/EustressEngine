@@ -17,6 +17,7 @@ pub mod builder;
 pub mod cache;
 pub mod codegen;
 pub mod validator;
+pub mod audit_log;
 pub mod claude_client;
 pub mod hot_compile;
 pub mod build_pipeline;
@@ -300,9 +301,23 @@ impl Plugin for EngineSoulPlugin {
                 process_build_requests,
                 update_build_status,
                 cleanup_removed_soulscripts,
+                sync_space_root_to_audit,
             ));
-        
+
         info!("EngineSoulPlugin initialized - Claude API + Hot Compile ready");
+    }
+}
+
+/// Propagate [`crate::space::SpaceRoot`] changes into the audit module's
+/// thread-local cell so Claude calls (which run outside Bevy's resource
+/// system) know where to write their `.log.toml` entries.
+fn sync_space_root_to_audit(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
+    if let Some(sr) = space_root {
+        if sr.is_changed() || sr.is_added() {
+            audit_log::set_current_space(Some(sr.0.clone()));
+        }
     }
 }
 

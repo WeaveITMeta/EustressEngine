@@ -1270,121 +1270,12 @@ fn handle_pause_toggle(
     }
 }
 
-/// Character movement system (runs in Playing state)
-fn character_movement(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&mut Transform, &mut CharacterInput, &Humanoid), With<PlayModeCharacter>>,
-    time: Res<Time>,
-) {
-    for (mut transform, mut input, humanoid) in query.iter_mut() {
-        // Gather input
-        let mut movement = Vec3::ZERO;
-        
-        if keyboard.pressed(KeyCode::KeyW) {
-            movement.z -= 1.0;
-        }
-        if keyboard.pressed(KeyCode::KeyS) {
-            movement.z += 1.0;
-        }
-        if keyboard.pressed(KeyCode::KeyA) {
-            movement.x -= 1.0;
-        }
-        if keyboard.pressed(KeyCode::KeyD) {
-            movement.x += 1.0;
-        }
-        
-        input.movement = movement.normalize_or_zero();
-        input.sprinting = keyboard.pressed(KeyCode::ShiftLeft);
-        input.jump = keyboard.just_pressed(KeyCode::Space);
-        
-        // Apply movement
-        let speed = humanoid.effective_speed(input.sprinting);
-        let velocity = input.movement * speed * time.delta_secs();
-        transform.translation += velocity;
-        
-        // Simple jump (no physics yet)
-        if input.jump {
-            // TODO: Proper physics jump
-        }
-    }
-}
-
-/// Camera follow system (runs in Playing state)
-fn camera_follow(
-    play_mode: Res<PlayMode>,
-    character_query: Query<&Transform, (With<PlayModeCharacter>, Without<Camera3d>)>,
-    mut camera_query: Query<&mut Transform, With<Camera3d>>,
-) {
-    if play_mode.player_character.is_none() {
-        return;
-    }
-    
-    let Ok(char_transform) = character_query.single() else { return };
-    let Ok(mut cam_transform) = camera_query.single_mut() else { return };
-    
-    // Third-person camera offset
-    let offset = Vec3::new(0.0, 3.0, 8.0);
-    let target_pos = char_transform.translation + offset;
-    
-    // Smooth follow
-    cam_transform.translation = cam_transform.translation.lerp(target_pos, 0.1);
-    cam_transform.look_at(char_transform.translation + Vec3::Y * 1.0, Vec3::Y);
-}
-
-/// Handle UI button clicks for play mode (from ribbon)
-fn handle_play_mode_ui_buttons(
-    mut studio_state: ResMut<crate::ui::StudioState>,
-    current_state: Res<State<PlayModeState>>,
-    mut start_events: MessageWriter<StartPlayEvent>,
-    mut stop_events: MessageWriter<StopPlayEvent>,
-    mut pause_events: MessageWriter<TogglePauseEvent>,
-) {
-    // Play with character button
-    if studio_state.play_with_character_requested {
-        studio_state.play_with_character_requested = false;
-        if *current_state.get() == PlayModeState::Editing {
-            info!("▶️ Play with Character requested from UI");
-            start_events.write(StartPlayEvent {
-                play_type: PlayModeType::WithCharacter,
-            });
-        }
-    }
-    
-    // Play solo button
-    if studio_state.play_solo_requested {
-        studio_state.play_solo_requested = false;
-        if *current_state.get() == PlayModeState::Editing {
-            info!("▶️ Play Solo requested from UI");
-            start_events.write(StartPlayEvent {
-                play_type: PlayModeType::Solo,
-            });
-        }
-    }
-    
-    // Pause button
-    if studio_state.pause_requested {
-        studio_state.pause_requested = false;
-        match current_state.get() {
-            PlayModeState::Playing | PlayModeState::Paused => {
-                info!("⏸️ Pause/Resume requested from UI");
-                pause_events.write(TogglePauseEvent);
-            }
-            _ => {}
-        }
-    }
-    
-    // Stop button
-    if studio_state.stop_requested {
-        studio_state.stop_requested = false;
-        match current_state.get() {
-            PlayModeState::Playing | PlayModeState::Paused => {
-                info!("⏹️ Stop requested from UI");
-                stop_events.write(StopPlayEvent);
-            }
-            _ => {}
-        }
-    }
-}
+// `character_movement`, `camera_follow`, and `handle_play_mode_ui_buttons`
+// used to live here. They were superseded by the shared plugins
+// (`SharedCharacterPlugin`, `SharedAnimationPlugin`) added in `PlayModePlugin`,
+// and by `handle_start_play` which already reads the same `StudioState`
+// request flags the UI-button handler was duplicating. Deleted to remove
+// dead-code warnings and to prevent accidental double-wiring.
 
 /// Keyboard shortcuts for play mode
 fn play_mode_shortcuts(

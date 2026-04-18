@@ -1,0 +1,30 @@
+// broken.rune — intentionally malformed, one bug per hunk.
+//
+// What to verify in the editor / Problems panel:
+//   1. `let x = 1` (no semicolon) yields an error squiggle on the next
+//      line; Ctrl+. offers "Insert missing semicolon".
+//   2. `undefined_fn()` resolves to nothing on F12 and produces no
+//      matches on Shift+F12.
+//   3. Hovering the `42 +` expression surfaces the Rune compiler's
+//      message in a tooltip.
+//   4. "Fix with Workshop" on the Problems panel opens a new Workshop
+//      session seeded with all of the above.
+
+pub fn on_init() {
+    let x = 1       // missing semicolon
+    log_info("ok");
+}
+
+pub fn on_update(dt) {
+    undefined_fn();            // undeclared ident — compiler flags it
+    let y = 42 +               // incomplete expression
+}
+
+fn helper() {
+    // Same symbol name twice — Phase 0's symbol index records both
+    // so `Find References` reports multiple hits.
+}
+
+fn helper() {
+    return 0;
+}

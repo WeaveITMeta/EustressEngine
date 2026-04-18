@@ -97,8 +97,9 @@ pub struct SceneManager {
 
 impl SceneManager {
     pub fn new() -> Result<Self, std::io::Error> {
-        // Get user's documents directory
-        let documents_dir = dirs::document_dir()
+        // Get user's documents directory — bypasses OneDrive KFM on Windows
+        // so Eustress data lives in the local %USERPROFILE%\Documents.
+        let documents_dir = crate::space::default_documents_root()
             .ok_or_else(|| std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Could not find documents directory"

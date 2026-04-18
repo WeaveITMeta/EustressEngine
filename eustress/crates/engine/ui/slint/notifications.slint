@@ -133,9 +133,10 @@ export component Notifications inherits Rectangle {
     callback on-dismiss(int);
 
     width: 320px;
-    // Auto-size height so the container hugs its stack — 72px per toast + 8px
-    // spacing. Caller can anchor bottom-right via y positioning.
-    height: root.notifications.length * 80px;
+    // Height is set by the parent (main.slint fills the available vertical
+    // strip). Never bind height here to a derived expression — letting the
+    // parent compute y from (self.height) created a property-recursion
+    // crash in Slint.
     background: transparent;
 
     VerticalLayout {

@@ -32,7 +32,21 @@ impl Default for SpaceRoot {
 }
 
 pub fn workspace_root() -> PathBuf {
-    if let Some(docs) = dirs::document_dir() {
+    // Resolution order:
+    //   1. `EUSTRESS_WORKSPACE` env var — explicit override for power users
+    //      and CI. Wins regardless of platform.
+    //   2. Platform default (see `default_documents_root`).
+    //   3. Current working directory as last resort.
+    if let Ok(env_path) = std::env::var("EUSTRESS_WORKSPACE") {
+        let root = PathBuf::from(env_path);
+        let _ = std::fs::create_dir_all(&root);
+        if is_dir_empty(&root) {
+            scaffold_default_universe(&root);
+        }
+        return root;
+    }
+
+    if let Some(docs) = default_documents_root() {
         let root = docs.join("Eustress");
         let _ = std::fs::create_dir_all(&root);
 
@@ -45,6 +59,36 @@ pub fn workspace_root() -> PathBuf {
     }
 
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Return the user's Documents folder, preferring the **local** one on Windows.
+///
+/// `dirs::document_dir()` returns whatever Windows' `FOLDERID_Documents` known
+/// folder resolves to. With OneDrive's "Known Folder Move" enabled (the default
+/// on most modern Windows installs), that points at `OneDrive\Documents` (or
+/// the locale equivalent — e.g. `OneDrive\Documentos` on Spanish systems).
+///
+/// Syncing the whole Eustress workspace through OneDrive is almost never what
+/// users want: OneDrive rewrites file metadata, fights the file watcher, and
+/// can silently restore deleted TOMLs. We explicitly bypass that by using
+/// `%USERPROFILE%\Documents` on Windows. Other platforms keep the XDG /
+/// macOS-standard behaviour.
+pub fn default_documents_root() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            let local_docs = home.join("Documents");
+            if local_docs.exists() || std::fs::create_dir_all(&local_docs).is_ok() {
+                return Some(local_docs);
+            }
+        }
+        // Fall through if %USERPROFILE% is somehow unavailable
+        dirs::document_dir()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::document_dir()
+    }
 }
 
 /// Check if a directory exists and has no subdirectories

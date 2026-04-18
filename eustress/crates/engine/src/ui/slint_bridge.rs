@@ -132,6 +132,11 @@ pub struct BridgeState {
     pub viewport_width: Option<f32>,
     pub viewport_height: Option<f32>,
 
+    /// Request to open the viewport (3D) right-click menu. Carries the
+    /// click position in window-local pixels. On apply, the Slint side
+    /// sets `show-context-menu = true` with the default entity items.
+    pub request_viewport_context_menu: Option<(f32, f32)>,
+
     // ---- Universe Browser ----
     pub show_universe_browser: Option<bool>,
     pub universe_items: Option<Vec<UniverseItemData>>,
@@ -170,6 +175,9 @@ impl BridgeState {
             || self.workshop_steps.is_some()
             || self.has_unsaved_changes.is_some()
             || self.selected_count.is_some()
+            // 3D viewport right-click → open context menu at cursor.
+            // Must be listed or take()+drop cycles the request away silently.
+            || self.request_viewport_context_menu.is_some()
     }
 }
 

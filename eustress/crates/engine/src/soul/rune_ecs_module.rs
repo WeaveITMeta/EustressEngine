@@ -1793,7 +1793,7 @@ impl TweenRune {
 #[rune::function]
 fn tween_service_create(info: TweenInfoRune) -> TweenRune {
     with_tween_service(TweenRune { id: 0 }, |service| {
-        let mut svc = service.write().unwrap();
+        let svc = service.write().unwrap();
         let tween = svc.create(info.to_shared());
         TweenRune { id: tween.id() as i64 }
     })

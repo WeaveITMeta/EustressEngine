@@ -137,6 +137,7 @@ pub fn insert_mesh_instance_at(
             name: if folder_name != instance_name { Some(instance_name.clone()) } else { None },
             created: now.clone(),
             last_modified: now,
+            ..Default::default()
         },
         material: None,
         thermodynamic: None,

@@ -283,7 +283,7 @@ impl ScenarioScriptEngine {
         let t_start = std::time::Instant::now();
         let context = ScriptContext::from_scenario(scenario, branch_id)?;
         let result = self.execute(source, &context);
-        let _execution_us = t_start.elapsed().as_micros() as u64;
+        let execution_us = t_start.elapsed().as_micros() as u64;
 
         // Publish audit record to Iggy before applying (captures pre-apply state).
         #[cfg(feature = "streaming")]

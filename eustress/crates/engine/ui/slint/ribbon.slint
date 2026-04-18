@@ -323,6 +323,30 @@ export component Ribbon inherits Rectangle {
     in property <int> update-progress: 0;    // 0-100 download progress
     callback on-update-clicked();
 
+    // Dynamic keyboard shortcuts — Bevy writes these on startup + on every
+    // Keybindings change so the ribbon subtitles stay in sync with File >
+    // Settings > Keybindings. Empty string hides the subtitle.
+    in property <string> shortcut-new: "";
+    in property <string> shortcut-open: "";
+    in property <string> shortcut-save: "";
+    in property <string> shortcut-undo: "";
+    in property <string> shortcut-redo: "";
+    in property <string> shortcut-cut: "";
+    in property <string> shortcut-copy: "";
+    in property <string> shortcut-paste: "";
+    in property <string> shortcut-duplicate: "";
+    in property <string> shortcut-delete: "";
+    in property <string> shortcut-select: "";
+    in property <string> shortcut-move: "";
+    in property <string> shortcut-scale: "";
+    in property <string> shortcut-rotate: "";
+    in property <string> shortcut-group: "";
+    in property <string> shortcut-ungroup: "";
+    in property <string> shortcut-lock: "";
+    in property <string> shortcut-unlock: "";
+    in property <string> shortcut-anchor: "";
+    in property <string> shortcut-focus: "";
+
     // Bliss node state
     in property <string> bliss-balance: "0.000000000000000000";
     in property <string> bliss-balance-short: "0.00";
@@ -978,6 +1002,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Discord"; clicked => { root.on-open-url("https://discord.gg/eustress"); } }
                                 DropdownItem { label: "GitHub"; clicked => { root.on-open-url("https://github.com/eustressengine/eustress"); } }
                                 DropdownSeparator {}
+                                DropdownItem { label: "Eustress Constitution"; clicked => { root.on-menu-action("help:constitution"); } }
                                 DropdownItem { label: "About Eustress Engine"; clicked => { root.on-menu-action("help:about"); } }
                             }
                         }
@@ -1735,38 +1760,38 @@ export component Ribbon inherits Rectangle {
                 // ── FILE group ──
                 ToolGroup {
                     label: "File";
-                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; tooltip: "New Space (Ctrl+N)"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; tooltip: "Open File (Ctrl+O)"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; tooltip: "Save Space (Ctrl+S)"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; shortcut: root.shortcut-new; tooltip: "New Space"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; shortcut: root.shortcut-open; tooltip: "Open File"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; shortcut: root.shortcut-save; tooltip: "Save Space"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
                 }
                 GroupDivider {}
-                
+
                 // ── HISTORY group ──
                 ToolGroup {
                     label: "History";
-                    IconButton { icon: @image-url("../../assets/icons/ui/undo.svg"); label: "Undo"; tooltip: "Undo (Ctrl+Z)"; tint: #ffb74d; clicked => { root.on-undo(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/redo.svg"); label: "Redo"; tooltip: "Redo (Ctrl+Y)"; tint: #ffb74d; clicked => { root.on-redo(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/undo.svg"); label: "Undo"; shortcut: root.shortcut-undo; tooltip: "Undo"; tint: #ffb74d; clicked => { root.on-undo(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/redo.svg"); label: "Redo"; shortcut: root.shortcut-redo; tooltip: "Redo"; tint: #ffb74d; clicked => { root.on-redo(); } }
                 }
                 GroupDivider {}
-                
+
                 // ── CLIPBOARD group ──
                 ToolGroup {
                     label: "Clipboard";
-                    IconButton { icon: @image-url("../../assets/icons/ui/cut.svg"); label: "Cut"; tooltip: "Cut (Ctrl+X)"; tint: #4dd0e1; clicked => { root.on-cut(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/copy.svg"); label: "Copy"; tooltip: "Copy (Ctrl+C)"; tint: #4dd0e1; clicked => { root.on-copy(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/paste.svg"); label: "Paste"; tooltip: "Paste (Ctrl+V)"; tint: #4dd0e1; clicked => { root.on-paste(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/duplicate.svg"); label: "Duplicate"; tooltip: "Duplicate (Ctrl+D)"; tint: #81c784; clicked => { root.on-duplicate(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Delete"; tooltip: "Delete (Del)"; tint: #ef5350; clicked => { root.on-delete(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cut.svg"); label: "Cut"; shortcut: root.shortcut-cut; tooltip: "Cut"; tint: #4dd0e1; clicked => { root.on-cut(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/copy.svg"); label: "Copy"; shortcut: root.shortcut-copy; tooltip: "Copy"; tint: #4dd0e1; clicked => { root.on-copy(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/paste.svg"); label: "Paste"; shortcut: root.shortcut-paste; tooltip: "Paste"; tint: #4dd0e1; clicked => { root.on-paste(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/duplicate.svg"); label: "Duplicate"; shortcut: root.shortcut-duplicate; tooltip: "Duplicate"; tint: #81c784; clicked => { root.on-duplicate(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/delete.svg"); label: "Delete"; shortcut: root.shortcut-delete; tooltip: "Delete"; tint: #ef5350; clicked => { root.on-delete(); } }
                 }
                 GroupDivider {}
-                
+
                 // ── TOOLS group ──
                 ToolGroup {
                     label: "Tools";
-                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; tooltip: "Select (Alt+Z)"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; tooltip: "Move (Alt+X)"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; tooltip: "Scale (Alt+C)"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; tooltip: "Rotate (Alt+V)"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/cursor.svg"); label: "Select"; shortcut: root.shortcut-select; tooltip: "Select"; tint: #e0e0e0; selected: root.current-tool == "select"; clicked => { root.on-select-tool("select"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/move.svg"); label: "Move"; shortcut: root.shortcut-move; tooltip: "Move"; tint: #66bb6a; selected: root.current-tool == "move"; clicked => { root.on-select-tool("move"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/scale.svg"); label: "Scale"; shortcut: root.shortcut-scale; tooltip: "Scale"; tint: #fdd835; selected: root.current-tool == "scale"; clicked => { root.on-select-tool("scale"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/rotate.svg"); label: "Rotate"; shortcut: root.shortcut-rotate; tooltip: "Rotate"; tint: #42a5f5; selected: root.current-tool == "rotate"; clicked => { root.on-select-tool("rotate"); } }
                 }
                 GroupDivider {}
                 
@@ -1800,11 +1825,11 @@ export component Ribbon inherits Rectangle {
                 // ── EDIT group ──
                 ToolGroup {
                     label: "Edit";
-                    IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; tooltip: "Group (Ctrl+G)"; tint: #90caf9; clicked => { root.on-group(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; tooltip: "Ungroup (Ctrl+U)"; tint: #90caf9; clicked => { root.on-ungroup(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock"; tooltip: "Unlock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/group.svg"); label: "Group"; shortcut: root.shortcut-group; tooltip: "Group"; tint: #90caf9; clicked => { root.on-group(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/ungroup.svg"); label: "Ungroup"; shortcut: root.shortcut-ungroup; tooltip: "Ungroup"; tint: #90caf9; clicked => { root.on-ungroup(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/lock.svg"); label: "Lock"; shortcut: root.shortcut-lock; tooltip: "Lock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:lock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/unlock.svg"); label: "Unlock"; shortcut: root.shortcut-unlock; tooltip: "Unlock"; tint: #ffcc80; clicked => { root.on-menu-action("edit:unlock"); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; shortcut: root.shortcut-anchor; tooltip: "Toggle Anchor"; tint: #ce93d8; clicked => { root.on-menu-action("edit:anchor"); } }
                 }
                 
                 GroupDivider {}

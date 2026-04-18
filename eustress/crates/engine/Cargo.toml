@@ -19,6 +19,16 @@ path = "src/main.rs"
 name = "generate-benchmark-map"
 path = "src/bin/generate_benchmark_map.rs"
 
+# Language Server Protocol stdio bin for external editors (Windsurf /
+# VS Code / Zed / Neovim). Guarded by the `lsp` feature so the main
+# engine build doesn't pull in tower-lsp when you don't need it.
+# Build: `cargo build --bin eustress-lsp --features lsp`
+# Run:   `eustress-lsp` (reads/writes LSP JSON-RPC on stdin/stdout)
+[[bin]]
+name = "eustress-lsp"
+path = "src/bin/eustress_lsp.rs"
+required-features = ["lsp"]
+
 
 [dependencies]
 # System clipboard for Slint platform (Ctrl+V paste in LineEdit/TextInput)
@@ -124,6 +134,9 @@ dashmap = "6"
 bytes = "1"
 # Async channels for Slint+Bevy integration
 smol = "2"
+# LSP server (feature-gated — pulled in only by the `eustress-lsp` bin).
+# Deliberately optional so the main engine binary doesn't link tower-lsp.
+tower-lsp = { version = "0.20", optional = true }
 spin_on = "0.1"
 # Byte casting for GPU buffer operations
 bytemuck = { version = "1.16", features = ["derive"] }
@@ -177,6 +190,21 @@ mindspace = []
 workshop = ["ai-integration"]
 # Claude API integration — Soul code generation, Workshop, summary builds
 ai-integration = []
+# Vortex semantic mention backend — SubwordTokenizer + embedvec (H4 lattice).
+# When off (default), the Workshop @ popup uses the built-in substring searcher.
+# When on, `workshop::mention_searcher_vortex` is compiled and installed in
+# place of the substring fallback. Dependencies stay behind the flag so
+# non-Vortex builds skip the embedvec + sled payload.
+workshop-vortex-embeddings = []
+# Clipboard integration (right-click → Copy Path writes to OS clipboard via arboard)
+clipboard = []
+# zstd-compressed save files (opt-in for large scenes)
+compression = []
+# LSP server for external editors (Windsurf / VS Code / Zed / Neovim, etc.)
+# Only pulled in when building the `eustress-lsp` bin — main engine binary
+# stays unchanged. tokio + serde_json are already base deps, so this only
+# gates tower-lsp itself.
+lsp = ["dep:tower-lsp"]
 # Forge orchestration (deployment + remote publishing)
 forge = []
 # Bliss node (Bliss token economy integration)

@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::space::SpaceFileRegistry;
 
 /// Actions that can be bound to keys
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -176,7 +175,7 @@ impl KeyBinding {
     
     pub fn to_string_rep(&self) -> String {
         let mut parts = Vec::new();
-        
+
         if self.ctrl {
             parts.push("Ctrl".to_string());
         }
@@ -186,10 +185,55 @@ impl KeyBinding {
         if self.shift {
             parts.push("Shift".to_string());
         }
-        
+
         parts.push(format!("{:?}", self.key));
-        
+
         parts.join("+")
+    }
+
+    /// User-facing display string — strips the `Key` / `Digit` enum-variant
+    /// prefixes produced by `{:?}` on KeyCode so users see "Ctrl+Z" instead
+    /// of "Ctrl+KeyZ". Used by the ribbon to render subtitle shortcuts.
+    pub fn display(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl  { parts.push("Ctrl".to_string()); }
+        if self.alt   { parts.push("Alt".to_string()); }
+        if self.shift { parts.push("Shift".to_string()); }
+        parts.push(key_display(&self.key));
+        parts.join("+")
+    }
+}
+
+/// Map a Bevy [`bevy::input::keyboard::KeyCode`] to a short, user-readable
+/// string. Handles the common letter/digit/arrow/function cases; falls back
+/// to `{:?}` for anything exotic (media keys, IMEs, etc.).
+fn key_display(key: &bevy::input::keyboard::KeyCode) -> String {
+    use bevy::input::keyboard::KeyCode;
+    let raw = format!("{:?}", key);
+    // KeyA..KeyZ → A..Z
+    if let Some(rest) = raw.strip_prefix("Key") {
+        if rest.len() == 1 {
+            return rest.to_string();
+        }
+    }
+    // Digit0..Digit9 → 0..9
+    if let Some(rest) = raw.strip_prefix("Digit") {
+        return rest.to_string();
+    }
+    // Function keys stay as F1..F24
+    // Arrows → ↑ ↓ ← → for compactness
+    match key {
+        KeyCode::ArrowUp    => "↑".to_string(),
+        KeyCode::ArrowDown  => "↓".to_string(),
+        KeyCode::ArrowLeft  => "←".to_string(),
+        KeyCode::ArrowRight => "→".to_string(),
+        KeyCode::Space      => "Space".to_string(),
+        KeyCode::Escape     => "Esc".to_string(),
+        KeyCode::Enter      => "Enter".to_string(),
+        KeyCode::Backspace  => "Backspace".to_string(),
+        KeyCode::Delete     => "Del".to_string(),
+        KeyCode::Tab        => "Tab".to_string(),
+        _ => raw,
     }
 }
 
@@ -433,6 +477,7 @@ fn handle_menu_action_events(
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     mut editor_settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
 ) {
     let (
         ref mut undo_events,
@@ -512,13 +557,10 @@ fn handle_menu_action_events(
                         target_bounds: Some((min, max)),
                     });
                     info!("📷 Focus on selection: bounds ({:?} to {:?})", min, max);
-                } else {
-                    // No selection or ID mismatch — frame entire scene
-                    frame_events.write(crate::camera_controller::FrameSelectionEvent {
-                        target_bounds: None,
-                    });
-                    info!("📷 Focus on scene (no selection)");
                 }
+                // No selection → no-op. Framing the whole scene on an empty
+                // selection used to fly the camera to an empty world and show
+                // only sky — unintuitive.
             }
 
             // Snapping
@@ -565,24 +607,60 @@ fn handle_menu_action_events(
                         {
                             camera_deleted = true;
                         }
-                        // Move TOML to .eustress/trash/ (recoverable via undo)
+                        // Move TOML (or the whole folder, for folder-based
+                        // entities) to .eustress/trash/ so Ctrl+Z can restore.
                         if let Ok(inst_file) = instance_file_query.get(entity) {
                             let toml_path = inst_file.toml_path.clone();
-                            if toml_path.exists() {
-                                let trash_dir = toml_path.parent()
+                            // Folder-based entities live in `Foo/_instance.toml`;
+                            // trashing only the TOML leaves an empty folder on disk
+                            // AND orphans sibling files (Summary.md, child instances).
+                            // Trash the containing folder instead.
+                            let is_folder_instance = toml_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy() == "_instance.toml")
+                                .unwrap_or(false);
+                            let source_path = if is_folder_instance {
+                                toml_path.parent().unwrap_or(toml_path.as_path()).to_path_buf()
+                            } else {
+                                toml_path.clone()
+                            };
+
+                            if source_path.exists() {
+                                // trash dir lives one level up from the part's
+                                // containing folder (or Workspace root for flat files).
+                                let trash_anchor = if is_folder_instance {
+                                    source_path.parent()
+                                } else {
+                                    toml_path.parent()
+                                };
+                                let trash_dir = trash_anchor
                                     .and_then(|p| p.parent())
-                                    .unwrap_or(toml_path.parent().unwrap_or(std::path::Path::new(".")))
+                                    .unwrap_or(trash_anchor.unwrap_or(std::path::Path::new(".")))
                                     .join(".eustress").join("trash");
                                 let _ = std::fs::create_dir_all(&trash_dir);
-                                let trash_path = trash_dir.join(toml_path.file_name().unwrap_or_default());
-                                match std::fs::rename(&toml_path, &trash_path) {
+                                let trash_name = source_path.file_name().unwrap_or_default();
+                                let trash_path = trash_dir.join(trash_name);
+
+                                // Tell file-watcher to ignore the impending delete
+                                // so it doesn't try to despawn an already-gone entity.
+                                if let Some(ref mut registry) = file_registry {
+                                    registry.rename_in_progress.insert(toml_path.clone());
+                                    registry.rename_in_progress.insert(source_path.clone());
+                                }
+
+                                match std::fs::rename(&source_path, &trash_path) {
                                     Ok(_) => {
                                         trashed_paths.push((toml_path.clone(), trash_path));
-                                        info!("🗑️ Moved {:?} to trash", toml_path.file_name().unwrap_or_default());
+                                        info!("🗑️ Moved {:?} to trash", source_path.file_name().unwrap_or_default());
                                     }
                                     Err(_) => {
-                                        let _ = std::fs::remove_file(&toml_path);
-                                        info!("🗑️ Deleted {:?}", toml_path.file_name().unwrap_or_default());
+                                        // Fallback: hard-delete. For folders, remove recursively.
+                                        if is_folder_instance {
+                                            let _ = std::fs::remove_dir_all(&source_path);
+                                        } else {
+                                            let _ = std::fs::remove_file(&source_path);
+                                        }
+                                        info!("🗑️ Deleted {:?}", source_path.file_name().unwrap_or_default());
                                     }
                                 }
                             }
@@ -602,6 +680,13 @@ fn handle_menu_action_events(
                     // Clear selection after delete
                     if let Some(ref sm) = selection_manager {
                         sm.0.write().clear();
+                    }
+
+                    // Force Explorer re-sync next frame so the deleted entities
+                    // disappear from the tree without waiting for the 30-frame
+                    // throttle — avoids the "deleted but still shown" UX.
+                    if let Some(ref mut es) = explorer_state {
+                        es.needs_immediate_sync = true;
                     }
                     // Respawn a default camera at origin so the viewport is never left without one
                     if camera_deleted {

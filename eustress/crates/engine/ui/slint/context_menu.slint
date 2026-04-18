@@ -81,47 +81,6 @@ component MenuSeparator inherits Rectangle {
     }
 }
 
-// ── Section Header ────────────────────────────────────────────────────────
-
-component MenuHeader inherits Rectangle {
-    in property <string> label: "";
-    height: 22px;
-
-    Text {
-        x: 10px;
-        text: root.label;
-        color: #666;
-        font-size: 9px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        vertical-alignment: center;
-    }
-}
-
-// ── Insert Item (compact) ─────────────────────────────────────────────────
-
-component InsertItem inherits Rectangle {
-    in property <string> label: "";
-    callback clicked();
-
-    height: 24px;
-    background: item-touch.has-hover ? #2a2d3a : transparent;
-    border-radius: 3px;
-
-    item-touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-
-    Text {
-        x: 10px;
-        text: root.label;
-        color: Theme.text-primary;
-        font-size: 11px;
-        vertical-alignment: center;
-    }
-}
-
 // ============================================================================
 // Context Menu — main component
 // ============================================================================
@@ -129,13 +88,15 @@ component InsertItem inherits Rectangle {
 export component ContextMenu inherits Rectangle {
     in property <[MenuItem]> items: [];
 
-    property <bool> show-insert-submenu: false;
-
     callback on-action(string);
     callback on-close();
 
     width: 220px;
-    max-height: 500px;
+    // Height hugs content via the inner layout's `min-height` (sum of
+    // children, independent of parent). `preferred-height` creates a
+    // circular binding when the parent height drives the child, which
+    // can resolve to 0 and hide the menu entirely.
+    height: body.min-height;
     clip: true;
     background: #1e1f2e;
     border-radius: 6px;
@@ -149,13 +110,12 @@ export component ContextMenu inherits Rectangle {
         scroll-event(event) => { return accept; }
     }
 
-    ScrollView {
-        VerticalLayout {
-            padding: 4px;
-            spacing: 1px;
+    body := VerticalLayout {
+        padding: 4px;
+        spacing: 1px;
 
-            // ── Dynamic items (file menu) ──
-            if root.items.length > 0 && !root.show-insert-submenu: VerticalLayout {
+        // ── Dynamic items (file menu) ──
+        if root.items.length > 0: VerticalLayout {
                 spacing: 1px;
 
                 for item in root.items: VerticalLayout {
@@ -174,7 +134,12 @@ export component ContextMenu inherits Rectangle {
             }
 
             // ── Default entity menu ──
-            if root.items.length == 0 && !root.show-insert-submenu: VerticalLayout {
+            //
+            // Order: edit clipboard ops → identity ops → structure ops →
+            // destructive (Delete) last so a misclick can't nuke the node.
+            // "Insert Object..." lives in the File menu; we don't duplicate
+            // it here.
+            if root.items.length == 0: VerticalLayout {
                 spacing: 1px;
 
                 MenuItemRow {
@@ -201,14 +166,17 @@ export component ContextMenu inherits Rectangle {
                 MenuSeparator {}
 
                 MenuItemRow {
-                    icon: @image-url("../../assets/icons/ui/delete.svg");
-                    label: "Delete"; shortcut: "Del";
-                    clicked => { root.on-action("delete"); }
-                }
-                MenuItemRow {
                     icon: @image-url("../../assets/icons/ui/rename.svg");
                     label: "Rename"; shortcut: "F2";
                     clicked => { root.on-action("rename"); }
+                }
+                // Copy Path — yields the `@entity:Space/Name` canonical handle
+                // so the user can paste it straight into the Workshop chat
+                // and @reference the selected entity.
+                MenuItemRow {
+                    icon: @image-url("../../assets/icons/ui/link.svg");
+                    label: "Copy Path"; shortcut: "";
+                    clicked => { root.on-action("copy-path"); }
                 }
 
                 MenuSeparator {}
@@ -227,61 +195,10 @@ export component ContextMenu inherits Rectangle {
                 MenuSeparator {}
 
                 MenuItemRow {
-                    icon: @image-url("../../assets/icons/ui/plus.svg");
-                    label: "Insert Object...";
-                    clicked => { root.show-insert-submenu = true; }
+                    icon: @image-url("../../assets/icons/ui/delete.svg");
+                    label: "Delete"; shortcut: "Del";
+                    clicked => { root.on-action("delete"); }
                 }
-            }
-
-            // ── Insert Object submenu (scrollable) ──
-            if root.show-insert-submenu: VerticalLayout {
-                spacing: 1px;
-
-                // Back button
-                MenuItemRow {
-                    icon: @image-url("../../assets/icons/ui/arrow-left.svg");
-                    label: "Back";
-                    clicked => { root.show-insert-submenu = false; }
-                }
-                MenuSeparator {}
-
-                MenuHeader { label: "PRIMITIVES"; }
-                InsertItem { label: "Part (Block)"; clicked => { root.on-action("insert:part"); } }
-                InsertItem { label: "Sphere"; clicked => { root.on-action("insert:sphere"); } }
-                InsertItem { label: "Cylinder"; clicked => { root.on-action("insert:cylinder"); } }
-                InsertItem { label: "Wedge"; clicked => { root.on-action("insert:wedge"); } }
-                InsertItem { label: "Cone"; clicked => { root.on-action("insert:cone"); } }
-
-                MenuSeparator {}
-                MenuHeader { label: "STRUCTURE"; }
-                InsertItem { label: "Model"; clicked => { root.on-action("insert:model"); } }
-                InsertItem { label: "Folder"; clicked => { root.on-action("insert:folder"); } }
-                InsertItem { label: "SpawnLocation"; clicked => { root.on-action("insert:spawnlocation"); } }
-
-                MenuSeparator {}
-                MenuHeader { label: "SCRIPTING"; }
-                InsertItem { label: "Script"; clicked => { root.on-action("insert:script"); } }
-                InsertItem { label: "LocalScript"; clicked => { root.on-action("insert:localscript"); } }
-                InsertItem { label: "ModuleScript"; clicked => { root.on-action("insert:modulescript"); } }
-
-                MenuSeparator {}
-                MenuHeader { label: "UI"; }
-                InsertItem { label: "ScreenGui"; clicked => { root.on-action("insert:screengui"); } }
-                InsertItem { label: "BillboardGui"; clicked => { root.on-action("insert:billboardgui"); } }
-                InsertItem { label: "SurfaceGui"; clicked => { root.on-action("insert:surfacegui"); } }
-                InsertItem { label: "Frame"; clicked => { root.on-action("insert:frame"); } }
-                InsertItem { label: "TextLabel"; clicked => { root.on-action("insert:textlabel"); } }
-                InsertItem { label: "TextButton"; clicked => { root.on-action("insert:textbutton"); } }
-                InsertItem { label: "ImageLabel"; clicked => { root.on-action("insert:imagelabel"); } }
-
-                MenuSeparator {}
-                MenuHeader { label: "EFFECTS"; }
-                InsertItem { label: "PointLight"; clicked => { root.on-action("insert:pointlight"); } }
-                InsertItem { label: "SpotLight"; clicked => { root.on-action("insert:spotlight"); } }
-                InsertItem { label: "Sound"; clicked => { root.on-action("insert:sound"); } }
-                InsertItem { label: "ParticleEmitter"; clicked => { root.on-action("insert:particleemitter"); } }
-                InsertItem { label: "Beam"; clicked => { root.on-action("insert:beam"); } }
             }
         }
     }
-}

@@ -21,7 +21,7 @@ use crate::classes::{BasePart, Instance};
 use crate::ui::{StudioState, Tool, BevySelectionManager, SlintUIFocus};
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
-    align_to_surface, ray_intersects_part, ray_intersects_part_rotated,
+    ray_intersects_part,
     find_surface_with_physics as math_find_surface_with_physics,
     find_surface_under_cursor_with_normal as math_find_surface_with_normal,
     calculate_surface_offset as math_calculate_surface_offset,

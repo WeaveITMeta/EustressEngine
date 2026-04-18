@@ -35,6 +35,7 @@ pub mod foot_ik;
 pub mod physics_constraints;
 pub mod play_mode;
 pub mod play_mode_runtime;
+pub mod script_editor;
 pub mod notifications;
 pub mod ui;
 pub mod seats;

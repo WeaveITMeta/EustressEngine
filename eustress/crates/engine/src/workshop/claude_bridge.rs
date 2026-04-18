@@ -21,11 +21,15 @@
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
 use eustress_common::soul::ClaudeConfig;
+use serde_json::{json, Value};
 
 use super::{
     IdeationPipeline, IdeationState, ClaudeResponseEvent, ClaudeErrorEvent,
-    McpCommandStatus, normalizer,
+    McpCommandStatus, MessageRole, normalizer,
 };
+use super::tools::ToolRegistry;
+use super::modes::ActiveModes;
+use crate::soul::claude_client::{AgenticResponse, ClaudeClient, ClaudeTool};
 
 // ============================================================================
 // 1. WorkshopClaudeTask — in-flight request state
@@ -56,11 +60,21 @@ impl InFlightRequest {
     }
 }
 
+/// Agentic (tool-use) in-flight request. Holds the parsed `AgenticResponse`
+/// once the background thread finishes. Separate from the legacy
+/// [`InFlightRequest`] which carries plain text (used by the normalize step).
+#[derive(Debug)]
+pub(super) struct AgenticInFlight {
+    pub(super) result: Arc<Mutex<Option<Result<AgenticResponse, String>>>>,
+}
+
 /// Resource tracking all in-flight Claude requests for the Workshop
 #[derive(Resource, Default)]
 pub struct WorkshopClaudeTasks {
-    /// Active requests being polled
+    /// Legacy text-mode requests (normalize, artifact gen)
     pub(super) in_flight: Vec<InFlightRequest>,
+    /// Agentic tool-use requests (the conversational chat loop)
+    pub(super) agentic_in_flight: Vec<AgenticInFlight>,
     /// Whether a conversational response is pending (prevent duplicate sends)
     pub chat_pending: bool,
 }
@@ -87,28 +101,48 @@ Do NOT generate TOML or structured data — that happens in a separate normaliza
 // 3. dispatch_claude_requests — spawn background threads
 // ============================================================================
 
-/// Spawns a conversational Claude call when the user sends a message
-/// and the pipeline is in Conversing state
+/// Dispatches the Workshop's agentic chat turn:
+/// * Builds the Anthropic-format `messages` array from the pipeline history
+///   (text, tool_use blocks from prior assistant turns, tool_result blocks
+///   from resolved tools).
+/// * Assembles the system prompt from the currently active modes' fragments.
+/// * Filters the [`ToolRegistry`] to just the tools the active modes expose.
+/// * Spawns a background thread that calls `call_with_tools` and delivers
+///   the `AgenticResponse` into a shared container.
+///
+/// Dispatch is suppressed while a previous turn is still in flight OR while
+/// the pipeline is waiting on user approval for one or more tool_use cards.
 pub fn dispatch_chat_request(
     mut pipeline: ResMut<IdeationPipeline>,
     mut tasks: ResMut<WorkshopClaudeTasks>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    tool_registry: Option<Res<ToolRegistry>>,
+    mention_index: Option<Res<super::mention::MentionIndex>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
-    // Only dispatch if we're conversing and not already waiting for a response
-    if pipeline.state != IdeationState::Conversing || tasks.chat_pending {
+    // Only dispatch in the conversing state, only when we're not already
+    // waiting, and only when the user has not gated us behind a tool
+    // approval that hasn't been resolved yet.
+    if pipeline.state != IdeationState::Conversing
+        || tasks.chat_pending
+        || pipeline.awaiting_tool_approval
+    {
         return;
     }
-    
-    // Check if the last message was from the user (needs a response)
-    let last_is_user = pipeline.messages.last()
-        .map(|m| m.role == super::MessageRole::User)
-        .unwrap_or(false);
-    
-    if !last_is_user {
-        return;
-    }
-    
+
+    // A dispatch is valid when the pipeline's most recent entry that would
+    // reach Claude is either:
+    //   - a user text message (the "send" case), or
+    //   - a tool_result (the "continue after tool execution" case).
+    // Errors/artifacts/mode-badges are UI-only and don't block the guard.
+    let ready_to_dispatch = pipeline.messages.iter().rev().find_map(|m| match m.role {
+        MessageRole::User => Some(true),
+        MessageRole::Mcp => m.tool_result.as_ref().map(|_| true), // resolved tool = ready
+        MessageRole::System | MessageRole::Artifact | MessageRole::Error | MessageRole::Approval => None,
+    }).unwrap_or(false);
+    if !ready_to_dispatch { return; }
+
     // Get API key
     let api_key = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => {
@@ -123,46 +157,242 @@ pub fn dispatch_chat_request(
         }
         _ => return,
     };
-    
-    // Build conversation prompt from accumulated context
-    let prompt = pipeline.conversation_context.clone();
-    let prompt_len = prompt.len();
-    
-    // Create shared result container
-    let result_container: Arc<Mutex<Option<Result<String, String>>>> = 
+
+    // Assemble Claude-API-shaped messages from the pipeline's chat log.
+    let mut messages = build_anthropic_messages(&pipeline);
+    if messages.is_empty() {
+        return;
+    }
+
+    // Resolve @ mentions on the latest user message. Extra content blocks
+    // (entity summaries, inlined file bytes, base64 images) ride alongside
+    // the original text so the user-visible chat log stays clean while
+    // Claude sees full context.
+    if let Some(ref index) = mention_index {
+        let space = space_root.as_ref().map(|sr| sr.0.as_path());
+        let universe = space.and_then(crate::space::universe_root_for_path);
+        attach_mention_blocks_to_last_user(
+            &mut messages,
+            index.as_ref(),
+            space,
+            universe.as_deref(),
+        );
+    }
+
+    // Build system prompt: base + active mode fragments.
+    let system_prompt = build_system_prompt(&pipeline.active_modes);
+
+    // Snapshot tools for the active modes. We clone the definitions here so
+    // the background thread owns them — `ToolRegistry` itself stays on the
+    // main thread.
+    let tools: Vec<ClaudeTool> = tool_registry
+        .as_ref()
+        .map(|r| r.claude_tools(&pipeline.active_modes.all()))
+        .unwrap_or_default();
+
+    let tool_count = tools.len();
+    let message_count = messages.len();
+
+    // Shared result container
+    let result_container: Arc<Mutex<Option<Result<AgenticResponse, String>>>> =
         Arc::new(Mutex::new(None));
     let result_clone = result_container.clone();
-    
-    // Build ClaudeConfig for the background thread
+
     let config = ClaudeConfig {
         api_key: Some(api_key),
         ..ClaudeConfig::default()
     };
-    
-    // Spawn background thread
+
     std::thread::spawn(move || {
-        let client = crate::soul::ClaudeClient::new(config);
-        let result = client.call_api_for_workshop(&prompt, WORKSHOP_SYSTEM_PROMPT);
+        let client = ClaudeClient::new(config);
+        let result = client
+            .call_with_tools(&messages, &tools, Some(&system_prompt))
+            .map_err(|e| e.to_string());
 
         match result_clone.lock() {
             Ok(mut lock) => *lock = Some(result),
             Err(poisoned) => {
-                tracing::error!("Workshop: Mutex poisoned in chat thread, recovering");
+                tracing::error!("Workshop: Mutex poisoned in agentic thread, recovering");
                 *poisoned.into_inner() = Some(Err("Internal error: thread lock poisoned".to_string()));
             }
         }
     });
 
-    // Track the in-flight request
-    tasks.in_flight.push(InFlightRequest::new(
-        result_container,
-        None,
-        None,
-        false,
-    ));
+    tasks.agentic_in_flight.push(AgenticInFlight { result: result_container });
     tasks.chat_pending = true;
-    
-    info!("Workshop: Dispatched conversational Claude request ({} chars context)", prompt_len);
+
+    info!(
+        "Workshop: Dispatched agentic Claude request ({} messages, {} tools, modes: {})",
+        message_count,
+        tool_count,
+        pipeline.active_modes.badges_text()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Helpers — system prompt + message array assembly
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Base system prompt that applies regardless of active mode. Per-mode
+/// fragments stack on top via `ActiveModes::system_prompt_fragments`.
+const BASE_SYSTEM_PROMPT: &str = r#"You are the Eustress Workshop agent — an AI pair-programmer embedded inside EustressEngine with live access to the user's Universe via MCP tools.
+
+Your behaviour:
+- When the user asks for something that requires state changes (entities, files, scripts, simulation), USE TOOLS. Don't describe what you would do; call the tool and let the user approve or see the result.
+- When the user asks a question, answer concisely. Text responses stay under 200 words unless explicitly asked for detail.
+- When mode-specific knowledge applies, prefix your response with the active-mode badges you see in the Active Mode sections below.
+- Never fabricate tool names. Only call tools defined in the tools array.
+- If a tool requires approval, the UI will prompt the user; continue your reasoning afterwards once results arrive.
+
+@ References:
+- The user can attach items from their Universe via `@kind:space/path` tokens. You'll see these inline in their message plus resolved context blocks (entity summaries, file contents, images) that follow.
+- When the user references an image with `@file:...` and wants code from it, call `image_to_code`. For textual documents, call `document_to_code`.
+- Cross-Space references (e.g. `@entity:Space2/Foo` while the user is in Space1) are valid — use `query_entities` / `read_file` to pull live state from the referenced Space if needed.
+"#;
+
+fn build_system_prompt(active_modes: &ActiveModes) -> String {
+    let mut out = String::with_capacity(2048);
+    out.push_str(BASE_SYSTEM_PROMPT);
+    out.push_str(&active_modes.system_prompt_fragments());
+    out
+}
+
+/// Walk the pipeline's chat log and produce an Anthropic-API-shaped
+/// messages array. The API requires alternating user/assistant roles, so
+/// consecutive same-role entries get merged into one message with multiple
+/// content blocks. Tool_use blocks live in assistant content, tool_result
+/// blocks live in user content.
+///
+/// Rules applied:
+/// * `User` → text block under role "user".
+/// * `System` (prior assistant reply) → text block under role "assistant".
+///   System messages without a user preceding them are treated as context.
+/// * `Mcp` with `tool_use_id` + `tool_input` → tool_use block under "assistant".
+///   If the same message also has `tool_result` → emits a paired tool_result
+///   block under the next "user" message.
+/// * `Approval`, `Error`, `Artifact` → skipped (UI-only).
+/// * System mode-badge messages (role=System, content starts with an emoji
+///   mode icon) are also elided so they don't pollute the Claude context.
+pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut current_role: Option<&'static str> = None;
+    let mut buffer: Vec<Value> = Vec::new();
+
+    fn flush(out: &mut Vec<Value>, role: Option<&'static str>, buffer: &mut Vec<Value>) {
+        if let Some(role) = role {
+            if !buffer.is_empty() {
+                out.push(json!({ "role": role, "content": std::mem::take(buffer) }));
+            }
+        }
+    }
+
+    // `target` is always a string literal ("user" / "assistant"), so it lives
+    // for `'static`. Match that so `flush` (which needs `'static`) can reuse
+    // the role without lifetime laundering.
+    fn switch(
+        role: &mut Option<&'static str>,
+        buffer: &mut Vec<Value>,
+        out: &mut Vec<Value>,
+        target: &'static str,
+    ) {
+        if *role != Some(target) {
+            flush(out, *role, buffer);
+            *role = Some(target);
+        }
+    }
+
+    for msg in &pipeline.messages {
+        match msg.role {
+            MessageRole::User => {
+                switch(&mut current_role, &mut buffer, &mut out, "user");
+                buffer.push(json!({ "type": "text", "text": msg.content.clone() }));
+            }
+            MessageRole::System => {
+                // Skip mode-activation badges — they're UI-only. Heuristic:
+                // content starts with a mode badge (emoji icon followed by " ").
+                if is_mode_badge(&msg.content) { continue; }
+                switch(&mut current_role, &mut buffer, &mut out, "assistant");
+                buffer.push(json!({ "type": "text", "text": msg.content.clone() }));
+            }
+            MessageRole::Mcp => {
+                // A tool_use block from a past assistant turn.
+                let (Some(tool_id), Some(tool_name)) =
+                    (msg.tool_use_id.as_deref(), msg.mcp_endpoint.as_deref())
+                else { continue };
+                let input = msg.tool_input.clone().unwrap_or_else(|| json!({}));
+
+                switch(&mut current_role, &mut buffer, &mut out, "assistant");
+                buffer.push(json!({
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": tool_name,
+                    "input": input,
+                }));
+
+                // If the tool has already executed and we have a result, the
+                // next Claude turn must see a tool_result on the user side.
+                if let Some(result) = &msg.tool_result {
+                    switch(&mut current_role, &mut buffer, &mut out, "user");
+                    buffer.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": result.clone(),
+                    }));
+                }
+            }
+            MessageRole::Approval | MessageRole::Artifact | MessageRole::Error => {
+                // Don't send UI-only messages to Claude.
+            }
+        }
+    }
+    flush(&mut out, current_role, &mut buffer);
+
+    out
+}
+
+/// Heuristic: does this content look like a "🏭 Manufacturing — mode activated"
+/// badge? Those messages are UI-only and shouldn't round-trip to Claude.
+fn is_mode_badge(content: &str) -> bool {
+    content.contains("— mode activated")
+}
+
+/// Walk the built `messages` array and append resolved mention blocks to
+/// the most recent `user` message. Tool_result blocks inside that user
+/// message are left untouched — we only append after them.
+fn attach_mention_blocks_to_last_user(
+    messages: &mut [Value],
+    index: &super::mention::MentionIndex,
+    space_root: Option<&std::path::Path>,
+    universe_root: Option<&std::path::Path>,
+) {
+    // Find the last "user"-role message. Iterate in reverse so we target
+    // the freshest user turn.
+    let Some(user_msg) = messages.iter_mut().rev().find(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("user")
+    }) else { return };
+
+    // Content blocks live under `content` as an array. Gather the combined
+    // text of every `text` block so we can scan for @refs once.
+    let content_arr = match user_msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+        Some(c) => c,
+        None => return,
+    };
+    let combined_text: String = content_arr.iter()
+        .filter_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text").and_then(|t| t.as_str()).map(str::to_string)
+            } else { None }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let extra = super::mention_resolver::resolve_mentions_to_blocks(
+        &combined_text, index, space_root, universe_root,
+    );
+
+    for block in extra {
+        content_arr.push(block);
+    }
 }
 
 /// Spawns a normalization Claude call when an MCP normalize command is approved
@@ -240,7 +470,164 @@ pub fn dispatch_normalize_request(
 }
 
 // ============================================================================
-// 4. poll_claude_responses — check for completed requests each frame
+// 4. poll_agentic_responses — handle tool-use round trips
+// ============================================================================
+
+/// Polls the agentic in-flight requests (chat turns using `call_with_tools`).
+/// On completion:
+/// * Appends the response's text content as a System message (assistant reply).
+/// * For each `tool_use` block:
+///     - Creates an `Mcp` message with the tool name + input + use_id.
+///     - If the tool is `requires_approval: false`, executes it *immediately*
+///       via `ToolRegistry.dispatch()`, stores the result on the message,
+///       and clears `awaiting_tool_approval` so `dispatch_chat_request` will
+///       continue the loop next frame.
+///     - If `requires_approval: true`, sets `awaiting_tool_approval = true`
+///       and leaves the card pending — user must approve or skip.
+///
+/// When the response has no tool_uses, the turn ends naturally — Claude has
+/// given its final text answer.
+pub fn poll_agentic_responses(
+    mut tasks: ResMut<WorkshopClaudeTasks>,
+    mut pipeline: ResMut<IdeationPipeline>,
+    tool_registry: Option<Res<ToolRegistry>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    auth: Option<Res<crate::auth::AuthState>>,
+) {
+    let mut completed_indices = Vec::new();
+
+    for (i, req) in tasks.agentic_in_flight.iter().enumerate() {
+        let result = {
+            let lock = req.result.lock().ok();
+            lock.and_then(|mut g| g.take())
+        };
+        let Some(result) = result else { continue };
+        completed_indices.push(i);
+
+        match result {
+            Ok(agentic) => {
+                // Estimate cost from token usage (Sonnet tier).
+                let input_cost = (agentic.input_tokens as f64) / 1_000_000.0 * 3.0;
+                let output_cost = (agentic.output_tokens as f64) / 1_000_000.0 * 15.0;
+                let cost = input_cost + output_cost;
+                pipeline.total_cost += cost;
+
+                // 1. Emit the assistant's text reply if any.
+                if !agentic.text.trim().is_empty() {
+                    pipeline.add_system_message(agentic.text.clone(), cost);
+                }
+
+                // 2. Emit each tool_use as an Mcp card. Auto-execute when
+                //    the registered definition doesn't require approval.
+                let tool_context = build_tool_context(&space_root, &auth);
+                let mut any_awaiting_approval = false;
+
+                for tool_use in &agentic.tool_uses {
+                    // Look up the tool's approval requirement.
+                    let requires_approval = tool_registry.as_ref()
+                        .and_then(|r| r.tools_for_modes(&pipeline.active_modes.all())
+                            .into_iter()
+                            .find(|d| d.name == tool_use.name))
+                        .map(|d| d.requires_approval)
+                        .unwrap_or(true); // unknown tool → safer to require approval
+
+                    // Create the Mcp message card.
+                    let card_content = format!("{}({})", tool_use.name,
+                        compact_input_preview(&tool_use.input));
+                    let msg_id = pipeline.add_mcp_command(
+                        card_content,
+                        tool_use.name.clone(),
+                        "tool_use".to_string(),
+                        0.0,
+                    );
+                    // Stash the tool_use metadata on the card for later reconstruction.
+                    if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                        msg.tool_use_id = Some(tool_use.id.clone());
+                        msg.tool_input = Some(tool_use.input.clone());
+                        msg.is_assistant_turn = true;
+                    }
+
+                    if !requires_approval {
+                        // Execute immediately and attach result.
+                        if let (Some(registry), Some(ref ctx)) = (&tool_registry, &tool_context) {
+                            let result = registry.dispatch(
+                                &tool_use.name,
+                                &tool_use.id,
+                                tool_use.input.clone(),
+                                ctx,
+                            );
+                            let status = if result.success {
+                                McpCommandStatus::Done
+                            } else {
+                                McpCommandStatus::Error
+                            };
+                            pipeline.update_mcp_status(msg_id, status);
+                            if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                                msg.tool_result = Some(result.content.clone());
+                            }
+                            info!("Workshop: auto-executed '{}' → success={}", tool_use.name, result.success);
+                        } else {
+                            // Tool context missing — can't execute, mark as needing approval so
+                            // something shows in the UI instead of silently failing.
+                            if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == msg_id) {
+                                msg.tool_result = Some(
+                                    "Workshop: no SpaceRoot resource — tool cannot execute.".to_string()
+                                );
+                            }
+                            pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+                        }
+                    } else {
+                        any_awaiting_approval = true;
+                    }
+                }
+
+                pipeline.awaiting_tool_approval = any_awaiting_approval;
+            }
+            Err(err) => {
+                pipeline.add_error_message(format!("Workshop: Claude error — {}", err));
+                pipeline.awaiting_tool_approval = false;
+            }
+        }
+    }
+
+    for i in completed_indices.into_iter().rev() {
+        tasks.agentic_in_flight.remove(i);
+    }
+    if tasks.agentic_in_flight.is_empty() {
+        tasks.chat_pending = false;
+    }
+}
+
+/// Build a `ToolContext` from Bevy resources. Returns `None` when Space isn't
+/// loaded (early startup / between spaces).
+fn build_tool_context(
+    space_root: &Option<Res<crate::space::SpaceRoot>>,
+    auth: &Option<Res<crate::auth::AuthState>>,
+) -> Option<super::tools::ToolContext> {
+    let sr = space_root.as_ref()?;
+    let universe_root = crate::space::universe_root_for_path(&sr.0)
+        .unwrap_or_else(|| sr.0.clone());
+    let (user_id, username) = auth.as_ref()
+        .and_then(|a| a.user.as_ref())
+        .map(|u| (Some(u.id.clone()), Some(u.username.clone())))
+        .unwrap_or((None, None));
+    Some(super::tools::ToolContext {
+        space_root: sr.0.clone(),
+        universe_root,
+        user_id,
+        username,
+    })
+}
+
+/// Produce a compact one-line preview of a tool's JSON input for the card
+/// content. Falls back to the raw JSON if compaction fails.
+fn compact_input_preview(input: &Value) -> String {
+    let s = input.to_string();
+    if s.len() <= 140 { s } else { format!("{}…", &s[..140.min(s.len())]) }
+}
+
+// ============================================================================
+// 5. poll_claude_responses — legacy text-mode poller (normalize/artifact flows)
 // ============================================================================
 
 /// Polls all in-flight Claude requests and fires events for completed ones

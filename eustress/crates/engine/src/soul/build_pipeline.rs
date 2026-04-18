@@ -1279,21 +1279,23 @@ impl Plugin for SoulBuildPipelinePlugin {
     }
 }
 
-/// System to sync API key from GlobalSoulSettings to SoulBuildPipeline
-/// This ensures the build pipeline always has the latest API key
-/// Uses a Local to track if initial sync has been done
+/// System to sync API key from GlobalSoulSettings to SoulBuildPipeline.
+/// Runs every frame but only acts when:
+///   1. First frame (initial sync), OR
+///   2. Either settings resource has changed (user saved a new key in File > Settings)
+/// This fixes the "saved key in Settings but build still fails with no API key"
+/// bug where the pipeline cached the empty key from startup and never re-read.
 fn sync_api_key_from_settings(
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     mut pipeline: ResMut<SoulBuildPipeline>,
-    mut synced: Local<bool>,
+    mut first_run: Local<bool>,
 ) {
-    // Skip if already synced and pipeline has a key
-    let pipeline_has_key = pipeline.has_api_key();
-    if *synced && pipeline_has_key {
-        return;
-    }
-    
+    let settings_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
+        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
+    if *first_run && !settings_changed { return; }
+    *first_run = true;
+
     // Get effective API key from settings
     let effective_key = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => {
@@ -1301,21 +1303,24 @@ fn sync_api_key_from_settings(
             if !key.is_empty() { Some(key) } else { None }
         }
         (Some(global), None) => {
-            if global.has_api_key() { 
-                Some(global.global_api_key.clone()) 
-            } else { 
-                None 
+            if global.has_api_key() {
+                Some(global.global_api_key.clone())
+            } else {
+                None
             }
         }
         _ => None,
     };
-    
-    // Sync if we have a key from settings and haven't synced yet
-    if let Some(key) = effective_key {
-        if !*synced {
+
+    match effective_key {
+        Some(key) => {
             info!("🔑 Synced API key from Soul Settings to build pipeline");
             pipeline.set_api_key(key);
-            *synced = true;
+        }
+        None => {
+            // Clearing the key in Settings should disable the pipeline, not
+            // leave it stuck on a stale stored value.
+            pipeline.set_api_key(String::new());
         }
     }
 }

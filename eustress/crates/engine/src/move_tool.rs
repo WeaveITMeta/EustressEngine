@@ -15,7 +15,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::SpatialQuery;
 use crate::selection_box::Selected;
 use crate::editor_settings::EditorSettings;
 use crate::gizmo_tools::TransformGizmoGroup;
@@ -269,6 +269,7 @@ fn handle_move_interaction(
     spatial_query: SpatialQuery,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    auth: Option<Res<crate::auth::AuthState>>,
 ) {
     if !state.active { return; }
 
@@ -466,11 +467,20 @@ fn handle_move_interaction(
 
             let final_target = if settings.snap_enabled {
                 let snapped = snap_to_grid(target_pos, settings.snap_size);
-                // Ensure Y doesn't snap below the surface hit point.
-                // The offset places the part's bottom at the hit surface;
-                // snapping Y down would push it inside the surface.
-                let min_y = target_pos.y;
-                Vec3::new(snapped.x, snapped.y.max(min_y), snapped.z)
+                if let Some((_, hit_normal, _)) = surface_hit {
+                    // Face-snap: when resting against another part's face, keep the
+                    // NORMAL-axis contact exact so the AABBs meet without a gap; only
+                    // snap the tangent axes to the grid. Without this, grid rounding
+                    // pushes the leader off the target face (visible as a gap).
+                    let n = hit_normal.normalize();
+                    let flush_normal = n * target_pos.dot(n);
+                    let snapped_tangent = snapped - n * snapped.dot(n);
+                    snapped_tangent + flush_normal
+                } else {
+                    // Free-air ground drag — clamp so grid snap doesn't bury the part.
+                    let min_y = target_pos.y;
+                    Vec3::new(snapped.x, snapped.y.max(min_y), snapped.z)
+                }
             } else {
                 target_pos
             };
@@ -513,14 +523,18 @@ fn handle_move_interaction(
                 undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
             }
 
-            // Write updated transforms back to TOML (file-system-first persistence)
+            // Write updated transforms back to TOML (file-system-first persistence).
+            // Every drag-release is a discrete signed event when logged in — feeds
+            // the audit chain + AI "who moved what" training signal.
+            let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
             for (entity, _, transform, _) in query.iter() {
                 if let Ok(inst_file) = instance_files.get(entity) {
                     if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
                         def.transform.position = [transform.translation.x, transform.translation.y, transform.translation.z];
                         def.transform.rotation = [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w];
-                        def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-                        let _ = crate::space::instance_loader::write_instance_definition(&inst_file.toml_path, &def);
+                        let _ = crate::space::instance_loader::write_instance_definition_signed(
+                            &inst_file.toml_path, &mut def, stamp.as_ref(),
+                        );
                     }
                 }
             }

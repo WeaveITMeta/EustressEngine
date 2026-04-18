@@ -1,0 +1,104 @@
+{
+  "name": "rune-lsp",
+  "displayName": "Eustress Rune LSP",
+  "description": "Language server for Rune scripts in Eustress Engine — diagnostics, go-to-definition, rename, completion, and code actions.",
+  "version": "0.1.1",
+  "publisher": "eustress",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "rune",
+    "eustress",
+    "lsp",
+    "language-server",
+    "game-engine"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eustressengine/eustress.git",
+    "directory": "infrastructure/extensions/lsp/vscode"
+  },
+  "homepage": "https://eustress.dev/learn#ide-integration",
+  "bugs": {
+    "url": "https://github.com/eustressengine/eustress/issues"
+  },
+  "license": "MIT",
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "rune",
+        "aliases": ["Rune", "rune"],
+        "extensions": [".rune"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/rune.svg",
+          "dark": "./icons/rune.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rune",
+        "scopeName": "source.rune",
+        "path": "./syntaxes/rune.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Eustress Rune LSP",
+      "properties": {
+        "eustress.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the `eustress-lsp` binary. Leave empty to use `EUSTRESS_LSP_PATH`, a workspace-local `target/release/eustress-lsp`, a bundled server, or `PATH` — in that order."
+        },
+        "eustress.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace LSP JSON-RPC traffic in the 'Eustress (Rune)' output channel. Useful for debugging; keep off in normal use."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "eustress.restartServer",
+        "title": "Eustress: Restart Rune Language Server"
+      },
+      {
+        "command": "eustress.setupServer",
+        "title": "Eustress: Set up Rune Language Server…"
+      },
+      {
+        "command": "eustress.showServerPath",
+        "title": "Eustress: Show resolved server path"
+      },
+      {
+        "command": "eustress.showOutput",
+        "title": "Eustress: Show Rune Language Server output"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "bun run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --out ../dist/"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

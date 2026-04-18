@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use crate::selection_box::Selected;
 use crate::gizmo_tools::TransformGizmoGroup;
-use crate::math_utils::{ray_plane_intersection, ray_to_point_distance, calculate_rotated_aabb};
+use crate::math_utils::{ray_plane_intersection, ray_to_point_distance};
 use crate::move_tool::Axis3d;
 
 // ============================================================================

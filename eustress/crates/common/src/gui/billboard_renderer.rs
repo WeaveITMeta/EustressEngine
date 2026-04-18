@@ -469,19 +469,28 @@ fn upload_billboard_atlas(
 fn spawn_billboard_quads(
     mut commands: Commands,
     atlas: Res<BillboardAtlas>,
+    mut meshes: ResMut<Assets<Mesh>>,
     billboards: Query<(Entity, &BillboardGuiMarker, &BillboardAtlasSlot), Without<BillboardQuad>>,
 ) {
-    for (entity, marker, _slot) in &billboards {
+    for (entity, marker, slot) in &billboards {
         // Scale: convert pixel dimensions to world studs (1 stud per 50 pixels)
         let scale_factor = 1.0 / 50.0;
         let size_x = marker.size[0] * scale_factor;
         let size_y = marker.size[1] * scale_factor;
 
+        // Per-billboard quad mesh with UVs clipped to this slot's atlas rect.
+        // Every billboard shares the same 4096×4096 atlas, so without
+        // slot-specific UVs each quad would sample the *entire* atlas and
+        // the rendered content (≈6%×3% of the surface) would be effectively
+        // invisible. `slot.uvs` = [u_min, v_min, u_max, v_max] stored when
+        // the slot was allocated.
+        let mesh_handle = meshes.add(build_slot_quad_mesh(slot.uvs));
+
         // Spawn quad as child of the billboard entity.
         // Local transform at origin — Bevy propagation handles world positioning
         // via the ChildOf hierarchy.
         let _quad = commands.spawn((
-            Mesh3d(atlas.quad_mesh.clone()),
+            Mesh3d(mesh_handle),
             MeshMaterial3d(atlas.material.clone()),
             Transform::from_scale(Vec3::new(size_x, size_y, 1.0)),
             BillboardQuad,
@@ -493,8 +502,52 @@ fn spawn_billboard_quads(
         // Mark the billboard entity as having a quad
         commands.entity(entity).insert(BillboardQuad);
 
-        info!("🪧 Spawned billboard quad for {:?} ({:.1}x{:.1} studs)", entity, size_x, size_y);
+        info!("🪧 Spawned billboard quad for {:?} ({:.1}x{:.1} studs, uv=[{:.3},{:.3} → {:.3},{:.3}])",
+              entity, size_x, size_y, slot.uvs[0], slot.uvs[1], slot.uvs[2], slot.uvs[3]);
     }
+}
+
+/// Build a unit quad (1×1 in local space, centred at origin) whose UVs
+/// sample the given rect of the shared atlas texture.
+///
+/// UV layout: `[u_min, v_min, u_max, v_max]` — top-left to bottom-right.
+/// Matches Bevy's convention where (0,0) is top-left of a texture.
+fn build_slot_quad_mesh(uvs: [f32; 4]) -> Mesh {
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    use bevy::asset::RenderAssetUsages;
+
+    let [u0, v0, u1, v1] = uvs;
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // Positions — unit quad in XY plane, -0.5..0.5 so Transform::from_scale
+    // maps directly to world-stud size.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            [-0.5, -0.5, 0.0], // bottom-left
+            [ 0.5, -0.5, 0.0], // bottom-right
+            [ 0.5,  0.5, 0.0], // top-right
+            [-0.5,  0.5, 0.0], // top-left
+        ],
+    );
+    // All four verts face +Z — the billboard_face_camera system rotates the
+    // whole quad toward the camera each frame.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![[0.0, 0.0, 1.0]; 4],
+    );
+    // UVs — map each corner to the slot's atlas rect. Bevy/Wgpu UV (0,0) is
+    // top-left, (1,1) is bottom-right, so v_min goes with the TOP verts.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![
+            [u0, v1], // bottom-left  → slot's (u_min, v_max)
+            [u1, v1], // bottom-right → slot's (u_max, v_max)
+            [u1, v0], // top-right    → slot's (u_max, v_min)
+            [u0, v0], // top-left     → slot's (u_min, v_min)
+        ],
+    );
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    mesh
 }
 
 /// Orient billboard quads toward the active camera each frame.

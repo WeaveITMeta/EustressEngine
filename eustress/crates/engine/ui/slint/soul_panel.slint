@@ -146,15 +146,19 @@ component ScriptRow inherits Rectangle {
                 }
             }
 
-            // Build button (only Rune scripts have explicit builds; Luau loads on run)
+            // Build button (only Rune scripts have explicit builds; Luau loads on run).
+            // Green to match the Script Editor's Build button (#2e7d32 base,
+            // #388e3c hover).
             if root.can-build: Rectangle {
                 width: 60px;
                 height: 28px;
                 y: (parent.height - self.height) / 2;
-                background: root.status == "building" ? Theme.button-background : Theme.button-primary;
+                background: root.status == "building" ? Theme.button-background :
+                            build-ta.has-hover ? #388e3c : #2e7d32;
                 border-radius: 4px;
 
-                TouchArea {
+                build-ta := TouchArea {
+                    mouse-cursor: root.status == "building" ? default : pointer;
                     enabled: root.status != "building";
                     clicked => { root.build(); }
                 }

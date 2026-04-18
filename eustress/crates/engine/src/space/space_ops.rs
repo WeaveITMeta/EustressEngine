@@ -12,15 +12,14 @@
 // ============================================================================
 
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use bevy::prelude::*;
 use chrono::Utc;
 
 use crate::space::instance_loader::{
     InstanceDefinition, InstanceMetadata, AssetReference,
-    TransformData, InstanceProperties, write_instance_definition,
+    TransformData, InstanceProperties,
 };
-use crate::space::service_loader::{ServiceComponent, ServiceDefinition, ServiceProperties, ServiceMetadata};
+use crate::space::service_loader::ServiceComponent;
 use crate::notifications::NotificationManager;
 
 use eustress_common::{
@@ -421,6 +420,7 @@ pub fn save_space(world: &mut World) {
                     name: None,
                     created: String::new(),
                     last_modified: now.clone(),
+                    ..Default::default()
                 },
                 material: None,
                 thermodynamic: None,
@@ -436,11 +436,19 @@ pub fn save_space(world: &mut World) {
         }
     }
 
-    for (name, path, def) in &to_save {
+    // Stamp every save with the current user's identity when logged in. The
+    // stamp is cheap (~100 bytes) and kept forever — the full chain feeds
+    // Bliss attribution and AI "who is capable of what" training data.
+    let stamp = world.get_resource::<crate::auth::AuthState>()
+        .and_then(crate::space::instance_loader::current_stamp);
+
+    for (name, path, def) in to_save.iter_mut() {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match write_instance_definition(path, def) {
+        match crate::space::instance_loader::write_instance_definition_signed(
+            path, def, stamp.as_ref(),
+        ) {
             Ok(()) => {
                 saved += 1;
                 debug!("💾 Saved '{}' → {:?}", name, path);
@@ -457,7 +465,7 @@ pub fn save_space(world: &mut World) {
         let services: Vec<ServiceComponent> = svc_query.iter(world).cloned().collect();
         for svc in &services {
             if svc.toml_path != PathBuf::new() {
-                if let Err(e) = crate::space::service_loader::save_service_to_file(svc) {
+                if let Err(e) = crate::space::service_loader::save_service_to_file_signed(svc, stamp.as_ref()) {
                     error!("❌ Failed to save service {}: {}", svc.class_name, e);
                     errors += 1;
                 } else {

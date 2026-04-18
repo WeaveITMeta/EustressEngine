@@ -11,7 +11,6 @@ use super::agent::{VigaAgent, AgentState};
 use super::context::{VigaContext, IterationHistory, CodeDiff};
 use super::generator::{VigaGenerator, GeneratorConfig};
 use super::verifier::{VigaVerifier, VerifierConfig, VerificationResult};
-use super::image_utils::ImageData;
 
 #[cfg(feature = "streaming")]
 use eustress_common::sim_record::{CodeDiffRecord, IterationRecord};
@@ -550,7 +549,7 @@ impl VigaPipeline {
             code_now.as_str(),
         );
         let duration_ms = task.start_time.elapsed().as_millis() as u64;
-        let _is_best = similarity > task.context.best_similarity;
+        let is_best = similarity > task.context.best_similarity;
 
         // Add iteration to history
         let history_entry = IterationHistory {
