@@ -309,8 +309,15 @@ fn handle_file_modified(
     soul_scripts: &mut Query<&mut crate::soul::SoulScriptData>,
 ) {
     match event.file_type {
-        FileType::Soul | FileType::Rune => {
-            // Hot-reload Soul/Rune script source
+        FileType::Soul | FileType::Rune | FileType::Lua => {
+            // Hot-reload script source for every dynamic language. The
+            // actual in-memory recompile / re-execute happens in
+            // `hot_recompile_dirty_rune_scripts` (Rune) and
+            // `hot_reload_dirty_luau_scripts` (Luau); both run in
+            // Update and pick up `dirty = true` flags we set here.
+            // Doing the work there (not inline) keeps this system free
+            // of RuneRuntimeState / LuauRuntimeState / module-registry
+            // params and avoids Bevy query-borrow conflicts.
             if let Some(entity) = registry.get_entity(&event.path) {
                 if let Ok(mut script_data) = soul_scripts.get_mut(entity) {
                     match std::fs::read_to_string(&event.path) {
@@ -319,11 +326,20 @@ fn handle_file_modified(
                             script_data.dirty = true;
                             script_data.build_status = crate::soul::SoulBuildStatus::Stale;
 
-                            info!("🔄 Hot-reloaded script: {:?}", event.path);
+                            info!("🔄 Hot-reloaded script source: {:?}", event.path);
 
-                            commands.trigger(crate::soul::TriggerBuildEvent {
-                                entity,
-                            });
+                            // SoulScript (AI-assisted) still goes through
+                            // the build pipeline. Rune and Luau both skip
+                            // it and re-run / recompile directly — those
+                            // per-language systems decide based on
+                            // `run_context`.
+                            match script_data.run_context {
+                                crate::soul::SoulRunContext::Rune
+                                | crate::soul::SoulRunContext::Luau => { /* direct path */ }
+                                _ => {
+                                    commands.trigger(crate::soul::TriggerBuildEvent { entity });
+                                }
+                            }
                         }
                         Err(e) => {
                             error!("Failed to reload script {:?}: {}", event.path, e);

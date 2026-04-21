@@ -887,18 +887,13 @@ fn spawn_pasted_entity(
                 extra: std::collections::HashMap::new(),
             };
 
-            // Generate unique folder name (folder-first architecture)
+            // Generate unique folder name (folder-first architecture).
+            // Uses the shared helper so flat-file variants (`Block.toml`,
+            // `Block.glb.toml`) also count as taken — otherwise duplicating
+            // a flat-file entity would silently shadow it with a folder of
+            // the same name.
             let _ = std::fs::create_dir_all(workspace_dir);
-            let base = &data.name;
-            let folder_name = {
-                if !workspace_dir.join(base).exists() {
-                    base.clone()
-                } else {
-                    (1..1000).map(|i| format!("{}{}", base, i))
-                        .find(|c| !workspace_dir.join(c).exists())
-                        .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
-                }
-            };
+            let folder_name = crate::space::instance_loader::unique_entity_name(workspace_dir, &data.name);
             let instance_dir = workspace_dir.join(&folder_name);
             let _ = std::fs::create_dir_all(&instance_dir);
             let toml_path = instance_dir.join("_instance.toml");

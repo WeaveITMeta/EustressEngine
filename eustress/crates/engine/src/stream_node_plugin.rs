@@ -147,8 +147,61 @@ impl StreamNodePlugin {
 impl Plugin for StreamNodePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(self.config.clone())
-           .add_systems(Startup, start_stream_nodes.run_if(resource_exists::<ChangeQueue>));
+           .add_systems(Startup, start_stream_nodes.run_if(resource_exists::<ChangeQueue>))
+           .add_systems(
+               Startup,
+               write_stream_port_file
+                   .run_if(resource_exists::<StreamNodeHandle>)
+                   .after(start_stream_nodes),
+           );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Port-file advertisement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Writes the primary TCP port of the StreamNode to
+/// `<universe>/.eustress/engine.stream.port` so sibling processes can
+/// discover it the same way they discover the LSP (`.eustress/lsp.port`)
+/// and the Engine Bridge (`.eustress/engine.port`).
+///
+/// Kept as a separate system so callers who want a different port-file
+/// location (multi-instance, CI) can skip this system and write their
+/// own. No-op if no node started.
+pub fn write_stream_port_file(handle: Res<StreamNodeHandle>) {
+    let Some(addr) = handle.primary_addr() else {
+        return;
+    };
+    let universe = default_universe_root();
+    let dir = universe.join(".eustress");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        warn!("StreamNodePlugin: failed to create .eustress dir for port file: {}", e);
+        return;
+    }
+    let path = dir.join("engine.stream.port");
+    if let Err(e) = std::fs::write(&path, addr.port().to_string()) {
+        warn!("StreamNodePlugin: failed to write {}: {}", path.display(), e);
+        return;
+    }
+    info!(
+        "🔗 StreamNode TCP port {} advertised at {}",
+        addr.port(),
+        path.display()
+    );
+}
+
+/// Best-effort lookup of the active Universe root. Falls back to the
+/// canonical `~/Documents/Eustress/Universe1` when no override is set,
+/// matching the convention used elsewhere in the engine.
+fn default_universe_root() -> std::path::PathBuf {
+    if let Ok(env_path) = std::env::var("EUSTRESS_UNIVERSE_ROOT") {
+        return std::path::PathBuf::from(env_path);
+    }
+    if let Some(docs) = dirs::document_dir() {
+        return docs.join("Eustress").join("Universe1");
+    }
+    std::path::PathBuf::from(".")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

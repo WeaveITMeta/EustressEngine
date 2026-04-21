@@ -51,6 +51,19 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 ; Main executable
 Source: "..\..\eustress\target\release\eustress-engine.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; Rune LSP server — ships alongside the engine so external IDEs (Windsurf,
+; VS Code, Cursor) get Rune intelligence without a second download. The
+; engine launches this binary on startup from the install directory.
+Source: "..\..\eustress\target\release\eustress-lsp.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; MCP server — exposes the Universe (Spaces, scripts, entities, assets,
+; conversations) to any MCP-compatible AI client (Windsurf, Cursor,
+; Claude Desktop). Pure Rust; `cargo build --release --bin eustress-mcp`
+; produces it alongside `eustress-engine.exe` and `eustress-lsp.exe`. No
+; Node.js, no bun runtime, just a small native executable. Users configure
+; their IDE via Help → Setup MCP in Eustress Studio.
+Source: "..\..\eustress\target\release\eustress-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Assets folder (if exists)
 ; Source: "..\..\eustress\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('..\..\eustress\assets'))
 

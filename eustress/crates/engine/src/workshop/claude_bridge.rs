@@ -131,16 +131,33 @@ pub fn dispatch_chat_request(
         return;
     }
 
-    // A dispatch is valid when the pipeline's most recent entry that would
-    // reach Claude is either:
+    // A dispatch is valid when the pipeline's most recent Claude-bound
+    // message is either:
     //   - a user text message (the "send" case), or
-    //   - a tool_result (the "continue after tool execution" case).
-    // Errors/artifacts/mode-badges are UI-only and don't block the guard.
-    let ready_to_dispatch = pipeline.messages.iter().rev().find_map(|m| match m.role {
-        MessageRole::User => Some(true),
-        MessageRole::Mcp => m.tool_result.as_ref().map(|_| true), // resolved tool = ready
-        MessageRole::System | MessageRole::Artifact | MessageRole::Error | MessageRole::Approval => None,
-    }).unwrap_or(false);
+    //   - a resolved tool_result (the "continue after tool execution" case).
+    //
+    // Critical: we walk backwards but stop at the FIRST message Claude would
+    // see — an assistant reply (System role) means Claude already answered
+    // this turn, so we MUST NOT redispatch. Previously this code kept
+    // scanning past System messages until it found an older User, which
+    // caused runaway dispatch: every frame after Claude replied, the guard
+    // would re-find the original user message and fire another request.
+    // At ~1 dispatch/frame this racked up $50+ in a minute.
+    let ready_to_dispatch = pipeline
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m.role {
+            MessageRole::User => Some(true),
+            // A resolved tool_use round-trip is ready; an unresolved one (no
+            // tool_result yet) means we're still waiting on approval/exec.
+            MessageRole::Mcp => Some(m.tool_result.is_some()),
+            // Assistant turn already happened for this user message.
+            MessageRole::System => Some(false),
+            // UI-only rows — transparent to the dispatch guard.
+            MessageRole::Artifact | MessageRole::Error | MessageRole::Approval => None,
+        })
+        .unwrap_or(false);
     if !ready_to_dispatch { return; }
 
     // Get API key
@@ -182,12 +199,18 @@ pub fn dispatch_chat_request(
     // Build system prompt: base + active mode fragments.
     let system_prompt = build_system_prompt(&pipeline.active_modes);
 
-    // Snapshot tools for the active modes. We clone the definitions here so
-    // the background thread owns them — `ToolRegistry` itself stays on the
-    // main thread.
+    // Advertise every registered tool to Claude regardless of which
+    // modes are currently active. The mode system still drives system-
+    // prompt fragments + badge rendering — but gating the *tool list*
+    // by mode meant Claude answered "I have 27 tools" when it in fact
+    // had access to 40+, because mode-specific tools were hidden until
+    // a keyword triggered their mode. One surface, one complete list.
+    // `ToolRegistry` is the shared one from `eustress-tools`; the
+    // Claude-shape conversion stays engine-side via
+    // `tools::claude_tools_for` because `ClaudeTool` is engine-only.
     let tools: Vec<ClaudeTool> = tool_registry
         .as_ref()
-        .map(|r| r.claude_tools(&pipeline.active_modes.all()))
+        .map(|r| super::tools::claude_tools_for(r, eustress_tools::modes::WorkshopMode::ALL))
         .unwrap_or_default();
 
     let tool_count = tools.len();

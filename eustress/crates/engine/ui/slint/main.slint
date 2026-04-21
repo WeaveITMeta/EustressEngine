@@ -39,6 +39,13 @@ import { ForgeConnectDialog } from "forge_connect.slint";
 import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
 import { KeybindingsDialog } from "keybindings.slint";
+import { AboutDialog } from "about_dialog.slint";
+// BillboardCard is instantiated per-entity by the engine's billboard_gui
+// systems, not nested inside StudioWindow. Re-export the combined form so
+// slint-build emits the generated Rust bindings into the module that
+// `include_modules!()` pulls in — a plain `import` alone won't surface
+// the types in the generated Rust.
+export { BillboardCard, BillboardLabelData } from "billboard_card.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
@@ -169,6 +176,10 @@ export component StudioWindow inherits Window {
     callback browse-identity();
     callback login-with-identity();
     in-out property <bool> show-keybindings-dialog: false;
+    in-out property <bool> show-about-dialog: false;
+    in-out property <string> about-version: "0.4.0";
+    in-out property <string> about-commit: "";
+    in-out property <string> about-build-date: "";
     in-out property <bool> show-soul-settings-dialog: false;
     in-out property <bool> show-exit-confirmation: false;
     in-out property <bool> show-settings-dialog: false;
@@ -236,6 +247,12 @@ export component StudioWindow inherits Window {
     in-out property <string> workshop-active-modes-text: "⚡ General";
     in-out property <int> workshop-tool-count: 0;
     in-out property <string> workshop-active-tool: "";
+
+    // Session tab strip — live list of Workshop sessions under
+    // SoulService/Workshop/. Host sync system refreshes this each
+    // frame so newly-created sessions appear without a restart.
+    in-out property <[ConversationSummary]> workshop-past-conversations: [];
+    in-out property <string> workshop-active-session-id: "";
 
     // @ Mention autocomplete state — backed by MentionIndex in Bevy
     in-out property <[MentionItemData]> workshop-mention-items: [];
@@ -727,6 +744,15 @@ export component StudioWindow inherits Window {
     callback workshop-optimize-and-build();
     callback workshop-load-conversation(string);
     callback workshop-new-conversation();
+    /// Close a session tab in the Workshop panel. Host removes the
+    /// session from the in-memory list and optionally deletes the
+    /// folder under SoulService/Workshop/ (policy TBD — for now
+    /// we just remove from UI and keep the folder on disk).
+    callback workshop-close-conversation(string);
+    /// Drag-to-reorder commit. `target_index` is the 0-based final
+    /// position in `workshop-past-conversations`. Host updates an
+    /// in-memory order override that the sync system honours.
+    callback workshop-reorder-tab(string /* session_id */, int /* target_index */);
 
     // Settings / Panels
     callback open-settings();
@@ -888,6 +914,7 @@ export component StudioWindow inherits Window {
             // Other
             on-toggle-command-bar => { root.show-command-bar = !root.show-command-bar; }
             on-show-keybindings => { root.show-keybindings-dialog = true; }
+            on-show-about => { root.show-about-dialog = true; }
             on-show-soul-settings => { root.settings-active-tab = 3; root.show-settings-dialog = true; }
             on-show-settings => { root.show-settings-dialog = true; }
             on-open-url(url) => { root.open-url(url); }
@@ -2377,6 +2404,10 @@ export component StudioWindow inherits Window {
                         if root.right-tab-index == 3: WorkshopPanel {
                             messages: root.workshop-messages;
                             input-text <=> root.workshop-input-text;
+                            // Reflect chat-input focus into the root-level
+                            // `any-input-has-focus` so Bevy's WASD / shortcut
+                            // keys stop firing while the user types.
+                            changed input-has-focus => { root.any-input-has-focus = self.input-has-focus; }
                             pipeline-steps: root.workshop-pipeline-steps;
                             pipeline-state: root.workshop-pipeline-state;
                             product-name: root.workshop-product-name;
@@ -2386,6 +2417,16 @@ export component StudioWindow inherits Window {
                             active-modes-text: root.workshop-active-modes-text;
                             tool-count: root.workshop-tool-count;
                             active-tool: root.workshop-active-tool;
+
+                            // Session tab strip — live session list +
+                            // highlighted active tab. Host updates
+                            // `workshop-past-conversations` via a sync
+                            // system that rescans SoulService/Workshop/
+                            // every few hundred ms.
+                            past-conversations: root.workshop-past-conversations;
+                            active-session-id: root.workshop-active-session-id;
+                            on-close-conversation(id) => { root.workshop-close-conversation(id); }
+                            on-reorder-tab(id, target) => { root.workshop-reorder-tab(id, target); }
 
                             // @ Mention autocomplete plumbing
                             mention-items: root.workshop-mention-items;
@@ -2467,7 +2508,16 @@ export component StudioWindow inherits Window {
                 show-warnings <=> root.output-show-warnings;
                 show-errors <=> root.output-show-errors;
                 show-debug <=> root.output-show-debug;
-                on-clear => { root.output-logs = []; root.output-all-text = ""; }
+                // Clear must hit BOTH sides — the Slint-side lists (so the
+                // visible output blanks instantly) AND the Rust-side
+                // `OutputConsole.entries` via `clear-script-output`.
+                // Without the latter, the next sync push re-floods the
+                // panel with every entry we "cleared" a moment earlier.
+                on-clear => {
+                    root.output-logs = [];
+                    root.output-all-text = "";
+                    root.clear-script-output();
+                }
                 on-close => { root.show-output = false; }
                 on-open-path(msg) => { root.open-path-from-log(msg); }
             }
@@ -2802,6 +2852,15 @@ export component StudioWindow inherits Window {
     // Keyboard shortcuts dialog
     if root.show-keybindings-dialog: KeybindingsDialog {
         on-close => { root.show-keybindings-dialog = false; }
+    }
+
+    // About Eustress Engine dialog
+    if root.show-about-dialog: AboutDialog {
+        version: root.about-version;
+        commit: root.about-commit;
+        build-date: root.about-build-date;
+        open-url(u) => { root.open-url(u); }
+        on-close => { root.show-about-dialog = false; }
     }
 
     // Simulation settings dialog

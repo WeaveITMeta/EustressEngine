@@ -386,9 +386,11 @@ fn handle_plugin_action_events(
                     continue;
                 }
 
-                // TextLabel.textlabel.toml
+                // TextLabel.textlabel.toml — transparent background + border,
+                // bold white text. Matches the billboard-label convention
+                // (floating 3D text readable against any backdrop).
                 let label_toml = format!(
-                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [200.0, 50.0]\nbackground_color = [0.1, 0.1, 0.15, 0.5]\nborder_size = 0.0\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
+                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [200.0, 50.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
                     label_text.replace('"', "\\\""), font_size
                 );
                 if let Err(e) = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_name)), &label_toml) {
@@ -430,13 +432,16 @@ fn handle_plugin_action_events(
                 };
                 let mut text_label = TextLabel::default();
                 text_label.text = label_text.clone();
+                text_label.font = eustress_common::classes::Font::GothamBold;
                 text_label.font_size = font_size;
                 text_label.text_color3 = [1.0, 1.0, 1.0];
-                text_label.background_transparency = 0.5;
-                // Default TextLabel size is 1×1 — the CPU rasterizer clips all
-                // glyphs to that box and the text vanishes. Fill the parent
-                // BillboardGui (200×50, set a few lines above) so the glyphs
-                // have room to draw.
+                // Transparent background + border so the billboard shows pure
+                // floating text (no card chrome against the 3D scene).
+                text_label.background_color3 = [0.0, 0.0, 0.0];
+                text_label.background_transparency = 1.0;
+                text_label.border_size_pixel = 0;
+                // Fill the parent BillboardGui canvas (200×50) so glyphs
+                // have room to draw; anchored at origin of the card.
                 text_label.size = [200.0, 50.0];
                 text_label.position = [0.0, 0.0];
 

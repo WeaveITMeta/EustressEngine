@@ -756,6 +756,58 @@ pub fn write_instance_definition(
     Ok(())
 }
 
+/// Returns true if `name` is available for a new entity in `dir` — i.e. no
+/// existing file or folder would collide.
+///
+/// Entity names map to two disk shapes: folder-based (`BASE/_instance.toml`)
+/// and legacy flat (`BASE.toml`, `BASE.glb.toml`, `BASE.<ext>.toml`). The
+/// file-loader treats both shapes as the same entity name "BASE". A naive
+/// `dir.join(name).exists()` check only catches the folder form — so
+/// duplicating a flat-file entity would create a sibling folder with the
+/// same name, producing two conflicting "BASE" entities on reload (the
+/// corruption the user reported: Block.toml + Block/_instance.toml).
+///
+/// This helper rejects the name if ANY entry in `dir` would resolve to it:
+/// a folder named `BASE`, a file `BASE.toml`, or any `BASE.<anything>.toml`.
+pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
+    if name.is_empty() { return false; }
+    // Folder with this exact name — the common path.
+    if dir.join(name).exists() { return false; }
+    // Any flat file whose first path segment (before the first `.`) matches.
+    // `.split('.').next()` yields the stem up to the first dot, so
+    // `Block.toml`, `Block.glb.toml`, and `Block.script.toml` all resolve
+    // to "Block" and therefore conflict.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let Some(s) = fname.to_str() else { continue };
+            if s.split('.').next() == Some(name) {
+                if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Pick a unique entity name in `dir`, falling back to `BASE`, `BASE1`, …
+/// `BASE9999`, then `BASE_<unix-timestamp>` if all are taken. Centralizes
+/// the collision check so every creation / paste / duplicate site gets the
+/// flat-file-aware behavior from [`entity_name_is_available`].
+pub fn unique_entity_name(dir: &Path, base: &str) -> String {
+    if entity_name_is_available(dir, base) {
+        return base.to_string();
+    }
+    for i in 1..10_000u32 {
+        let candidate = format!("{}{}", base, i);
+        if entity_name_is_available(dir, &candidate) {
+            return candidate;
+        }
+    }
+    format!("{}_{}", base, chrono::Utc::now().timestamp())
+}
+
 /// Return a [`CreatorStamp`] for the currently-authenticated user, or `None`
 /// if the user is offline / not logged in. Offline edits stay unsigned so the
 /// Bliss-eligible audit trail only records provable identities.

@@ -27,7 +27,7 @@ component MenuItemRow inherits Rectangle {
     callback clicked();
 
     height: 26px;
-    background: self.enabled && touch.has-hover ? #2a2d3a : transparent;
+    background: self.enabled && touch.has-hover ? Theme.button-hover : transparent;
     border-radius: 3px;
 
     touch := TouchArea {
@@ -36,34 +36,43 @@ component MenuItemRow inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    HorizontalLayout {
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
+    // Absolute positioning inside the row instead of HorizontalLayout —
+    // the Layout was cross-stretching the Image, which pushed the 14px
+    // glyph to the TOP of the 26px row rather than vertical centre, so
+    // icons sat visibly higher than their text. Explicit `y` bindings
+    // centre each child against the row's own height.
 
-        Image {
-            width: 14px;
-            height: 14px;
-            source: root.icon;
-            image-fit: contain;
-            colorize: root.enabled ? Theme.text-secondary : Theme.text-disabled;
-            vertical-alignment: center;
-        }
+    Image {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.enabled ? Theme.text-secondary : Theme.text-disabled;
+    }
 
-        Text {
-            horizontal-stretch: 1;
-            text: root.label;
-            color: root.enabled ? Theme.text-primary : Theme.text-disabled;
-            font-size: 12px;
-            vertical-alignment: center;
-        }
+    Text {
+        x: 32px;
+        y: (parent.height - self.height) / 2;
+        width: root.shortcut != ""
+            ? parent.width - 32px - 8px - shortcut-text.preferred-width - 8px
+            : parent.width - 32px - 8px;
+        text: root.label;
+        color: root.enabled ? Theme.text-primary : Theme.text-disabled;
+        font-size: 12px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+    }
 
-        if root.shortcut != "": Text {
-            text: root.shortcut;
-            color: #555;
-            font-size: 10px;
-            vertical-alignment: center;
-        }
+    shortcut-text := Text {
+        x: parent.width - self.preferred-width - 10px;
+        y: (parent.height - self.height) / 2;
+        text: root.shortcut;
+        color: Theme.text-disabled;
+        font-size: 10px;
+        vertical-alignment: center;
+        visible: root.shortcut != "";
     }
 }
 
@@ -77,7 +86,7 @@ component MenuSeparator inherits Rectangle {
         height: 1px;
         x: 8px;
         width: parent.width - 16px;
-        background: #333;
+        background: Theme.border-color;
     }
 }
 
@@ -98,10 +107,12 @@ export component ContextMenu inherits Rectangle {
     // can resolve to 0 and hide the menu entirely.
     height: body.min-height;
     clip: true;
-    background: #1e1f2e;
+    // Theme-backed background + border instead of the old hardcoded
+    // #1e1f2e purple that clashed with the rest of the dark UI.
+    background: Theme.dialog-background;
     border-radius: 6px;
     border-width: 1px;
-    border-color: #333;
+    border-color: Theme.border-color;
     drop-shadow-blur: 16px;
     drop-shadow-color: #000000a0;
 

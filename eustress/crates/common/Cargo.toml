@@ -44,9 +44,9 @@ crossbeam = "0.8"
 # Byte casting for GPU buffers
 bytemuck = { version = "1.14", features = ["derive"] }
 
-# CPU font rasterization for billboard GUI text
-fontdue = "0.9"
-# Slint UI renderer (optional — enabled by `gui` feature for in-game UI)
+# Slint UI renderer (optional — enabled by `gui` feature for in-game UI).
+# The former CPU-atlas billboard path used fontdue + an embedded TTF; that
+# was replaced by the BillboardCard Slint component in `engine::billboard_gui`.
 slint = { workspace = true, optional = true }
 
 # USD Binary Format

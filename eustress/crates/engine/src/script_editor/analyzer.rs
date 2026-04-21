@@ -170,7 +170,15 @@ pub fn analyze(source: &str) -> AnalysisResult {
     }
 
     let mut diagnostics = Diagnostics::new();
-    let _ = rune::prepare(&mut sources)
+    let mut preparer = rune::prepare(&mut sources);
+    if let Some(ctx) = eustress_context() {
+        // Passing a `with_context(ctx)` lets the compiler resolve `use
+        // eustress::{...}` and every registered API symbol. Without it
+        // the analyzer previously flagged every Eustress import as
+        // "module not found" — noise that drowned out real errors.
+        preparer = preparer.with_context(ctx);
+    }
+    let _ = preparer
         .with_diagnostics(&mut diagnostics)
         .build();
 
@@ -181,6 +189,227 @@ pub fn analyze(source: &str) -> AnalysisResult {
     }
 
     out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Eustress API catalog — hover, completion, signature help
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Single source of truth already lives in [`workshop::api_reference`],
+// parsed at compile time from `rune_ecs_module.rs` + the Scripting API
+// checklist markdown. That same catalog drives the Workshop agent
+// prompt, the in-engine API Browser panel, and the /learn web docs.
+// Here we just cache one copy for the analyzer and expose name lookups.
+//
+// The catalog is read-only after construction, so sharing via `Arc`
+// across async analyzer tasks is safe.
+
+use crate::workshop::api_reference::{ApiCatalog, ApiEntry as CatalogEntry};
+
+static API_CATALOG: std::sync::OnceLock<std::sync::Arc<ApiCatalog>> =
+    std::sync::OnceLock::new();
+
+fn api_catalog() -> &'static ApiCatalog {
+    API_CATALOG
+        .get_or_init(|| std::sync::Arc::new(ApiCatalog::build()))
+}
+
+/// Look up a single API entry by exact name. Used by hover and
+/// goto-def-into-native-API (Phase D).
+pub fn api_lookup(name: &str) -> Option<&'static CatalogEntry> {
+    // SAFETY: `api_catalog()` returns a reference into a `OnceLock<Arc<_>>`
+    // that never drops for the lifetime of the process, so the `'static`
+    // extension is sound.
+    api_catalog()
+        .entries
+        .iter()
+        .find(|e| e.name == name)
+}
+
+/// Return entries whose names start with the prefix (case-insensitive).
+/// Used by completion so typing `get_s` surfaces `get_sim_value`,
+/// `get_soc`, etc.
+pub fn api_starts_with<'a>(prefix: &'a str) -> impl Iterator<Item = &'static CatalogEntry> + 'a {
+    let lower = prefix.to_ascii_lowercase();
+    api_catalog().entries.iter().filter(move |e| {
+        lower.is_empty() || e.name.to_ascii_lowercase().starts_with(&lower)
+    })
+}
+
+/// If the cursor sits inside the argument list of a call to one of the
+/// registered API functions, return the function entry plus a 0-based
+/// parameter index. `signature_help_at("get_sim_value(|", line, col)`
+/// yields `(entry_for_get_sim_value, 0)`. Returns `None` if the cursor
+/// isn't in a recognisable call context.
+///
+/// The scan is intentionally shallow — a bounded look-back from the
+/// cursor to find the nearest open `(` not already balanced by a
+/// matching `)`, then counts commas at depth 1 to compute the param
+/// index. Good enough for IDE-grade parameter hints; doesn't attempt
+/// to resolve chained calls or trait methods.
+pub fn signature_help_at(
+    source: &str,
+    line: u32,
+    column: u32,
+) -> Option<(&'static CatalogEntry, u32)> {
+    const LOOKBACK_BYTES: usize = 2048;
+    let offset = line_col_to_offset(source, line, column)? as usize;
+    let bytes = source.as_bytes();
+    let start = offset.saturating_sub(LOOKBACK_BYTES);
+
+    // Walk backward from the cursor. Track parenthesis + bracket depth
+    // so commas in nested calls don't bump the param index.
+    let mut paren_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
+    let mut commas_at_depth1: u32 = 0;
+    let mut i = offset;
+    let open_paren_idx = loop {
+        if i == 0 || i <= start {
+            return None;
+        }
+        i -= 1;
+        let b = bytes[i];
+        // Skip the interiors of string/char literals so commas inside
+        // strings don't count as parameter separators. Simple pass —
+        // doesn't handle escaped quotes perfectly but good enough for
+        // our purposes.
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            if i == 0 { return None; }
+            i -= 1;
+            while i > 0 && bytes[i] != quote {
+                i -= 1;
+            }
+            continue;
+        }
+        match b {
+            b')' => paren_depth += 1,
+            b'(' => {
+                if paren_depth == 0 {
+                    break i;
+                }
+                paren_depth -= 1;
+            }
+            b']' => bracket_depth += 1,
+            b'[' => bracket_depth -= 1,
+            b'}' => brace_depth += 1,
+            b'{' => brace_depth -= 1,
+            b';' => return None, // crossed a statement boundary
+            b',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                commas_at_depth1 += 1;
+            }
+            _ => {}
+        }
+    };
+
+    // Walk backward from `(` over whitespace, then grab the identifier
+    // that comes before it. That identifier is the callee name.
+    let mut j = open_paren_idx;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if j == 0 {
+        return None;
+    }
+    let name_end = j;
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    while j > 0 && is_ident(bytes[j - 1]) {
+        j -= 1;
+    }
+    if j == name_end {
+        return None;
+    }
+    let name = &source[j..name_end];
+
+    let entry = api_lookup(name)?;
+    Some((entry, commas_at_depth1))
+}
+
+/// Render an API entry as Markdown fit for LSP hover. Shared between
+/// the current-file hover handler and the future native-goto-def
+/// synthetic document (Phase D).
+pub fn render_api_hover(entry: &CatalogEntry) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("**{}** — *{}*\n\n", entry.name, entry.category));
+
+    // Signature line: `fn name(p1: T1, p2: T2) -> RetT`
+    let params = entry
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, p.typ))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str("```rust\n");
+    if entry.return_type.is_empty() || entry.return_type == "()" {
+        out.push_str(&format!("fn {}({})\n", entry.name, params));
+    } else {
+        out.push_str(&format!(
+            "fn {}({}) -> {}\n",
+            entry.name, params, entry.return_type,
+        ));
+    }
+    out.push_str("```\n\n");
+
+    if !entry.doc.is_empty() {
+        out.push_str(&entry.doc);
+        out.push('\n');
+    }
+    if !entry.example.is_empty() {
+        out.push_str("\n### Example\n\n```rune\n");
+        out.push_str(&entry.example);
+        out.push_str("\n```");
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared Rune context — the same API surface the runtime sees
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// We build one canonical `rune::Context` lazily and reuse it across every
+// `analyze()` call. Construction is the expensive part (module metadata
+// registration); analysis itself is cheap. The context is immutable once
+// built, so sharing via `Arc` across analyzer tasks is safe.
+//
+// If `rune::Context` turns out not to be `Send + Sync`, the `OnceLock`
+// below will refuse to compile — that would be a genuine diagnostic, not
+// a workaround we want to reach for.
+
+use std::sync::OnceLock;
+
+static ANALYZER_CONTEXT: OnceLock<Option<std::sync::Arc<rune::Context>>> = OnceLock::new();
+
+/// Return the shared Rune context used for analyzer compilation passes,
+/// or `None` if construction failed. Cached on first call.
+fn eustress_context() -> Option<&'static rune::Context> {
+    ANALYZER_CONTEXT
+        .get_or_init(build_analyzer_context)
+        .as_deref()
+}
+
+fn build_analyzer_context() -> Option<std::sync::Arc<rune::Context>> {
+    let mut ctx = rune::Context::with_default_modules().ok()?;
+
+    // The engine's single ECS module exposes the full Eustress API
+    // surface — `get_sim_value`, `set_sim_value`, `gui_set_text`,
+    // Instance, TweenService, raycast helpers, task utilities, UDim,
+    // and the Vector3/Color3/CFrame types. Building it is pure metadata
+    // registration; the thread-local ECS bindings it consults at call
+    // time aren't needed for compilation. A missing installation here
+    // falls back to "default modules only" — still better than the old
+    // behaviour of no context at all.
+    #[cfg(feature = "realism-scripting")]
+    {
+        if let Ok(module) = crate::soul::rune_ecs_module::create_ecs_module() {
+            let _ = ctx.install(module);
+        }
+        if let Ok(module) = crate::soul::rune_ecs_module::create_event_bus_module() {
+            let _ = ctx.install(module);
+        }
+    }
+
+    Some(std::sync::Arc::new(ctx))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -292,6 +521,108 @@ pub fn identifier_at(source: &str, line: u32, column: u32) -> Option<(String, (u
     Some((text, (start as u32, end as u32)))
 }
 
+/// Hover info for the identifier under the cursor. Resolution order:
+///
+/// 1. **Eustress API catalog** — registered native function/type. Yields
+///    signature + docstring + example as Markdown.
+/// 2. **In-file symbol index** — `fn foo() {}` defined in this document.
+/// 3. **Cursor-spanning diagnostic** — if a compile error overlaps the
+///    cursor, show its message. Used when there's no symbol to resolve.
+///
+/// Returns `None` when the cursor isn't on an identifier OR nothing
+/// matches. Callers (LSP `textDocument/hover`, engine Problems tooltip)
+/// render the returned Markdown verbatim.
+pub fn hover(
+    source: &str,
+    line: u32,
+    column: u32,
+    symbols: &SymbolIndex,
+    diagnostics: &[Diagnostic],
+) -> Option<HoverInfo> {
+    let (name, byte_range) = identifier_at(source, line, column)?;
+    let line_starts = compute_line_starts(source);
+    let range = span_to_range(byte_range.0, byte_range.1, &line_starts);
+
+    // 1. API catalog — authoritative for engine-registered names.
+    if let Some(entry) = api_lookup(&name) {
+        return Some(HoverInfo {
+            range,
+            byte_range,
+            markdown: render_api_hover(entry),
+            source: HoverSource::ApiCatalog,
+        });
+    }
+
+    // 2. In-file symbol — surface the symbol's kind + its own defining range.
+    if let Some(sym) = symbols.resolve(&name).first() {
+        let kind = match sym.kind {
+            SymbolKind::Function => "fn",
+        };
+        let md = format!(
+            "**{}** — *in-file {kind}*\n\nDefined at line {line}:{col}.",
+            sym.name,
+            line = sym.range.start_line,
+            col = sym.range.start_column,
+        );
+        return Some(HoverInfo {
+            range,
+            byte_range,
+            markdown: md,
+            source: HoverSource::LocalSymbol,
+        });
+    }
+
+    // 3. Diagnostic overlap — if a compiler error covers the cursor,
+    //    surface its message so hovering broken code explains itself.
+    for diag in diagnostics {
+        if byte_range.0 >= diag.byte_range.0 && byte_range.1 <= diag.byte_range.1 {
+            return Some(HoverInfo {
+                range,
+                byte_range,
+                markdown: format!(
+                    "**{}** — *{}*\n\n{}",
+                    name,
+                    severity_label(diag.severity),
+                    diag.message,
+                ),
+                source: HoverSource::Diagnostic,
+            });
+        }
+    }
+
+    None
+}
+
+fn severity_label(s: Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Info => "info",
+        Severity::Hint => "hint",
+    }
+}
+
+/// Hover payload. `markdown` is ready-to-render CommonMark that LSP
+/// clients display in a tooltip; `range` bounds the identifier that
+/// triggered the hover so the client knows which text to underline.
+#[derive(Debug, Clone)]
+pub struct HoverInfo {
+    pub range: Range,
+    pub byte_range: (u32, u32),
+    pub markdown: String,
+    pub source: HoverSource,
+}
+
+/// Where the hover content came from. LSP doesn't care; useful for
+/// debugging and for the engine's own Problems tooltip which color-
+/// codes by provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverSource {
+    ApiCatalog,
+    LocalSymbol,
+    Diagnostic,
+}
+
 /// Inverse of [`offset_to_line_col`]. Used by `identifier_at` to turn a
 /// click position (the editor reports 1-based line/col) into a byte offset.
 pub fn line_col_to_offset(source: &str, line: u32, column: u32) -> Option<u32> {
@@ -371,8 +702,46 @@ pub fn complete(prefix: &str, symbols: &SymbolIndex, max_items: usize) -> Vec<Co
         });
     }
 
-    // Alpha-sort within kind, keywords already at top because they were
-    // pushed first.
+    // Eustress API catalog — every function, method, and type the engine
+    // registers into the Rune context. Skip entries that collide with a
+    // local symbol of the same name so user definitions shadow the API
+    // (matching Rune's own resolution rules).
+    let local_names: std::collections::HashSet<&str> =
+        symbols.by_name.keys().map(|s| s.as_str()).collect();
+    for entry in api_starts_with(prefix) {
+        if local_names.contains(entry.name.as_str()) {
+            continue;
+        }
+        // Signature as completion detail so the drop-down shows "fn
+        // get_sim_value(key: String) -> f64" alongside the name.
+        let params = entry
+            .params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.typ))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = if entry.return_type.is_empty() || entry.return_type == "()" {
+            format!("fn {}({})", entry.name, params)
+        } else {
+            format!("fn {}({}) -> {}", entry.name, params, entry.return_type)
+        };
+        out.push(Completion {
+            label: entry.name.clone(),
+            // Types get `Module` kind so the VS Code icon differs from
+            // function results — Roblox-style `Vector3::new` vs. free
+            // functions are visually distinct.
+            kind: if entry.return_type.starts_with("struct ")
+                || entry.name.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+            {
+                CompletionKind::Module
+            } else {
+                CompletionKind::Function
+            },
+            detail,
+        });
+    }
+
+    // Keywords are already at the top because they were pushed first.
     out.truncate(max_items);
     out
 }

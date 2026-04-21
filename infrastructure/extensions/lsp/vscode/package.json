@@ -1,9 +1,10 @@
 {
   "name": "rune-lsp",
   "displayName": "Eustress Rune LSP",
-  "description": "Language server for Rune scripts in Eustress Engine — diagnostics, go-to-definition, rename, completion, and code actions.",
-  "version": "0.1.1",
-  "publisher": "eustress",
+  "description": "Rune language features for Eustress Engine — connects to the LSP server bundled with Studio. Install Eustress Engine and this extension picks it up automatically. No separate download.",
+  "version": "0.3.6",
+  "publisher": "WeaveITMeta",
+  "icon": "icons/rune.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -30,12 +31,21 @@
   },
   "license": "MIT",
   "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.rune",
+    "workspaceContains:**/.eustress/lsp.port"
+  ],
   "contributes": {
     "languages": [
       {
         "id": "rune",
-        "aliases": ["Rune", "rune"],
-        "extensions": [".rune"],
+        "aliases": [
+          "Rune",
+          "rune"
+        ],
+        "extensions": [
+          ".rune"
+        ],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/rune.svg",
@@ -57,11 +67,15 @@
         "eustress.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the `eustress-lsp` binary. Leave empty to use `EUSTRESS_LSP_PATH`, a workspace-local `target/release/eustress-lsp`, a bundled server, or `PATH` — in that order."
+          "description": "Advanced. Normally you don't need this — Eustress Studio spawns the Rune LSP automatically and the extension discovers it over TCP. Set this only for headless / CI / no-engine setups where you want the extension to launch a standalone `eustress-lsp` itself. Resolution order when set: this path → `EUSTRESS_LSP_PATH` env var → workspace-local `target/release/eustress-lsp` → PATH."
         },
         "eustress.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "Trace LSP JSON-RPC traffic in the 'Eustress (Rune)' output channel. Useful for debugging; keep off in normal use."
         }
@@ -87,8 +101,9 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "bun run compile",
-    "compile": "tsc -p ./",
+    "vscode:prepublish": "bun run bundle",
+    "compile": "tsc -p ./ --noEmit",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --target=node18 --minify",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --out ../dist/"
   },
@@ -99,6 +114,7 @@
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.24.2",
     "typescript": "^5.3.0"
   }
 }

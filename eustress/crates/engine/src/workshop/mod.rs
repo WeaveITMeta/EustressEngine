@@ -951,9 +951,16 @@ impl IdeationPipeline {
     }
 
     /// Get the Slint-compatible pipeline state string
+    ///
+    /// `conversing` is split out from `running` so the UI can hide the
+    /// 13-step pipeline panel while the user is just chatting with Claude.
+    /// The huge step list at the top of the Workshop panel should only
+    /// appear once real artifact-generation kicks off — until then it
+    /// looks like the pipeline is "doing something" when it isn't.
     pub fn state_string(&self) -> &str {
         match &self.state {
             IdeationState::Idle => "idle",
+            IdeationState::Conversing => "conversing",
             IdeationState::Complete => "complete",
             IdeationState::Paused => "paused",
             IdeationState::Failed { .. } => "error",

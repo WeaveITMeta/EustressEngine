@@ -174,8 +174,9 @@ impl FileType {
             // AdornmentService: Adornment definition TOMLs spawn as adornment entities
             (Self::Toml, "AdornmentService") => true,
 
-            // Scripts in any service folder
-            (Self::Soul | Self::Rune, _) => true,
+            // Scripts in any service folder — Rune, Soul (markdown), and Luau
+            // all spawn as SoulScript entities wherever the user drops them.
+            (Self::Soul | Self::Rune | Self::Lua, _) => true,
             
             // Default: don't spawn
             _ => false,
@@ -648,6 +649,49 @@ pub fn spawn_file_entry(
             }
         }
 
+        FileType::Lua => {
+            // Luau/Lua scripts go through the mlua runtime. Spawned with the
+            // same SoulScriptData component as Rune so `compile_scripts_on_play`
+            // picks them up alongside .rune files; `run_context = Luau` routes
+            // execution through `execute_chunk` instead of the Rune VM.
+            match std::fs::read_to_string(&file_meta.path) {
+                Ok(lua_source) => {
+                    let e = commands.spawn((
+                        eustress_common::classes::Instance {
+                            name: file_meta.name.clone(),
+                            class_name: eustress_common::classes::ClassName::SoulScript,
+                            archivable: true,
+                            id: 0,
+                            ai: false,
+                            uuid: String::new(),
+                        },
+                        crate::soul::SoulScriptData {
+                            source: lua_source,
+                            dirty: false,
+                            ast: None,
+                            generated_code: None,
+                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                            errors: Vec::new(),
+                            run_context: crate::soul::SoulRunContext::Luau,
+                        },
+                        LoadedFromFile {
+                            path: file_meta.path.clone(),
+                            file_type: file_meta.file_type,
+                            service: file_meta.service.clone(),
+                        },
+                        Name::new(file_meta.name.clone()),
+                    )).id();
+                    registry.register(file_meta.path.clone(), e, file_meta.clone());
+                    info!("🌙 Loaded Luau script {} from {:?}", file_meta.name, file_meta.path);
+                    e
+                }
+                Err(err) => {
+                    error!("❌ Failed to read Luau script {:?}: {}", file_meta.path, err);
+                    return None;
+                }
+            }
+        }
+
         FileType::GuiElement => {
             // Load GUI element files (.textlabel.toml, .frame.toml, etc.) as Bevy UI entities.
             // Parses the TOML file for visual properties (position, size, colors, text)
@@ -751,10 +795,15 @@ pub fn spawn_file_entry(
         }
     };
 
-    // Non-GUI files (scripts, sounds) inside StarterGui need a hidden Node
-    // so Bevy doesn't panic from mixing UI and non-UI entities in one hierarchy.
+    // Non-GUI, non-script files (sounds, loose data) inside StarterGui get a
+    // hidden Node so Bevy doesn't treat them as stray non-UI leaves of the UI
+    // root. Scripts are exempt — they carry SoulScriptData, not visuals, and
+    // forcing them into the UI tree risks the UI layout system touching them
+    // during play (historically scripts in StarterGui didn't execute).
+    let is_script = matches!(file_meta.file_type, FileType::Soul | FileType::Rune | FileType::Lua);
     if file_meta.service == "StarterGui"
         && !matches!(file_meta.file_type, FileType::GuiElement)
+        && !is_script
     {
         commands.entity(entity).insert(Node { display: Display::None, ..default() });
     }
@@ -916,7 +965,7 @@ pub fn spawn_directory_entry(
                 bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
                 corner_radius: 0.0,
                 text: String::new(), text_color: [1.0; 4],
-                font_size: 14.0, text_align: "center".to_string(),
+                font_size: 14.0, font_weight: 400, text_align: "center".to_string(),
                 image_path: String::new(),
                 class_type: "screengui".to_string(),
                 mouse_filter: "ignore".to_string(),
@@ -943,7 +992,7 @@ pub fn spawn_directory_entry(
                 border_size: 0.0, border_color: [0.0; 4],
                 corner_radius: 0.0,
                 text: String::new(), text_color: [1.0; 4],
-                font_size: 14.0, text_align: "center".to_string(),
+                font_size: 14.0, font_weight: 400, text_align: "center".to_string(),
                 image_path: String::new(),
                 class_type: "frame".to_string(),
                 mouse_filter: "stop".to_string(),
@@ -1001,6 +1050,8 @@ pub fn spawn_directory_entry(
                 size: bb_size,
                 max_distance: bb_max_distance,
                 always_on_top: bb_always_on_top,
+                face_camera: true,
+                visible: true,
             },
             LoadedFromFile {
                 path: dir_meta.path.clone(),
@@ -1158,15 +1209,17 @@ pub fn spawn_directory_entry(
         )).id()
     };
 
-    // Non-GUI directories (e.g. "scripts/") inside StarterGui need UI-compatible
-    // components so Bevy doesn't panic from mixing UI and 3D hierarchies.
-    // Replace Transform+Visibility with a hidden Node.
+    // Non-GUI directories (e.g. "scripts/") inside StarterGui get a hidden Node
+    // so Bevy doesn't treat them as stray non-UI leaves of the UI root.
+    // Script folders (SoulScript) are exempt — they host SoulScriptData and
+    // shouldn't be dragged into the UI layout pass.
     let is_non_gui_dir = dir_meta.service == "StarterGui" && !is_screen_gui && !is_gui_container
         && !matches!(class_name,
             eustress_common::classes::ClassName::Frame
             | eustress_common::classes::ClassName::ScrollingFrame
             | eustress_common::classes::ClassName::BillboardGui
             | eustress_common::classes::ClassName::SurfaceGui
+            | eustress_common::classes::ClassName::SoulScript
         );
     if is_non_gui_dir {
         // Spawned with Transform+Visibility above — swap to hidden Node

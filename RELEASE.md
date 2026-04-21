@@ -205,13 +205,18 @@ git tag -a v0.3.7 -m "Release notes summary"
 git push origin v0.3.7
 git checkout main
 
-# Local release build (matches what CI produces)
+# Local release build (matches what CI produces).
+# `lsp` is in the default `core` feature, so this produces BOTH bins:
+#   target/release/eustress-engine.exe   (the Studio)
+#   target/release/eustress-lsp.exe      (the Rune LSP server)
+# Both ship inside the installer.
 cd eustress
 cargo build --release --package eustress-engine
 
 # Or using the tier alias
 cargo core
 
-# Inspect the generated artifact
+# Inspect the generated artifacts — you should see both bins.
 ls -lh eustress/target/release/eustress-engine*
+ls -lh eustress/target/release/eustress-lsp*
 ```

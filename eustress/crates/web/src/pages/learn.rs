@@ -367,6 +367,21 @@ pub fn LearnPage() -> impl IntoView {
                         <h3>"Networking"</h3>
                         <p>"Build multiplayer experiences with real-time sync"</p>
                     </a>
+                    <a href="/learn/ide" class="doc-card">
+                        <img src="/assets/icons/code.svg" alt="IDE" class="doc-icon" />
+                        <h3>"IDE Integration"</h3>
+                        <p>"VS Code, Windsurf, Cursor — Rune intelligence in your editor"</p>
+                    </a>
+                    <a href="/learn/mcp" class="doc-card">
+                        <img src="/assets/icons/sparkles.svg" alt="MCP" class="doc-icon" />
+                        <h3>"MCP Server"</h3>
+                        <p>"Expose the Universe to Claude, Cursor, Windsurf via Model Context Protocol"</p>
+                    </a>
+                    <a href="/learn/lsp" class="doc-card">
+                        <img src="/assets/icons/brain.svg" alt="LSP" class="doc-icon" />
+                        <h3>"Rune LSP"</h3>
+                        <p>"Language Server for Rune scripts — diagnostics, hover, go-to-def"</p>
+                    </a>
                     <a href="/docs/audio" class="doc-card">
                         <img src="/assets/icons/audio.svg" alt="Audio" class="doc-icon" />
                         <h3>"Audio"</h3>

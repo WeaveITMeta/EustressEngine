@@ -33,14 +33,18 @@
 
 pub mod analyzer;
 pub mod plugin;
+pub mod runtime_snapshot;
+pub mod workspace;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 
 pub use analyzer::{
-    analyze, apply_edits, code_actions, complete, identifier_at,
-    line_col_to_offset, prefix_at, rename,
+    analyze, api_lookup, api_starts_with, apply_edits, code_actions, complete,
+    hover, identifier_at, line_col_to_offset, prefix_at, render_api_hover,
+    rename, signature_help_at,
     AnalysisResult, CodeAction, Completion, CompletionKind, Diagnostic,
-    Range, Severity, Symbol, SymbolIndex, SymbolKind, TextEdit,
-    RUNE_KEYWORDS,
+    HoverInfo, HoverSource, Range, Severity, Symbol, SymbolIndex, SymbolKind,
+    TextEdit, RUNE_KEYWORDS,
 };
 pub use plugin::{ScriptAnalysis, ScriptAnalysisPlugin};
+pub use workspace::{WorkspaceIndex, WorkspaceSymbol};

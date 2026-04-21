@@ -88,7 +88,17 @@ impl BevyWindowAdapter {
         })
     }
 
-    fn resize(&self, new_size: PhysicalSize, scale_factor: f32) {
+    /// Render the adapter's current component into an RGBA pixel buffer.
+    /// Used by per-billboard rendering (one adapter per BillboardCard).
+    pub(crate) fn render_to_buffer(
+        &self,
+        pixels: &mut [slint::platform::software_renderer::PremultipliedRgbaColor],
+        width: usize,
+    ) {
+        self.software_renderer.render(pixels, width);
+    }
+
+    pub(crate) fn resize(&self, new_size: PhysicalSize, scale_factor: f32) {
         self.size.set(new_size);
         self.scale_factor.set(scale_factor);
         self.slint_window.dispatch_event(WindowEvent::Resized {
@@ -102,6 +112,14 @@ impl BevyWindowAdapter {
 // Thread-local storage for window adapters created by the platform
 thread_local! {
     static SLINT_WINDOWS: RefCell<Vec<Weak<BevyWindowAdapter>>> = RefCell::new(Vec::new());
+}
+
+/// Return the most recently created `BevyWindowAdapter` (the one bound to the
+/// Slint component that was just `::new()`'d). Callers instantiate a Slint
+/// component and immediately call this to get the adapter that drives it, so
+/// they can resize it + render its surface into their own pixel buffer.
+pub(crate) fn take_latest_window_adapter() -> Option<Weak<BevyWindowAdapter>> {
+    SLINT_WINDOWS.with(|w| w.borrow().last().cloned())
 }
 
 /// Custom Slint platform for Bevy integration
@@ -411,6 +429,14 @@ pub enum SlintAction {
     WorkshopOptimizeAndBuild,
     WorkshopLoadConversation(String),
     WorkshopNewConversation,
+    /// User clicked × on a Workshop session tab. Removes the tab
+    /// from the in-memory list; the on-disk folder is preserved so
+    /// the session stays recoverable from the history modal.
+    WorkshopCloseConversation(String),
+    /// User drag-reordered a Workshop session tab. `(session_id,
+    /// target_index)`. Host applies the reorder to an in-memory
+    /// override map that overrides the default recent-first sort.
+    WorkshopReorderTab(String, i32),
     /// User typed a character in the Workshop input — parse the active
     /// `@token` (if any) and push ranked results to the popup.
     WorkshopMentionQueryChanged(String),
@@ -540,9 +566,15 @@ impl OutputConsole {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         self.entries.push(LogEntry { level, message, timestamp, source: source.to_string() });
 
-        let max = if self.max_entries > 0 { self.max_entries } else { 1000 };
-        while self.entries.len() > max {
-            self.entries.remove(0);
+        // Default cap bumped from 1k → 10k so hot-reload diagnostics
+        // and flood-style per-frame logging stay visible long enough
+        // for a user to scroll back through a full Play-mode session.
+        // `drain(..overflow)` is O(N) amortised vs. `remove(0)`'s O(N²)
+        // when trimming many entries.
+        let max = if self.max_entries > 0 { self.max_entries } else { 10_000 };
+        if self.entries.len() > max {
+            let overflow = self.entries.len() - max;
+            self.entries.drain(..overflow);
         }
     }
 
@@ -659,6 +691,16 @@ pub struct UnifiedExplorerState {
     /// Ordered list of visible node IDs (entity + file) as shown in the tree.
     /// Populated during sync, used for Shift+Click range selection.
     pub visible_node_order: Vec<i32>,
+    /// Rust-side double-click detector. The Slint `for`-loop rebuilds
+    /// every TreeItem instance whenever the model is replaced (which we
+    /// do on every selection change), wiping Slint's internal
+    /// double-click timer state. So the user always needed "select, then
+    /// click again" to hit two clicks on the same TouchArea lifetime.
+    /// We detect double-clicks ourselves by tracking the last clicked
+    /// node + timestamp; two clicks on the same id within
+    /// `DOUBLE_CLICK_MS` → treat as `OpenNode`.
+    pub last_click_node_id: Option<i32>,
+    pub last_click_at: Option<std::time::Instant>,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -686,9 +728,15 @@ impl Default for UnifiedExplorerState {
             explorer_fs_stale: true,
             last_selected_node_id: None,
             visible_node_order: Vec::new(),
+            last_click_node_id: None,
+            last_click_at: None,
         }
     }
 }
+
+/// Maximum inter-click interval that counts as a double-click. Matches
+/// Windows/macOS defaults; users with slower reflexes can tune later.
+pub const DOUBLE_CLICK_MS: u128 = 500;
 
 /// Selected item in unified explorer
 #[derive(Debug, Clone, PartialEq)]
@@ -996,6 +1044,20 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, publish_output_logs)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
+            // Workshop session list sync: rescans SoulService/Workshop/
+            // every 500 ms and pushes ConversationSummary[] to the tab
+            // strip. Uses its own throttle (no reliance on ECS change
+            // detection) since folders are created on-disk by external
+            // events the ECS doesn't know about.
+            .add_systems(Update, sync_workshop_sessions_to_slint.after(SlintSystems::Drain))
+            // Generate short tab titles via Claude Haiku for sessions
+            // that don't have one yet. Throttled + non-blocking — fires
+            // one background thread per session, at most one per frame,
+            // so a fresh install with many sessions doesn't rate-limit
+            // the API. See function docs for backoff rules.
+            .init_resource::<WorkshopTitleGenState>()
+            .init_resource::<WorkshopTabOrder>()
+            .add_systems(Update, generate_workshop_titles.after(sync_workshop_sessions_to_slint))
             // Script analyzer → squiggle spans on the script editor
             .add_systems(Update, sync_analyzer_to_slint.after(SlintSystems::Drain))
             // API Reference Panel sync: ApiCatalog + ApiFilterState → Slint
@@ -1095,6 +1157,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.set_show_properties(true);
     ui.set_show_output(true);
     ui.set_show_toolbox(true);
+
+    // About dialog identity — version comes from the engine crate's Cargo.toml
+    // (so bumping the crate version automatically updates the About screen).
+    ui.set_about_version(env!("CARGO_PKG_VERSION").into());
     
     // ========================================================================
     // Wire Slint callbacks → SlintActionQueue
@@ -1474,9 +1540,44 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_force_exit(move || q.push(SlintAction::ForceExit));
     
-    // Workshop Panel callbacks are wired in slint_main.rs (overlay thread).
-    // Do NOT duplicate them here — both push to the same SlintActionQueue,
-    // which would cause every action to fire twice (double Claude API calls).
+    // Workshop Panel callbacks. (Historically these lived in slint_main.rs's
+    // overlay loop, but that path isn't active — SlintUiPlugin owns the UI
+    // in-process. Without these, the Send button, pipeline controls, and
+    // mention popup were all no-ops.)
+    let q = queue.clone();
+    ui.on_workshop_send_message(move |text| q.push(SlintAction::WorkshopSendMessage(text.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_approve_mcp(move |id| q.push(SlintAction::WorkshopApproveMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_skip_mcp(move |id| q.push(SlintAction::WorkshopSkipMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_edit_mcp(move |id| q.push(SlintAction::WorkshopEditMcp(id)));
+    let q = queue.clone();
+    ui.on_workshop_open_artifact(move |path| q.push(SlintAction::WorkshopOpenArtifact(path.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_start_pipeline(move || q.push(SlintAction::WorkshopStartPipeline));
+    let q = queue.clone();
+    ui.on_workshop_pause_pipeline(move || q.push(SlintAction::WorkshopPausePipeline));
+    let q = queue.clone();
+    ui.on_workshop_resume_pipeline(move || q.push(SlintAction::WorkshopResumePipeline));
+    let q = queue.clone();
+    ui.on_workshop_cancel_pipeline(move || q.push(SlintAction::WorkshopCancelPipeline));
+    let q = queue.clone();
+    ui.on_workshop_optimize_and_build(move || q.push(SlintAction::WorkshopOptimizeAndBuild));
+    let q = queue.clone();
+    ui.on_workshop_load_conversation(move |id| q.push(SlintAction::WorkshopLoadConversation(id.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_close_conversation(move |id| q.push(SlintAction::WorkshopCloseConversation(id.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_reorder_tab(move |id, idx| q.push(SlintAction::WorkshopReorderTab(id.to_string(), idx)));
+    let q = queue.clone();
+    ui.on_workshop_new_conversation(move || q.push(SlintAction::WorkshopNewConversation));
+    let q = queue.clone();
+    ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_mention_commit(move |idx| q.push(SlintAction::WorkshopMentionCommit(idx)));
+    let q = queue.clone();
+    ui.on_workshop_mention_cancel(move || q.push(SlintAction::WorkshopMentionCancel));
 
     // Universe browser
     let q = queue.clone();
@@ -1776,6 +1877,8 @@ static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn sync_gui_elements_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     gui_query: Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
+    billboard_q: Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
+    parent_q: Query<&ChildOf>,
     changed: Query<(), Changed<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
     added: Query<(), Added<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
     mut last_count: Local<usize>,
@@ -1836,14 +1939,37 @@ fn sync_gui_elements_to_slint(
         false
     }
 
-    // Collect, filter hidden ScreenGui descendants, and sort by z_order
+    // Check whether any ancestor of `entity` is a BillboardGuiMarker. Those
+    // GuiElementDisplay entities are consumed by the per-billboard Slint
+    // renderer in `billboard_gui.rs` and must NOT leak into the screen-space
+    // overlay — otherwise a TextLabel parented to a billboard would draw
+    // both in 3D on the card AND as a 2D UI element in the top-left.
+    fn is_under_billboard(
+        entity: Entity,
+        billboard_q: &Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
+        parent_q: &Query<&ChildOf>,
+    ) -> bool {
+        let mut cur = entity;
+        loop {
+            if billboard_q.get(cur).is_ok() { return true; }
+            match parent_q.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => return false,
+            }
+        }
+    }
+
+    // Collect, filter hidden ScreenGui descendants + billboard children, sort.
     let mut elements: Vec<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)> =
         gui_query.iter()
             .filter(|(e, d, _)| {
                 // Skip the ScreenGui display element itself (zero-size container)
                 if d.class_type == "screengui" { return false; }
                 // Skip children of hidden ScreenGuis
-                !is_ancestor_hidden(*e, &gui_query)
+                if is_ancestor_hidden(*e, &gui_query) { return false; }
+                // Skip billboard descendants — rendered by billboard_gui plugin
+                if is_under_billboard(*e, &billboard_q, &parent_q) { return false; }
+                true
             })
             .map(|(e, d, _)| (e, d))
             .collect();
@@ -2099,16 +2225,51 @@ pub fn update_slint_ui_focus(
     windows: Query<&Window, With<PrimaryWindow>>,
     viewport_bounds: Option<Res<super::ViewportBounds>>,
     mut ui_focus: ResMut<super::SlintUIFocus>,
-    gui_elements: Query<(&eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&eustress_common::classes::Instance>)>,
+    // Include `ChildOf` so we can walk the parent chain and compute the
+    // absolute on-screen position of each button — identical to the
+    // accumulation the renderer does in `sync_gui_elements_to_slint`.
+    // Without this walk, click detection used panel-relative coords
+    // while the render used viewport-absolute, so every button's hit
+    // rect was offset by its parent panel's position.
+    gui_elements: Query<(
+        Entity,
+        &eustress_common::gui::billboard_renderer::GuiElementDisplay,
+        Option<&eustress_common::classes::Instance>,
+        Option<&ChildOf>,
+    )>,
     slint_context: Option<NonSend<SlintUiState>>,
     mouse: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
 ) {
-    // Track text input focus from Slint (blocks keyboard shortcuts while typing)
+    // Block engine keyboard handling whenever ANY Slint modal is open
+    // or a text input has focus. The atomic this feeds is what the
+    // camera controller + keybindings module read each frame before
+    // accepting key events — without it, WASD and shortcut keys leak
+    // through the modal backdrop to the 3D viewport and the user's
+    // typing also moves the camera.
+    //
+    // Every `show-*-dialog` property on the root StudioWindow goes
+    // here. Missing one means that modal's dialog backdrop absorbs
+    // mouse clicks but keyboard events still escape — the bug the
+    // Simulation Settings modal reproduced.
     let any_focus = slint_context.as_ref()
-        .map(|ctx| ctx.window.get_any_input_has_focus()
-            || ctx.window.get_command_bar_has_focus()
-            || ctx.window.get_show_settings_dialog()
-            || ctx.window.get_show_exit_confirmation())
+        .map(|ctx| {
+            let w = &ctx.window;
+            w.get_any_input_has_focus()
+                || w.get_command_bar_has_focus()
+                // Dialogs — every one must be listed here.
+                || w.get_show_settings_dialog()
+                || w.get_show_exit_confirmation()
+                || w.get_show_publish_dialog()
+                || w.get_show_login_dialog()
+                || w.get_show_keybindings_dialog()
+                || w.get_show_about_dialog()
+                || w.get_show_soul_settings_dialog()
+                || w.get_show_find_dialog()
+                || w.get_show_forge_connect_dialog()
+                || w.get_show_stress_test_dialog()
+                || w.get_show_sync_domain_dialog()
+                || w.get_show_simulation_settings_dialog()
+        })
         .unwrap_or(false);
     ui_focus.text_input_focused = any_focus;
     OVERLAY_INPUT_FOCUSED.store(any_focus, std::sync::atomic::Ordering::Relaxed);
@@ -2135,12 +2296,29 @@ pub fn update_slint_ui_focus(
         ui_focus.last_ui_position = None;
         return;
     };
-    
-    // Check if cursor is inside the 3D viewport bounds (physical pixels)
-    let in_viewport = cursor_pos.x >= vb.x
-        && cursor_pos.x <= vb.x + vb.width
-        && cursor_pos.y >= vb.y
-        && cursor_pos.y <= vb.y + vb.height;
+
+    // ViewportBounds is stored in PHYSICAL pixels (see ui/mod.rs:208) but
+    // `window.cursor_position()` returns LOGICAL pixels. On high-DPI
+    // displays (Windows 125%/150% scaling) the mismatch made the focus
+    // check think the viewport was offset and larger than it actually was,
+    // so `has_focus` flipped true while the cursor was visibly inside the
+    // 3D viewport. That early-returned every viewport tool system —
+    // including box selection, which is why the overlay never appeared.
+    // Convert physical bounds down to logical to match cursor_pos.
+    let scale = slint_context.as_ref()
+        .map(|ctx| ctx.adapter.scale_factor.get())
+        .unwrap_or(1.0)
+        .max(0.0001);
+    let vb_x = vb.x / scale;
+    let vb_y = vb.y / scale;
+    let vb_w = vb.width / scale;
+    let vb_h = vb.height / scale;
+
+    // Check if cursor is inside the 3D viewport bounds (logical pixels)
+    let in_viewport = cursor_pos.x >= vb_x
+        && cursor_pos.x <= vb_x + vb_w
+        && cursor_pos.y >= vb_y
+        && cursor_pos.y <= vb_y + vb_h;
     
     // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
     ui_focus.has_focus = !in_viewport;
@@ -2151,24 +2329,62 @@ pub fn update_slint_ui_focus(
     ui_focus.gui_element_hit = false;
     ui_focus.gui_clicked_button = None;
     if in_viewport {
-        // Convert cursor to viewport-local coordinates
-        let vp_x = cursor_pos.x - vb.x;
-        let vp_y = cursor_pos.y - vb.y;
+        // Convert cursor to viewport-local coordinates (logical pixels —
+        // GuiElementDisplay stores logical widths/heights).
+        let vp_x = cursor_pos.x - vb_x;
+        let vp_y = cursor_pos.y - vb_y;
 
-        for (gui, instance) in &gui_elements {
+        // Resolve absolute on-screen positions per element by walking the
+        // ChildOf chain. Mirrors the renderer's accumulation exactly —
+        // if the two ever diverge, clicks stop matching rendered rects.
+        // Cached within this call so a Panel with 10 children only walks
+        // each ancestor once.
+        let mut offset_cache: std::collections::HashMap<Entity, (f32, f32)> =
+            std::collections::HashMap::new();
+        fn compute_offset(
+            entity: Entity,
+            q: &Query<(
+                Entity,
+                &eustress_common::gui::billboard_renderer::GuiElementDisplay,
+                Option<&eustress_common::classes::Instance>,
+                Option<&ChildOf>,
+            )>,
+            cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
+        ) -> (f32, f32) {
+            if let Some(&v) = cache.get(&entity) { return v; }
+            let Ok((_, _display, _, parent)) = q.get(entity) else { return (0.0, 0.0) };
+            let out = if let Some(co) = parent {
+                let pe = co.parent();
+                let ancestor = compute_offset(pe, q, cache);
+                let parent_pos = q.get(pe).map(|(_, pd, _, _)| (pd.x, pd.y)).unwrap_or((0.0, 0.0));
+                (ancestor.0 + parent_pos.0, ancestor.1 + parent_pos.1)
+            } else {
+                (0.0, 0.0)
+            };
+            cache.insert(entity, out);
+            out
+        }
+
+        // Z-order the hit test so topmost buttons win over Frames that
+        // geometrically contain them. Higher z-index renders on top, so
+        // a DESCENDING z_order iteration matches click priority.
+        let mut ordered: Vec<_> = gui_elements.iter().collect();
+        ordered.sort_by(|a, b| b.1.z_order.cmp(&a.1.z_order));
+
+        for (entity, gui, instance, _parent) in ordered {
             if !gui.visible { continue; }
-            // "ignore" filter — completely transparent to mouse
             if gui.mouse_filter == "ignore" { continue; }
-            // GuiElementDisplay has x, y, width, height in viewport pixels
-            let gx = gui.x;
-            let gy = gui.y;
+            let (ox, oy) = compute_offset(entity, &gui_elements, &mut offset_cache);
+            let gx = gui.x + ox;
+            let gy = gui.y + oy;
             let gw = gui.width;
             let gh = gui.height;
-            if gw > 0.0 && gh > 0.0 && vp_x >= gx && vp_x <= gx + gw && vp_y >= gy && vp_y <= gy + gh {
-                // "stop" (default) consumes the event; "pass" lets it through
+            if gw > 0.0 && gh > 0.0
+                && vp_x >= gx && vp_x <= gx + gw
+                && vp_y >= gy && vp_y <= gy + gh
+            {
                 if gui.mouse_filter != "pass" {
                     ui_focus.gui_element_hit = true;
-                    // If left mouse just pressed on a TextButton, record its name for script dispatch
                     if mouse.just_pressed(bevy::input::mouse::MouseButton::Left)
                         && gui.class_type == "textbutton"
                     {
@@ -2321,6 +2537,10 @@ struct DrainResources<'w> {
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     space_root: Option<Res<'w, crate::space::SpaceRoot>>,
     view_state: Option<ResMut<'w, super::ViewSelectorState>>,
+    /// SimulationClock — the Save button on Simulation Settings writes
+    /// the chosen preset's time_scale into this resource so the change
+    /// applies live to the running sim.
+    sim_clock: Option<ResMut<'w, eustress_common::simulation::SimulationClock>>,
     editor_settings: Option<ResMut<'w, crate::editor_settings::EditorSettings>>,
     auth_state: Option<ResMut<'w, crate::auth::AuthState>>,
     bliss_state: Option<ResMut<'w, crate::auth::BlissNodeState>>,
@@ -2332,6 +2552,9 @@ struct DrainResources<'w> {
     selection_manager: Option<Res<'w, crate::rendering::BevySelectionManager>>,
     /// Workshop pipeline resource for cancel/pause/resume actions
     workshop_pipeline: Option<ResMut<'w, crate::workshop::IdeationPipeline>>,
+    /// User-driven Workshop tab order override. Mutated by drag-to-
+    /// reorder and read by the session-list sync system.
+    workshop_tab_order: Option<ResMut<'w, WorkshopTabOrder>>,
     /// Workshop @ mention index — Universe-scoped searcher backing the popup
     mention_index: Option<ResMut<'w, crate::workshop::mention::MentionIndex>>,
     /// Rune analyzer output — read by Problems panel handlers.
@@ -2804,10 +3027,62 @@ fn drain_slint_actions(
                 }
             }
 
-            // Simulation settings — save to simulation.toml (also applies)
+            // Simulation settings — apply to the live SimulationClock
+            // (time-compression scale, tick rate) immediately so the
+            // running sim picks up the new cadence. Previous version
+            // just logged "saved" without mutating any resource, which
+            // is why changing Preset in the modal never affected the
+            // Tick Wall display.
             SlintAction::SaveSimulationSettings => {
+                let Some(ui) = ui.as_ref() else { continue };
+
+                // Preset → multiplier. The Custom preset falls back to
+                // the `custom_time_scale` numeric field so the two
+                // inputs work together: pick "Custom" + type a scale.
+                let preset: String = ui.get_sim_time_scale_preset().into();
+                // Slint properties for custom/tick-rate/max-ticks are
+                // declared as `string` (SimField is a text input), so parse
+                // them here. Blank or unparseable values fall through to
+                // sensible defaults rather than 0, which would freeze the
+                // simulation or cause a divide-by-zero below.
+                let custom_str: String = ui.get_sim_custom_time_scale().into();
+                let custom: f32 = custom_str.trim().parse::<f32>().unwrap_or(1.0);
+                let scale: f64 = match preset.as_str() {
+                    "Realtime (1×)"               => 1.0,
+                    "1 min / sec (60×)"            => 60.0,
+                    "1 hr / sec (3,600×)"          => 3_600.0,
+                    "1 day / sec (86,400×)"        => 86_400.0,
+                    "1 week / sec (604,800×)"      => 604_800.0,
+                    "1 month / sec (2.63M×)"       => 2_630_000.0,
+                    "1 year / sec (31.5M×)"        => 31_536_000.0,
+                    "Custom" | _                   => custom as f64,
+                };
+
+                let tick_rate_str: String = ui.get_sim_tick_rate().into();
+                let tick_rate_hz: f32 = tick_rate_str.trim().parse::<f32>().unwrap_or(60.0);
+                let max_ticks_str: String = ui.get_sim_max_ticks_per_frame().into();
+                let max_ticks: i32 = max_ticks_str.trim().parse::<i32>().unwrap_or(10);
+
+                if let Some(ref mut clock) = res.sim_clock {
+                    // Write fields directly — `SimulationClock` exposes
+                    // them as pub. time_scale is clamped at 0 so a
+                    // misclick can't freeze the sim forever; Realtime is
+                    // the floor, not a stop.
+                    clock.time_scale = scale.max(0.0);
+                    if tick_rate_hz > 0.1 {
+                        clock.tick_rate_hz = tick_rate_hz as f64;
+                        clock.fixed_timestep_s = 1.0 / tick_rate_hz as f64;
+                    }
+                    if max_ticks > 0 {
+                        clock.max_ticks_per_frame = max_ticks as u32;
+                    }
+                }
+
                 if let Some(ref mut out) = res.output {
-                    out.info("Simulation settings saved to simulation.toml.".to_string());
+                    out.info(format!(
+                        "⏱️  Simulation: time_scale={}× ({}), tick_rate={:.1}Hz, max_ticks/frame={}",
+                        scale, preset, tick_rate_hz, max_ticks,
+                    ));
                 }
             }
             SlintAction::AddSimWatchpoint => {
@@ -3753,6 +4028,45 @@ fn drain_slint_actions(
             
             // Explorer actions — unified node handling (entities + files)
             SlintAction::SelectNode(id, node_type, ctrl, shift) => {
+                // ── Rust-side double-click detection ──
+                // The Slint `for`-loop rebuilds TreeItem instances every
+                // time the tree-nodes model swaps (which is on every
+                // selection change), so TouchArea's own double-click
+                // timer is wiped between the first and second click. We
+                // track it here instead: two clicks on the SAME id
+                // within DOUBLE_CLICK_MS → fire OpenNode and short-circuit
+                // the usual selection logic (we already selected on the
+                // first click).
+                if !ctrl && !shift {
+                    if let Some(ref mut es) = res.explorer_state {
+                        let now = std::time::Instant::now();
+                        let is_double = matches!(
+                            (es.last_click_node_id, es.last_click_at),
+                            (Some(prev_id), Some(prev_at))
+                                if prev_id == id
+                                && now.duration_since(prev_at).as_millis() < DOUBLE_CLICK_MS
+                        );
+                        if is_double {
+                            // Clear the tracker so a third click doesn't
+                            // immediately re-fire open (ghost open).
+                            es.last_click_node_id = None;
+                            es.last_click_at = None;
+                            // Enqueue OpenNode on the shared queue so it
+                            // processes next drain-cycle — doing it here
+                            // would clash with the `res` mutable borrow
+                            // around us.
+                            queue.push(SlintAction::OpenNode(id, node_type.clone()));
+                            // Still fall through to normal selection so
+                            // the row highlights + Properties panel
+                            // refreshes — users expect selection + open
+                            // on double-click, not just open.
+                        } else {
+                            es.last_click_node_id = Some(id);
+                            es.last_click_at = Some(now);
+                        }
+                    }
+                }
+
                 if let Some(ref mut es) = res.explorer_state {
                     // ── Shift+Click: range select ──
                     if shift {
@@ -4611,6 +4925,58 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                        // 3D Transform edits — write back to the live Bevy
+                        // Transform component so the change is visible in
+                        // the viewport before the TOML flush below. Without
+                        // these branches, Transform edits only landed on
+                        // disk and required a space reload to take effect.
+                        "Position" => {
+                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() == 3 {
+                                    tf.translation.x = parts[0];
+                                    tf.translation.y = parts[1];
+                                    tf.translation.z = parts[2];
+                                }
+                            }
+                        }
+                        "Rotation" => {
+                            // Properties panel feeds Euler degrees XYZ —
+                            // convert to quaternion the same way the
+                            // rotate gizmo does so the two stay in sync.
+                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() == 3 {
+                                    tf.rotation = Quat::from_euler(
+                                        EulerRot::XYZ,
+                                        parts[0].to_radians(),
+                                        parts[1].to_radians(),
+                                        parts[2].to_radians(),
+                                    );
+                                }
+                            }
+                        }
+                        "Scale" => {
+                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() == 3 {
+                                    // Clamp against 0 / negatives — Bevy
+                                    // meshes render flipped with negative
+                                    // scale and degenerate at 0, which is
+                                    // rarely what the user intends when
+                                    // they type in a field.
+                                    tf.scale.x = parts[0].max(1e-4);
+                                    tf.scale.y = parts[1].max(1e-4);
+                                    tf.scale.z = parts[2].max(1e-4);
+                                }
+                            }
+                        }
                         "Material" => {
                             if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
                                 bp.material = crate::classes::Material::from_string(&val);
@@ -5077,17 +5443,11 @@ fn drain_slint_actions(
                             extra: std::collections::HashMap::new(),
                         };
 
-                        // Unique folder name (folder-first architecture)
-                        let folder_name = {
-                            let base = &inst.name;
-                            if !workspace_dir.join(base).exists() {
-                                base.clone()
-                            } else {
-                                (1..1000).map(|i| format!("{}{}", base, i))
-                                    .find(|c| !workspace_dir.join(c).exists())
-                                    .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
-                            }
-                        };
+                        // Unique folder name — flat-file-aware via the
+                        // shared helper (catches `Block.toml` / `.glb.toml`
+                        // siblings that a bare `dir.join(name).exists()`
+                        // would miss).
+                        let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
                         let instance_dir = workspace_dir.join(&folder_name);
                         let _ = std::fs::create_dir_all(&instance_dir);
                         let toml_path = instance_dir.join("_instance.toml");
@@ -5254,6 +5614,54 @@ fn drain_slint_actions(
                     if let Some(ref mut out) = res.output {
                         out.info("Workshop: New conversation started".to_string());
                     }
+                }
+            }
+            // Drag-reorder a Workshop session tab. Rebuilds the in-
+            // memory order override so the sync system emits the tabs
+            // in the new sequence.
+            SlintAction::WorkshopReorderTab(session_id, target_idx) => {
+                if let Some(ref mut order) = res.workshop_tab_order {
+                    // Rebuild: start from the current *displayed* order
+                    // by rescanning sessions, apply any prior override,
+                    // then move `session_id` to `target_idx`. This way
+                    // the override always reflects a real ordering of
+                    // currently-existing sessions — stale ids (from
+                    // deleted folders) get pruned automatically.
+                    let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                    let sessions = crate::workshop::persistence::list_sessions_in_space(space);
+                    let mut current: Vec<String> = apply_tab_order(&order.order, &sessions);
+
+                    // Remove the dragged session from its current slot
+                    // (if present) then re-insert at the target index.
+                    current.retain(|id| id != &session_id);
+                    let clamped = (target_idx as usize).min(current.len());
+                    current.insert(clamped, session_id);
+
+                    order.order = current;
+                }
+            }
+            // × on a session tab → remove the tab from the live list.
+            // We deliberately don't delete the folder here; the session
+            // stays on disk so the history modal can restore it. If the
+            // user closed their currently-active tab, we also reset the
+            // pipeline so the chat area swaps to a blank state.
+            SlintAction::WorkshopCloseConversation(session_id) => {
+                let was_active = res.workshop_pipeline.as_ref()
+                    .map(|p| p.session_id == session_id)
+                    .unwrap_or(false);
+                if was_active {
+                    if let Some(ref mut pipeline) = res.workshop_pipeline {
+                        let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+                        let _ = crate::workshop::persistence::save_session_to_space(pipeline, space);
+                        pipeline.reset();
+                    }
+                }
+                // The sync system reads the live list from disk, so the
+                // tab disappears only when we actually remove the folder.
+                // For now "close" = "just deselect"; a follow-up can wire
+                // a Shift+click "delete permanently" if needed.
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Workshop: closed session {}", &session_id[..8.min(session_id.len())]));
                 }
             }
 
@@ -5487,16 +5895,9 @@ fn drain_slint_actions(
                     let workspace_dir = space_root.join("Workspace");
                     let _ = std::fs::create_dir_all(&workspace_dir);
 
-                    // Generate unique directory name
-                    let base = part_type_str.clone();
-                    let dir_name = {
-                        let test = workspace_dir.join(&base);
-                        if !test.exists() { base.clone() } else {
-                            (1..1000).map(|i| format!("{}{}", base, i))
-                                .find(|c| !workspace_dir.join(c).exists())
-                                .unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()))
-                        }
-                    };
+                    // Generate unique directory name via the shared helper
+                    // so flat `.toml` siblings count as taken too.
+                    let dir_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &part_type_str);
                     let dir_path = workspace_dir.join(&dir_name);
                     if let Err(e) = std::fs::create_dir_all(&dir_path) {
                         error!("Failed to create {} directory: {}", part_type_str, e);
@@ -5927,11 +6328,10 @@ fn drain_slint_actions(
                         })
                         .unwrap_or_else(|| space_root.join("SoulService"));
 
-                    let base = "Script".to_string();
-                    let script_name = (0..1000u32).find_map(|i| {
-                        let candidate = if i == 0 { base.clone() } else { format!("{}{}", base, i) };
-                        if !write_dir.join(&candidate).exists() { Some(candidate) } else { None }
-                    }).unwrap_or_else(|| format!("Script_{}", chrono::Utc::now().timestamp()));
+                    // Shared helper — catches `Script.rune` / `Script.luau`
+                    // flat files that would otherwise collide with a new
+                    // `Script/` folder on reload.
+                    let script_name = crate::space::instance_loader::unique_entity_name(&write_dir, "Script");
 
                     let script_dir = write_dir.join(&script_name);
                     let _ = std::fs::create_dir_all(&script_dir);
@@ -6021,11 +6421,10 @@ fn drain_slint_actions(
                         })
                         .unwrap_or_else(|| space_root.join("Workspace"));
 
-                    let base = part_type_str.to_string();
-                    let dir_name = (0..1000u32).find_map(|i| {
-                        let c = if i == 0 { base.clone() } else { format!("{}{}", base, i) };
-                        if !write_dir.join(&c).exists() { Some(c) } else { None }
-                    }).unwrap_or_else(|| format!("{}_{}", base, chrono::Utc::now().timestamp()));
+                    // Shared helper — catches flat `.toml` siblings so a
+                    // new `Block/` folder can't shadow an existing
+                    // `Block.toml`.
+                    let dir_name = crate::space::instance_loader::unique_entity_name(&write_dir, part_type_str);
 
                     let dir_path = write_dir.join(&dir_name);
                     if let Err(e) = std::fs::create_dir_all(&dir_path) {
@@ -7024,72 +7423,358 @@ fn publish_output_logs(
 }
 
 /// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
-/// Only runs when the pipeline resource has actually changed (Bevy change detection).
-/// Sync Workshop panel state to the SlintBridge (Bevy → overlay thread).
+/// Sync Workshop panel state directly to the Slint UI.
+///
+/// Runs when the pipeline OR Soul settings change. The soul-settings trigger
+/// is critical: without it, saving an API key in File > Settings wouldn't
+/// clear the Workshop panel's "Configure" banner until the next pipeline
+/// mutation — so the UI would look broken even though the key is valid.
+///
+/// Pushes straight to `SlintUiState.window` via NonSend. The `SlintBridge`
+/// pipeline in slint_main.rs is unused in the current in-process Slint path,
+/// so writing there never reached the UI (banner stuck on, message list empty).
 fn sync_workshop_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
-    tool_registry: Option<Res<crate::workshop::tools::ToolRegistry>>,
-    bridge: Option<Res<super::slint_bridge::SlintBridge>>,
 ) {
+    let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
-    let Some(bridge) = bridge else { return };
-    // Re-sync when pipeline OR the Soul settings change. Without the soul
-    // trigger, saving an API key in File > Settings wouldn't clear the
-    // Workshop panel's "Configure" banner until the next pipeline mutation.
+
     let soul_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
         || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
     if !pipeline.is_changed() && !soul_changed { return; }
 
-    // Check API key validity
     let api_key_valid = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
         _ => false,
     };
 
-    // Build bridge message data
-    use super::slint_bridge::WorkshopMessageData;
-    let messages: Vec<WorkshopMessageData> = pipeline.messages.iter().map(|msg| {
-        WorkshopMessageData {
-            role: msg.role.to_slint_string().to_string(),
-            content: msg.content.clone(),
-            message_type: msg.mcp_endpoint.clone().unwrap_or_default(),
-            timestamp: msg.timestamp.clone(),
+    let ui = &slint_context.window;
+
+    ui.set_workshop_api_key_valid(api_key_valid);
+    ui.set_workshop_pipeline_state(pipeline.state_string().into());
+    ui.set_workshop_product_name(pipeline.product_name.as_str().into());
+    ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
+    ui.set_workshop_estimated_cost(pipeline.format_cost().into());
+
+    let messages: Vec<ChatMessage> = pipeline.messages.iter().enumerate().map(|(i, msg)| {
+        ChatMessage {
+            id: i as i32,
+            role: msg.role.to_slint_string().into(),
+            content: msg.content.clone().into(),
+            timestamp: msg.timestamp.clone().into(),
+            mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
+            mcp_method: slint::SharedString::default(),
+            mcp_status: slint::SharedString::default(),
+            artifact_path: slint::SharedString::default(),
+            artifact_type: slint::SharedString::default(),
         }
     }).collect();
+    let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
+    ui.set_workshop_messages(slint::ModelRc::from(msg_model));
 
-    let steps: Vec<super::slint_bridge::WorkshopStepData> = pipeline.steps.iter().map(|step| {
-        super::slint_bridge::WorkshopStepData {
-            name: step.label.clone(),
-            status: step.status.to_slint_string().to_string(),
-            description: String::new(),
+    let steps: Vec<PipelineStepData> = pipeline.steps.iter().enumerate().map(|(i, step)| {
+        PipelineStepData {
+            index: i as i32,
+            label: step.label.as_str().into(),
+            status: step.status.to_slint_string().into(),
+            artifact_count: 0,
         }
     }).collect();
-
-    let tool_count = tool_registry.map(|r| r.tool_count() as i32).unwrap_or(0);
-
-    // Write to bridge — overlay thread will apply on next timer tick
-    let mut state = bridge.lock();
-    state.workshop_state = Some(pipeline.state_string().to_string());
-    state.workshop_product_name = Some(pipeline.product_name.clone());
-    state.workshop_artifact_count = Some(pipeline.artifacts.len() as i32);
-    state.workshop_estimated_cost = Some(pipeline.format_cost());
-    state.workshop_api_key_valid = Some(api_key_valid);
-    state.workshop_messages = Some(messages);
-    state.workshop_steps = Some(steps);
+    let step_model = std::rc::Rc::new(slint::VecModel::from(steps));
+    ui.set_workshop_pipeline_steps(slint::ModelRc::from(step_model));
 }
 
-/// Sync API Reference catalog to Slint panel. Runs when filter state changes.
-/// Sync API Reference catalog to the SlintBridge (Bevy → overlay thread).
+/// Rescan `SoulService/Workshop/` every ~500 ms and push the session
+/// list to the Workshop tab strip. Folders there are created by async
+/// saves (`save_session_to_space`) + Haiku title updates + manual
+/// filesystem edits, none of which run through Bevy change detection —
+/// so we poll.
+///
+/// Throttle: 500 ms is a human-perceptible "new tab appeared" latency
+/// without measurable CPU cost. The inner `list_sessions_in_space`
+/// does a single directory read + one JSON parse per session (tens
+/// of µs each); rescanning at 2 Hz is cheap until sessions run into
+/// the hundreds, at which point we'd switch to a `notify` file watcher.
+fn sync_workshop_sessions_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
+    tab_order: Option<Res<WorkshopTabOrder>>,
+    time: Res<bevy::time::Time>,
+    mut last_run: Local<f64>,
+    mut last_hash: Local<u64>,
+) {
+    let now = time.elapsed_secs_f64();
+    if now - *last_run < 0.5 {
+        return;
+    }
+    *last_run = now;
+
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    let space = space_root.as_ref().map(|sr| sr.0.as_path());
+    let sessions_recent_first = crate::workshop::persistence::list_sessions_in_space(space);
+
+    // Apply the user's drag-reorder override (if any) on top of the
+    // default recent-first sort. Sessions missing from the override
+    // keep their default position at the tail.
+    let ordered_ids: Vec<String> = match tab_order.as_ref() {
+        Some(o) if !o.order.is_empty() => apply_tab_order(&o.order, &sessions_recent_first),
+        _ => sessions_recent_first.iter().map(|s| s.session_id.clone()).collect(),
+    };
+    // Rebuild sessions in the final order.
+    let sessions: Vec<_> = ordered_ids.iter()
+        .filter_map(|id| sessions_recent_first.iter().find(|s| &s.session_id == id).cloned())
+        .collect();
+
+    // Hash the (id, title, last_timestamp) tuples plus the pipeline's
+    // active session id to skip redundant UI updates. Slint model swaps
+    // trigger a full redraw of the tab strip; without this guard we'd
+    // rebuild every 500 ms even when nothing changed.
+    //
+    // The active-session-id MUST be part of the hash — otherwise
+    // clicking a tab (which only changes pipeline.session_id, not the
+    // session list) leaves the hash unchanged and early-returns here,
+    // so the `set_workshop_active_session_id` write below never runs
+    // and the blue "selected tab" highlight stays stuck on the
+    // previously-active tab.
+    let active_id = pipeline.as_ref().map(|p| p.session_id.as_str()).unwrap_or("");
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        sessions.len().hash(&mut h);
+        for s in &sessions {
+            s.session_id.hash(&mut h);
+            s.title.hash(&mut h);
+            s.last_timestamp.hash(&mut h);
+        }
+        active_id.hash(&mut h);
+        h.finish()
+    };
+    if hash == *last_hash {
+        return;
+    }
+    *last_hash = hash;
+
+    let summaries: Vec<ConversationSummary> = sessions.iter().map(|s| {
+        // Format `last_active` as a short relative-ish date. The
+        // timestamp is ms-since-epoch; we render it as "MMM D, YYYY"
+        // via chrono for compact display in tab tooltips / the
+        // history modal.
+        let last_active = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(s.last_timestamp as i64)
+            .map(|dt| dt.format("%b %-d, %Y").to_string())
+            .unwrap_or_default();
+        ConversationSummary {
+            session_id: s.session_id.as_str().into(),
+            title: s.title.as_str().into(),
+            product_name: s.product_name.as_str().into(),
+            state: s.pipeline_state.as_str().into(),
+            message_count: s.entry_count as i32,
+            cost: format!("${:.2}", s.total_cost).into(),
+            last_active: last_active.into(),
+            preview: s.first_message.as_str().into(),
+        }
+    }).collect();
+
+    let model = std::rc::Rc::new(slint::VecModel::from(summaries));
+    ui.set_workshop_past_conversations(slint::ModelRc::from(model));
+
+    // Active-tab highlight follows the live pipeline's session id so
+    // switching via load_conversation updates the tab strip instantly.
+    if let Some(pipeline) = pipeline {
+        ui.set_workshop_active_session_id(pipeline.session_id.as_str().into());
+    }
+}
+
+/// Apply the explicit tab-order override to a freshly-scanned session
+/// list, appending any sessions missing from the override at the end
+/// in default (recent-first) order. Shared by both the reorder
+/// handler (which needs a starting point to mutate) and the sync
+/// system (which needs to emit the final ordering to Slint).
+fn apply_tab_order(
+    override_ids: &[String],
+    sessions: &[crate::workshop::persistence::SessionSummary],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(sessions.len());
+    // First pass: emit overridden sessions in their declared order,
+    // skipping ones that no longer exist on disk.
+    for id in override_ids {
+        if sessions.iter().any(|s| &s.session_id == id) {
+            out.push(id.clone());
+        }
+    }
+    // Second pass: append the rest in default (recent-first) order.
+    // `sessions` is already sorted by `last_timestamp DESC` by
+    // `list_sessions_in_space`, so iteration order is correct.
+    for s in sessions {
+        if !out.iter().any(|id| id == &s.session_id) {
+            out.push(s.session_id.clone());
+        }
+    }
+    out
+}
+
+/// User-driven session order override for the Workshop tab strip.
+///
+/// The sync system's default sort is `last_timestamp DESC` (most
+/// recent first). When the user drags a tab, we record the explicit
+/// order here and the sync system honours it before falling back to
+/// the default.
+///
+/// In-memory only — resets on engine restart. Persisting this would
+/// mean storing a separate `order.json` next to the session folders;
+/// left as a follow-up because the default sort is usually what users
+/// want after a restart anyway.
+#[derive(Resource, Default)]
+pub struct WorkshopTabOrder {
+    /// Session ids in display order. Sessions not in this list fall
+    /// through to the default sort (recent-first) and get appended
+    /// after the explicitly-ordered ones.
+    pub order: Vec<String>,
+}
+
+/// Tracks which session ids have an in-flight Haiku title call and the
+/// last time the generator ran, so we don't re-fire on every poll tick
+/// or hit Anthropic's rate limit with a burst on first scan.
+#[derive(Resource, Default)]
+struct WorkshopTitleGenState {
+    /// Session ids we've already dispatched a Haiku call for in this
+    /// process. Prevents retrying on every ~500ms rescan.
+    in_flight: std::collections::HashSet<String>,
+    /// Last wall-clock frame time we kicked off a call. At most one
+    /// call per second system-wide to stay well under rate limits.
+    last_dispatch: f64,
+}
+
+/// Scan sessions pushed by `sync_workshop_sessions_to_slint` for any
+/// that still have the fallback title (which starts with the first
+/// message preview or a short session id) and generate a real label
+/// via Claude Haiku. Writes the result back to the session's
+/// `entries.json` via `persistence::update_session_title`, which the
+/// next rescan picks up automatically.
+///
+/// Design notes:
+/// * Haiku is ~8× cheaper than Sonnet and returns in <1 s for short
+///   prompts, so the cost of labelling even 50 existing sessions is
+///   a few cents total.
+/// * We keep `in_flight` in-process only — restart re-dispatches are
+///   OK because `update_session_title` round-trips the manifest, so
+///   a stale duplicate just rewrites the same title.
+/// * Rate-limit guard: at most one dispatch per second, and at most
+///   one at a time in-flight per session. A fresh install with a big
+///   SoulService/Workshop/ folder fills titles over a minute or so.
+fn generate_workshop_titles(
+    pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
+    global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
+    space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    time: Res<bevy::time::Time>,
+    mut state: ResMut<WorkshopTitleGenState>,
+) {
+    let _ = pipeline; // reserved for future "skip if current is active"
+    let Some(space_root) = space_root else { return };
+
+    let api_key = match (&global_settings, &space_settings) {
+        (Some(g), Some(s)) => s.effective_api_key(g),
+        _ => return,
+    };
+    if api_key.is_empty() {
+        return;
+    }
+
+    let now = time.elapsed_secs_f64();
+    if now - state.last_dispatch < 1.0 {
+        return;
+    }
+
+    // Find the first session that has a first-user message but no
+    // stored title yet. We re-read the manifest to distinguish
+    // "fallback title" from a real one — the summary `title` field is
+    // always populated by list_sessions_in_space, so we can't use it
+    // alone as a signal.
+    let space = space_root.0.as_path();
+    let sessions = crate::workshop::persistence::list_sessions_in_space(Some(space));
+    let target = sessions.into_iter().find(|s| {
+        if state.in_flight.contains(&s.session_id) { return false; }
+        if s.first_message.is_empty() { return false; }
+        // Cheap check — re-read just the manifest title field.
+        let path = crate::workshop::persistence::session_entries_path_in_space(
+            Some(space), &s.session_id,
+        );
+        let raw = match std::fs::read_to_string(&path) { Ok(r) => r, Err(_) => return false };
+        let m: Result<crate::workshop::persistence::SessionManifest, _> =
+            serde_json::from_str(&raw);
+        matches!(m, Ok(ref man) if man.title.as_deref().map(|t| t.trim().is_empty()).unwrap_or(true))
+    });
+    let Some(target) = target else { return };
+
+    state.in_flight.insert(target.session_id.clone());
+    state.last_dispatch = now;
+
+    // Dispatch in a background thread so we never stall the render
+    // loop on network IO. The result is flushed to disk; the next
+    // sync tick picks it up and repaints the tab.
+    let api_key = api_key.to_string();
+    let session_id = target.session_id.clone();
+    let prompt = target.first_message.clone();
+    let space_root_buf = space_root.0.clone();
+
+    std::thread::spawn(move || {
+        let client = crate::soul::claude_client::ClaudeClient::new(
+            eustress_common::soul::ClaudeConfig {
+                api_key: Some(api_key),
+                ..Default::default()
+            }
+        );
+        let system_prompt =
+            "Produce a 2–5 word title for the following chat prompt. \
+             Return ONLY the title text. No quotes, no trailing punctuation, \
+             no emojis. Title Case. Keep it concrete (name the subject) rather \
+             than generic like \"AI Question\" or \"Help Request\".";
+        match client.call_api_haiku(&prompt, system_prompt) {
+            Ok(raw) => {
+                let title = raw.trim()
+                    .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '!' || c == '?')
+                    .trim()
+                    .chars().take(60).collect::<String>();
+                if title.is_empty() { return; }
+                if let Err(e) = crate::workshop::persistence::update_session_title(
+                    Some(&space_root_buf),
+                    &session_id,
+                    &title,
+                ) {
+                    tracing::warn!("Workshop: update_session_title({}) failed: {}", session_id, e);
+                } else {
+                    tracing::info!("Workshop: Haiku titled session {} → {:?}",
+                        &session_id[..8.min(session_id.len())], title);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Workshop: Haiku title call for {} failed: {}",
+                    &session_id[..8.min(session_id.len())], e);
+            }
+        }
+    });
+}
+
+/// Sync API Reference catalog directly to the Slint UI. Runs when the catalog
+/// changes or the filter is marked dirty (search text, category, language).
+///
+/// This pushes straight to `SlintUiState.window` via NonSend — the separate
+/// SlintBridge pipeline in slint_main.rs is unused in the current Bevy-native
+/// overlay path, so data written there never reached the UI.
 fn sync_api_reference_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
     catalog: Option<Res<crate::workshop::api_reference::ApiCatalog>>,
     mut filter: Option<ResMut<ApiFilterState>>,
-    bridge: Option<Res<super::slint_bridge::SlintBridge>>,
 ) {
+    let Some(slint_context) = slint_context else { return };
     let Some(catalog) = catalog else { return };
     let Some(ref mut filter) = filter else { return };
-    let Some(bridge) = bridge else { return };
 
     // Only re-push when filter changed or catalog just loaded
     if !filter.dirty && !catalog.is_changed() { return; }
@@ -7099,20 +7784,16 @@ fn sync_api_reference_to_slint(
     let cat_filter = &filter.selected_category;
     let lang_filter = &filter.language_filter;
 
-    // Filter entries
     let filtered: Vec<_> = catalog.entries.iter().filter(|e| {
-        // Language filter
         if !lang_filter.is_empty() && lang_filter != "All" {
             let lang_str = e.language.to_string();
             if lang_str != *lang_filter && lang_str != "Both" {
                 return false;
             }
         }
-        // Category filter
         if !cat_filter.is_empty() && cat_filter != "All" && e.category != *cat_filter {
             return false;
         }
-        // Search filter
         if !search.is_empty() {
             let name_match = e.name.to_lowercase().contains(&search);
             let doc_match = e.doc.to_lowercase().contains(&search);
@@ -7122,36 +7803,37 @@ fn sync_api_reference_to_slint(
         true
     }).collect();
 
-    // Build bridge data
-    use super::slint_bridge::ApiEntryBridgeData;
-    let entries: Vec<ApiEntryBridgeData> = filtered.iter().map(|e| {
+    let slint_entries: Vec<ApiEntryData> = filtered.iter().map(|e| {
         let params_str = e.params.iter()
             .map(|p| format!("{}: {}", p.name, p.typ))
             .collect::<Vec<_>>()
             .join(", ");
-        ApiEntryBridgeData {
-            name: e.name.clone(),
-            params: params_str,
-            return_type: e.return_type.clone(),
-            doc: e.doc.clone(),
-            category: e.category.clone(),
-            language: e.language.to_string(),
-            status: e.status.to_string(),
-            status_icon: e.status.icon().to_string(),
-            example: e.example.clone(),
+        ApiEntryData {
+            name: e.name.clone().into(),
+            params: params_str.into(),
+            return_type: e.return_type.clone().into(),
+            doc: e.doc.clone().into(),
+            category: e.category.clone().into(),
+            language: e.language.to_string().into(),
+            status: e.status.to_string().into(),
+            status_icon: e.status.icon().to_string().into(),
+            example: e.example.clone().into(),
         }
     }).collect();
 
-    let categories: Vec<String> = catalog.categories.clone();
     let total = catalog.entries.len() as i32;
-    let filtered_count = entries.len() as i32;
+    let filtered_count = slint_entries.len() as i32;
 
-    // Write to bridge — overlay thread will apply on next timer tick
-    let mut state = bridge.lock();
-    state.api_entries = Some(entries);
-    state.api_categories = Some(categories);
-    state.api_total_count = Some(total);
-    state.api_filtered_count = Some(filtered_count);
+    let ui = &slint_context.window;
+    let entries_model = std::rc::Rc::new(slint::VecModel::from(slint_entries));
+    ui.set_api_entries(slint::ModelRc::from(entries_model));
+
+    let cats: Vec<slint::SharedString> = catalog.categories.iter().map(|c| c.clone().into()).collect();
+    let cats_model = std::rc::Rc::new(slint::VecModel::from(cats));
+    ui.set_api_categories(slint::ModelRc::from(cats_model));
+
+    ui.set_api_total_count(total);
+    ui.set_api_filtered_count(filtered_count);
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -8605,12 +9287,13 @@ fn sync_properties_to_slint(
     base_parts: Query<&eustress_common::classes::BasePart>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
-    material_props: Query<&eustress_common::realism::materials::properties::MaterialProperties>,
-    thermo_states: Query<&eustress_common::realism::particles::components::ThermodynamicState>,
-    echem_states: Query<&eustress_common::realism::particles::components::ElectrochemicalState>,
     gui_display_query: Query<&eustress_common::gui::billboard_renderer::GuiElementDisplay>,
-    // UI class components collapsed into a ParamSet to stay within Bevy's 16-param system limit
-    mut ui_queries: ParamSet<(
+    // UI class components split across two ParamSets — Bevy's ParamSet
+    // caps at 8 members and we now surface 10 UI classes (BillboardGui /
+    // ScreenGui / SurfaceGui joined the flat 2D classes when 3D UI
+    // containers landed). Splitting keeps each ParamSet within limits
+    // without exceeding the 16-param system budget.
+    mut ui_queries_flat: ParamSet<(
         Query<&eustress_common::classes::TextLabel>,
         Query<&eustress_common::classes::TextButton>,
         Query<&eustress_common::classes::TextBox>,
@@ -8618,6 +9301,11 @@ fn sync_properties_to_slint(
         Query<&eustress_common::classes::ImageLabel>,
         Query<&eustress_common::classes::ImageButton>,
         Query<&eustress_common::classes::ScrollingFrame>,
+    )>,
+    mut ui_queries_3d: ParamSet<(
+        Query<&eustress_common::classes::BillboardGui>,
+        Query<&eustress_common::classes::ScreenGui>,
+        Query<&eustress_common::classes::SurfaceGui>,
     )>,
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
@@ -8774,35 +9462,52 @@ fn sync_properties_to_slint(
             // via PropertyAccess.  Skip the BasePart Appearance/Physics sections
             // since UI classes do not have color/anchored/can_collide semantics.
             use eustress_common::classes::{ClassName, PropertyAccess};
+            // 3D UI containers (BillboardGui, ScreenGui, SurfaceGui) are
+            // routed through PropertyAccess too — without this they fell
+            // through to the BasePart `else` branch and the Properties
+            // panel displayed Appearance/Physics/Transform sections that
+            // have no business on a 3D UI node (no Anchored, no CanCollide,
+            // no Material). The correct set — Size, MaxDistance, Adornee,
+            // AlwaysOnTop, LightInfluence, Enabled, UnitsOffset, etc. —
+            // lives in `impl PropertyAccess for BillboardGui` in common.
             let is_ui_class = matches!(instance.class_name,
                 ClassName::TextLabel | ClassName::TextButton | ClassName::TextBox |
                 ClassName::Frame     | ClassName::ImageLabel | ClassName::ImageButton |
-                ClassName::ScrollingFrame
+                ClassName::ScrollingFrame |
+                ClassName::BillboardGui | ClassName::ScreenGui | ClassName::SurfaceGui
             );
             if is_ui_class {
                 // Emit all properties from the live ECS component so edits are
                 // always round-tripped through the component, not re-read from disk.
-                // Use the ParamSet accessors sequentially (only one is accessed at a time).
+                // Each ParamSet access is one-at-a-time; we probe each class in
+                // turn to find which component the entity actually has.
+                use eustress_common::classes::PropertyAccess as _;
                 let ui_props: Option<Vec<eustress_common::classes::PropertyDescriptor>> =
-                    if let Ok(c) = ui_queries.p0().get(selected_entity)     { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p1().get(selected_entity)  { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p2().get(selected_entity)  { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p3().get(selected_entity)  { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p4().get(selected_entity)  { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p5().get(selected_entity)  { Some(c.list_properties()) }
-                    else if let Ok(c) = ui_queries.p6().get(selected_entity)  { Some(c.list_properties()) }
+                    if let Ok(c) = ui_queries_flat.p0().get(selected_entity)   { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p1().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p2().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p3().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p4().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p5().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_flat.p6().get(selected_entity) { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_3d.p0().get(selected_entity)   { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_3d.p1().get(selected_entity)   { Some(c.list_properties()) }
+                    else if let Ok(c) = ui_queries_3d.p2().get(selected_entity)   { Some(c.list_properties()) }
                     else { None };
 
                 if let Some(descriptors) = ui_props {
                     for desc in &descriptors {
                         let val_opt =
-                            ui_queries.p0().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name))
-                            .or_else(|| ui_queries.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries.p3().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries.p4().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries.p5().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
-                            .or_else(|| ui_queries.p6().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
+                            ui_queries_flat.p0().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name))
+                            .or_else(|| ui_queries_flat.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_flat.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_flat.p3().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_flat.p4().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_flat.p5().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_flat.p6().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_3d.p0().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_3d.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
+                            .or_else(|| ui_queries_3d.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
                         if let Some(val) = val_opt {
                             let (val_str, prop_type) = property_value_to_display(&val);
                             add_prop(&desc.category, &desc.name, val_str, prop_type, !desc.read_only);

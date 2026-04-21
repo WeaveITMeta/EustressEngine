@@ -11,7 +11,7 @@ always_on_top = false
 light_influence = 0.0
 clips_descendants = false
 z_index_behavior = "Sibling"
-pixels_per_stud = 50.0
+pixels_per_meter = 50.0
 brightness = 1.0
 
 [metadata]

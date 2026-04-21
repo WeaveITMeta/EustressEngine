@@ -582,15 +582,28 @@ fn eustress_camera_controls(
         return;
     }
     
-    // Check if cursor is inside the 3D viewport (not over Explorer or Properties panels).
-    // ViewportBounds is in physical pixels from top-left, matching window.cursor_position().
-    let cursor_in_viewport = if let (Some(vb), Ok(window)) = (viewport_bounds.as_deref(), windows.single()) {
+    // Check if cursor is inside the 3D viewport (not over Explorer,
+    // Properties, Output, or any other Slint panel). Delegate to
+    // `ui_focus.has_focus` — it's already the authoritative
+    // cursor-over-UI signal and uses the scale-corrected viewport
+    // bounds (see update_slint_ui_focus). Rolling our own bounds
+    // check here previously compared `window.cursor_position()`
+    // (logical pixels) to ViewportBounds (physical pixels), which
+    // mis-classified the Output panel area as "inside viewport" on
+    // high-DPI displays — so wheel events hovering the Output
+    // scrolled its text AND zoomed the 3D scene.
+    //
+    // Fall back to the raw bounds check when SlintUIFocus isn't
+    // available (pre-UI-init frames) so camera input still works.
+    let cursor_in_viewport = if let Some(f) = ui_focus.as_ref() {
+        !f.has_focus
+    } else if let (Some(vb), Ok(window)) = (viewport_bounds.as_deref(), windows.single()) {
         window.cursor_position().map(|pos| {
             pos.x >= vb.x && pos.x <= vb.x + vb.width
                 && pos.y >= vb.y && pos.y <= vb.y + vb.height
         }).unwrap_or(true)
     } else {
-        true // No bounds known yet — allow input
+        true
     };
     
     // Block keyboard camera controls when a Slint text input has focus

@@ -3,7 +3,7 @@
 // Log viewer with filtering and search
 // ============================================================================
 
-import { LineEdit, ScrollView, CheckBox } from "std-widgets.slint";
+import { LineEdit, ScrollView, CheckBox, TextEdit } from "std-widgets.slint";
 import { Theme, LogEntry } from "theme.slint";
 
 // Log entry data
@@ -582,41 +582,38 @@ export component OutputConsole inherits Rectangle {
             }
         }
         
-        // Log output — single selectable text area for full copy support
-        ScrollView {
+        // Log output — TextEdit from std-widgets is a scrollable,
+        // read-only-capable, multi-line text area with built-in
+        // selection + copy. Replaces a prior ScrollView + Rectangle +
+        // TextInput sandwich that had no viewport-width/height set
+        // (so the scroll bar never appeared) AND a TextInput that
+        // captured the wheel event before the ScrollView could see
+        // it. TextEdit solves both in one primitive. The separate
+        // "don't zoom the 3D viewport while hovering Output" fix
+        // lives in camera_controller.rs (delegates to
+        // ui_focus.has_focus instead of a duplicate bounds check).
+        Rectangle {
             vertical-stretch: 1;
+            background: transparent;
 
-            Rectangle {
-                background: transparent;
-                // Size to content: each line ~16px, minimum the viewport height
-                height: max(parent.height, root.logs.length * 18px + 20px);
+            TextEdit {
+                width: 100%;
+                height: 100%;
+                text: root.all-text;
+                read-only: true;
+                wrap: no-wrap;
+                font-size: 12px;
+            }
 
-                TextInput {
-                    x: 8px;
-                    y: 4px;
-                    width: parent.width - 16px;
-                    height: parent.height - 8px;
-                    text: root.all-text;
-                    color: Theme.output-info;
-                    font-size: 12px;
-                    font-family: "Consolas";
-                    read-only: true;
-                    single-line: false;
-                    wrap: no-wrap;
-                    selection-background-color: #264f78;
-                    selection-foreground-color: #ffffff;
-                }
-
-                // Empty state
-                if root.all-text == "": Text {
-                    x: 0px;
-                    y: 10px;
-                    width: 100%;
-                    text: "No log entries";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                }
+            // Empty state
+            if root.all-text == "": Text {
+                x: 0px;
+                y: 10px;
+                width: 100%;
+                text: "No log entries";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
             }
         }
     }

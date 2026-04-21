@@ -17,6 +17,7 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import {
   workspace,
   ExtensionContext,
@@ -31,23 +32,77 @@ import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
+  StreamInfo,
   TransportKind,
   State,
 } from 'vscode-languageclient/node';
 
 // ─── Module-scoped state ──────────────────────────────────────────────
 
-let client: LanguageClient | undefined;
+// One client per Universe port (or the single string 'stdio' for the
+// fallback). This is the core of multi-Universe routing: when you have
+// two engines running and you open files from both, each file's
+// requests land on its Universe's LSP — not the first one we found.
+const clients = new Map<string | number, LanguageClient>();
 let statusBar: StatusBarItem | undefined;
+let currentCtx: ExtensionContext | undefined;
 const OUTPUT_CHANNEL_NAME = 'Eustress (Rune)';
-const DOWNLOAD_URL = 'https://eustress.dev/learn#ide-integration';
+// "Learn" page that documents install + launch. The LSP binary ships inside
+// the Eustress Engine installer now — there's no separate download — so this
+// URL is a help link, not a binary download target.
+const ENGINE_LEARN_URL = 'https://eustress.dev/learn/ide';
+const ENGINE_DOWNLOAD_URL = 'https://eustress.dev/download';
+
+/**
+ * Walk up from `startPath` looking for `.eustress/lsp.port`. Used to
+ * figure out which Universe a file belongs to. Returns the port (TCP)
+ * or `null` if none is found before hitting the filesystem root.
+ */
+function findPortFor(startPath: string): number | null {
+  let cur = path.resolve(startPath);
+  const seen = new Set<string>();
+  for (let i = 0; i < 64 && !seen.has(cur); i++) {
+    seen.add(cur);
+    const candidate = path.join(cur, '.eustress', 'lsp.port');
+    try {
+      if (fs.existsSync(candidate)) {
+        const port = parseInt(fs.readFileSync(candidate, 'utf8').trim(), 10);
+        if (Number.isFinite(port) && port > 0 && port < 65536) return port;
+      }
+    } catch { /* unreadable — keep walking */ }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
+}
+
+/**
+ * Also walk up to find the Universe root (the directory containing
+ * `Spaces/` AND `.eustress/`). Used to scope a per-Universe client's
+ * `documentSelector` so requests for that Universe's files — and only
+ * those — reach its LSP.
+ */
+function findUniverseRoot(startPath: string): string | null {
+  let cur = path.resolve(startPath);
+  const seen = new Set<string>();
+  for (let i = 0; i < 64 && !seen.has(cur); i++) {
+    seen.add(cur);
+    if (fs.existsSync(path.join(cur, 'Spaces'))) {
+      return cur;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
+}
 
 // ─── Binary resolution ────────────────────────────────────────────────
 
 type Resolved =
-  | { kind: 'file';     path: string }              // exists on disk
-  | { kind: 'pathName'; name: string }              // bare name, hope it's in PATH
-  | { kind: 'missing'                   };          // nothing to try
+  | { kind: 'file';     path: string }              // concrete path, exists on disk (or found via PATH walk)
+  | { kind: 'missing'                   };          // nothing to try — UX prompts for setup
 
 /**
  * Resolve the server in the order documented in ARCHITECTURE.md.
@@ -122,7 +177,7 @@ function whichSync(name: string): string | null {
 // ─── Status bar ───────────────────────────────────────────────────────
 
 type Status =
-  | { state: 'missing' }
+  | { state: 'waiting-for-engine' }  // engine not running; no port file yet
   | { state: 'starting'; path: string }
   | { state: 'running';  path: string }
   | { state: 'error';    message: string };
@@ -130,9 +185,15 @@ type Status =
 function renderStatus(s: Status): void {
   if (!statusBar) return;
   switch (s.state) {
-    case 'missing':
-      statusBar.text = '$(warning) Rune LSP: not installed';
-      statusBar.tooltip = 'The `eustress-lsp` binary was not found. Click for setup options.';
+    case 'waiting-for-engine':
+      // The LSP ships bundled with Eustress Engine — if we got here, Eustress
+      // simply isn't running yet (or isn't open on a Universe). Not an error
+      // condition, just "waiting." Click routes to the setup help.
+      statusBar.text = '$(debug-start) Rune LSP: engine not running';
+      statusBar.tooltip =
+        'The Rune language server is bundled with Eustress Engine. ' +
+        'Launch Eustress Engine and open a Universe — the extension will connect automatically.\n\n' +
+        'Click for setup help.';
       statusBar.backgroundColor = new ThemeColor('statusBarItem.warningBackground');
       statusBar.command = 'eustress.setupServer';
       break;
@@ -160,104 +221,173 @@ function renderStatus(s: Status): void {
 
 // ─── Start / stop ─────────────────────────────────────────────────────
 
-async function startClient(ctx: ExtensionContext): Promise<void> {
-  if (client) {
-    try { await client.stop(); } catch { /* swallow — we're replacing it */ }
-    client = undefined;
-  }
+/**
+ * Ensure a LanguageClient exists for the Universe that owns `filePath`.
+ * Each distinct Universe — live TCP port OR the single `stdio` fallback —
+ * gets its own client, keyed by port number (or the string `'stdio'`).
+ * Same-key calls reuse the already-running client. This is what lets
+ * a single Windsurf window route files to the correct engine when
+ * multiple engine instances are running on different Universes.
+ */
+async function ensureClientForFile(filePath: string): Promise<void> {
+  if (!currentCtx) return;
 
-  const resolved = resolveServerPath(ctx);
+  const universeRoot = findUniverseRoot(filePath);
+  const tcpPort = universeRoot
+    ? findPortFor(universeRoot)
+    : findPortFor(path.dirname(filePath));
 
-  if (resolved.kind === 'missing') {
-    renderStatus({ state: 'missing' });
-    await offerServerSetup();
+  const key: string | number = tcpPort ?? 'stdio';
+  if (clients.has(key)) {
+    // Already have a client for this routing target — nothing to do.
     return;
   }
 
-  const serverCommand = resolved.path;
-  renderStatus({ state: 'starting', path: serverCommand });
+  let serverOptions: ServerOptions;
+  let transportLabel: string;
+  let selectorPattern: string | undefined;
 
-  const serverOptions: ServerOptions = {
-    run:   { command: serverCommand, transport: TransportKind.stdio },
-    debug: { command: serverCommand, transport: TransportKind.stdio },
-  };
+  if (typeof key === 'number') {
+    const port = key;
+    serverOptions = () => new Promise<StreamInfo>((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port });
+      // Hard cap the connect attempt so a stale `.eustress/lsp.port` (pointing
+      // at a port nobody's listening on — prior engine crashed, engine not
+      // running yet) rejects fast instead of wedging extension activation.
+      // Windows' default TCP connect retry blocks for ~21s; we want sub-second.
+      const TCP_CONNECT_TIMEOUT_MS = 1500;
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error(
+          `timeout connecting to 127.0.0.1:${port} after ${TCP_CONNECT_TIMEOUT_MS}ms ` +
+          `(stale .eustress/lsp.port? engine not running?)`,
+        ));
+      }, TCP_CONNECT_TIMEOUT_MS);
+      socket.once('connect', () => {
+        clearTimeout(timer);
+        resolve({ writer: socket, reader: socket });
+      });
+      socket.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    transportLabel = `tcp://127.0.0.1:${port} (${universeRoot ? path.basename(universeRoot) : 'engine'})`;
+    // Scope THIS client to files under the matching Universe so documents
+    // from a different Universe don't accidentally hit this port.
+    if (universeRoot) {
+      selectorPattern = path.join(universeRoot, '**/*.rune').split(path.sep).join('/');
+    }
+  } else {
+    // No port file = no running engine in this Universe. The LSP is
+    // bundled with Eustress Engine and is spawned by the engine — so the
+    // correct action is "launch Eustress Engine," not "install a separate
+    // binary." We attempt a last-ditch stdio fallback to the bundled
+    // binary if it's findable on disk (power-users running the LSP
+    // standalone for CI/headless work); otherwise we render the
+    // waiting-for-engine state and surface setup help.
+    const resolved = resolveServerPath(currentCtx);
+    if (resolved.kind === 'missing') {
+      renderStatus({ state: 'waiting-for-engine' });
+      await offerServerSetup();
+      return;
+    }
+    transportLabel = resolved.path;
+    serverOptions = {
+      run:   { command: resolved.path, transport: TransportKind.stdio },
+      debug: { command: resolved.path, transport: TransportKind.stdio },
+    };
+  }
+
+  renderStatus({ state: 'starting', path: transportLabel });
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: 'file', language: 'rune' }],
-    outputChannelName: OUTPUT_CHANNEL_NAME,
+    documentSelector: [
+      selectorPattern
+        ? { scheme: 'file', language: 'rune', pattern: selectorPattern }
+        : { scheme: 'file', language: 'rune' },
+    ],
+    outputChannelName: `Eustress (${transportLabel})`,
     synchronize: {
       configurationSection: 'eustress',
       fileEvents: workspace.createFileSystemWatcher('**/*.rune'),
     },
-    // revealOutputChannelOn defaults to Error — that suppresses the
-    // "Show Output"-style toasts vscode-languageclient would otherwise
-    // pile on top of our own. We handle error surfacing via the status
-    // bar + a single notification, not the output panel auto-reveal.
   };
 
-  client = new LanguageClient(
-    'eustress-rune-lsp',
-    'Eustress Rune LSP',
+  const c = new LanguageClient(
+    `eustress-rune-lsp-${key}`,
+    `Eustress Rune LSP (${transportLabel})`,
     serverOptions,
     clientOptions,
   );
 
-  client.onDidChangeState((event) => {
+  c.onDidChangeState((event) => {
     if (event.newState === State.Running) {
-      renderStatus({ state: 'running', path: serverCommand });
+      renderStatus({ state: 'running', path: transportLabel });
     } else if (event.newState === State.Stopped && event.oldState === State.Starting) {
-      // Server died during handshake. Surface a single message with a
-      // "Show Output" action instead of letting vscode-languageclient
-      // cascade its own toasts.
-      renderStatus({
-        state: 'error',
-        message: `Server exited during startup (${serverCommand})`,
-      });
+      renderStatus({ state: 'error', message: `Server exited during startup (${transportLabel})` });
+      clients.delete(key);
     }
   });
 
+  clients.set(key, c);
   try {
-    await client.start();
+    await c.start();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     renderStatus({ state: 'error', message: msg });
+    clients.delete(key);
     const pick = await window.showErrorMessage(
-      `Rune LSP failed to start: ${msg}`,
+      `Rune LSP failed to start (${transportLabel}): ${msg}. ` +
+      `Most common cause: Eustress Engine isn't running (the engine spawns the LSP).`,
       'Show Output',
-      'Reconfigure',
-      'Download Server',
+      'Help',
+      'Advanced: configure path',
     );
     if (pick === 'Show Output') {
       await commands.executeCommand('eustress.showOutput');
-    } else if (pick === 'Reconfigure') {
+    } else if (pick === 'Help') {
+      await commands.executeCommand('vscode.open', Uri.parse(ENGINE_LEARN_URL));
+    } else if (pick === 'Advanced: configure path') {
       await commands.executeCommand('workbench.action.openSettings', 'eustress.serverPath');
-    } else if (pick === 'Download Server') {
-      await commands.executeCommand('vscode.open', Uri.parse(DOWNLOAD_URL));
     }
   }
 }
 
 /**
- * Shown once per activation when the binary can't be resolved. Collapses
- * the multi-toast failure path vscode-languageclient would otherwise
- * produce into a single, actionable notification.
+ * Shut down every client and clear the map. Used by the restart command
+ * and extension deactivation.
+ */
+async function stopAllClients(): Promise<void> {
+  await Promise.all(
+    Array.from(clients.values()).map(c => c.stop().catch(() => {})),
+  );
+  clients.clear();
+}
+
+/**
+ * Shown once per activation when no running engine is found and no bundled
+ * binary can be located on PATH. The Rune language server ships inside the
+ * Eustress Engine installer, so the primary action is "install / launch
+ * Eustress," not "download a separate server." Collapses the multi-toast
+ * failure path vscode-languageclient would otherwise produce into a single
+ * notification.
  */
 async function offerServerSetup(): Promise<void> {
   const pick = await window.showInformationMessage(
-    'Rune language features need the `eustress-lsp` server. Run the Eustress engine (which ships the binary), download it separately, or configure a path.',
-    'Download Server',
+    'Rune language features come from Eustress Engine — the engine launches the Rune LSP ' +
+    'automatically whenever a Universe is open. No separate download needed. If you don\'t ' +
+    'have Eustress Engine installed yet, grab it from eustress.dev/download.',
+    'Install Eustress Engine',
     'How it works',
-    'Configure Path',
+    'Advanced: configure path',
     'Dismiss',
   );
-  if (pick === 'Download Server') {
-    await commands.executeCommand('vscode.open', Uri.parse(DOWNLOAD_URL));
+  if (pick === 'Install Eustress Engine') {
+    await commands.executeCommand('vscode.open', Uri.parse(ENGINE_DOWNLOAD_URL));
   } else if (pick === 'How it works') {
-    await commands.executeCommand(
-      'vscode.open',
-      Uri.parse('https://eustress.dev/learn#ide-integration'),
-    );
-  } else if (pick === 'Configure Path') {
+    await commands.executeCommand('vscode.open', Uri.parse(ENGINE_LEARN_URL));
+  } else if (pick === 'Advanced: configure path') {
     await commands.executeCommand('workbench.action.openSettings', 'eustress.serverPath');
   }
 }
@@ -265,28 +395,70 @@ async function offerServerSetup(): Promise<void> {
 // ─── Activation ───────────────────────────────────────────────────────
 
 export async function activate(ctx: ExtensionContext): Promise<void> {
+  currentCtx = ctx;
+
   // Status bar item first — it's the canonical "is the LSP up?" signal
   // and must be visible even when the server fails to start.
   statusBar = window.createStatusBarItem(StatusBarAlignment.Right, 100);
   ctx.subscriptions.push(statusBar);
 
   ctx.subscriptions.push(
-    commands.registerCommand('eustress.restartServer', () => startClient(ctx)),
+    commands.registerCommand('eustress.restartServer', async () => {
+      await stopAllClients();
+      // Re-fire for every currently-open .rune document so clients respawn.
+      for (const doc of workspace.textDocuments) {
+        if (doc.languageId === 'rune') await ensureClientForFile(doc.uri.fsPath);
+      }
+    }),
     commands.registerCommand('eustress.setupServer',   () => offerServerSetup()),
     commands.registerCommand('eustress.showServerPath', () => {
       const r = resolveServerPath(ctx);
       const msg = r.kind === 'file' ? r.path : '<not found>';
-      window.showInformationMessage(`Rune LSP server: ${msg}`);
+      const live = Array.from(clients.keys()).join(', ') || '(none)';
+      window.showInformationMessage(
+        `Rune LSP — stdio binary: ${msg}\nLive clients: ${live}`,
+      );
     }),
     commands.registerCommand('eustress.showOutput', () => {
-      client?.outputChannel.show(true);
+      // Show the first active client's output channel; for multi-Universe
+      // workflows each client has its own labelled channel and the user
+      // picks from the output dropdown.
+      const c = clients.values().next().value;
+      c?.outputChannel.show(true);
     }),
   );
 
-  await startClient(ctx);
+  // Route on every .rune document open. `onDidOpenTextDocument` fires
+  // for every document the user opens (or that's already open at
+  // activation time for the first .rune file they touch), so we get
+  // per-file routing without extra polling.
+  ctx.subscriptions.push(
+    workspace.onDidOpenTextDocument((doc) => {
+      // Same no-await-in-event-handler pattern as the initial sweep below —
+      // if the TCP probe is slow, we don't block VS Code's event loop.
+      if (doc.languageId === 'rune') {
+        ensureClientForFile(doc.uri.fsPath).catch((err) => {
+          console.error('[eustress-rune-lsp] onDidOpen client start failed:', err);
+        });
+      }
+    }),
+  );
+
+  // Kick off clients for documents that were already open when activation
+  // fired. Do NOT await these — a stale port file or a slow TCP probe would
+  // otherwise wedge the extension in "Activating..." indefinitely. The
+  // status bar surfaces success/failure for each client independently, and
+  // the `Rune: Restart` command is always available for recovery.
+  for (const doc of workspace.textDocuments) {
+    if (doc.languageId === 'rune') {
+      ensureClientForFile(doc.uri.fsPath).catch((err) => {
+        console.error('[eustress-rune-lsp] initial client start failed:', err);
+      });
+    }
+  }
 }
 
-export function deactivate(): Thenable<void> | undefined {
+export async function deactivate(): Promise<void> {
   statusBar?.dispose();
-  return client?.stop();
+  await stopAllClients();
 }

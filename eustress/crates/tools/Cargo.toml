@@ -1,0 +1,56 @@
+[package]
+name = "eustress-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Shared tool registry — the single source of truth for MCP tool definitions + handlers, consumed by both the in-engine Workshop agent and the out-of-process MCP server."
+
+[dependencies]
+# Core: schema definitions + serialization. The registry and handlers
+# operate on `serde_json::Value` boundaries so tools work identically
+# in-process (Workshop) or over the wire (MCP → Engine Bridge).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Filesystem helpers — most tools resolve paths relative to the
+# active Space + Universe.
+dirs = { workspace = true }
+
+# UUID for tool_use_id synthesis when callers don't provide one.
+uuid = { workspace = true }
+
+# Logging — tools emit info/warn/error that propagate to whichever
+# subscriber is wired (tracing in the engine, stderr in the MCP server).
+tracing = "0.1"
+
+# Synchronous HTTP client used by the `http_request` tool. Kept as a
+# direct dep here so both the engine and MCP server can dispatch the
+# same handler without wiring their own client.
+ureq = { version = "2", features = ["json"] }
+
+# TOML — entity/instance definitions are TOML on disk. `spatial_tools`
+# and `entity_tools` parse `_instance.toml` files; `universe_tools`
+# could use this too.
+toml = "0.8"
+
+# Base64 — `script_tools::ImageToCodeTool` encodes images for Claude's
+# vision API. Kept here so the tool works identically out-of-process.
+base64 = "0.22"
+
+# Chrono — parse the RFC-3339 timestamp on `runtime-snapshot.json` so
+# `get_sim_value` / `list_sim_values` can report snapshot age.
+chrono = { workspace = true }
+
+# Git tool implementations shell out to `git`; no native dep needed.
+# The spatial / physics / simulation tool groups are also filesystem +
+# snapshot-reading only, so they don't pull in Bevy or Rapier here.
+
+[features]
+default = []
+# When enabled, `ToolRegistry` derives Bevy's `Resource` via the
+# minimal `bevy_ecs` crate (not the full Bevy tree). Off by default so
+# the MCP server can depend on this crate with ~0 extra weight.
+bevy = ["dep:bevy_ecs"]
+
+[dependencies.bevy_ecs]
+version = "0.18"
+optional = true

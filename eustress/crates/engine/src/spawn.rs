@@ -681,11 +681,15 @@ pub fn spawn_billboard_gui(
         Transform::from_translation(offset),
         Visibility::default(),
         instance,
-        // Billboard renderer marker with size/distance for atlas + quad spawning
+        // Billboard renderer marker. The engine's billboard_gui plugin watches
+        // Changed<BillboardGuiMarker> and pushes size/visibility/depth updates
+        // each frame, so Properties panel edits are live.
         eustress_common::gui::billboard_renderer::BillboardGuiMarker {
             size: gui.size,
             max_distance: gui.max_distance,
             always_on_top: gui.always_on_top,
+            face_camera: true,
+            visible: true,
         },
         // Adornee tracking
         BillboardAdornee { target_name: None, target_entity: gui.adornee },
@@ -819,7 +823,14 @@ pub fn spawn_text_label(
 ) -> Entity {
     let name = instance.name.clone();
 
-    // Build GuiElementDisplay for billboard renderer (CPU text rasterization)
+    // Build GuiElementDisplay — read by the billboard and screen-space GUI
+    // renderers. `font_weight` is derived from the TextLabel's Font variant
+    // so GothamBold → 700, GothamLight → 300, everything else → 400.
+    let font_weight = match label.font {
+        eustress_common::classes::Font::GothamBold => 700,
+        eustress_common::classes::Font::GothamLight => 300,
+        _ => 400,
+    };
     let gui_display = eustress_common::gui::billboard_renderer::GuiElementDisplay {
         x: label.position[0] * label.size[0],  // UDim2 scale → pixels
         y: label.position[1] * label.size[1],
@@ -851,6 +862,7 @@ pub fn spawn_text_label(
             1.0 - label.text_transparency,
         ],
         font_size: label.font_size,
+        font_weight,
         text_align: match label.text_x_alignment {
             crate::classes::TextXAlignment::Left => "left".to_string(),
             crate::classes::TextXAlignment::Center => "center".to_string(),

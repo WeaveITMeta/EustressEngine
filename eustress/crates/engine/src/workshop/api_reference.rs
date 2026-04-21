@@ -109,14 +109,44 @@ impl ApiStatus {
 impl ApiCatalog {
     /// Build the full catalog by parsing embedded source files at compile time.
     pub fn build() -> Self {
-        let rune_source = include_str!("../soul/rune_ecs_module.rs");
+        // Each source file that registers `#[rune::function]` items
+        // contributes to the catalog. Adding a new module means adding
+        // a line here; the parser is a pure string walk and doesn't
+        // care which crate the content came from.
+        const SOURCES: &[(&str, &str)] = &[
+            ("rune_ecs", include_str!("../soul/rune_ecs_module.rs")),
+            // Event bus module lives alongside the ECS module in the
+            // same file, but we keep the entry symbolic so when it
+            // moves to its own file we only update the right-hand side.
+            ("functions/temporal",   include_str!("../../../functions/src/temporal.rs")),
+            ("functions/statistical", include_str!("../../../functions/src/statistical.rs")),
+            ("functions/spatial",    include_str!("../../../functions/src/spatial_intelligence.rs")),
+            ("functions/refinement", include_str!("../../../functions/src/refinement.rs")),
+            ("functions/proximity",  include_str!("../../../functions/src/proximity.rs")),
+            ("functions/planning",   include_str!("../../../functions/src/planning.rs")),
+            ("functions/ontology",   include_str!("../../../functions/src/ontology.rs")),
+            ("functions/meta",       include_str!("../../../functions/src/meta.rs")),
+            ("functions/measurement", include_str!("../../../functions/src/measurement.rs")),
+            ("functions/language",   include_str!("../../../functions/src/language.rs")),
+            ("functions/knowledge",  include_str!("../../../functions/src/knowledge.rs")),
+            ("functions/genesis",    include_str!("../../../functions/src/genesis.rs")),
+            ("functions/concurrence", include_str!("../../../functions/src/concurrence.rs")),
+        ];
         let checklist = include_str!("../../../../../docs/development/SCRIPTING_API_CHECKLIST.md");
 
         let status_map = parse_checklist_statuses(checklist);
-        let mut entries = parse_rune_functions(rune_source, &status_map);
+        let mut entries: Vec<ApiEntry> = Vec::new();
+        for (_label, src) in SOURCES {
+            entries.extend(parse_rune_functions(src, &status_map));
+        }
         entries.extend(luau_known_entries(&status_map));
 
-        // Deduplicate and sort
+        // Dedupe by name — if two files register the same symbol name
+        // (uncommon, but can happen with re-exports) keep the first.
+        // Stable sort to preserve that first-wins order across builds.
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.dedup_by(|a, b| a.name == b.name);
+        // Now re-sort by category + name for presentation order.
         entries.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
 
         let categories: Vec<String> = entries.iter()
@@ -125,7 +155,9 @@ impl ApiCatalog {
             .into_iter()
             .collect();
 
-        let rune_type_names = parse_rune_types(rune_source);
+        // Types still come from the primary ECS module — the functions
+        // crate exposes pure functions, not types.
+        let rune_type_names = parse_rune_types(SOURCES[0].1);
 
         let luau_services = vec![
             "Instance".into(), "Workspace".into(), "Players".into(),

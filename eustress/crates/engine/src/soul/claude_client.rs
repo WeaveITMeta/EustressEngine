@@ -989,6 +989,14 @@ Generate a complete, compilable Rust module with a Plugin implementation."#,
             .map_err(|e| e.to_string())
     }
 
+    /// Fast + cheap Haiku variant — used by the Workshop session-title
+    /// generator and anywhere else that wants a short classification/
+    /// labelling call without burning Sonnet tokens.
+    pub fn call_api_haiku(&self, prompt: &str, system_prompt: &str) -> Result<String, String> {
+        self.call_api_with_system(prompt, system_prompt, ModelTier::Haiku)
+            .map_err(|e| e.to_string())
+    }
+
     // ====================================================================
     // AGENTIC TOOL USE API
     // ====================================================================

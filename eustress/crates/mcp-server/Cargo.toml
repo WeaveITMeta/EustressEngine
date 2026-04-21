@@ -1,0 +1,51 @@
+[package]
+name = "eustress-mcp-server"
+version = "0.3.0"
+edition = "2021"
+description = "Eustress MCP stdio server — exposes a Universe (Spaces, scripts, entities, assets, conversations) to MCP-compatible AI clients (Claude Desktop, Cursor, Windsurf)."
+authors = ["EustressEngine Contributors"]
+license = "MIT OR Apache-2.0"
+
+# The binary is what the installer bundles and what users wire into their IDE
+# config. Keeping the package name distinct from `eustress-mcp` (which is an
+# older axum-based library in this workspace) avoids a collision while still
+# producing the familiar `eustress-mcp` executable.
+[[bin]]
+name = "eustress-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# stdio + JSON-RPC 2.0 loop. tokio gives us async stdin/stdout handling;
+# serde_json deserializes each incoming request.
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# TOML parsing for _instance.toml / ideation_brief.toml (proper parser, not a
+# regex hack — the TS version fakes it with a per-line `field = "value"` scan;
+# the Rust one can afford a real parser and still ship a tiny binary).
+toml = "0.8"
+
+# Cross-platform file watching. `notify` is the Rust equivalent of chokidar;
+# notify-debouncer-full coalesces burst events from editors that save via
+# write-then-rename.
+notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-full = "0.3"
+
+# Small utilities.
+anyhow = "1.0"
+thiserror = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+dirs = { workspace = true }
+
+# Shared tool registry — the same tool handlers the engine ships so
+# external IDEs get every Workshop tool. Consumed WITHOUT the `bevy`
+# feature so we don't drag in Bevy on the MCP-server side.
+eustress-tools = { path = "../tools" }
+
+# Release profile is inherited from the workspace root (`opt-level = 3`,
+# `strip = true`). That's already enough to get the binary well under 10 MB
+# — the 20x-plus reduction vs. the old bun-compiled TS blob comes from not
+# embedding a JS runtime at all, not from aggressive LTO.

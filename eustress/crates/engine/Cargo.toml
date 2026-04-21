@@ -38,6 +38,12 @@ clipboard-win = "5"
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
 eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node" }
+# Shared tool registry — single source of truth for MCP tool
+# definitions + handlers. The engine enables the `bevy` feature so
+# `ToolRegistry` derives `Resource`; the MCP server depends on this
+# same crate without the `bevy` feature and treats the registry as a
+# plain struct.
+eustress-tools = { path = "../tools", features = ["bevy"] }
 bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
 # TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
@@ -171,6 +177,11 @@ core = [
     "ai-integration",
     "forge",
     "bliss",
+    # LSP server ships inside the engine bundle. `cargo build --release`
+    # produces BOTH `eustress-engine` AND `eustress-lsp` automatically —
+    # same binary install, no separate download required for external
+    # IDEs to get Rune intelligence.
+    "lsp",
 ]
 
 # ── Individual feature gates ──────────────────────────────────────────────────

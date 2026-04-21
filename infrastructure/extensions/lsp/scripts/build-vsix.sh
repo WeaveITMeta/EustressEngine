@@ -46,8 +46,10 @@ cd "${EXT_DIR}"
 echo "→ Installing dependencies (npm — see note above)..."
 npm ci --no-audit --no-fund
 
-echo "→ Compiling TypeScript (bun run)..."
+echo "→ Type-checking (bun run compile — no emit)..."
 bun run compile
+echo "→ Bundling with esbuild (single self-contained out/extension.js)..."
+bun run bundle
 
 if [[ -n "${BUNDLE_SRC}" ]]; then
     echo "→ Bundling server binaries from ${BUNDLE_SRC}..."

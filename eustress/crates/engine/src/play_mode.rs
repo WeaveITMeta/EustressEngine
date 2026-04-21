@@ -1458,14 +1458,32 @@ impl Plugin for PlayModePlugin {
                 .after(crate::soul::rune_api::run_script_exit))
             .add_systems(OnEnter(PlayModeState::Editing), restore_gui_on_stop)
 
+            // Dynamic-script runtimes. LuauRuntimeState is registered
+            // here so the Luau hot-reload system has somewhere to write
+            // recompiled chunks. The runtime itself initialises lazily
+            // on first execution.
+            .init_resource::<eustress_common::luau::runtime::LuauRuntimeState>()
+
             // Rune script execution during play mode:
+            // 0. Hot-recompile any SoulScriptData marked `dirty` by the
+            //    file watcher (edits to .rune files on disk). Runs
+            //    FIRST so the rest of the pipeline operates on the
+            //    freshly-compiled unit. Same system handles Luau via a
+            //    sibling helper (execute_chunk re-runs the whole file).
             // 1. Populate thread-locals from ECS (sim values, entity snapshots)
             // 2. Run on_init() for newly compiled scripts
             // 3. Run on_ready() one frame after on_init (subtree complete)
             // 4. Run on_update(dt) each frame
             // 5. Clear thread-locals
+            // LSP-grade script-error drainer. Runs in Update (outside
+            // any Play-state gate) so users see compile diagnostics from
+            // the analyzer even in Edit mode — before they press Play.
+            .add_systems(Update, crate::soul::rune_api::drain_script_errors_to_output)
             .add_systems(Update, (
-                crate::soul::rune_api::prepare_script_bindings,
+                crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
+                crate::soul::rune_api::hot_reload_dirty_luau_scripts,
+                crate::soul::rune_api::prepare_script_bindings
+                    .after(crate::soul::rune_api::hot_recompile_dirty_rune_scripts),
                 crate::soul::rune_api::run_script_init
                     .after(crate::soul::rune_api::prepare_script_bindings),
                 crate::soul::rune_api::run_script_ready

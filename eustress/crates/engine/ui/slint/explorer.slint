@@ -245,6 +245,12 @@ export component ExplorerPanel inherits Rectangle {
                             && root.drag-mouse-y >= self.absolute-position.y
                             && root.drag-mouse-y < self.absolute-position.y + self.height
                             && node.visible;
+                        // drag-target-id is tracked by the overlay TouchArea
+                        // below (abs-y → row index). A `changed drop-target`
+                        // handler that wrote back to `root.drag-target-id`
+                        // was cleaner but Slint flagged it as a property
+                        // cycle at layout time. The overlay's math-based
+                        // approach sidesteps the property graph entirely.
                         ctrl-held: explorer-keys.ctrl-held;
                         shift-held: explorer-keys.shift-held;
 
@@ -320,13 +326,15 @@ export component ExplorerPanel inherits Rectangle {
                     moved => {
                         root.drag-mouse-x = self.absolute-position.x + self.mouse-x;
                         root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
-                        // Subtract the 30px search-bar header to get the
-                        // tree-local y, then bucket into 22px rows. Fixes
-                        // the 1-2 row offset between hover-highlight and
-                        // drop target.
-                        let tree-y = self.mouse-y - 30px;
-                        if tree-y > 0px {
-                            let row-idx = floor(tree-y / 22px);
+                        // Map cursor position to a row index using the
+                        // overlay's own mouse-y — this TouchArea sits inside
+                        // the FocusScope that starts just below the 30px
+                        // search header, so `self.mouse-y` is already
+                        // tree-local. Don't subtract the header height
+                        // again (prior code did, which offset every drop
+                        // target by ~1.4 rows).
+                        if self.mouse-y > 0px && root.tree-nodes.length > 0 {
+                            let row-idx = floor(self.mouse-y / 22px);
                             let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
                             root.drag-target-id = root.tree-nodes[clamped].id;
                         } else {

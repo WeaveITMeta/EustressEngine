@@ -18,13 +18,21 @@ use std::path::{Path, PathBuf};
 // Tab Type Enum
 // ============================================================================
 
-/// Display mode for a SoulScript tab
+/// Display mode for a SoulScript-style tab
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SoulScriptMode {
-    /// Rendered markdown / documentation view (default for .md)
+    /// Rendered markdown summary of a Soul Script — has `_instance.toml`
+    /// sibling with `class_name = "Script" / "SoulScript"`. Shows the
+    /// Summary / Code toggle + Build button.
     Summary,
-    /// Raw code editor view (default for .rune / .soul)
+    /// Raw code editor view (default for .rune / .soul).
     Code,
+    /// Plain markdown file that is NOT a Soul Script (README, PATENT,
+    /// SOTA docs, etc.). Renders the same editor surface as `Summary`
+    /// but the script-specific controls (Code/Summary toggle, Build)
+    /// are hidden — those only make sense for a real Soul Script where
+    /// code is compiled from the summary.
+    Markdown,
 }
 
 impl SoulScriptMode {
@@ -32,6 +40,7 @@ impl SoulScriptMode {
         match self {
             SoulScriptMode::Summary => "summary",
             SoulScriptMode::Code => "code",
+            SoulScriptMode::Markdown => "markdown",
         }
     }
 
@@ -39,6 +48,10 @@ impl SoulScriptMode {
         match self {
             SoulScriptMode::Summary => SoulScriptMode::Code,
             SoulScriptMode::Code => SoulScriptMode::Summary,
+            // Plain markdown has no opposite — the toggle is hidden in
+            // the UI, but if the callback ever fires we no-op (stay in
+            // Markdown) rather than flip to a broken Code view.
+            SoulScriptMode::Markdown => SoulScriptMode::Markdown,
         }
     }
 }
@@ -614,15 +627,48 @@ pub fn route_file_to_tab_type(path: &Path) -> CenterTabType {
         }
     }
 
+    // Helper used by the `.md` branch below — declared as an inner fn so
+    // the `tab_type_from_path` top-level stays readable.
+    fn is_soul_script_summary(md_path: &Path) -> bool {
+        // A Soul Script folder has a sibling `_instance.toml` whose
+        // `class_name` says "Script" / "SoulScript". Any other `.md`
+        // (README, PATENT, SOTA docs, etc.) is just documentation.
+        let Some(parent) = md_path.parent() else { return false };
+        let inst = parent.join("_instance.toml");
+        if !inst.exists() {
+            return false;
+        }
+        let Ok(content) = std::fs::read_to_string(&inst) else { return false };
+        content.contains("\"Script\"") || content.contains("\"SoulScript\"")
+    }
+
     let ext = path.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
 
     match ext.as_str() {
-        // Soul scripts: .rune and .soul open in Code mode, .md opens in Summary (markdown preview)
+        // Soul scripts: .rune and .soul always open in Code mode.
         "soul" | "rune" => CenterTabType::SoulScript { mode: SoulScriptMode::Code },
-        "md" | "markdown" => CenterTabType::SoulScript { mode: SoulScriptMode::Summary },
+
+        // Markdown opens two different ways depending on context:
+        //   * sitting alongside a Soul Script (same folder has an
+        //     `_instance.toml` whose `class_name` is "Script" /
+        //     "SoulScript") → SoulScript Summary tab with Build + Code
+        //     toggle, because it's the script's summary brief;
+        //   * anywhere else (README.md under a Part folder, loose docs
+        //     under Workspace, etc.) → plain Markdown document — no
+        //     Build button, no Code tab.
+        "md" | "markdown" => {
+            if is_soul_script_summary(path) {
+                CenterTabType::SoulScript { mode: SoulScriptMode::Summary }
+            } else {
+                // Plain markdown — same SoulScript tab container (so we
+                // reuse the editor surface + syntax highlighting) but
+                // `Markdown` mode hides the Code toggle + Build button.
+                CenterTabType::SoulScript { mode: SoulScriptMode::Markdown }
+            }
+        }
 
         // Code files (Monaco editor)
         "rs" => CenterTabType::CodeEditor { language: "rust".into() },

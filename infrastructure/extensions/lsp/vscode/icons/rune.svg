@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
-  <!-- Rune file icon: diamond + monogram, echoing the in-engine SoulScript glyph. -->
-  <polygon points="8,1.5 14.5,8 8,14.5 1.5,8"
-           fill="#2e7d32" stroke="#66bb6a" stroke-width="0.5"/>
-  <text x="8" y="10.2"
-        text-anchor="middle"
-        font-family="Consolas, monospace"
-        font-size="7"
-        font-weight="700"
-        fill="#ffffff">R</text>
+<!--
+  Extension icon — matches the in-engine SoulScript glyph: a white diamond
+  on a transparent background. 128-unit viewBox so Open VSX rasterises
+  cleanly at any marketplace display size.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <polygon points="64,16 112,64 64,112 16,64"
+           fill="#FFFFFF"
+           stroke="#C0C0C0"
+           stroke-width="4"
+           stroke-linejoin="round"/>
 </svg>

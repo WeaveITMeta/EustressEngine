@@ -214,6 +214,9 @@ pub enum SoulRunContext {
     /// Rune VM — primary Soul scripting runtime (compiled from markdown → Rune)
     #[default]
     Rune,
+    /// Luau VM — Roblox-compatible scripting for `.luau` / `.lua` files.
+    /// Hot-reloaded through `execute_chunk` on save.
+    Luau,
     /// Server-side execution context
     Server,
     /// Client-side execution context
@@ -225,6 +228,7 @@ impl SoulRunContext {
     pub fn as_str(&self) -> &'static str {
         match self {
             SoulRunContext::Rune => "Rune",
+            SoulRunContext::Luau => "Luau",
             SoulRunContext::Server => "Server",
             SoulRunContext::Client => "Client",
         }

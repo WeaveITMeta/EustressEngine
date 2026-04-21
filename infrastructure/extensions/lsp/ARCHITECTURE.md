@@ -18,9 +18,9 @@ and get "live" intelligence from the running engine.
 We **don't** do that as the default, because:
 
 1. **External editing is a first-class workflow, not a fallback.** Users
-   edit `.rune` files without Eustress Studio open all the time (CI, git
-   bisect, diff review). A TCP-to-studio model would silently break the
-   moment studio is closed.
+   edit `.rune` files without Eustress Engine open all the time (CI, git
+   bisect, diff review). A TCP-to-engine-only model would silently break
+   the moment the engine is closed.
 2. **File-system-first means analysis is stateless.** The analyzer reads
    source text and produces diagnostics. It doesn't need live ECS state
    to be correct. Keeping the LSP binary independent keeps the contract
@@ -29,10 +29,16 @@ We **don't** do that as the default, because:
    `--features lsp --bin eustress-lsp` produces a server every editor
    can use. The main engine binary still links zero LSP code.
 
-A **future** Studio-embedded TCP mode (`eustress-engine --lsp-port 24785`)
-can be added without changing the extension — it'll be a transport option
-the user flips via the `eustress.transport` setting. Until someone asks
-for live ECS context in their external editor, stdio stays the default.
+**Update (v0.3.0+):** Eustress Engine now auto-launches `eustress-lsp --tcp`
+as a child process on startup and writes the bound port to
+`<universe>/.eustress/lsp.port`. The extension probes for that file on
+activation and prefers TCP when it's present. Users don't configure the
+transport — it's automatic based on whether the engine is running.
+
+The stdio path is retained as the offline fallback (IDE active, engine
+not running) so external editing of `.rune` files still gets
+diagnostics / go-to-def / completion without requiring the engine to be
+open.
 
 ## Runtime topology
 
@@ -132,8 +138,8 @@ Eustress LSP adopts the same shape with two differences:
 1. Our binary lives in the engine repo rather than a separate crate,
    because the analyzer must stay in lock-step with the engine's Rune
    integration. Feature-gating keeps the main engine build clean.
-2. We expose a future Studio-embedded TCP mode as a flag. Luau LSP
-   has no equivalent because Roblox Studio doesn't share its analyzer.
+2. We expose an engine-embedded TCP mode as the default. Luau LSP has
+   no equivalent because Roblox Studio doesn't share its analyzer.
 
 ## Paths in this repo
 

@@ -90,6 +90,225 @@ pub fn register_engine_rune_modules(
     }
 }
 
+/// System: recompile any Rune scripts whose `SoulScriptData.dirty` flag
+/// was set by the file watcher. Runs every frame during Update; a
+/// no-op when no scripts changed. Lets the user save a `.rune` file in
+/// an external editor (or Studio) and see the change take effect on
+/// the next frame without leaving Play mode.
+///
+/// Pure Rune only — SoulScript's AI-assisted build pipeline still runs
+/// via `TriggerBuildEvent`. This path skips it entirely.
+pub fn hot_recompile_dirty_rune_scripts(
+    mut scripts: Query<(Entity, &Name, &mut super::SoulScriptData)>,
+    mut runtime: ResMut<RuneRuntimeState>,
+    module_registry: Res<RuneModuleRegistry>,
+) {
+    #[cfg(feature = "realism-scripting")]
+    {
+        for (entity, name, mut data) in scripts.iter_mut() {
+            if !data.dirty {
+                continue;
+            }
+            if data.run_context != super::SoulRunContext::Rune {
+                continue;
+            }
+            if data.source.is_empty() {
+                data.dirty = false; // nothing to compile; clear the flag
+                continue;
+            }
+            let entity_index = entity.index().index();
+            let name_str = name.as_str().to_string();
+            match eustress_common::soul::rune_runtime::hot_recompile_one_script(
+                &mut runtime,
+                &module_registry,
+                entity_index,
+                &name_str,
+                &data.source,
+            ) {
+                Ok(()) => {
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Built;
+                    data.errors.clear();
+                }
+                Err(msg) => {
+                    // Clear dirty so retries only happen on the next
+                    // save — otherwise a broken file would try every
+                    // frame and flood the log.
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Failed;
+                    data.errors = vec![msg];
+                }
+            }
+        }
+    }
+    #[allow(unused_variables)]
+    {
+        let _ = (&scripts, &runtime, &module_registry);
+    }
+}
+
+/// System: drain Rune + Luau script errors into the Output panel so users
+/// see every compile/runtime failure alongside their `log_info` lines.
+///
+/// Rune errors accumulate in [`RuneRuntimeState::last_errors`] as
+/// `(script_name, message)` pairs — pushed by the initial compile
+/// (`compile_scripts`), the hot-recompile path, and `run_script_update`
+/// when `on_update` throws. This system drains that vec each frame and
+/// forwards each entry to [`crate::ui::OutputConsole`] tagged with the
+/// `rune` source so the panel's filter chips work. After drain the
+/// vec is cleared — same error doesn't re-push every frame.
+///
+/// Luau errors arrive via `LuauScriptErrorEvent` messages (emitted by
+/// the common crate's Luau runtime). We drain those too.
+///
+/// Both paths include the script name and the full error text; the
+/// Rune compiler and mlua both embed line:col info in their messages
+/// already, so the user sees "foo.rune:12:5: expected identifier" etc.
+/// without extra parsing on our end.
+pub fn drain_script_errors_to_output(
+    mut runtime: ResMut<RuneRuntimeState>,
+    mut luau_errors: MessageReader<eustress_common::luau::runtime::LuauScriptErrorEvent>,
+    mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+    analysis: Option<Res<crate::script_editor::ScriptAnalysis>>,
+    mut last_analysis_gen: Local<u64>,
+) {
+    // LSP-grade compile diagnostics — same source of truth the Problems
+    // panel and squiggle overlay use. Push exactly once per analyzer
+    // generation so edits don't flood the Output while the user is
+    // mid-typing; the 80 ms debounce in `ScriptAnalysisPlugin` already
+    // throttles the upstream analyze() rate.
+    if let (Some(ref mut out), Some(analysis)) = (&mut output, analysis.as_deref()) {
+        if analysis.generation != *last_analysis_gen && !analysis.result.diagnostics.is_empty() {
+            let path_label = analysis
+                .active_path
+                .as_deref()
+                .unwrap_or("<unsaved>");
+            let file_name = std::path::Path::new(path_label)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path_label);
+            for diag in &analysis.result.diagnostics {
+                let level = match diag.severity {
+                    crate::script_editor::analyzer::Severity::Error => crate::ui::slint_ui::LogLevel::Error,
+                    crate::script_editor::analyzer::Severity::Warning => crate::ui::slint_ui::LogLevel::Warn,
+                    crate::script_editor::analyzer::Severity::Info
+                    | crate::script_editor::analyzer::Severity::Hint => crate::ui::slint_ui::LogLevel::Info,
+                };
+                // Format: [file.rune:12:5] message — matches the LSP
+                // client's hover output and compiler convention.
+                out.push_with_source(
+                    level,
+                    format!(
+                        "[{}:{}:{}] {}",
+                        file_name,
+                        diag.range.start_line,
+                        diag.range.start_column,
+                        diag.message,
+                    ),
+                    diag.source, // "rune" or "rune-warning" or "rune-link"
+                );
+            }
+            *last_analysis_gen = analysis.generation;
+        }
+    }
+
+    // Rune: drain `last_errors`. Use `std::mem::take` so we empty the
+    // vec even if `output` isn't available — avoids re-logging next
+    // frame once the panel resource shows up.
+    let rune_batch = std::mem::take(&mut runtime.last_errors);
+    if let Some(ref mut out) = output {
+        for (script_name, err) in rune_batch {
+            // Split multi-line errors so each line is one OutputConsole
+            // entry — otherwise the Slint TextInput shows `\n`-joined
+            // text on a single row and the timestamp/level badges only
+            // annotate the first line.
+            for line in err.lines() {
+                if line.trim().is_empty() { continue; }
+                out.push_with_source(
+                    crate::ui::slint_ui::LogLevel::Error,
+                    format!("[{}] {}", script_name, line),
+                    "rune",
+                );
+            }
+        }
+    }
+
+    // Luau: message-driven, one event per error.
+    for event in luau_errors.read() {
+        if let Some(ref mut out) = output {
+            let line_suffix = event
+                .line
+                .map(|l| format!(":{}", l))
+                .unwrap_or_default();
+            out.push_with_source(
+                crate::ui::slint_ui::LogLevel::Error,
+                format!("[{}{}] {}", event.script_name, line_suffix, event.error),
+                "luau",
+            );
+        }
+    }
+}
+
+/// System: hot-reload dirty Luau scripts during Play mode. Luau uses a
+/// single persistent `Lua` state — re-running `execute_chunk` on the
+/// updated source redefines any globals / functions the script sets
+/// up, which is the Luau equivalent of "recompile" for Rune.
+///
+/// Parallel to `hot_recompile_dirty_rune_scripts` so external-editor
+/// saves propagate live for both languages.
+pub fn hot_reload_dirty_luau_scripts(
+    mut scripts: Query<(&Name, &mut super::SoulScriptData)>,
+    mut luau_state: Option<ResMut<eustress_common::luau::runtime::LuauRuntimeState>>,
+) {
+    #[cfg(feature = "luau")]
+    {
+        let Some(luau_state) = luau_state.as_deref_mut() else { return };
+        let Some(runtime) = luau_state.runtime.as_mut() else {
+            // LuauRuntimeState is registered but hasn't lazy-initialised
+            // its runtime yet — clear dirty flags so we don't retry the
+            // whole list every frame until the first execution lands.
+            for (_, mut data) in scripts.iter_mut() {
+                if data.dirty && data.run_context == super::SoulRunContext::Luau {
+                    data.dirty = false;
+                }
+            }
+            return;
+        };
+
+        for (name, mut data) in scripts.iter_mut() {
+            if !data.dirty {
+                continue;
+            }
+            if data.run_context != super::SoulRunContext::Luau {
+                continue;
+            }
+            if data.source.is_empty() {
+                data.dirty = false;
+                continue;
+            }
+            let chunk_name = format!("hot-reload:{}", name.as_str());
+            match runtime.execute_chunk(&data.source, &chunk_name) {
+                Ok(()) => {
+                    info!("🔥 Hot-reloaded Luau script '{}'", name.as_str());
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Built;
+                    data.errors.clear();
+                }
+                Err(msg) => {
+                    warn!("⚠ Luau hot-reload error in '{}': {}", name.as_str(), msg);
+                    data.dirty = false;
+                    data.build_status = crate::soul::SoulBuildStatus::Failed;
+                    data.errors = vec![msg];
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "luau"))]
+    {
+        let _ = (&scripts, &luau_state);
+    }
+}
+
 /// System: compile all SoulScriptData entities when entering Playing state.
 /// Gathers script sources from ECS and delegates to common runtime.
 pub fn compile_scripts_on_play(

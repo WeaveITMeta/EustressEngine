@@ -1,42 +1,23 @@
-//! # Billboard GUI Renderer
+//! # Billboard GUI Types
 //!
-//! High-performance manual pixel renderer for BillboardGui and SurfaceGui.
-//! Designed to scale to 100K+ billboards via:
+//! Shared component types for 3D GUI surfaces — `BillboardGuiMarker`,
+//! `SurfaceGuiMarker`, and `GuiElementDisplay`. The actual rendering lives
+//! in the engine crate (`engine::billboard_gui`), which instantiates a
+//! `BillboardCard` Slint component per marker and software-renders it into
+//! a GPU texture mapped onto a world-space quad.
 //!
-//! - **Template atlas**: unique GUI layouts rendered once to shared texture regions
-//! - **GPU instancing**: one quad mesh + one atlas material + N instance transforms
-//! - **Dirty tracking**: only re-render textures when data changes
-//! - **LOD culling**: billboards beyond distance threshold are hidden
-//!
-//! ## Architecture
-//!
-//! 1. Each BillboardGui entity has `BillboardGuiMarker` + child `GuiElementDisplay` components
-//! 2. `update_billboard_textures` renders dirty billboards to pixel buffers
-//! 3. Pixel buffers are uploaded to a shared texture atlas (Image asset)
-//! 4. `spawn_billboard_quads` creates/updates 3D quad meshes with atlas UVs
-//! 5. `billboard_face_camera` orients quads toward the active camera each frame
+//! Historical note: this file used to host a CPU-atlas + fontdue renderer.
+//! That path was removed once the Slint-based renderer landed — it couldn't
+//! share theming with the editor UI and had a hard 128 px font-size ceiling.
+//! The `BillboardRendererPlugin` is now a no-op shim kept so upstream crates
+//! registering it don't need coordinated edits; prefer
+//! `engine::billboard_gui::BillboardGuiPlugin` in new code.
 
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use std::sync::OnceLock;
 
-// ── Embedded Font ─────────────────────────────────────────────────────────────
-
-/// FiraMono subset (SIL Open Font License) — embedded at compile time.
-static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/FiraMono-subset.ttf");
-
-/// Lazily initialized fontdue font for CPU text rasterization.
-static FONT: OnceLock<fontdue::Font> = OnceLock::new();
-
-fn get_font() -> &'static fontdue::Font {
-    FONT.get_or_init(|| {
-        fontdue::Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
-            .expect("Failed to load embedded billboard font")
-    })
-}
-
-/// GUI element display data — shared between ScreenGui (Slint) and BillboardGui (manual renderer).
-/// Stored as a Bevy component on each GUI entity (Frame, TextLabel, TextButton, etc.).
+/// GUI element display data — attached to each Frame / TextLabel / Button /
+/// ... entity. Used by the Slint billboard renderer to build the card's
+/// `BillboardLabelData` model, and by the screen-space UI pipeline.
 #[derive(Component, Debug, Clone)]
 pub struct GuiElementDisplay {
     pub x: f32,
@@ -55,6 +36,10 @@ pub struct GuiElementDisplay {
     pub text: String,
     pub text_color: [f32; 4],
     pub font_size: f32,
+    /// CSS-style font weight (400 = normal, 700 = bold). Drives
+    /// `Text.font-weight` in the Slint billboard card; irrelevant
+    /// for non-text elements.
+    pub font_weight: i32,
     pub text_align: String,
     pub image_path: String,
     pub class_type: String,
@@ -65,12 +50,39 @@ pub struct GuiElementDisplay {
     pub mouse_filter: String,
 }
 
-/// Marker for BillboardGui entities — rendered as 3D quads facing the camera.
-#[derive(Component, Debug)]
+/// Marker for BillboardGui entities — rendered by the engine crate as 3D
+/// quads facing the camera. `size` is in billboard-local pixels; the Slint
+/// card's canvas matches those dimensions.
+///
+/// All fields are live-edited: the engine's `sync_billboard_properties`
+/// system watches `Changed<BillboardGuiMarker>` and pushes updates into
+/// the quad's visibility, material depth-bias, and texture size each frame.
+#[derive(Component, Debug, Clone)]
 pub struct BillboardGuiMarker {
+    /// Pixel canvas dimensions of the Slint card ([width, height]).
     pub size: [f32; 2],
+    /// Distance in meters beyond which the quad is hidden. 0 disables culling.
     pub max_distance: f32,
+    /// Render in front of all 3D geometry (depth-bias override).
     pub always_on_top: bool,
+    /// When true the quad yaws to face the active camera each frame.
+    /// Set false for e.g. world-anchored signs that keep a fixed rotation.
+    pub face_camera: bool,
+    /// Explicit visibility toggle from scripts / Properties panel. Distinct
+    /// from `max_distance` culling so the two don't fight each other.
+    pub visible: bool,
+}
+
+impl Default for BillboardGuiMarker {
+    fn default() -> Self {
+        Self {
+            size: [200.0, 100.0],
+            max_distance: 100.0,
+            always_on_top: false,
+            face_camera: true,
+            visible: true,
+        }
+    }
 }
 
 /// Marker for SurfaceGui entities — rendered as textures mapped to a part face.
@@ -78,543 +90,16 @@ pub struct BillboardGuiMarker {
 pub struct SurfaceGuiMarker {
     pub face: String,
     pub target_part: String,
-    pub pixels_per_stud: f32,
+    /// Texture resolution per world meter on the target surface.
+    pub pixels_per_meter: f32,
 }
 
-// ── Constants ──────────────────────────────────────────────────────────────────
-
-/// Atlas texture size (shared across all billboards)
-const ATLAS_SIZE: u32 = 4096;
-/// Maximum billboard slots in the atlas (each slot is a region)
-const MAX_BILLBOARD_SLOTS: usize = 256;
-/// Default billboard texture resolution
-const DEFAULT_BILLBOARD_WIDTH: u32 = 256;
-const DEFAULT_BILLBOARD_HEIGHT: u32 = 128;
-/// Maximum render distance for billboards (studs)
-const DEFAULT_MAX_DISTANCE: f32 = 500.0;
-
-// ── Components ─────────────────────────────────────────────────────────────────
-
-/// Tracks the atlas slot assigned to this billboard's rendered texture
-#[derive(Component)]
-struct BillboardAtlasSlot {
-    slot_index: usize,
-    /// Hash of the last rendered state — skip re-render if unchanged
-    content_hash: u64,
-    /// UV coordinates in the atlas [u_min, v_min, u_max, v_max]
-    uvs: [f32; 4],
-    /// True if children weren't available when first rendered — retry next frame
-    needs_rerender: bool,
-}
-
-/// Marker for the 3D quad entity that displays the billboard texture
-#[derive(Component)]
-struct BillboardQuad;
-
-/// Marker for SurfaceGui quad entities
-#[derive(Component)]
-struct SurfaceQuad;
-
-// ── Resources ──────────────────────────────────────────────────────────────────
-
-/// Shared texture atlas for all billboard GUI renders
-#[derive(Resource)]
-struct BillboardAtlas {
-    /// The atlas image handle (shared by all billboard materials)
-    image: Handle<Image>,
-    /// Material using the atlas texture
-    material: Handle<StandardMaterial>,
-    /// Pixel buffer for CPU-side rendering
-    pixels: Vec<u8>,
-    /// Which slots are occupied
-    slot_occupied: Vec<bool>,
-    /// Slot dimensions (uniform for simplicity)
-    slot_width: u32,
-    slot_height: u32,
-    /// Number of slots per row in the atlas
-    slots_per_row: u32,
-    /// Shared quad mesh (1x1, scaled per instance)
-    quad_mesh: Handle<Mesh>,
-    /// Whether any slot was dirtied this frame
-    dirty: bool,
-}
-
-impl BillboardAtlas {
-    fn new(
-        images: &mut Assets<Image>,
-        materials: &mut Assets<StandardMaterial>,
-        meshes: &mut Assets<Mesh>,
-    ) -> Self {
-        // Create atlas image
-        let pixels = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE * 4) as usize];
-        let mut image = Image::new_fill(
-            Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            &[0, 0, 0, 0],
-            TextureFormat::Rgba8UnormSrgb,
-            default(),
-        );
-        image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
-
-        let image_handle = images.add(image);
-
-        // Unlit material with alpha blending for transparent backgrounds
-        let material = materials.add(StandardMaterial {
-            base_color_texture: Some(image_handle.clone()),
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            double_sided: true,
-            ..default()
-        });
-
-        // Unit quad mesh — scaled per billboard instance
-        let quad_mesh = meshes.add(Rectangle::new(1.0, 1.0));
-
-        let slot_width = DEFAULT_BILLBOARD_WIDTH;
-        let slot_height = DEFAULT_BILLBOARD_HEIGHT;
-        let slots_per_row = ATLAS_SIZE / slot_width;
-
-        Self {
-            image: image_handle,
-            material,
-            pixels,
-            slot_occupied: vec![false; MAX_BILLBOARD_SLOTS],
-            slot_width,
-            slot_height,
-            slots_per_row,
-            quad_mesh,
-            dirty: false,
-        }
-    }
-
-    /// Allocate a slot in the atlas, returns slot index or None if full
-    fn allocate_slot(&mut self) -> Option<usize> {
-        for (i, occupied) in self.slot_occupied.iter_mut().enumerate() {
-            if !*occupied {
-                *occupied = true;
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Free a slot
-    fn free_slot(&mut self, index: usize) {
-        if index < self.slot_occupied.len() {
-            self.slot_occupied[index] = false;
-        }
-    }
-
-    /// Get pixel coordinates for a slot
-    fn slot_origin(&self, index: usize) -> (u32, u32) {
-        let col = (index as u32) % self.slots_per_row;
-        let row = (index as u32) / self.slots_per_row;
-        (col * self.slot_width, row * self.slot_height)
-    }
-
-    /// Get UV coordinates for a slot [u_min, v_min, u_max, v_max]
-    fn slot_uvs(&self, index: usize) -> [f32; 4] {
-        let (x, y) = self.slot_origin(index);
-        let u_min = x as f32 / ATLAS_SIZE as f32;
-        let v_min = y as f32 / ATLAS_SIZE as f32;
-        let u_max = (x + self.slot_width) as f32 / ATLAS_SIZE as f32;
-        let v_max = (y + self.slot_height) as f32 / ATLAS_SIZE as f32;
-        [u_min, v_min, u_max, v_max]
-    }
-
-    /// Clear a slot region to transparent
-    fn clear_slot(&mut self, slot: usize) {
-        let (origin_x, origin_y) = self.slot_origin(slot);
-        let sw = self.slot_width as usize;
-        let sh = self.slot_height as usize;
-        let atlas_w = ATLAS_SIZE as usize;
-
-        for py in 0..sh {
-            let row_start = ((origin_y as usize + py) * atlas_w + origin_x as usize) * 4;
-            let row_end = row_start + sw * 4;
-            if row_end <= self.pixels.len() {
-                self.pixels[row_start..row_end].fill(0);
-            }
-        }
-        self.dirty = true;
-    }
-
-    /// Render a GUI element into the atlas at the given slot (additive — call clear_slot first)
-    fn render_element_to_slot(&mut self, slot: usize, element: &GuiElementDisplay) {
-        let (origin_x, origin_y) = self.slot_origin(slot);
-        let sw = self.slot_width as usize;
-        let sh = self.slot_height as usize;
-        let atlas_w = ATLAS_SIZE as usize;
-
-        // Element bounds within the slot (clamped)
-        let ex = element.x.max(0.0) as usize;
-        let ey = element.y.max(0.0) as usize;
-        let ew = (element.width as usize).min(sw.saturating_sub(ex));
-        let eh = (element.height as usize).min(sh.saturating_sub(ey));
-
-        // Draw background rectangle with alpha blending
-        let bg_r = (element.bg_color[0] * 255.0) as u8;
-        let bg_g = (element.bg_color[1] * 255.0) as u8;
-        let bg_b = (element.bg_color[2] * 255.0) as u8;
-        let bg_a = (element.bg_color[3] * 255.0) as u8;
-
-        for py in 0..eh {
-            for px in 0..ew {
-                let ax = origin_x as usize + ex + px;
-                let ay = origin_y as usize + ey + py;
-                let idx = (ay * atlas_w + ax) * 4;
-                if idx + 3 < self.pixels.len() {
-                    self.pixels[idx] = bg_r;
-                    self.pixels[idx + 1] = bg_g;
-                    self.pixels[idx + 2] = bg_b;
-                    self.pixels[idx + 3] = bg_a;
-                }
-            }
-        }
-
-        // Draw border
-        if element.border_size > 0.0 && ew > 0 && eh > 0 {
-            let br = (element.border_color[0] * 255.0) as u8;
-            let bgreen = (element.border_color[1] * 255.0) as u8;
-            let bb = (element.border_color[2] * 255.0) as u8;
-            let ba = (element.border_color[3] * 255.0) as u8;
-            let bw = (element.border_size.ceil() as usize).min(ew / 2).min(eh / 2);
-
-            for py in 0..eh {
-                for px in 0..ew {
-                    if py < bw || py >= eh - bw || px < bw || px >= ew - bw {
-                        let ax = origin_x as usize + ex + px;
-                        let ay = origin_y as usize + ey + py;
-                        let idx = (ay * atlas_w + ax) * 4;
-                        if idx + 3 < self.pixels.len() {
-                            self.pixels[idx] = br;
-                            self.pixels[idx + 1] = bgreen;
-                            self.pixels[idx + 2] = bb;
-                            self.pixels[idx + 3] = ba;
-                        }
-                    }
-                }
-            }
-        }
-
-        // CPU text rasterization via fontdue
-        if !element.text.is_empty() && ew > 0 && eh > 0 {
-            let font = get_font();
-            let font_size = element.font_size.max(6.0).min(64.0);
-            let tr = (element.text_color[0] * 255.0) as u8;
-            let tg = (element.text_color[1] * 255.0) as u8;
-            let tb = (element.text_color[2] * 255.0) as u8;
-            let ta = (element.text_color[3] * 255.0) as u8;
-
-            // Layout: measure total width, then position based on alignment
-            let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::new();
-            let mut total_width = 0.0f32;
-            for ch in element.text.chars() {
-                let (metrics, bitmap) = font.rasterize(ch, font_size);
-                total_width += metrics.advance_width;
-                glyphs.push((metrics, bitmap));
-            }
-
-            // Vertical centering: use font metrics
-            let line_height = font_size;
-            let y_start = match element.text_align.as_str() {
-                _ => ((eh as f32 - line_height) / 2.0).max(0.0) as usize, // center vertically
-            };
-
-            // Horizontal alignment
-            let x_start = match element.text_align.as_str() {
-                "left" => 2usize, // small padding
-                "right" => (ew as f32 - total_width - 2.0).max(0.0) as usize,
-                _ => ((ew as f32 - total_width) / 2.0).max(0.0) as usize, // center
-            };
-
-            let mut cursor_x = x_start as f32;
-            for (metrics, bitmap) in &glyphs {
-                let gx = (cursor_x + metrics.xmin as f32) as isize;
-                let gy = (y_start as f32 + (font_size - metrics.height as f32 - metrics.ymin as f32)) as isize;
-
-                for row in 0..metrics.height {
-                    for col in 0..metrics.width {
-                        let px = gx + col as isize;
-                        let py = gy + row as isize;
-                        if px < 0 || py < 0 || px >= ew as isize || py >= eh as isize {
-                            continue;
-                        }
-                        let coverage = bitmap[row * metrics.width + col];
-                        if coverage == 0 { continue; }
-
-                        let ax = origin_x as usize + ex + px as usize;
-                        let ay = origin_y as usize + ey + py as usize;
-                        let idx = (ay * atlas_w + ax) * 4;
-                        if idx + 3 >= self.pixels.len() { continue; }
-
-                        // Alpha-blend text over background
-                        let alpha = (coverage as u16 * ta as u16) / 255;
-                        let inv = 255 - alpha as u16;
-                        self.pixels[idx] = ((tr as u16 * alpha + self.pixels[idx] as u16 * inv) / 255) as u8;
-                        self.pixels[idx + 1] = ((tg as u16 * alpha + self.pixels[idx + 1] as u16 * inv) / 255) as u8;
-                        self.pixels[idx + 2] = ((tb as u16 * alpha + self.pixels[idx + 2] as u16 * inv) / 255) as u8;
-                        self.pixels[idx + 3] = (self.pixels[idx + 3] as u16 + alpha).min(255) as u8;
-                    }
-                }
-                cursor_x += metrics.advance_width;
-            }
-        }
-
-        self.dirty = true;
-    }
-}
-
-// ── Systems ────────────────────────────────────────────────────────────────────
-
-/// Initialize the billboard atlas on startup
-fn setup_billboard_atlas(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    let atlas = BillboardAtlas::new(&mut images, &mut materials, &mut meshes);
-    commands.insert_resource(atlas);
-}
-
-/// Render child GUI elements for a billboard into the given atlas slot.
-/// Returns true if at least one child element was rendered.
-fn render_children_to_slot(
-    atlas: &mut BillboardAtlas,
-    slot: usize,
-    elements: &[GuiElementDisplay],
-) -> bool {
-    atlas.clear_slot(slot);
-    if elements.is_empty() { return false; }
-    for elem in elements {
-        atlas.render_element_to_slot(slot, elem);
-    }
-    true
-}
-
-/// Collect sorted GuiElementDisplay children for a billboard entity.
-fn collect_child_elements(
-    entity: Entity,
-    children_query: &Query<&Children>,
-    gui_elements: &Query<&GuiElementDisplay>,
-) -> Vec<GuiElementDisplay> {
-    let Ok(children) = children_query.get(entity) else { return Vec::new() };
-    let mut elems: Vec<GuiElementDisplay> = children.iter()
-        .filter_map(|child| gui_elements.get(child).ok().cloned())
-        .collect();
-    elems.sort_by_key(|e| e.z_order);
-    elems
-}
-
-/// Assign atlas slots to new BillboardGui entities and render their content.
-/// Also re-renders billboards that were initially rendered without children
-/// (commands hadn't flushed yet when the billboard was first seen).
-fn update_billboard_textures(
-    mut atlas: ResMut<BillboardAtlas>,
-    mut commands: Commands,
-    new_billboards: Query<(Entity, &BillboardGuiMarker), Without<BillboardAtlasSlot>>,
-    mut pending_billboards: Query<(Entity, &mut BillboardAtlasSlot), With<BillboardGuiMarker>>,
-    children_query: Query<&Children>,
-    gui_elements: Query<&GuiElementDisplay>,
-) {
-    // Assign slots to new billboards
-    for (entity, _marker) in &new_billboards {
-        if let Some(slot) = atlas.allocate_slot() {
-            let uvs = atlas.slot_uvs(slot);
-            let elems = collect_child_elements(entity, &children_query, &gui_elements);
-            let rendered = render_children_to_slot(&mut atlas, slot, &elems);
-
-            commands.entity(entity).insert(BillboardAtlasSlot {
-                slot_index: slot,
-                content_hash: 0,
-                uvs,
-                needs_rerender: !rendered,
-            });
-        }
-    }
-
-    // Re-render billboards that had no children on first pass (deferred child spawning)
-    for (entity, mut slot) in &mut pending_billboards {
-        if !slot.needs_rerender { continue; }
-        let elems = collect_child_elements(entity, &children_query, &gui_elements);
-        let rendered = render_children_to_slot(&mut atlas, slot.slot_index, &elems);
-        if rendered {
-            slot.needs_rerender = false;
-        }
-    }
-}
-
-/// Upload dirty atlas pixels to GPU
-fn upload_billboard_atlas(
-    mut atlas: ResMut<BillboardAtlas>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    if !atlas.dirty { return; }
-    atlas.dirty = false;
-
-    if let Some(image) = images.get_mut(&atlas.image) {
-        if let Some(ref mut data) = image.data {
-            data.copy_from_slice(&atlas.pixels);
-        }
-    }
-}
-
-/// Spawn 3D quad entities for BillboardGui entities that have atlas slots but no quad
-fn spawn_billboard_quads(
-    mut commands: Commands,
-    atlas: Res<BillboardAtlas>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    billboards: Query<(Entity, &BillboardGuiMarker, &BillboardAtlasSlot), Without<BillboardQuad>>,
-) {
-    for (entity, marker, slot) in &billboards {
-        // Scale: convert pixel dimensions to world studs (1 stud per 50 pixels)
-        let scale_factor = 1.0 / 50.0;
-        let size_x = marker.size[0] * scale_factor;
-        let size_y = marker.size[1] * scale_factor;
-
-        // Per-billboard quad mesh with UVs clipped to this slot's atlas rect.
-        // Every billboard shares the same 4096×4096 atlas, so without
-        // slot-specific UVs each quad would sample the *entire* atlas and
-        // the rendered content (≈6%×3% of the surface) would be effectively
-        // invisible. `slot.uvs` = [u_min, v_min, u_max, v_max] stored when
-        // the slot was allocated.
-        let mesh_handle = meshes.add(build_slot_quad_mesh(slot.uvs));
-
-        // Spawn quad as child of the billboard entity.
-        // Local transform at origin — Bevy propagation handles world positioning
-        // via the ChildOf hierarchy.
-        let _quad = commands.spawn((
-            Mesh3d(mesh_handle),
-            MeshMaterial3d(atlas.material.clone()),
-            Transform::from_scale(Vec3::new(size_x, size_y, 1.0)),
-            BillboardQuad,
-            ChildOf(entity),
-            bevy::light::NotShadowCaster,
-            Name::new("BillboardQuad"),
-        )).id();
-
-        // Mark the billboard entity as having a quad
-        commands.entity(entity).insert(BillboardQuad);
-
-        info!("🪧 Spawned billboard quad for {:?} ({:.1}x{:.1} studs, uv=[{:.3},{:.3} → {:.3},{:.3}])",
-              entity, size_x, size_y, slot.uvs[0], slot.uvs[1], slot.uvs[2], slot.uvs[3]);
-    }
-}
-
-/// Build a unit quad (1×1 in local space, centred at origin) whose UVs
-/// sample the given rect of the shared atlas texture.
-///
-/// UV layout: `[u_min, v_min, u_max, v_max]` — top-left to bottom-right.
-/// Matches Bevy's convention where (0,0) is top-left of a texture.
-fn build_slot_quad_mesh(uvs: [f32; 4]) -> Mesh {
-    use bevy::mesh::{Indices, PrimitiveTopology};
-    use bevy::asset::RenderAssetUsages;
-
-    let [u0, v0, u1, v1] = uvs;
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    // Positions — unit quad in XY plane, -0.5..0.5 so Transform::from_scale
-    // maps directly to world-stud size.
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_POSITION,
-        vec![
-            [-0.5, -0.5, 0.0], // bottom-left
-            [ 0.5, -0.5, 0.0], // bottom-right
-            [ 0.5,  0.5, 0.0], // top-right
-            [-0.5,  0.5, 0.0], // top-left
-        ],
-    );
-    // All four verts face +Z — the billboard_face_camera system rotates the
-    // whole quad toward the camera each frame.
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        vec![[0.0, 0.0, 1.0]; 4],
-    );
-    // UVs — map each corner to the slot's atlas rect. Bevy/Wgpu UV (0,0) is
-    // top-left, (1,1) is bottom-right, so v_min goes with the TOP verts.
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![
-            [u0, v1], // bottom-left  → slot's (u_min, v_max)
-            [u1, v1], // bottom-right → slot's (u_max, v_max)
-            [u1, v0], // top-right    → slot's (u_max, v_min)
-            [u0, v0], // top-left     → slot's (u_min, v_min)
-        ],
-    );
-    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
-    mesh
-}
-
-/// Orient billboard quads toward the active camera each frame.
-/// Quads are children of the BillboardGui entity (via ChildOf), so their
-/// Transform is in the parent's local space — Bevy's propagation handles
-/// the world-space positioning.  We only need to set the facing rotation.
-fn billboard_face_camera(
-    camera_query: Query<&GlobalTransform, (With<Camera3d>, Without<BillboardQuad>, Without<BillboardGuiMarker>)>,
-    mut billboard_quads: Query<(&mut Transform, &GlobalTransform), With<BillboardQuad>>,
-) {
-    let Some(camera_transform) = camera_query.iter().next() else { return };
-    let camera_pos = camera_transform.translation();
-
-    for (mut local_tf, global_tf) in &mut billboard_quads {
-        let quad_pos = global_tf.translation();
-        // Face camera (Y-axis billboard — stays upright)
-        let dir = camera_pos - quad_pos;
-        if dir.length_squared() > 0.001 {
-            let yaw = dir.x.atan2(dir.z);
-            local_tf.rotation = Quat::from_rotation_y(yaw);
-        }
-    }
-}
-
-/// Position billboards at their adornee entity's location + offset.
-/// The BillboardAdornee component (from spawn.rs) tracks the target entity.
-/// We also resolve name-based adornees on the first frame they're seen.
-fn position_billboards_at_adornees(
-    mut billboards: Query<(&mut Transform, &BillboardGuiMarker, Option<&ChildOf>)>,
-    parents: Query<&GlobalTransform, Without<BillboardGuiMarker>>,
-) {
-    for (mut transform, _marker, child_of) in billboards.iter_mut() {
-        // If the billboard is a child of another entity (via ChildOf), Bevy's
-        // transform propagation already positions it relative to the parent.
-        // The billboard's Transform.translation IS the StudsOffset.
-        // Nothing extra needed — Bevy handles parent-relative positioning.
-        let _ = (child_of, &parents); // suppress unused warnings
-    }
-}
-
-/// Clean up atlas slots when billboard entities are despawned
-fn cleanup_billboard_slots(
-    mut atlas: ResMut<BillboardAtlas>,
-    mut removed: RemovedComponents<BillboardAtlasSlot>,
-    slots: Query<&BillboardAtlasSlot>,
-) {
-    // RemovedComponents tracks entities that had the component removed
-    // We can't query the component since it's removed, so we track via the event
-    for _entity in removed.read() {
-        // Can't get slot index from removed entity — would need a separate tracker
-        // For now, slots leak until space reload clears the atlas
-    }
-}
-
-// ── Plugin ─────────────────────────────────────────────────────────────────────
-
+/// Legacy plugin name preserved for registration sites. The real billboard
+/// systems live in `engine::billboard_gui::BillboardGuiPlugin` now.
 pub struct BillboardRendererPlugin;
 
 impl Plugin for BillboardRendererPlugin {
-    fn build(&self, app: &mut App) {
-        app
-            .add_systems(Startup, setup_billboard_atlas)
-            .add_systems(Update, (
-                update_billboard_textures,
-                upload_billboard_atlas.after(update_billboard_textures),
-                spawn_billboard_quads.after(update_billboard_textures),
-                billboard_face_camera,
-            ));
+    fn build(&self, _app: &mut App) {
+        // Intentionally empty. See module docs.
     }
 }

@@ -433,6 +433,7 @@ export component Ribbon inherits Rectangle {
     // Other callbacks
     callback on-toggle-command-bar();
     callback on-show-keybindings();
+    callback on-show-about();
     callback on-show-soul-settings();
     callback on-show-settings();
     callback on-open-url(string);
@@ -997,13 +998,18 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "Tutorials"; clicked => { root.on-open-url("https://docs.eustress.dev/tutorials"); } }
                                 DropdownItem { label: "Soul Scripting Guide"; clicked => { root.on-open-url("https://docs.eustress.dev/soul"); } }
                                 DropdownSeparator {}
+                                DropdownHeader { label: "EXTERNAL TOOLS"; }
+                                DropdownItem { label: "Setup IDE"; clicked => { root.on-open-url("https://eustress.dev/learn/ide"); } }
+                                DropdownItem { label: "Setup MCP"; clicked => { root.on-open-url("https://eustress.dev/learn/mcp"); } }
+                                DropdownItem { label: "Setup Rune LSP Server"; clicked => { root.on-open-url("https://eustress.dev/learn/lsp"); } }
+                                DropdownSeparator {}
                                 DropdownHeader { label: "COMMUNITY"; }
                                 DropdownItem { label: "Website"; clicked => { root.on-open-url("https://eustress.dev"); } }
                                 DropdownItem { label: "Discord"; clicked => { root.on-open-url("https://discord.gg/eustress"); } }
                                 DropdownItem { label: "GitHub"; clicked => { root.on-open-url("https://github.com/eustressengine/eustress"); } }
                                 DropdownSeparator {}
                                 DropdownItem { label: "Eustress Constitution"; clicked => { root.on-menu-action("help:constitution"); } }
-                                DropdownItem { label: "About Eustress Engine"; clicked => { root.on-menu-action("help:about"); } }
+                                DropdownItem { label: "About Eustress Engine"; clicked => { root.on-show-about(); } }
                             }
                         }
                     }

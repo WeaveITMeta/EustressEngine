@@ -10,9 +10,8 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 !out/*.js
+# esbuild bundles every runtime dep into out/extension.js, so we ship zero
+# node_modules/ in the VSIX. Massive size reduction + no transitive-dep
+# resolution issues (no more "Cannot find module 'balanced-match'" from
+# hoisted packages that vsce forgot to include).
 node_modules/**
-!node_modules/vscode-languageclient/**
-!node_modules/vscode-jsonrpc/**
-!node_modules/vscode-languageserver-protocol/**
-!node_modules/vscode-languageserver-types/**
-!node_modules/semver/**

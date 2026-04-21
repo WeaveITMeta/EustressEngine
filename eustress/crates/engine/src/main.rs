@@ -214,6 +214,18 @@ fn main() {
         .add_plugins(PlayModePlugin)
         // Script analyzer (Rune diagnostics + symbol index on AsyncComputeTaskPool)
         .add_plugins(script_editor::ScriptAnalysisPlugin)
+        // Runtime snapshot — writes live play-state + sim values to
+        // `<universe>/.eustress/runtime-snapshot.json` at 4 Hz so the
+        // LSP (separate process) can surface live values in hover.
+        .add_plugins(script_editor::runtime_snapshot::RuntimeSnapshotPlugin)
+        // LSP child-process launcher — spawns `eustress-lsp --tcp` so
+        // external IDEs can connect to a live server while Studio is up.
+        // No-op if the companion binary isn't on disk.
+        .add_plugins(eustress_engine::lsp_launcher::LspLauncherPlugin)
+        // Engine Bridge — JSON-RPC 2.0 over localhost TCP for sibling
+        // processes (MCP server, plugins) to query live ECS / sim /
+        // embedvec. Port handoff via `<universe>/.eustress/engine.port`.
+        .add_plugins(eustress_engine::engine_bridge::EngineBridgePlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
         // Floating windows
@@ -263,8 +275,10 @@ fn main() {
         .add_plugins(eustress_engine::mesh_optimizer::MeshOptPlugin)
         // Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
         .add_plugins(eustress_common::gui::SlintGuiPlugin)
-        // Billboard/SurfaceGui 3D rendering (manual pixel renderer with atlas)
-        .add_plugins(eustress_common::gui::BillboardRendererPlugin)
+        // BillboardGui: per-entity Slint BillboardCard software-rendered onto
+        // a 3D quad. Replaces the deprecated fontdue/atlas path; the legacy
+        // BillboardRendererPlugin in `common` is now a no-op shim.
+        .add_plugins(eustress_engine::billboard_gui::BillboardGuiPlugin)
         // Selection box
         .add_plugins(SelectionBoxPlugin)
         // Tools
@@ -346,6 +360,15 @@ fn main() {
     {
         app.add_plugins(StreamingPlugin);
         app.add_systems(Startup, setup_sim_stream_writer);
+
+        // Cross-process pub/sub over TCP. The in-process EustressStream
+        // (set up by StreamingPlugin above) is exposed on 33000+ so MCP,
+        // LSP, visualizers, and remote agents can subscribe to live
+        // scene_deltas / mcp.entity.* / sim_watchpoints / etc. without
+        // polling filesystem snapshots. The plugin itself writes the
+        // primary TCP port to `<universe>/.eustress/engine.stream.port`
+        // after startup so siblings can discover it.
+        app.add_plugins(eustress_engine::stream_node_plugin::StreamNodePlugin::default());
     }
 
     app.run();

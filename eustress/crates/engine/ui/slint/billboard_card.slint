@@ -1,0 +1,96 @@
+// ============================================================================
+// BillboardCard — Slint component rendered per-billboard into its own texture.
+// Each BillboardGui entity owns one of these; the engine drives the `labels`
+// model from its TextLabel children and software-renders into a GPU image
+// mapped to a 3D quad that faces the camera with full depth-buffer occlusion.
+// ============================================================================
+
+// Data for a single TextLabel child inside a billboard.
+// Mirrors the subset of GuiElementDisplay fields that visibly matter for
+// rendering — position in billboard-local pixels, colors, alignment, text.
+export struct BillboardLabelData {
+    x: float,          // px, relative to billboard top-left
+    y: float,
+    width: float,
+    height: float,
+    text: string,
+    text-color: color,
+    bg-color: color,
+    border-size: float,
+    border-color: color,
+    corner-radius: float,
+    font-size: float,
+    font-weight: int,     // 400 normal, 700 bold (CSS-style)
+    text-align: string,   // "left" | "center" | "right"
+    z-order: int,
+    visible: bool,
+}
+
+// One billboard's worth of content.
+//
+// Slint's `inherits Window` gives the component a top-level window surface
+// that the software renderer can paint into. The `debug-backdrop` flag
+// paints a faint card behind labels so the quad stays visible even when
+// labels are empty (or when text fails to render due to a font lookup
+// miss). Set `debug-backdrop: false` once every billboard in the scene
+// is reliably rendering text on a transparent card.
+//
+// `default-font-family` is set explicitly so the software renderer
+// resolves the system font the same way the main StudioWindow does —
+// without it the per-instance adapter's first render can produce empty
+// glyph boxes.
+export component BillboardCard inherits Window {
+    in property <int> canvas-width: 200;
+    in property <int> canvas-height: 100;
+    in property <[BillboardLabelData]> labels: [];
+    /// Semi-opaque dark pill behind the label area so the quad is
+    /// visible as a placeholder while text rendering is stabilising.
+    /// Engine-side code flips this off once labels are reliable.
+    in property <bool> debug-backdrop: true;
+
+    width: root.canvas-width * 1px;
+    height: root.canvas-height * 1px;
+    background: transparent;
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+
+    if root.debug-backdrop: Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: #1a1a1a99;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: #3a3a3a99;
+    }
+
+    // Render order follows the `labels` model order — the Rust side sorts
+    // by z-order before pushing, so later entries paint on top. Slint's
+    // `z` property only accepts literal numbers, so we can't bind it to
+    // `label.z-order` directly; sorting upstream is the supported path.
+    for label in root.labels: Rectangle {
+        x: label.x * 1px;
+        y: label.y * 1px;
+        width: label.width * 1px;
+        height: label.height * 1px;
+        background: label.bg-color;
+        border-radius: label.corner-radius * 1px;
+        border-width: label.border-size * 1px;
+        border-color: label.border-color;
+        visible: label.visible;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: label.text;
+            color: label.text-color;
+            font-size: label.font-size * 1px;
+            font-weight: label.font-weight;
+            horizontal-alignment: label.text-align == "left" ? left
+                               : label.text-align == "right" ? right
+                               : center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}

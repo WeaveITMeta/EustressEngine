@@ -1,0 +1,189 @@
+// ============================================================================
+// About Eustress Engine — simple identity card. Version + build info + links.
+// Opened from Help menu via help:about action.
+// ============================================================================
+
+import { Theme } from "theme.slint";
+
+component LinkRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> url: "";
+    callback open-url(string);
+
+    height: 24px;
+    background: ta.has-hover ? Theme.button-hover : transparent;
+    border-radius: 4px;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open-url(root.url); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px; spacing: 8px;
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.url;
+            color: Theme.accent-blue;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component AboutDialog inherits Rectangle {
+    in property <string> version: "";
+    in property <string> commit: "";
+    in property <string> build-date: "";
+    callback open-url(string);
+    callback on-close();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Backdrop click closes
+    TouchArea {
+        clicked => { root.on-close(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 440px;
+        height: 360px;
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        // Absorb clicks inside the card so backdrop doesn't close it
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "About Eustress Engine";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-close(); }
+                    }
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Body ──
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                Text {
+                    text: "Eustress Engine";
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Version " + root.version;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+
+                if root.commit != "": Text {
+                    text: "Build " + root.commit + (root.build-date != "" ? " • " + root.build-date : "");
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle { height: 8px; }
+
+                Text {
+                    text: "Bevy + Rust game engine with Soul Scripts, Workshop AI, and live world modeling.";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                Rectangle { height: 8px; }
+
+                LinkRow {
+                    label: "Website";
+                    url: "https://eustress.dev";
+                    open-url(u) => { root.open-url(u); }
+                }
+                LinkRow {
+                    label: "GitHub";
+                    url: "https://github.com/eustressengine/eustress";
+                    open-url(u) => { root.open-url(u); }
+                }
+                LinkRow {
+                    label: "Discord";
+                    url: "https://discord.gg/eustress";
+                    open-url(u) => { root.open-url(u); }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                Text {
+                    text: "© Anthropic-assisted. Built by humans who care.";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

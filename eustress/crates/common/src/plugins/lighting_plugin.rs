@@ -354,16 +354,35 @@ fn update_fog_settings(
                 lighting.fog_color[2],
                 lighting.fog_color[3],
             );
-            
+
+            // Normalize fog range: `end` must be strictly greater than `start`
+            // for FogFalloff::Linear to produce a sensible fade. The values
+            // flow in from many sources — TOML service files, the Properties
+            // panel, Rune scripts, atmosphere sync — and any of them can get
+            // the pair reversed (the user reported `start: 5000, end: 2000`).
+            // Auto-swap reversed pairs, and if they're equal nudge `end`
+            // forward so the falloff math doesn't divide by zero.
+            let (fog_start, fog_end) = if lighting.fog_end > lighting.fog_start {
+                (lighting.fog_start, lighting.fog_end)
+            } else if lighting.fog_end < lighting.fog_start {
+                tracing::warn!(
+                    "🌫️ Fog range reversed (start: {}, end: {}) — swapping so end > start",
+                    lighting.fog_start, lighting.fog_end
+                );
+                (lighting.fog_end, lighting.fog_start)
+            } else {
+                (lighting.fog_start, lighting.fog_start + 1.0)
+            };
+
             let new_fog = DistanceFog {
                 color: fog_color,
                 falloff: FogFalloff::Linear {
-                    start: lighting.fog_start,
-                    end: lighting.fog_end,
+                    start: fog_start,
+                    end: fog_end,
                 },
                 ..default()
             };
-            
+
             if let Some(mut existing_fog) = fog {
                 // Update existing fog
                 existing_fog.color = new_fog.color;
@@ -371,7 +390,7 @@ fn update_fog_settings(
             } else {
                 // Add fog to camera
                 commands.entity(entity).insert(new_fog);
-                info!("🌫️ Global fog enabled (start: {}, end: {})", lighting.fog_start, lighting.fog_end);
+                info!("🌫️ Global fog enabled (start: {}, end: {})", fog_start, fog_end);
             }
         } else {
             // Remove fog if disabled

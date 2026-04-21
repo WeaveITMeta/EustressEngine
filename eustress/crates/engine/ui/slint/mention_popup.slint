@@ -88,6 +88,8 @@ export component MentionChip inherits Rectangle {
 // slice; never does its own filtering. Keyboard nav flags via
 // `selected-index` (0-based) — host manages Up/Down.
 
+import { ScrollView } from "std-widgets.slint";
+
 export component MentionPopup inherits Rectangle {
     in property <[MentionItemData]> items: [];
     in property <int> selected-index: 0;
@@ -97,13 +99,19 @@ export component MentionPopup inherits Rectangle {
     in property <bool> show-recent-header: false;
     /// Empty state copy when there's nothing to show.
     in property <string> empty-hint: "No matches";
+    /// Title shown in the header bar. Host sets this to the current
+    /// mention query so users see what they're filtering against.
+    in property <string> title: "Mentions";
 
     callback on-select(int); // item index committed
 
     width: 360px;
+    // Height budget: 28px title bar + up-to-320px scroll area.
+    // The inner ScrollView caps at 320px and scrolls past that so the
+    // popup itself stays a consistent 348px when many items match.
     height: items.length > 0
-        ? min(28px + items.length * 42px, 360px)
-        : 60px;
+        ? min(28px + min(items.length * 42px + 8px, 320px), 348px)
+        : 68px;
     background: Theme.panel-background;
     border-radius: 6px;
     border-width: 1px;
@@ -113,100 +121,173 @@ export component MentionPopup inherits Rectangle {
     drop-shadow-offset-y: 4px;
     clip: true;
 
+    // Eat wheel + click events that reach the empty regions inside the
+    // popup — without this, scrolling over the list (in regions between
+    // items) would fall through to the Bevy viewport (camera zoom) or
+    // the chat ScrollView behind us. TouchArea `scroll-event` returns
+    // `accept` to stop propagation; an accompanying layout TouchArea
+    // below the ScrollView catches clicks on the header/padding.
+    TouchArea {
+        scroll-event(event) => {
+            // We still want the ScrollView's own wheel handling to
+            // work for the list itself. The inner child TouchAreas
+            // in each row don't swallow wheel, and Slint's ScrollView
+            // consumes wheel events within its bounds; this outer
+            // area only catches wheel in the non-scrollable gutters
+            // (header + empty margins) and prevents it from escaping.
+            accept
+        }
+    }
+
     VerticalLayout {
-        padding: 4px;
+        padding: 0px;
         spacing: 0px;
 
-        if root.show-recent-header: Rectangle {
-            height: 20px;
-            Text {
-                x: 8px;
-                text: root.items.length > 0 ? "RECENT" : "START TYPING TO SEARCH";
-                color: Theme.text-secondary;
-                font-size: 9px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-        }
-
-        if root.items.length == 0 && !root.show-recent-header: Rectangle {
-            height: 40px;
-            Text {
-                text: root.empty-hint;
-                color: Theme.text-disabled;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        for item[i] in root.items: Rectangle {
-            height: 42px;
-            background: i == root.selected-index ? Theme.selection-background : transparent;
-            border-radius: 4px;
-
-            TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.on-select(i); }
-            }
+        // Title bar — pinned, always visible. Shows "Mentions — @<query>"
+        // when filtering, falls back to "Mentions" otherwise.
+        Rectangle {
+            height: 28px;
+            background: Theme.header-background;
 
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 10px;
-                spacing: 10px;
-                alignment: center;
+                spacing: 6px;
 
-                Image {
-                    width: 18px;
-                    height: 18px;
-                    source: item.icon;
-                    image-fit: contain;
+                Text {
+                    text: "@ " + root.title;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
                     vertical-alignment: center;
-                }
-
-                VerticalLayout {
                     horizontal-stretch: 1;
-                    spacing: 1px;
-                    padding-top: 4px;
-                    padding-bottom: 4px;
-
-                    Text {
-                        text: item.name;
-                        color: Theme.text-primary;
-                        font-size: 12px;
-                        font-weight: 500;
-                        overflow: elide;
-                    }
-
-                    Text {
-                        text: item.qualifier;
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        overflow: elide;
-                    }
                 }
 
-                // Right-side kind tag (small badge)
-                Rectangle {
-                    width: kind-text.preferred-width + 12px;
-                    height: 16px;
-                    background: {
-                        if item.kind == "entity" { return Theme.accent-blue.with-alpha(0.2); }
-                        if item.kind == "file"   { return Theme.accent-purple.with-alpha(0.2); }
-                        if item.kind == "script" { return Theme.accent-yellow.with-alpha(0.2); }
-                        if item.kind == "service" { return Theme.accent-green.with-alpha(0.2); }
-                        Theme.accent-blue.with-alpha(0.2)
-                    };
-                    border-radius: 8px;
-                    y: (parent.height - self.height) / 2;
+                Text {
+                    text: root.items.length + "";
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                    visible: root.items.length > 0;
+                }
+            }
 
-                    kind-text := Text {
-                        text: item.kind;
+            // 1px bottom divider — Slint has no `border-bottom-width`,
+            // so a thin child rectangle pinned to the edge does the job.
+            Rectangle {
+                x: 0px;
+                y: parent.height - 1px;
+                width: 100%;
+                height: 1px;
+                background: Theme.border-color;
+            }
+        }
+
+        // Scrollable item list. ScrollView swallows wheel events within
+        // its bounds by default (it's how its own scrollbar works), so
+        // the mouse wheel scrolls the list instead of spilling into the
+        // 3D viewport or the chat.
+        ScrollView {
+            vertical-stretch: 1;
+            viewport-height: list-col.preferred-height;
+
+            list-col := VerticalLayout {
+                padding: 4px;
+                spacing: 0px;
+
+                if root.show-recent-header && root.items.length > 0: Rectangle {
+                    height: 20px;
+                    Text {
+                        x: 8px;
+                        text: "RECENT";
                         color: Theme.text-secondary;
                         font-size: 9px;
-                        font-weight: 600;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if root.items.length == 0: Rectangle {
+                    height: 40px;
+                    Text {
+                        text: root.show-recent-header ? "Start typing to search" : root.empty-hint;
+                        color: Theme.text-disabled;
+                        font-size: 11px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                    }
+                }
+
+                for item[i] in root.items: Rectangle {
+                    height: 42px;
+                    background: i == root.selected-index ? Theme.selection-background : transparent;
+                    border-radius: 4px;
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-select(i); }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        alignment: center;
+
+                        Image {
+                            width: 18px;
+                            height: 18px;
+                            source: item.icon;
+                            image-fit: contain;
+                            vertical-alignment: center;
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 1px;
+                            padding-top: 4px;
+                            padding-bottom: 4px;
+
+                            Text {
+                                text: item.name;
+                                color: Theme.text-primary;
+                                font-size: 12px;
+                                font-weight: 500;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: item.qualifier;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+
+                        // Right-side kind tag (small badge)
+                        Rectangle {
+                            width: kind-text.preferred-width + 12px;
+                            height: 16px;
+                            background: {
+                                if item.kind == "entity" { return Theme.accent-blue.with-alpha(0.2); }
+                                if item.kind == "file"   { return Theme.accent-purple.with-alpha(0.2); }
+                                if item.kind == "script" { return Theme.accent-yellow.with-alpha(0.2); }
+                                if item.kind == "service" { return Theme.accent-green.with-alpha(0.2); }
+                                Theme.accent-blue.with-alpha(0.2)
+                            };
+                            border-radius: 8px;
+                            y: (parent.height - self.height) / 2;
+
+                            kind-text := Text {
+                                text: item.kind;
+                                color: Theme.text-secondary;
+                                font-size: 9px;
+                                font-weight: 600;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                     }
                 }
             }

@@ -110,10 +110,24 @@ pub struct GuiTomlText {
     pub font_size: f32,
     #[serde(default)]
     pub font_family: String,
+    /// Font family variant — e.g. "GothamBold", "SourceSans", "RobotoMono".
+    /// Feeds font_weight derivation: names containing "Bold" → 700, else 400.
+    #[serde(default)]
+    pub font: String,
     #[serde(default = "default_left")]
     pub text_x_alignment: String,
     #[serde(default = "default_center")]
     pub text_y_alignment: String,
+}
+
+/// Map a font name to a CSS-style weight. Conservative: anything with "Bold"
+/// becomes 700, "Light" becomes 300, otherwise 400. Slint's software renderer
+/// uses the weight to pick the right variant when multiple are registered.
+pub fn font_weight_from_name(name: &str) -> i32 {
+    let lower = name.to_lowercase();
+    if lower.contains("bold") { 700 }
+    else if lower.contains("light") || lower.contains("thin") { 300 }
+    else { 400 }
 }
 
 fn default_size() -> Vec<f32> { vec![100.0, 30.0] }
@@ -144,6 +158,11 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             text_color: default_text_color(),
             font_size: default_font_size(),
             font_family: String::new(),
+            // `font` is a newer field alongside `font_family`; drives
+            // the billboard card's `font-weight` binding via the
+            // `font_weight_from_name` helper. Default is empty — tools
+            // read either field.
+            font: String::new(),
             text_x_alignment: "center".to_string(),
             text_y_alignment: "center".to_string(),
         })
@@ -358,15 +377,17 @@ fn spawn_screen_gui_element(
 /// Frame — container with background color and optional border
 /// Build a GuiElementDisplay from TOML properties + optional text
 pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
-    let (text, text_color, font_size, text_align) = if let Some(tp) = text_props {
+    let (text, text_color, font_size, text_align, font_weight) = if let Some(tp) = text_props {
+        let weight_source = if !tp.font.is_empty() { &tp.font } else { &tp.font_family };
         (
             tp.text.clone(),
             tp.text_color,
             tp.font_size,
             tp.text_x_alignment.clone(),
+            font_weight_from_name(weight_source),
         )
     } else {
-        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "center".to_string())
+        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "center".to_string(), 400)
     };
 
     GuiElementDisplay {
@@ -386,6 +407,7 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
         text,
         text_color,
         font_size,
+        font_weight,
         text_align,
         image_path: String::new(),
         class_type: class_type.to_string(),

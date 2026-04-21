@@ -169,12 +169,29 @@ component SimToggle inherits Rectangle {
     }
 }
 
-// Compact dropdown row
+// Compact dropdown row.
+//
+// `selected-value` is the string form of the picked option — this is
+// what callers should bind to their own string property (e.g.
+// `sim-time-scale-preset`). `current` tracks the index internally and
+// is seeded from `selected-value` on init so the combo reflects the
+// value the host already stored. `changed(string)` fires after the
+// user picks so callers can react beyond property bindings.
 component SimCombo inherits Rectangle {
     in property <string> label: "";
     in property <[string]> options: [];
+    in-out property <string> selected-value: "";
     in-out property <int> current: 0;
-    callback changed(int);
+    callback changed(string);
+
+    // `current` is driven by ComboBox.selected below — it writes both
+    // current-index and selected-value. (A prior attempt used a
+    // `changed selected-value` handler with `for opt[i] in options` to
+    // resync the index when the host pushed a new preset; Slint's `for`
+    // is element-generation syntax only, not imperative iteration in a
+    // callback body, so it refused to parse. No Rust path currently
+    // pushes selected-value back anyway — if that's ever needed, the
+    // host should set `current` explicitly alongside `selected-value`.)
 
     height: 28px;
     background: transparent;
@@ -195,7 +212,11 @@ component SimCombo inherits Rectangle {
             width: 200px;
             model: root.options;
             current-index: root.current;
-            selected(v) => { root.current = root.options.length > 0 ? root.current : 0; root.changed(root.current); }
+            selected(v) => {
+                root.current = self.current-index;
+                root.selected-value = v;
+                root.changed(v);
+            }
         }
     }
 }
@@ -519,6 +540,7 @@ export component SimulationSettingsDialog inherits Rectangle {
                                 "1 year / sec (31.5M×)",
                                 "Custom",
                             ];
+                            selected-value <=> root.time-scale-preset;
                         }
 
                         SimField {

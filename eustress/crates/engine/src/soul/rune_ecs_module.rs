@@ -112,10 +112,18 @@ where
     })
 }
 
-/// Create the Eustress ECS module for Rune scripts
+/// Create the Eustress ECS module for Rune scripts.
+///
+/// Registers every function under the `eustress::` crate namespace —
+/// matching the GUI module in `common::soul::rune_gui_module` and the
+/// functions crate modules (`eustress::functions::*`). This is what
+/// makes `use eustress::{get_sim_value, log_info, ...}` resolve in
+/// Rune source; with `Module::new()` (the previous behaviour) the
+/// items were at root and every `use eustress::…` diagnostic fired
+/// "Missing item eustress::X" false positives.
 #[cfg(feature = "realism-scripting")]
 pub fn create_ecs_module() -> Result<Module, ContextError> {
-    let mut module: Module = Module::new();
+    let mut module: Module = Module::with_crate("eustress")?;
     
     // Entity component access
     module.function_meta(get_voltage)?;

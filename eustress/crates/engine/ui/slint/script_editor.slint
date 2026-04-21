@@ -7,6 +7,48 @@ import { VerticalBox, HorizontalBox, ScrollView, TextEdit } from "std-widgets.sl
 import { Theme } from "theme.slint";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared structs used by EustressTextEdit and the outer ScriptEditor. Defined
+// at the top of the file because Slint name resolution is single-pass / top-
+// down — the EustressTextEdit component below declares a
+// `<[TokenSpan]>` property and must see the struct's definition already.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One highlighted line: Rust pre-joins all tokens for the line into a single
+// text string and picks the dominant (first non-whitespace token) color.
+export struct HighlightLine {
+    text: string,  // full line text
+    r: float,      // foreground color [0..1]
+    g: float,
+    b: float,
+    bold: bool,    // true for headings, keywords, etc.
+}
+
+// Per-token span for true syntax highlighting.
+// Each token has its own color and is positioned by character offset.
+// Monospace: x = col * char_width (computed Rust-side for pixel precision).
+export struct TokenSpan {
+    line: int,     // 0-based line index
+    x: float,      // x pixel offset from left edge
+    text: string,  // token text
+    r: float,      // foreground [0..1]
+    g: float,
+    b: float,
+    bold: bool,
+}
+
+// One analyzer diagnostic, positioned for drawing as an underline squiggle
+// under the offending text. `line` is 0-based; `x_start`/`x_end` are pixel
+// offsets. `severity` is one of "error" | "warning" | "info" | "hint" — the
+// renderer picks the color. Populated by Rust from `ScriptAnalysis`.
+export struct DiagnosticSpan {
+    line: int,
+    x_start: float,
+    x_end: float,
+    severity: string,
+    message: string,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EustressTextEdit — local replacement for std-widgets TextEdit.
 //
 // Slint's TextEdit bakes its own ContextMenuArea inside, so we can't add icons
@@ -28,6 +70,21 @@ component EustressTextEdit inherits Rectangle {
     in property <bool> read-only: false;
     in property <brush> foreground: Theme.text-primary;
     out property <bool> has-focus: text-input.has-focus;
+
+    // Syntax-highlight overlay. Per-token positioned Text elements that
+    // render INSIDE the Flickable so they scroll atomically with the
+    // TextInput — no manual scroll-tracking, no ghost lines. Callers
+    // push a list of `TokenSpan`s (line + x + text + color) and flip
+    // `has-token-spans` when highlighting is available.
+    in property <[TokenSpan]> token-spans: [];
+    in property <bool> has-token-spans: false;
+
+    // Current viewport offset of the inner Flickable. Retained as an
+    // output for sibling overlays (line-number gutter, diagnostic
+    // squiggles) that aren't children of this component and therefore
+    // have to offset themselves. Exposed as read-only.
+    out property <length> scroll-x: flick.viewport-x;
+    out property <length> scroll-y: flick.viewport-y;
 
     callback edited(text: string);
     callback key-pressed(event: KeyEvent) -> EventResult;
@@ -110,6 +167,32 @@ component EustressTextEdit inherits Rectangle {
                 : self.width;
             viewport-height: max(self.height, text-input.preferred-height);
 
+            // Syntax-highlight overlay — rendered INSIDE the Flickable's
+            // viewport as a sibling of the TextInput. Because they share the
+            // same scrolling parent, the overlay automatically moves with the
+            // text on scroll — no manual scroll-tracking, no ghost lines.
+            // Must come BEFORE the TextInput in z-order so the caret and
+            // selection highlight stay on top.
+            if root.has-token-spans: Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: parent.height;
+                background: transparent;
+
+                for span in root.token-spans: Text {
+                    x: span.x * 1px + 12px;
+                    y: span.line * 18px + 5px;
+                    text: span.text;
+                    color: rgba(span.r, span.g, span.b, 1.0);
+                    font-size: 13px;
+                    font-family: "Consolas";
+                    font-weight: span.bold ? 700 : 400;
+                    height: 18px;
+                    wrap: no-wrap;
+                }
+            }
+
             text-input := TextInput {
                 x: 0px; y: 0px;
                 width: parent.width;
@@ -154,40 +237,10 @@ component EustressTextEdit inherits Rectangle {
     }
 }
 
-// One highlighted line: Rust pre-joins all tokens for the line into a single
-// text string and picks the dominant (first non-whitespace token) color.
-export struct HighlightLine {
-    text: string,  // full line text
-    r: float,      // foreground color [0..1]
-    g: float,
-    b: float,
-    bold: bool,    // true for headings, keywords, etc.
-}
-
-// Per-token span for true syntax highlighting.
-// Each token has its own color and is positioned by character offset.
-// Monospace: x = col * char_width (computed Rust-side for pixel precision).
-export struct TokenSpan {
-    line: int,     // 0-based line index
-    x: float,      // x pixel offset from left edge
-    text: string,  // token text
-    r: float,      // foreground [0..1]
-    g: float,
-    b: float,
-    bold: bool,
-}
-
-// One analyzer diagnostic, positioned for drawing as an underline squiggle
-// under the offending text. `line` is 0-based; `x_start`/`x_end` are pixel
-// offsets. `severity` is one of "error" | "warning" | "info" | "hint" — the
-// renderer picks the color. Populated by Rust from `ScriptAnalysis`.
-export struct DiagnosticSpan {
-    line: int,
-    x_start: float,
-    x_end: float,
-    severity: string,
-    message: string,
-}
+// (TokenSpan / HighlightLine / DiagnosticSpan moved above EustressTextEdit
+// so the component can declare a `<[TokenSpan]>` property. Slint resolves
+// names top-down in a single file, so struct definitions must precede
+// the components that reference them.)
 
 // Center tab types: "scene" = 3D viewport, "script" = Soul Script, "web" = browser
 // Tab data model for the center tabbed viewer
@@ -319,12 +372,22 @@ export component ScriptEditor inherits Rectangle {
     callback on-go-to-definition(int, int);   // line, col (1-based)
     callback on-find-references(int, int);    // line, col (1-based)
 
-    // Derived: active tab mode ("summary" | "code" | "")
+    // Derived: active tab mode ("summary" | "code" | "markdown" | "")
+    //
+    // `is-soul-script` gates the Summary/Code toggle pill + the Build
+    // button — those only make sense for a real Soul Script, where
+    // Build compiles the summary brief into .rune code. Plain
+    // markdown documents (README, PATENT, etc.) use the same editor
+    // surface via `mode = "markdown"` but without those controls.
+    //
+    // `is-summary` selects the Summary editor surface (markdown view).
+    // We treat "markdown" mode as summary-like so plain-MD tabs render
+    // their content in the same editor; no Code view exists for them.
     property <string> active-mode: root.tabs.length > 0 && root.active-tab >= 0 && root.active-tab < root.tabs.length
         ? root.tabs[root.active-tab].mode
         : "";
     property <bool> is-soul-script: root.active-mode == "summary" || root.active-mode == "code";
-    property <bool> is-summary: root.active-mode == "summary";
+    property <bool> is-summary: root.active-mode == "summary" || root.active-mode == "markdown";
 
     background: Theme.panel-background;
 
@@ -626,27 +689,19 @@ export component ScriptEditor inherits Rectangle {
                 // Separator
                 Rectangle { width: 1px; background: #2a2a2a; }
 
-                // Editable markdown text area with per-token highlighting
+                // Editable markdown text area with per-token highlighting.
+                //
+                // Syntax-highlight overlay is pushed INTO the EustressTextEdit
+                // via `token-spans` — the overlay then lives inside the
+                // editor's own Flickable and scrolls atomically with the
+                // text. A previous version sat an external overlay Rectangle
+                // alongside this edit, which didn't share the scroll
+                // parent and produced ghost-duplicate lines when the user
+                // scrolled down. Mirror the Code-mode editor below, which
+                // has the correct wiring.
                 Rectangle {
                     horizontal-stretch: 1;
                     clip: true;
-
-                    // Per-token colored overlay for markdown
-                    if root.has-token-spans: Rectangle {
-                        x: 0px; y: 0px; width: 100%; height: 100%;
-
-                        for span in root.token-spans: Text {
-                            x: span.x * 1px + 12px;
-                            y: span.line * 18px + 5px;
-                            text: span.text;
-                            color: rgba(span.r, span.g, span.b, 1.0);
-                            font-size: 13px;
-                            font-family: "Consolas";
-                            font-weight: span.bold ? 700 : 400;
-                            height: 18px;
-                            wrap: no-wrap;
-                        }
-                    }
 
                     summary-edit := EustressTextEdit {
                         x: 0px; y: 0px; width: 100%; height: 100%;
@@ -654,6 +709,14 @@ export component ScriptEditor inherits Rectangle {
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
+                        token-spans: root.token-spans;
+                        has-token-spans: root.has-token-spans;
+                        // Keep the TextInput's own glyphs visible (dim)
+                        // beneath the coloured overlay. If the overlay is
+                        // ever stale during a scroll flush, the plain
+                        // text still reads through instead of leaving
+                        // ghost duplicates of old spans on screen.
+                        foreground: Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;
@@ -680,35 +743,42 @@ export component ScriptEditor inherits Rectangle {
                     background: Theme.background-secondary;
                     clip: true;
 
-                    // Colored accent strips (one per line, 18px tall) when highlights active
+                    // Colored accent strips (one per line, 18px tall) when highlights active.
+                    // Per-child `+ scroll-y` on each strip so they move in
+                    // lockstep with the line numbers and code above. The
+                    // outer Rectangle is just a scope holder — Slint
+                    // doesn't allow `if … for …` in a single binding.
                     if root.has-highlights: Rectangle {
-                        x: 0; y: 5px;
+                        x: 0;
+                        y: 0;
                         width: 3px;
                         height: 100%;
-                        clip: true;
 
-                        VerticalLayout {
-                            spacing: 0px;
-                            alignment: start;
-                            for hl in root.highlight-lines: Rectangle {
-                                height: 18px;
-                                width: 3px;
-                                background: rgba(hl.r, hl.g, hl.b, 0.55);
-                            }
+                        for hl[idx] in root.highlight-lines: Rectangle {
+                            x: 0;
+                            y: idx * 18px + 5px + editor-area.scroll-y;
+                            width: 3px;
+                            height: 18px;
+                            background: rgba(hl.r, hl.g, hl.b, 0.55);
                         }
                     }
 
                     // Line number text — one Text per line on the same
-                    // 18px grid as the code overlay so the gutter never
-                    // drifts against the code as you scroll.
+                    // 18px grid as the code overlay. Per-child `+ scroll-y`
+                    // keeps each number aligned with its matching code line
+                    // as the Flickable viewport moves. Must mirror the token
+                    // overlay's per-child approach exactly, or the gutter
+                    // desyncs from code during fast scrolls.
                     Rectangle {
-                        x: 0; y: 0;
-                        width: 100%; height: 100%;
+                        x: 0;
+                        y: 0;
+                        width: 100%;
+                        height: 100%;
                         background: transparent;
 
                         for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
-                            y: idx * 18px + 5px;
+                            y: idx * 18px + 5px + editor-area.scroll-y;
                             width: parent.width - 10px;
                             height: 18px;
                             text: num;
@@ -728,36 +798,26 @@ export component ScriptEditor inherits Rectangle {
                     background: #2a2a2a;
                 }
 
-                // Code editor with per-token syntax highlighting
+                // Code editor. Syntax highlighting is rendered INSIDE the
+                // EustressTextEdit's Flickable now, so there's no external
+                // overlay to keep in sync with scroll — the editor and its
+                // overlay move together atomically.
                 Rectangle {
                     horizontal-stretch: 1;
                     clip: true;
-
-                    // Per-token colored overlay — absolutely positioned Text elements
-                    if root.has-token-spans: Rectangle {
-                        x: 0px; y: 0px; width: 100%; height: 100%;
-
-                        for span in root.token-spans: Text {
-                            x: span.x * 1px + 12px;
-                            y: span.line * 18px + 5px;
-                            text: span.text;
-                            color: rgba(span.r, span.g, span.b, 1.0);
-                            font-size: 13px;
-                            font-family: "Consolas";
-                            font-weight: span.bold ? 700 : 400;
-                            height: 18px;
-                            wrap: no-wrap;
-                        }
-                    }
 
                     // Diagnostic squiggles + hover tooltip. The squiggle is a
                     // thin colored bar under the offending range; the
                     // invisible TouchArea sits OVER the offending text to
                     // register hover. On hover, a floating tooltip renders
                     // the diagnostic message above the squiggle.
+                    //
+                    // Same translation trick as the token-span overlay above:
+                    // `+ editor-area.scroll-x/y` keeps the squiggle locked to
+                    // its underlying text as the user scrolls.
                     for diag in root.diagnostic-spans: Rectangle {
-                        x: diag.x_start * 1px + 12px;
-                        y: diag.line * 18px + 5px;
+                        x: diag.x_start * 1px + 12px + editor-area.scroll-x;
+                        y: diag.line * 18px + 5px + editor-area.scroll-y;
                         width: max(4px, (diag.x_end - diag.x_start) * 1px);
                         height: 18px;
 
@@ -818,10 +878,20 @@ export component ScriptEditor inherits Rectangle {
                         font-size: 13px;
                         font-family: "Consolas";
                         wrap: no-wrap;
-                        // When syntax highlighting is active we hide the
-                        // TextInput's own glyphs so the overlay is the only
-                        // source of color, matching the old TextEdit behavior.
-                        foreground: root.has-token-spans ? transparent : Theme.text-primary;
+                        // Feed the syntax-highlight overlay INTO the editor.
+                        // The overlay now lives inside the editor's Flickable
+                        // and scrolls atomically with the text — no more
+                        // ghost-line duplication from external scroll chase.
+                        token-spans: root.token-spans;
+                        has-token-spans: root.has-token-spans;
+                        // Keep the TextInput's own glyphs visible. When the
+                        // coloured overlay draws on top, the user sees
+                        // highlighted code; when the overlay is rebuilding
+                        // (e.g. mid-scroll or right after an edit), the
+                        // plain text stays readable instead of vanishing
+                        // into blank space or showing stale spans on top
+                        // of now-different content.
+                        foreground: Theme.text-primary;
 
                         edited(text) => {
                             root.current-content = text;

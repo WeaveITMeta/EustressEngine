@@ -392,7 +392,11 @@ pub struct OutputConsole {
 
 impl Default for OutputConsole {
     fn default() -> Self {
-        Self { entries: Vec::new(), max_entries: 1000, auto_scroll: true, filter_level: LogLevel::Info }
+        // 10_000 lines ≈ 600–800 KB at 60–80 chars per line; cheap even
+        // with per-frame diagnostics flooding from Rune/Luau scripts.
+        // Enough headroom that a user scrolling back through a full
+        // Play-mode session sees the whole thing, not a truncated tail.
+        Self { entries: Vec::new(), max_entries: 10_000, auto_scroll: true, filter_level: LogLevel::Info }
     }
 }
 

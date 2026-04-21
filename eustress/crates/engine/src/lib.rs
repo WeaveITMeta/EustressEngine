@@ -36,6 +36,8 @@ pub mod physics_constraints;
 pub mod play_mode;
 pub mod play_mode_runtime;
 pub mod script_editor;
+pub mod lsp_launcher;
+pub mod engine_bridge;
 pub mod notifications;
 pub mod ui;
 pub mod seats;

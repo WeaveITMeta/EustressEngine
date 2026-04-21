@@ -168,6 +168,78 @@ pub fn compile_scripts(
 }
 
 // ============================================================================
+// Single-script hot recompile — replace one compiled unit while Play runs
+// ============================================================================
+
+/// Recompile one Rune script in place and swap the result into
+/// [`RuneRuntimeState::compiled`]. Used by the file watcher to deliver
+/// live edits without dropping out of Play mode.
+///
+/// Returns `Ok(())` on success. On compile failure the old unit is left
+/// untouched so the running VM keeps executing the last known-good
+/// version; the error is pushed onto `runtime.last_errors` and also
+/// returned so the caller can surface it in the UI.
+///
+/// Building a fresh `rune::Context` for each recompile is cheap
+/// (microseconds on our module set) and keeps the behaviour identical
+/// to [`compile_scripts`] — no lock-in on a half-built context that
+/// could drift out of sync with the registry.
+#[cfg(feature = "realism-scripting")]
+pub fn hot_recompile_one_script(
+    runtime: &mut RuneRuntimeState,
+    module_registry: &RuneModuleRegistry,
+    entity_index: u32,
+    name: &str,
+    source: &str,
+) -> Result<(), String> {
+    let rune_context = module_registry.build_context()?;
+    let runtime_ctx = std::sync::Arc::new(
+        rune_context
+            .runtime()
+            .map_err(|e| format!("runtime build: {}", e))?,
+    );
+
+    let mut sources = rune::Sources::new();
+    let src = rune::Source::memory(source)
+        .map_err(|e| format!("source init: {}", e))?;
+    sources
+        .insert(src)
+        .map_err(|e| format!("source insert: {}", e))?;
+
+    let mut diagnostics = rune::Diagnostics::new();
+    match rune::prepare(&mut sources)
+        .with_context(&rune_context)
+        .with_diagnostics(&mut diagnostics)
+        .build()
+    {
+        Ok(unit) => {
+            runtime.compiled.insert(
+                entity_index,
+                CompiledScript {
+                    unit: std::sync::Arc::new(unit),
+                    context: runtime_ctx,
+                    name: name.to_string(),
+                },
+            );
+            // Reset the per-entity initialisation flag so `on_init` fires
+            // again against the new unit. Without this, changes to
+            // `on_init` would silently not take effect until restart.
+            runtime.initialized.insert(entity_index, false);
+            info!("🔥 Hot-recompiled Rune script '{}'", name);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("hot recompile error in '{}': {}", name, e);
+            warn!("⚠ {}", msg);
+            runtime
+                .last_errors
+                .push((name.to_string(), msg.clone()));
+            Err(msg)
+        }
+    }
+}
+
+// ============================================================================
 // One-shot execution — run a script immediately outside simulation mode
 // ============================================================================
 

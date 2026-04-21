@@ -53,6 +53,9 @@ use crate::pages::{
     gallery::GalleryPage,
     leaderboard::LeaderboardPage,
     learn::LearnPage,
+    learn_ide::LearnIdePage,
+    learn_lsp::LearnLspPage,
+    learn_mcp::LearnMcpPage,
     marketplace::MarketplacePage,
     marketplace_item::MarketplaceItemPage,
     profile::ProfilePage,
@@ -169,6 +172,9 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/marketplace") view=MarketplacePage />
                 <Route path=path!("/marketplace/:id") view=MarketplaceItemPage />
                 <Route path=path!("/learn") view=LearnPage />
+                <Route path=path!("/learn/ide") view=LearnIdePage />
+                <Route path=path!("/learn/mcp") view=LearnMcpPage />
+                <Route path=path!("/learn/lsp") view=LearnLspPage />
                 <Route path=path!("/docs/getting-started") view=DocsGettingStartedPage />
                 <Route path=path!("/docs/scripting") view=DocsScriptingPage />
                 <Route path=path!("/docs/networking") view=DocsNetworkingPage />

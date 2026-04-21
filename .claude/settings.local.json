@@ -54,7 +54,15 @@
       "Bash(grep -E \"\\\\.\\(json|toml|yaml|yml\\)$\")",
       "Bash(ls -la /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*panel*.slint)",
       "Bash(grep -n \"component DropdownItem\\\\|component DropdownHeader\\\\|component DropdownSeparator\" /e/Workspace/EustressEngine/eustress/crates/engine/ui/slint/*.slint)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(git commit -m ' *)",
+      "Bash(find /e/Workspace/EustressEngine/eustress/crates/engine/src -name \"*.disabled\" -exec basename {} \\\\;)",
+      "Bash(\"C:/Program Files/LibreOffice/program/soffice.exe\" --headless --convert-to txt --outdir \"e:/tmp\" \"e:/Workspace/EustressEngine/docs/documents/eustress_constitution.docx\")",
+      "Read(//e/tmp/**)",
+      "Bash(bun --version)",
+      "Bash(bun install *)",
+      "Bash(bun run *)",
+      "Bash([ -f \"e:/Workspace/EustressEngine/eustress/crates/functions/src/$f.rs\" ])"
     ]
   }
 }
