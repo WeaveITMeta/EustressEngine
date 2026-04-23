@@ -33,6 +33,12 @@ required-features = ["lsp"]
 [dependencies]
 # System clipboard for Slint platform (Ctrl+V paste in LineEdit/TextInput)
 clipboard-win = "5"
+# Cross-platform clipboard used by Explorer "Copy Path" + the Vec3
+# copy/paste icons in the Properties panel. The `#[cfg(feature =
+# "clipboard")]` gates around these usages are kept so headless /
+# server-side builds can opt out by turning the feature off — for
+# interactive editor builds the `core` tier enables it.
+arboard = { version = "3", optional = true }
 
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "luau", "gui"] }
@@ -52,7 +58,12 @@ eustress-geo = { path = "../geo" }
 # bevy_shader provides ShaderRef, used in MaterialExtension implementations (Bevy 0.18)
 bevy_shader = { version = "0.18", default-features = false }
 
-# Workspace dependencies (Bevy 0.18) - without audio to avoid windows conflicts
+# Workspace dependencies (Bevy 0.18). `debug` enabled so B0001 query-
+# conflict panics report system + type names — essential when iterating
+# on system-param composition. `bevy_audio` restored 2026-04-22 per
+# user instruction: audio is required. If cpal/rodio surface a Windows
+# 0.54 conflict again, pin the workspace `windows` crate rather than
+# disabling the feature.
 bevy = { workspace = true, default-features = false, features = [
     "bevy_log",
     "bevy_winit",
@@ -61,7 +72,7 @@ bevy = { workspace = true, default-features = false, features = [
     "bevy_gizmos",
     "bevy_gltf",
     "bevy_scene",
-    # "bevy_audio",  # DISABLED - uses cpal/rodio with Windows 0.54
+    "bevy_audio",
     "bevy_state",
     "default_font",
     "bevy_asset",
@@ -75,6 +86,7 @@ bevy = { workspace = true, default-features = false, features = [
     "multi_threaded",
     "tonemapping_luts",
     "zstd_rust",
+    "debug",
 ] }
 # Slint UI (software renderer + FemtoVG OpenGL GPU renderer)
 slint = { workspace = true }
@@ -177,6 +189,7 @@ core = [
     "ai-integration",
     "forge",
     "bliss",
+    "clipboard",
     # LSP server ships inside the engine bundle. `cargo build --release`
     # produces BOTH `eustress-engine` AND `eustress-lsp` automatically —
     # same binary install, no separate download required for external
@@ -207,8 +220,12 @@ ai-integration = []
 # place of the substring fallback. Dependencies stay behind the flag so
 # non-Vortex builds skip the embedvec + sled payload.
 workshop-vortex-embeddings = []
-# Clipboard integration (right-click → Copy Path writes to OS clipboard via arboard)
-clipboard = []
+# Clipboard integration — right-click → Copy Path, Vec3 row
+# copy/paste icons, etc. Pulls in the cross-platform `arboard` crate.
+# Declared as `dep:arboard` so the feature gate and the optional dep
+# stay in sync (otherwise the `#[cfg(feature = "clipboard")]` blocks
+# compile against a non-existent module).
+clipboard = ["dep:arboard"]
 # zstd-compressed save files (opt-in for large scenes)
 compression = []
 # LSP server for external editors (Windsurf / VS Code / Zed / Neovim, etc.)

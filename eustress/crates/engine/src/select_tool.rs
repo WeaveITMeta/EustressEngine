@@ -244,8 +244,16 @@ fn handle_select_drag(
                 let scale = cam_dist * (fov * 0.5).tan() * 0.16;
                 let handle_length = scale * 1.0;
                 
-                // Check if clicking on move handle - let move_tool handle it
-                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::ONE, handle_length, &camera_transform) {
+                // Check if clicking on move handle - let move_tool handle it.
+                // Gizmo rotation follows StudioState.transform_mode so the
+                // click target matches the visible arrow in Local mode.
+                let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
+                    studio_state.transform_mode,
+                    selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
+                );
+                if crate::move_tool::is_clicking_move_handle(
+                    &ray, center, Vec3::ONE, handle_length, &camera_transform, gizmo_rotation,
+                ) {
                     return;
                 }
                 
@@ -262,20 +270,34 @@ fn handle_select_drag(
             // Not clicking on handle or selected part - continue to allow selecting new objects
         }
         
-        // Check Scale tool handles (per-entity, camera-distance-based)
+        // Check Scale tool handles (group-level, matching scale_handles.rs).
         if scale_state.active && studio_state.current_tool == Tool::Scale {
-            for (_entity, _, global_transform, _, _, basepart_opt) in selected_query.iter() {
-                let t = global_transform.compute_transform();
-                let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-                // MUST match scale_tool.rs camera-distance-based handle_length exactly!
+            let mut s_bmin = Vec3::splat(f32::MAX);
+            let mut s_bmax = Vec3::splat(f32::MIN);
+            let mut s_count = 0;
+            for (_e, _, gt, _, _, bp) in selected_query.iter() {
+                let t = gt.compute_transform();
+                let sz = bp.map(|b| b.size).unwrap_or(t.scale);
+                let (mn, mx) = calculate_rotated_aabb(t.translation, sz * 0.5, t.rotation);
+                s_bmin = s_bmin.min(mn);
+                s_bmax = s_bmax.max(mx);
+                s_count += 1;
+            }
+            if s_count > 0 {
+                let group_center = (s_bmin + s_bmax) * 0.5;
+                let group_extent = (s_bmax - s_bmin) * 0.5;
                 let scale_fov = match projection {
                     Projection::Perspective(p) => p.fov,
                     _ => std::f32::consts::FRAC_PI_4,
                 };
-                let scale_dist = (t.translation - camera_transform.translation()).length().max(0.1);
-                let scale_s = scale_dist * (scale_fov * 0.5).tan() * 0.16;
-                let scale_handle_length = scale_s * 0.9;
-                if crate::scale_tool::is_clicking_scale_handle(&ray, t.translation, t.rotation, size, scale_handle_length) {
+                let effective_extent = crate::scale_tool::effective_scale_extent(
+                    group_extent, group_center, camera_transform.translation(), scale_fov,
+                );
+                let scale_rotation = crate::move_tool::gizmo_rotation_for(
+                    studio_state.transform_mode,
+                    selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
+                );
+                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
                     return;
                 }
             }
@@ -298,7 +320,11 @@ fn handle_select_drag(
                 let rot_center = (rot_bmin + rot_bmax) * 0.5;
                 let rot_extent = rot_bmax - rot_bmin;
                 let rotate_radius = crate::rotate_tool::compute_ring_radius(rot_center, rot_extent, &camera_transform, projection);
-                if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, rotate_radius, &camera_transform) {
+                let rotate_rotation = crate::move_tool::gizmo_rotation_for(
+                    studio_state.transform_mode,
+                    selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
+                );
+                if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, rotate_radius, &camera_transform, rotate_rotation) {
                     return;
                 }
             }
@@ -629,103 +655,11 @@ fn handle_select_drag(
         }
     }
     
-    // +/- keys to move selected parts up/down by snap grid unit
-    // Uses pressed() for key repeat when held down
-    let has_selection = selected_query.iter().count() > 0;
-    if has_selection {
-        let snap_size = editor_settings.snap_size;
-        
-        // Use pressed() for continuous movement while key is held
-        let move_up = keys.pressed(KeyCode::Minus) || 
-                      keys.pressed(KeyCode::NumpadSubtract);
-        
-        let move_down = keys.pressed(KeyCode::Equal) || 
-                        keys.pressed(KeyCode::NumpadAdd);
-        
-        if move_up {
-            let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-            for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
-                let mut is_descendant = false;
-                let mut current = entity;
-                while let Ok(child_of) = parent_query.get(current) {
-                    let parent_entity = child_of.parent();
-                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
-                    current = parent_entity;
-                }
-                if is_descendant { continue; }
-                transform.translation.y += snap_size;
-            }
-            // Moved up by snap_size
-        }
-        
-        if move_down {
-            let selected_entities_set: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-            let entities_data: Vec<(Entity, Vec3, Vec3)> = selected_query.iter()
-                .filter(|(e, ..)| {
-                    let mut is_descendant = false;
-                    let mut current = *e;
-                    while let Ok(child_of) = parent_query.get(current) {
-                        let parent_entity = child_of.parent();
-                        if selected_entities_set.contains(&parent_entity) { is_descendant = true; break; }
-                        current = parent_entity;
-                    }
-                    !is_descendant
-                })
-                .map(|(e, t, _, _, _, bp)| {
-                    let size = bp.map(|b| b.size).unwrap_or(Vec3::ONE);
-                    (e, t.translation, size)
-                })
-                .collect();
-            
-            // Exclude selected entities AND their children (adornments) from raycast
-            let mut excluded_entities: Vec<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-            for parent in excluded_entities.clone() {
-                if let Ok(children) = children_query.get(parent) {
-                    excluded_entities.extend(children.iter());
-                }
-            }
-            
-            let mut _snapped_count = 0;
-            for (entity, current_pos, size) in entities_data {
-                let half_height = size.y * 0.5;
-                
-                // Cast a ray downward from the CENTER of the part
-                let ray_origin = current_pos;
-                let direction = Dir3::NEG_Y;
-                
-                if let Some(hit) = spatial_query.ray_hits(
-                    ray_origin,
-                    direction,
-                    1000.0,
-                    10,
-                    true,
-                    &SpatialQueryFilter::default().with_excluded_entities(excluded_entities.clone()),
-                ).first() {
-                    let surface_y = ray_origin.y - hit.distance;
-                    let new_y = surface_y + half_height;
-                    
-                    if let Ok((_, mut transform, _, _, _, basepart_opt)) = selected_query.get_mut(entity) {
-                        transform.translation.y = new_y;
-                        if let Some(mut bp) = basepart_opt {
-                            bp.cframe.translation.y = new_y;
-                        }
-                        _snapped_count += 1;
-                    }
-                } else {
-                    if let Ok((_, mut transform, _, _, _, basepart_opt)) = selected_query.get_mut(entity) {
-                        let new_y = half_height;
-                        transform.translation.y = new_y;
-                        if let Some(mut bp) = basepart_opt {
-                            bp.cframe.translation.y = new_y;
-                        }
-                        _snapped_count += 1;
-                    }
-                }
-            }
-            
-            // Snapped parts to surface
-        }
-    }
+    // `+` / `-` nudging lives in `keybindings.rs::nudge_selection_system`
+    // exclusively — that handler uses a proper first-press + auto-repeat
+    // timer. A duplicate `pressed()`-based handler used to live here and
+    // fired once per frame while the key was held, producing a double-
+    // or N-unit jump for every tap. Removed.
 }
 
 /// Ray-OBB intersection returning distance (for paste raycasting)

@@ -40,6 +40,11 @@ pub struct RotateToolState {
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
     /// Group center at drag start (pivot point)
     pub group_center: Vec3,
+    /// Gizmo rotation captured at drag start. World mode → IDENTITY;
+    /// Local mode → active entity's rotation at press time. Kept stable
+    /// for the entire drag so Local-mode rotation doesn't feedback-loop
+    /// as the entity rotates from its own motion.
+    pub drag_rotation: Quat,
 }
 
 // ============================================================================
@@ -50,10 +55,14 @@ pub struct RotateToolPlugin;
 
 impl Plugin for RotateToolPlugin {
     fn build(&self, app: &mut App) {
+        // Gizmo drawing moved to `rotate_handles::RotateHandlesPlugin`.
         app.init_resource::<RotateToolState>()
             .add_systems(Update, (
-                draw_rotate_gizmos,
                 handle_rotate_interaction,
+                // Numeric-input commit — applies typed angle exactly and
+                // finalizes the drag. Runs after cursor-driven drag so
+                // Enter wins over any in-progress cursor delta.
+                finalize_numeric_input_on_rotate.after(handle_rotate_interaction),
             ));
     }
 }
@@ -147,21 +156,56 @@ fn handle_rotate_interaction(
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     editor_settings: Res<crate::editor_settings::EditorSettings>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    studio_state: Option<Res<crate::ui::StudioState>>,
+    pivot_state: Option<Res<crate::pivot_mode::PivotState>>,
 ) {
     if !state.active { return; }
+
+    // Transform mode governs whether rotation axes are world-aligned
+    // (World) or rotated to match the active entity (Local). Must match
+    // what `rotate_handles::sync_rotate_handle_root` renders.
+    let transform_mode = studio_state
+        .as_ref()
+        .map(|s| s.transform_mode)
+        .unwrap_or(crate::ui::TransformMode::World);
+
+    // Escape cancels an in-progress rotation and restores pre-drag transforms.
+    if keys.just_pressed(KeyCode::Escape) {
+        if state.dragged_axis.is_some() {
+            for (entity, _, mut transform, bp_opt) in query.iter_mut() {
+                if let Some(pos) = state.initial_positions.get(&entity).copied() {
+                    transform.translation = pos;
+                }
+                if let Some(rot) = state.initial_rotations.get(&entity).copied() {
+                    transform.rotation = rot;
+                }
+                if let Some(mut bp) = bp_opt {
+                    if let Some(pos) = state.initial_positions.get(&entity).copied() {
+                        bp.cframe.translation = pos;
+                    }
+                    if let Some(rot) = state.initial_rotations.get(&entity).copied() {
+                        bp.cframe.rotation = rot;
+                    }
+                }
+            }
+            state.dragged_axis = None;
+            state.initial_rotations.clear();
+            state.initial_positions.clear();
+            return;
+        }
+    }
 
     let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
     
     // Block NEW drags when cursor is over UI panels (outside 3D viewport).
     // Allow in-progress drags to continue even if cursor leaves the viewport.
+    // ViewportBounds is physical px, cursor_pos is logical — go through
+    // contains_logical so DPI-scaled displays don't reject every click.
     if state.dragged_axis.is_none() {
         if let Some(vb) = viewport_bounds.as_deref() {
-            if vb.width > 0.0 && vb.height > 0.0 {
-                let in_viewport = cursor_pos.x >= vb.x && cursor_pos.x <= vb.x + vb.width
-                    && cursor_pos.y >= vb.y && cursor_pos.y <= vb.y + vb.height;
-                if !in_viewport { return; }
-            }
+            let scale = window.scale_factor() as f32;
+            if !vb.contains_logical(cursor_pos, scale) { return; }
         }
     }
     let Some((camera, camera_transform, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
@@ -190,13 +234,36 @@ fn handle_rotate_interaction(
             let (mn, mx) = calculate_rotated_aabb(*pos, *scale * 0.5, *rot);
             bmin = bmin.min(mn); bmax = bmax.max(mx);
         }
-        let center = (bmin + bmax) * 0.5;
+        let group_center = (bmin + bmax) * 0.5;
+        // Phase-1 pivot-mode integration — resolve the effective pivot
+        // point through PivotState. Active → use the first-selected
+        // entity's origin; Cursor → use the user-placed 3D cursor;
+        // Median (default) → group center. Individual is handled by
+        // the drag-math path below (rotates each entity around its own
+        // origin instead of a shared center).
+        let active_pos = snapshot.iter().next().map(|(_, p, _, _)| *p);
+        let center = if let Some(p) = pivot_state.as_deref() {
+            crate::pivot_mode::resolve_group_pivot(p, group_center, active_pos)
+        } else {
+            group_center
+        };
         let radius = compute_ring_radius(center, bmax - bmin, camera_transform, projection);
 
-        if let Some(axis) = detect_ring_hit(&ray, center, radius) {
+        // Gizmo rotation — captures whether we're in World or Local mode.
+        // Hit test rotates the canonical ring axes into this frame so
+        // clicking the visible Local-mode ring actually registers.
+        let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
+            transform_mode,
+            snapshot.iter().map(|(_, _, r, _)| *r),
+        );
+
+        if let Some(axis) = detect_ring_hit(&ray, center, radius, gizmo_rotation) {
             state.dragged_axis = Some(axis);
             state.group_center = center;
-            state.drag_start_angle = angle_on_ring(&ray, center, axis);
+            // Capture the gizmo rotation for stable axis across the whole
+            // drag — prevents feedback loops in Local mode.
+            state.drag_rotation = gizmo_rotation;
+            state.drag_start_angle = angle_on_ring(&ray, center, axis, gizmo_rotation);
             state.drag_start_pos = cursor_pos;
 
             state.initial_rotations.clear();
@@ -209,21 +276,42 @@ fn handle_rotate_interaction(
     } else if mouse.pressed(MouseButton::Left) {
         if let Some(axis) = state.dragged_axis {
             let center = state.group_center;
-            let current_angle = angle_on_ring(&ray, center, axis);
+            let gizmo_rotation = state.drag_rotation;
+            let current_angle = angle_on_ring(&ray, center, axis, gizmo_rotation);
             let raw_delta = current_angle - state.drag_start_angle;
 
-            // Snap: 15° by default, 1° with Shift held
-            let snap_deg = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+            // Angular snap: default from EditorSettings, 1° with Shift,
+            // no snap with Ctrl held (CAD-style temporary snap override).
+            // Defaults: 15° if unset.
+            let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let ctrl_pressed  = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+            let snap_deg = if ctrl_pressed {
+                0.0_f32  // bypass snap — CAD-style temporary override
+            } else if shift_pressed {
                 1.0_f32
             } else {
-                15.0_f32
+                editor_settings.angle_snap.max(0.0)
             };
-            let snap_rad = snap_deg.to_radians();
-            let snapped_delta = (raw_delta / snap_rad).round() * snap_rad;
+            let snapped_delta = if snap_deg > 0.0 {
+                let snap_rad = snap_deg.to_radians();
+                (raw_delta / snap_rad).round() * snap_rad
+            } else {
+                raw_delta
+            };
 
-            let rotation_delta = Quat::from_axis_angle(axis.to_vec3(), snapped_delta);
+            // Rotation axis = canonical axis rotated into gizmo frame.
+            let rotation_axis = gizmo_rotation * axis.to_vec3();
+            let rotation_delta = Quat::from_axis_angle(rotation_axis, snapped_delta);
 
             let selected_set: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
+
+            // Phase-1 Individual pivot — each entity rotates around its
+            // own origin instead of the group center. Other pivot modes
+            // (Median / Active / Cursor) all rotate around the shared
+            // `center` which was resolved at mouse-press time.
+            let individual_pivot = pivot_state.as_deref()
+                .map(|p| p.mode == crate::pivot_mode::PivotMode::Individual)
+                .unwrap_or(false);
 
             for (entity, _, mut transform, basepart_opt) in query.iter_mut() {
                 if is_descendant(entity, &selected_set, &parent_query) { continue; }
@@ -232,9 +320,12 @@ fn handle_rotate_interaction(
                     state.initial_rotations.get(&entity),
                     state.initial_positions.get(&entity),
                 ) {
-                    let rel = *init_pos - center;
-                    let new_pos = center + rotation_delta * rel;
-                    let new_rot = rotation_delta * *init_rot;
+                    let (new_pos, new_rot) = if individual_pivot {
+                        (*init_pos, rotation_delta * *init_rot)
+                    } else {
+                        let rel = *init_pos - center;
+                        (center + rotation_delta * rel, rotation_delta * *init_rot)
+                    };
 
                     transform.translation = new_pos;
                     transform.rotation = new_rot;
@@ -276,6 +367,80 @@ fn handle_rotate_interaction(
     }
 }
 
+/// Apply a `NumericInputCommittedEvent` to an in-progress Rotate drag.
+/// `value` is interpreted as an angle in **degrees** around the dragged
+/// ring axis; absolute = total angle from drag start, relative adds
+/// the same `value` on top (v1 treats the two identically since the
+/// cursor-derived delta isn't carried into the finalize — Enter always
+/// defines the exact angle from the initial orientation).
+///
+/// Matches mouse-release: pushes a `TransformEntities` undo for every
+/// entity that actually moved or rotated. TOML persistence for rotate
+/// is handled elsewhere — not duplicated here.
+#[allow(clippy::too_many_arguments)]
+fn finalize_numeric_input_on_rotate(
+    mut committed: MessageReader<crate::numeric_input::NumericInputCommittedEvent>,
+    mut state: ResMut<RotateToolState>,
+    mut query: Query<(
+        Entity,
+        &mut Transform,
+        Option<&mut crate::classes::BasePart>,
+    ), With<Selected>>,
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
+    parent_query: Query<&ChildOf>,
+) {
+    use crate::numeric_input::NumericInputOwner;
+
+    for event in committed.read() {
+        if event.owner != NumericInputOwner::Rotate { continue; }
+        let Some(axis) = state.dragged_axis else { continue; };
+        if state.initial_rotations.is_empty() { continue; }
+
+        let angle_rad = event.value.to_radians();
+        let rotation_axis = state.drag_rotation * axis.to_vec3();
+        let rotation_delta = Quat::from_axis_angle(rotation_axis, angle_rad);
+        let center = state.group_center;
+
+        let selected_set: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
+
+        let mut old_transforms = Vec::new();
+        let mut new_transforms = Vec::new();
+
+        for (entity, mut transform, basepart_opt) in query.iter_mut() {
+            if is_descendant(entity, &selected_set, &parent_query) { continue; }
+
+            let Some(init_rot) = state.initial_rotations.get(&entity).copied() else { continue };
+            let Some(init_pos) = state.initial_positions.get(&entity).copied() else { continue };
+
+            let rel = init_pos - center;
+            let new_pos = center + rotation_delta * rel;
+            let new_rot = rotation_delta * init_rot;
+
+            let rot_changed = init_rot.angle_between(new_rot) > 0.001;
+            let pos_changed = (init_pos - new_pos).length() > 0.001;
+            if rot_changed || pos_changed {
+                old_transforms.push((entity.to_bits(), init_pos.to_array(), init_rot.to_array()));
+                new_transforms.push((entity.to_bits(), new_pos.to_array(),  new_rot.to_array()));
+            }
+
+            transform.translation = new_pos;
+            transform.rotation    = new_rot;
+            if let Some(mut bp) = basepart_opt {
+                bp.cframe.translation = new_pos;
+                bp.cframe.rotation    = new_rot;
+            }
+        }
+
+        if !old_transforms.is_empty() {
+            undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
+        }
+
+        state.dragged_axis = None;
+        state.initial_rotations.clear();
+        state.initial_positions.clear();
+    }
+}
+
 // ============================================================================
 // 5. Public Helpers
 // ============================================================================
@@ -304,13 +469,18 @@ pub fn compute_ring_radius(
 
 /// Check if the ray hits any rotation ring. Used by part_selection to avoid
 /// deselecting when clicking a ring handle.
+///
+/// `rotation` is the gizmo's world rotation — `Quat::IDENTITY` for World
+/// transform mode, or the active entity's rotation for Local mode.
+/// Must match what rotate_handles::sync_rotate_handle_root renders.
 pub fn is_clicking_rotate_handle(
     ray: &Ray3d,
     center: Vec3,
     radius: f32,
     _camera_transform: &GlobalTransform,
+    rotation: Quat,
 ) -> bool {
-    detect_ring_hit(ray, center, radius).is_some()
+    detect_ring_hit(ray, center, radius, rotation).is_some()
 }
 
 // ============================================================================
@@ -318,15 +488,16 @@ pub fn is_clicking_rotate_handle(
 // ============================================================================
 
 /// Detect which ring axis the ray hits. Returns the closest axis whose ring
-/// plane intersection falls within [inner_r, outer_r] of the ring.
-fn detect_ring_hit(ray: &Ray3d, center: Vec3, radius: f32) -> Option<Axis3d> {
+/// plane intersection falls within [inner_r, outer_r] of the ring. Ring
+/// normals are rotated by `rotation` so Local-mode rings are hit correctly.
+fn detect_ring_hit(ray: &Ray3d, center: Vec3, radius: f32, rotation: Quat) -> Option<Axis3d> {
     let inner = radius * 0.75;
     let outer = radius * 1.25;
 
     let mut best: Option<(Axis3d, f32)> = None;
 
     for axis in [Axis3d::X, Axis3d::Y, Axis3d::Z] {
-        let axis_vec = axis.to_vec3();
+        let axis_vec = rotation * axis.to_vec3();
         if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec) {
             let hit = ray.origin + *ray.direction * t;
             let dist = (hit - center).length();
@@ -342,9 +513,10 @@ fn detect_ring_hit(ray: &Ray3d, center: Vec3, radius: f32) -> Option<Axis3d> {
     best.map(|(a, _)| a)
 }
 
-/// Calculate the angle of the ray's intersection with the ring plane around `axis`.
-fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d) -> f32 {
-    let axis_vec = axis.to_vec3();
+/// Calculate the angle of the ray's intersection with the ring plane around
+/// `axis` rotated by `rotation`.
+fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d, rotation: Quat) -> f32 {
+    let axis_vec = rotation * axis.to_vec3();
     let t = ray_plane_intersection(ray.origin, *ray.direction, center, axis_vec).unwrap_or(0.0);
     let hit = ray.origin + *ray.direction * t;
     let to_hit = hit - center;

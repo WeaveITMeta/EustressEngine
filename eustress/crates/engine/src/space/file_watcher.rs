@@ -238,7 +238,7 @@ pub fn process_file_changes(
     }
     
     let events = watcher.poll_events();
-    
+
     if !events.is_empty() {
         // Mark asset manager and explorer caches stale so they rescan on next sync
         if let Some(ref mut ams) = asset_manager_state {
@@ -254,6 +254,18 @@ pub fn process_file_changes(
         if elapsed.as_millis() > 50 {
             warn!("🐌 process_file_changes took {:.1}ms ({} events)", elapsed.as_secs_f64() * 1000.0, events.len());
         }
+    }
+
+    // Coalesce external renames. On most filesystems an `mv Foo Bar`
+    // arrives as a Remove + Create pair in the same poll window —
+    // processing them naively would despawn the entity and re-spawn
+    // a fresh one, losing any transient ECS state (physics velocity,
+    // animation progress, in-flight tool results, etc.). We detect
+    // the pair by matching final-filename equality (same basename,
+    // different full path) and promote it to an in-place path update.
+    let (events, renames) = coalesce_renames(events);
+    for (old_ev, new_ev) in renames {
+        handle_file_renamed(&old_ev.path, &new_ev.path, &mut registry, &mut commands, &file_entities);
     }
     
     // Grace period: ignore Modified events for the first 5 seconds after watcher
@@ -367,45 +379,61 @@ fn handle_file_modified(
         }
         
         FileType::Toml => {
-            // Hot-reload TOML instance file (.glb.toml, .part.toml, etc.)
+            // Hot-reload TOML instance file. `_instance.toml` is included
+            // so external-editor updates (VS Code, Workshop `update_entity`,
+            // any CRUD pathway that writes the folder marker directly)
+            // propagate without a restart. Engine-side Properties-panel
+            // edits also land here, but they're harmless because the
+            // re-deserialize produces the same ECS state we just wrote.
             let path_str = event.path.to_string_lossy();
-            if path_str.ends_with(".glb.toml") 
-                || path_str.ends_with(".part.toml") 
+            if path_str.ends_with(".glb.toml")
+                || path_str.ends_with(".part.toml")
                 || path_str.ends_with(".model.toml")
-                || path_str.ends_with(".instance.toml") 
+                || path_str.ends_with(".instance.toml")
+                || path_str.ends_with("_instance.toml")
             {
                 if let Some(entity) = registry.get_entity(&event.path) {
-                    // Reload the TOML and update ECS components
+                    // Reload the TOML and update ECS components. Editors
+                    // commonly write files in two syscalls (truncate,
+                    // then content), so the first Modify event can fire
+                    // on a half-written file — zero bytes or trailing
+                    // garbage. Downgrading the parse/read failures to
+                    // debug! avoids spamming the Output panel with
+                    // transient errors; the next Modify will land on a
+                    // complete file and succeed.
                     match std::fs::read_to_string(&event.path) {
                         Ok(toml_content) => {
-                            match toml::from_str::<crate::space::instance_loader::InstanceDefinition>(&toml_content) {
-                                Ok(instance_def) => {
-                                    // Update transform
-                                    let transform: Transform = instance_def.transform.into();
-                                    commands.entity(entity).insert(transform);
-                                    
-                                    // Update realism components if present (use to_component() methods)
-                                    if let Some(ref mat) = instance_def.material {
-                                        commands.entity(entity).insert(mat.to_component());
+                            if toml_content.trim().is_empty() {
+                                debug!("Skipping mid-write reload of empty {:?}", event.path);
+                            } else {
+                                match toml::from_str::<crate::space::instance_loader::InstanceDefinition>(&toml_content) {
+                                    Ok(instance_def) => {
+                                        // Update transform
+                                        let transform: Transform = instance_def.transform.into();
+                                        commands.entity(entity).insert(transform);
+
+                                        if let Some(ref mat) = instance_def.material {
+                                            commands.entity(entity).insert(mat.to_component());
+                                        }
+
+                                        if let Some(ref thermo) = instance_def.thermodynamic {
+                                            commands.entity(entity).insert(thermo.to_component());
+                                        }
+
+                                        if let Some(ref echem) = instance_def.electrochemical {
+                                            commands.entity(entity).insert(echem.to_component());
+                                        }
+
+                                        debug!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
                                     }
-                                    
-                                    if let Some(ref thermo) = instance_def.thermodynamic {
-                                        commands.entity(entity).insert(thermo.to_component());
+                                    Err(e) => {
+                                        debug!("Partial-write parse of {:?} deferred: {}", event.path, e);
                                     }
-                                    
-                                    if let Some(ref echem) = instance_def.electrochemical {
-                                        commands.entity(entity).insert(echem.to_component());
-                                    }
-                                    
-                                    debug!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
-                                }
-                                Err(e) => {
-                                    error!("Failed to parse TOML instance {:?}: {}", event.path, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to read TOML instance {:?}: {}", event.path, e);
+                            debug!("Partial-write read of {:?} deferred: {}", event.path, e);
                         }
                     }
                 }
@@ -467,17 +495,31 @@ fn handle_file_created(
         return;
     }
     
-    // Skip files inside leaf entity folders (Script, Part).
-    // These are internal files (source code, Summary.md, meshes), not scene entities.
-    if let Some(parent) = event.path.parent() {
-        let instance_toml = parent.join("_instance.toml");
-        if instance_toml.exists() {
-            if let Ok(content) = std::fs::read_to_string(&instance_toml) {
-                if content.contains("\"Script\"") || content.contains("\"SoulScript\"")
-                    || content.contains("\"Part\"")
-                {
-                    debug!("Skipping {:?} (internal file of leaf entity folder)", event.path);
-                    return;
+    // Skip files inside leaf entity folders (Script, Part) — e.g. a
+    // Script's `.rune` source or a Part's mesh file, which are internal
+    // assets of the parent entity, not their own scene entities.
+    //
+    // EXCEPTION: `_instance.toml` IS the leaf entity's definition (not
+    // an internal asset), so a Create event for it must flow through
+    // to the Toml branch below. Without this guard-skip, every
+    // folder-based entity written at runtime (Workshop create_entity,
+    // scripts, manual drag-in) would be silently dropped because its
+    // parent's `_instance.toml` matches the "leaf" heuristic (which
+    // self-matches since parent.join("_instance.toml") == event.path).
+    let is_instance_marker = event.path.file_name()
+        .map(|n| n == "_instance.toml")
+        .unwrap_or(false);
+    if !is_instance_marker {
+        if let Some(parent) = event.path.parent() {
+            let instance_toml = parent.join("_instance.toml");
+            if instance_toml.exists() {
+                if let Ok(content) = std::fs::read_to_string(&instance_toml) {
+                    if content.contains("\"Script\"") || content.contains("\"SoulScript\"")
+                        || content.contains("\"Part\"")
+                    {
+                        debug!("Skipping {:?} (internal file of leaf entity folder)", event.path);
+                        return;
+                    }
                 }
             }
         }
@@ -764,6 +806,110 @@ fn handle_file_created(
 }
 
 /// Handle file deletion
+/// Scan a poll batch for Remove+Create pairs that look like a rename:
+/// same final filename (basename) but different absolute paths. Returns
+/// the surviving non-rename events plus the matched pairs.
+///
+/// The heuristic is intentionally conservative: the two events must
+/// appear in the SAME poll batch (~one frame), so a human-scale
+/// delete-then-create a few hundred milliseconds apart won't be
+/// mistaken for a rename. A matching filename across different paths in
+/// the same frame is overwhelmingly a filesystem rename.
+fn coalesce_renames(
+    events: Vec<FileChangeEvent>,
+) -> (Vec<FileChangeEvent>, Vec<(FileChangeEvent, FileChangeEvent)>) {
+    let mut consumed = vec![false; events.len()];
+    let mut renames: Vec<(FileChangeEvent, FileChangeEvent)> = Vec::new();
+
+    for i in 0..events.len() {
+        if consumed[i] || events[i].change_type != FileChangeType::Removed { continue; }
+        let rm_basename = match events[i].path.file_name() {
+            Some(n) => n.to_os_string(),
+            None => continue,
+        };
+        for j in (i + 1)..events.len() {
+            if consumed[j] || events[j].change_type != FileChangeType::Created { continue; }
+            if events[j].path == events[i].path { continue; }
+            if events[j].path.file_name() == Some(rm_basename.as_os_str()) {
+                consumed[i] = true;
+                consumed[j] = true;
+                renames.push((events[i].clone(), events[j].clone()));
+                break;
+            }
+        }
+    }
+
+    let survivors: Vec<FileChangeEvent> = events.into_iter()
+        .enumerate()
+        .filter_map(|(i, ev)| if consumed[i] { None } else { Some(ev) })
+        .collect();
+    (survivors, renames)
+}
+
+/// In-place rename: rekey the entity in the registry under its new path
+/// and patch any path-bearing components on the entity itself
+/// (`LoadedFromFile`, `InstanceFile`) so subsequent writes land on the
+/// renamed file. Leaves `Instance.name` alone — if the user wants the
+/// entity display name to follow the folder name, editing the
+/// `_instance.toml` fires a Modify event that reloads the metadata
+/// through the normal path.
+fn handle_file_renamed(
+    old_path: &Path,
+    new_path: &Path,
+    registry: &mut SpaceFileRegistry,
+    commands: &mut Commands,
+    file_entities: &Query<(Entity, &super::file_loader::LoadedFromFile)>,
+) {
+    let Some(entity) = registry.get_entity(old_path) else {
+        // Nothing in the registry at the old path — treat as a plain
+        // Create and let the downstream handler spawn a fresh entity.
+        debug!("🔀 Rename {:?} → {:?} but old path not registered; skipping rekey", old_path, new_path);
+        return;
+    };
+
+    // Move the registry entry. `unregister_file` returns `()`, so we
+    // snapshot the metadata first, then rekey under the new path.
+    let mut meta = registry.file_metadata.get(old_path).cloned()
+        .unwrap_or_else(|| super::file_loader::FileMetadata {
+            path: new_path.to_path_buf(),
+            file_type: super::file_loader::FileType::Toml,
+            service: String::new(),
+            name: String::new(),
+            size: 0,
+            modified: std::time::SystemTime::now(),
+            children: Vec::new(),
+        });
+    registry.unregister_file(old_path);
+    meta.path = new_path.to_path_buf();
+    registry.register(new_path.to_path_buf(), entity, meta);
+
+    // Update `LoadedFromFile.path` on the entity so stale-entity
+    // cleanup and any downstream reload logic point to the new file.
+    if let Ok((_, loaded)) = file_entities.get(entity) {
+        if loaded.path == old_path {
+            commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+                path: new_path.to_path_buf(),
+                file_type: loaded.file_type,
+                service: loaded.service.clone(),
+            });
+        }
+    }
+
+    // `InstanceFile` tracks the TOML path used for write-back by the
+    // transform persistence system; keep it in sync so edits after a
+    // rename land on the new location instead of recreating the old.
+    commands.entity(entity).insert(super::instance_loader::InstanceFile {
+        toml_path: new_path.to_path_buf(),
+        mesh_path: std::path::PathBuf::new(),
+        name: new_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string(),
+    });
+
+    info!("🔀 Rename {:?} → {:?} (entity preserved)", old_path, new_path);
+}
+
 fn handle_file_removed(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,

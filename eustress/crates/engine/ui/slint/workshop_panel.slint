@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Button, LineEdit, TextEdit } from "std-widgets.slint";
-import { Theme, PanelHeader } from "theme.slint";
+import { Theme, PanelHeader, SidePanelHeader } from "theme.slint";
 import { MentionPopup, MentionItemData } from "mention_popup.slint";
 
 export { MentionItemData }
@@ -31,6 +31,15 @@ export struct ChatMessage {
     mcp-status: string,     // For role="mcp": "pending" | "approved" | "running" | "done" | "skipped" | "error"
     artifact-path: string,  // For role="artifact": file path of generated artifact
     artifact-type: string,  // For role="artifact": "patent" | "sota" | "requirements" | "mesh" | "toml" | "readme" | "catalog"
+    // Entity-affordance fields — populated by `sync_workshop_to_slint`
+    // when the tool call created or targeted a scene entity (e.g.
+    // create_entity, update_entity). When `entity-name` is non-empty
+    // the chat bubble renders a clickable entity chip with class icon
+    // + name, and `select-entity(name)` fires when clicked so the
+    // Explorer jumps to that entity.
+    entity-class: string,   // class_name, e.g. "Part" | "SoulScript" | "BillboardGui"
+    entity-name: string,    // human-readable entity name
+    entity-icon: image,     // pre-loaded class icon (same source the Explorer uses)
 }
 
 // Past conversation summary for history browser
@@ -71,10 +80,16 @@ component ChatBubble inherits Rectangle {
     in property <string> artifact-path: "";
     in property <string> artifact-type: "";
 
+    // Entity affordances (see ChatMessage struct comments)
+    in property <string> entity-class: "";
+    in property <string> entity-name: "";
+    in property <image>  entity-icon;
+
     callback approve-mcp(int);
     callback skip-mcp(int);
     callback edit-mcp(int);
     callback open-artifact(string);
+    callback select-entity(string);
 
     in property <int> message-id: 0;
 
@@ -192,6 +207,58 @@ component ChatBubble inherits Rectangle {
                         font-family: "Consolas";
                         vertical-alignment: center;
                         overflow: elide;
+                    }
+                }
+
+                // Entity chip — rendered when the tool call produced or
+                // targeted a scene entity. Clicking jumps the Explorer
+                // to that entity. Icon is y-centered with the name via
+                // explicit `y: (parent.height - self.height) / 2`
+                // arithmetic (HorizontalLayout was top-aligning fixed-
+                // height children in the same way it did on the tool
+                // badge above). The whole chip is a single TouchArea
+                // so the click target covers icon + name.
+                if root.entity-name != "": Rectangle {
+                    height: 30px;
+                    background: entity-touch.has-hover ? #1a3050 : #162638;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: entity-touch.has-hover ? Theme.accent-blue : #25405a;
+
+                    entity-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.select-entity(root.entity-name); }
+                    }
+
+                    entity-icon-img := Image {
+                        x: 8px;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        source: root.entity-icon;
+                        image-fit: contain;
+                    }
+
+                    entity-name-text := Text {
+                        x: entity-icon-img.x + entity-icon-img.width + 8px;
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width - self.x - entity-class-text.width - 16px;
+                        text: root.entity-name;
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        font-weight: 600;
+                        font-family: "Consolas";
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    entity-class-text := Text {
+                        x: parent.width - self.width - 8px;
+                        y: (parent.height - self.height) / 2;
+                        text: root.entity-class;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        vertical-alignment: center;
                     }
                 }
 
@@ -558,6 +625,7 @@ export component WorkshopPanel inherits Rectangle {
     callback on-skip-mcp(int);                      // User skips an MCP command
     callback on-edit-mcp(int);                      // User wants to edit before running
     callback on-open-artifact(string);              // User clicks an artifact path
+    callback on-select-entity(string);              // User clicks an entity chip in a chat bubble — select by name in Explorer
     callback on-start-pipeline();                   // Start the ideation pipeline
     callback on-pause-pipeline();                   // Pause to let user review
     callback on-resume-pipeline();                  // Resume after pause/edit
@@ -574,7 +642,18 @@ export component WorkshopPanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // Header with conversation history button
+        // Unified side-panel title — shared 36px gradient + bold
+        // label + optional count badge, consistent with Properties /
+        // History / Soul / Problems.
+        SidePanelHeader {
+            title: "WORKSHOP";
+            count: root.past-conversations.length;
+            show-icon: true;
+            icon: @image-url("../../assets/icons/wrench.svg");
+        }
+
+        // Secondary toolbar — + / history buttons moved here to keep
+        // the title strip clean.
         Rectangle {
             height: 28px;
             background: Theme.header-background;
@@ -583,15 +662,7 @@ export component WorkshopPanel inherits Rectangle {
                 padding-left: 8px;
                 padding-right: 4px;
                 spacing: 4px;
-
-                Text {
-                    text: "Workshop";
-                    color: Theme.text-primary;
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
+                alignment: end;
 
                 // New conversation button
                 Rectangle {
@@ -1118,12 +1189,16 @@ export component WorkshopPanel inherits Rectangle {
                     mcp-status: msg.mcp-status;
                     artifact-path: msg.artifact-path;
                     artifact-type: msg.artifact-type;
+                    entity-class: msg.entity-class;
+                    entity-name: msg.entity-name;
+                    entity-icon: msg.entity-icon;
                     message-id: msg.id;
 
                     approve-mcp(id) => { root.on-approve-mcp(id); }
                     skip-mcp(id) => { root.on-skip-mcp(id); }
                     edit-mcp(id) => { root.on-edit-mcp(id); }
                     open-artifact(path) => { root.on-open-artifact(path); }
+                    select-entity(name) => { root.on-select-entity(name); }
                 }
             }
         }

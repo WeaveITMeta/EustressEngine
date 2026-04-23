@@ -171,6 +171,7 @@ pub fn drain_script_errors_to_output(
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     analysis: Option<Res<crate::script_editor::ScriptAnalysis>>,
     mut last_analysis_gen: Local<u64>,
+    queue: Option<Res<eustress_common::change_queue::ChangeQueue>>,
 ) {
     // LSP-grade compile diagnostics — same source of truth the Problems
     // panel and squiggle overlay use. Push exactly once per analyzer
@@ -215,7 +216,33 @@ pub fn drain_script_errors_to_output(
     // Rune: drain `last_errors`. Use `std::mem::take` so we empty the
     // vec even if `output` isn't available — avoids re-logging next
     // frame once the panel resource shows up.
+    //
+    // ALSO tee each compile error to the `rune.compile.error` stream
+    // topic so MCP / CLI subscribers (including the Workshop AI via
+    // `query_stream_events`) can detect failures after calling
+    // `execute_rune` and iterate the script until it compiles clean —
+    // the feedback loop the user asked for in 2026-04-22.
     let rune_batch = std::mem::take(&mut runtime.last_errors);
+    for (script_name, err) in &rune_batch {
+        // Each line of `err` is one pre-formatted
+        // `script:line:col: error: msg` diagnostic from
+        // `format_compile_diagnostics`. Publish them line-by-line
+        // so subscribers see one structured event per diagnostic.
+        if let Some(ref queue) = queue {
+            for line in err.lines() {
+                if line.trim().is_empty() { continue; }
+                let payload = serde_json::json!({
+                    "script": script_name,
+                    "line": line.trim(),
+                });
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    queue.stream
+                        .producer("rune.compile.error")
+                        .send_bytes(bytes::Bytes::from(bytes));
+                }
+            }
+        }
+    }
     if let Some(ref mut out) = output {
         for (script_name, err) in rune_batch {
             // Split multi-line errors so each line is one OutputConsole

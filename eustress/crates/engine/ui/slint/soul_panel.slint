@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
-import { Theme, PanelHeader } from "theme.slint";
+import { Theme, PanelHeader, SidePanelHeader } from "theme.slint";
 
 // Soul script data — a single script row in the panel.
 export struct SoulScriptData {
@@ -219,7 +219,19 @@ export component SoulPanel inherits Rectangle {
         padding: 0px;
         spacing: 0px;
 
-        // Header — matches Workshop style
+        // Unified side-panel header (36px gradient + bold title),
+        // matches Properties / History / Workshop / Problems so every
+        // right-hand panel shares the same top strip.
+        SidePanelHeader {
+            title: "SOUL SCRIPTS";
+            count: root.rune-count + root.luau-server-count + root.luau-client-count + root.luau-module-count;
+            show-icon: true;
+            icon: @image-url("../../assets/icons/ui/brain.svg");
+        }
+
+        // Toolbar row — action buttons live here instead of in the
+        // title row so the 36px title stays uncluttered like the
+        // Properties panel.
         Rectangle {
             height: 28px;
             background: Theme.header-background;
@@ -228,15 +240,7 @@ export component SoulPanel inherits Rectangle {
                 padding-left: 8px;
                 padding-right: 4px;
                 spacing: 4px;
-
-                Text {
-                    text: "Soul Scripts";
-                    color: Theme.text-primary;
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
+                alignment: end;
 
                 // Build All button (hammer icon)
                 Rectangle {

@@ -383,6 +383,9 @@ export component Ribbon inherits Rectangle {
     // Tool callbacks
     callback on-select-tool(string);
     callback on-set-transform-mode(string);
+    /// Activate a modal tool by id — routed to ActivateModalToolEvent
+    /// on the Rust side (see `modal_tool::ModalToolRegistry`).
+    callback on-activate-modal-tool(string);
     
     // Play callbacks
     callback on-play-solo();
@@ -1720,6 +1723,7 @@ export component Ribbon inherits Rectangle {
                 
                 for tab-item in [
                     { name: "Home",      id: "home",      color: #808080 },
+                    { name: "CAD",       id: "cad",       color: #00bcd4 },  // brand cyan — CAD is the parametric/smart-edit workflow
                     { name: "Model",     id: "model",     color: #6495ed },
                     { name: "UI",        id: "ui",        color: #00A2FF },
                     { name: "Terrain",   id: "terrain",   color: #3cb371 },
@@ -1729,14 +1733,14 @@ export component Ribbon inherits Rectangle {
                     width: tab-text.preferred-width + 16px;
                     height: 20px;
                     border-radius: 4px;
-                    background: root.ribbon-tab == tab-item.id ? tab-item.color : 
+                    background: root.ribbon-tab == tab-item.id ? tab-item.color :
                                 tab-touch.has-hover ? Theme.button-hover : transparent;
-                    
+
                     tab-touch := TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.ribbon-tab = tab-item.id; }
                     }
-                    
+
                     tab-text := Text {
                         text: tab-item.name;
                         color: root.ribbon-tab == tab-item.id ? #ffffff : Theme.text-secondary;
@@ -1744,6 +1748,23 @@ export component Ribbon inherits Rectangle {
                         font-weight: root.ribbon-tab == tab-item.id ? 600 : 400;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                        animate font-weight { duration: 140ms; easing: ease-in-out; }
+                    }
+
+                    // Tab-underline — 2px `accent-eustress` bar anchored
+                    // to the bottom of the active tab. Width + opacity
+                    // animate on ribbon-tab change so the accent slides
+                    // between tabs rather than snapping. 140ms ease-in-
+                    // out per TOOLSET_UX.md §2.4.
+                    Rectangle {
+                        y: parent.height - 2px;
+                        x: (parent.width - self.width) / 2;
+                        width: root.ribbon-tab == tab-item.id ? parent.width * 0.8 : 0px;
+                        height: 2px;
+                        background: Theme.accent-eustress;
+                        border-radius: 1px;
+                        animate width   { duration: 140ms; easing: ease-in-out; }
+                        animate x       { duration: 140ms; easing: ease-in-out; }
                     }
                 }
             }
@@ -1849,6 +1870,201 @@ export component Ribbon inherits Rectangle {
                 }
             }
             
+            // ════════════════════════════════════════════════════════════
+            // CAD TAB — Smart Build Tools, Align, Boolean
+            // Parametric Sketch/Features/Modify/Pattern groups land as
+            // they're implemented (TOOLSET_CAD.md Phase 0).
+            // ════════════════════════════════════════════════════════════
+            if root.ribbon-tab == "cad": HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+                alignment: center;
+
+                // ── SMART EDIT group — stravant-tier productivity tools
+                // backed by the ModalTool framework. Each button fires
+                // ActivateModalToolEvent{tool_id}.
+                ToolGroup {
+                    label: "Smart Edit";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/gap-fill.svg");
+                        label: "Gap Fill"; shortcut: "Ctrl+Alt+G";
+                        tooltip: "Fill the gap between two parts with a bridging block";
+                        tint: #00bcd4;
+                        clicked => { root.on-activate-modal-tool("gap_fill"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/resize-align.svg");
+                        label: "Resize Align"; shortcut: "Ctrl+Alt+A";
+                        tooltip: "Resize source part until its face meets target's face";
+                        tint: #00bcd4;
+                        clicked => { root.on-activate-modal-tool("resize_align"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/edge-align.svg");
+                        label: "Edge Align"; shortcut: "";
+                        tooltip: "Translate source so its edge coincides with target's edge";
+                        tint: #00bcd4;
+                        clicked => { root.on-activate-modal-tool("edge_align"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/part-swap.svg");
+                        label: "Part Swap"; shortcut: "Ctrl+Alt+P";
+                        tooltip: "Swap positions between two parts";
+                        tint: #00bcd4;
+                        clicked => { root.on-activate-modal-tool("part_swap_positions"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/mirror.svg");
+                        label: "Mirror"; shortcut: "Ctrl+Alt+M";
+                        tooltip: "Reflect selection across a plane";
+                        tint: #00bcd4;
+                        clicked => { root.on-activate-modal-tool("model_reflect"); }
+                    }
+                }
+                GroupDivider {}
+
+                // ── ALIGN group — last Phase-0 tool feature
+                // (TOOLSET.md §4.4 + §4.13.8). Center-align + distribute
+                // on each world axis. Min/Max align + align-to-active
+                // available via keybinding follow-up.
+                ToolGroup {
+                    label: "Align";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/align-center.svg");
+                        label: "Align X"; shortcut: "";
+                        tooltip: "Align selection centers along the X axis";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("align:center:x"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/align-center.svg");
+                        label: "Align Y"; shortcut: "";
+                        tooltip: "Align selection centers along the Y axis";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("align:center:y"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/align-center.svg");
+                        label: "Align Z"; shortcut: "";
+                        tooltip: "Align selection centers along the Z axis";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("align:center:z"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/distribute.svg");
+                        label: "Dist. X"; shortcut: "";
+                        tooltip: "Distribute selection evenly along the X axis (≥ 3 parts)";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("distribute:x"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/distribute.svg");
+                        label: "Dist. Y"; shortcut: "";
+                        tooltip: "Distribute selection evenly along the Y axis (≥ 3 parts)";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("distribute:y"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/distribute.svg");
+                        label: "Dist. Z"; shortcut: "";
+                        tooltip: "Distribute selection evenly along the Z axis (≥ 3 parts)";
+                        tint: #ffb74d;
+                        clicked => { root.on-menu-action("distribute:z"); }
+                    }
+                }
+                GroupDivider {}
+
+                // ── PATTERN group (Phase 1) — Linear / Radial / Grid
+                // array ModalTool implementations. Users pick parameters
+                // in the Tool Options Bar, click Apply → N copies spawn
+                // as TOML-backed folders.
+                ToolGroup {
+                    label: "Pattern";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/array-linear.svg");
+                        label: "Linear"; shortcut: "Ctrl+Alt+L";
+                        tooltip: "Linear array — N copies along a step vector";
+                        tint: #ba68c8;
+                        clicked => { root.on-activate-modal-tool("linear_array"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/array-radial.svg");
+                        label: "Radial"; shortcut: "Ctrl+Alt+R";
+                        tooltip: "Radial array — N copies around a pivot axis";
+                        tint: #ba68c8;
+                        clicked => { root.on-activate-modal-tool("radial_array"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/array-grid.svg");
+                        label: "Grid"; shortcut: "";
+                        tooltip: "Grid array — Nx × Ny × Nz 3D pattern";
+                        tint: #ba68c8;
+                        clicked => { root.on-activate-modal-tool("grid_array"); }
+                    }
+                }
+                GroupDivider {}
+
+                // ── BOOLEAN group — CSG operations on selected parts.
+                ToolGroup {
+                    label: "Boolean";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-union.svg");
+                        label: "Union"; shortcut: "";
+                        tooltip: "Combine selected parts into a single solid (CSG Union)";
+                        tint: #64b5f6;
+                        clicked => { root.on-menu-action("csg:union"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-subtract.svg");
+                        label: "Subtract"; shortcut: "";
+                        tooltip: "Subtract second selection from first (CSG Difference)";
+                        tint: #64b5f6;
+                        clicked => { root.on-menu-action("csg:negate"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-intersect.svg");
+                        label: "Intersect"; shortcut: "";
+                        tooltip: "Keep only the overlap of selected parts (CSG Intersection)";
+                        tint: #64b5f6;
+                        clicked => { root.on-menu-action("csg:intersect"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/csg-separate.svg");
+                        label: "Separate"; shortcut: "";
+                        tooltip: "Break a union back into its components";
+                        tint: #64b5f6;
+                        clicked => { root.on-menu-action("csg:separate"); }
+                    }
+                }
+                GroupDivider {}
+
+                // ── Placeholder for upcoming parametric groups.
+                // Rendered as a dim label so users know the tab is
+                // scaffolded — prevents "empty tab" confusion while
+                // Sketch / Features / Modify / Pattern ship.
+                Rectangle {
+                    width: 240px; height: 64px;
+                    background: transparent;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "Sketch · Features · Modify";
+                            color: Theme.text-disabled;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "coming soon — see TOOLSET_CAD.md";
+                            color: Theme.text-disabled;
+                            font-size: 9px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
             // ════════════════════════════════════════════════════════════
             // MODEL TAB — Parts, Structure, Constraints, Effects, CSG, Assets
             // ════════════════════════════════════════════════════════════

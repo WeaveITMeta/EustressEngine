@@ -15,6 +15,8 @@ members = [
     "crates/mcp-server",
     "crates/player-mobile",
     "crates/bliss",
+    "crates/cad",
+    "crates/mesh-edit",
     "crates/embedvec",
     "crates/spatial-llm",
     "crates/geo",
@@ -80,6 +82,27 @@ bytes = "1.7"
 
 # Zero-copy serialization for ECS scene deltas (rkyv 0.8)
 rkyv = { version = "0.8", features = ["std"] }
+
+# CAD BRep kernel — `truck` is a pure-Rust parametric modeler (curves /
+# surfaces / topology / CSG / meshing / STEP I/O). Underpins the
+# eustress-cad crate; unblocks parametric Gap Fill + Resize Align
+# (TOOLSET.md Phase 1) and all of TOOLSET_CAD.md Phase 0-2.
+#
+# **Pin strategy (2026-04-22)** — the truck ecosystem publishes
+# sub-crates at independent cadences. These are the actual latest
+# versions on crates.io *and* cargo's resolver converges on a single
+# copy of every shared dep (verified with `cargo tree` on a probe
+# workspace). An aspirational "all at 0.6" pin fails because
+# truck-base/-geometry never hit 0.6, and truck-shapeops/-stepio
+# remain on older majors. Update each line individually after
+# verifying the ecosystem is still coherent.
+truck-base      = "0.5"    # latest: 0.5.0 — base traits + cgmath64
+truck-geometry  = "0.5"    # latest: 0.5.0 — B-spline / NURBS
+truck-topology  = "0.6"    # latest: 0.6.0 — vertex/edge/wire/face/shell
+truck-modeling  = "0.6"    # latest: 0.6.0 — extrude / revolve / sweep
+truck-meshalgo  = "0.4"    # latest: 0.4.0 — tessellation
+truck-shapeops  = "0.4"    # latest: 0.4.0 — boolean or / and / not
+truck-stepio    = "0.3"    # latest: 0.3.0 — STEP import/export
 
 [profile.dev]
 opt-level = 2

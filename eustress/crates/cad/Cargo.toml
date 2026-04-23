@@ -1,0 +1,40 @@
+[package]
+name = "eustress-cad"
+version = "0.1.0"
+edition = "2021"
+
+# Parametric CAD for Eustress — BRep kernel + feature tree + TOML-
+# backed authoring format. Wraps `truck` (pure-Rust BRep) and exposes
+# an Eustress-native API (`Quantity` units, `FeatureTree`, `Sketch`,
+# `Feature`) that the engine's CAD ribbon tab + MCP surface consume.
+#
+# Unblocks:
+# - TOOLSET.md Phase 1: Parametric Gap Fill, Parametric Resize Align
+# - TOOLSET_CAD.md Phase 0 entire tranche (sketch / extrude / revolve /
+#   fillet / chamfer / reference geometry / feature-tree loader)
+# - TOOLSET_CAD.md Phase 1 partial (sweep / loft / shell / hole wizard)
+
+[dependencies]
+# truck sub-crates — only pull what's used to keep compile time sane.
+truck-base      = { workspace = true }
+truck-geometry  = { workspace = true }
+truck-topology  = { workspace = true }
+truck-modeling  = { workspace = true }
+truck-meshalgo  = { workspace = true }
+truck-shapeops  = { workspace = true }
+truck-stepio    = { workspace = true }
+
+# TOML serialization for the on-disk feature-tree format.
+serde = { workspace = true }
+toml  = "0.8"
+
+# Error handling.
+thiserror = { workspace = true }
+
+# Math — Bevy types for interop with the rest of the engine.
+# The CAD crate itself doesn't depend on Bevy ECS; only Bevy's
+# glam Vec3/Quat so callers can hand off positions cleanly.
+glam = "0.29"
+
+# Time stamps for audit metadata.
+chrono = { workspace = true }

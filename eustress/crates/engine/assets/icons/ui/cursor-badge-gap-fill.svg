@@ -1,0 +1,7 @@
+<!-- Gap Fill cursor badge — minimal bridging icon for 12×12 cursor overlay. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Two small blocks connected by a bridge -->
+  <rect x="1" y="5" width="4" height="6"/>
+  <rect x="11" y="5" width="4" height="6"/>
+  <line x1="5" y1="8" x2="11" y2="8"/>
+</svg>

@@ -439,18 +439,27 @@ component Vec3Row inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
-    
+
     // Parsed values (split from value string)
     in property <string> x-value: "0";
     in property <string> y-value: "0";
     in property <string> z-value: "0";
-    
+
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: x-edit.has-focus || y-edit.has-focus || z-edit.has-focus;
-    
+
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
+    // Fired when the user clicks the tiny copy icon at the end of
+    // the row. The argument is the full "x, y, z" triple so the
+    // parent can push it to the OS clipboard without re-parsing
+    // the LineEdit state.
+    callback copy-vector(string);
+    // Fired when the user clicks the paste icon. The argument is
+    // irrelevant (empty string); the parent reads the clipboard on
+    // the Rust side + pushes a value-changed.
+    callback paste-vector();
     
     height: 28px;
     border-radius: 2px;
@@ -626,6 +635,56 @@ component Vec3Row inherits Rectangle {
                 }
             }
         }
+
+        // Copy / Paste icon pair. Click Copy to push the current
+        // `x, y, z` triple to the OS clipboard; click Paste to
+        // read the clipboard, parse it (accepts `x, y, z`,
+        // `x y z`, `(x, y, z)`, or `Vector3.new(x, y, z)`) and set
+        // all three fields atomically — saves the user from
+        // Ctrl+C'ing each field individually.
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: copy-touch.has-hover ? Theme.button-hover : transparent;
+            copy-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.copy-vector(x-edit.text + ", " + y-edit.text + ", " + z-edit.text);
+                }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/copy.svg");
+                image-fit: contain;
+                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+            }
+        }
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: paste-touch.has-hover ? Theme.button-hover : transparent;
+            paste-touch := TouchArea {
+                mouse-cursor: pointer;
+                enabled: root.editable;
+                clicked => { root.paste-vector(); }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/paste.svg");
+                image-fit: contain;
+                colorize: root.editable
+                    ? (paste-touch.has-hover ? Theme.text-primary : Theme.text-disabled)
+                    : Theme.text-disabled;
+            }
+        }
     }
 }
 
@@ -650,6 +709,10 @@ component RotationVec3Row inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
+    // Matches `Vec3Row` — copy pushes the current triple; paste asks
+    // the parent/Rust to read the clipboard and drive a value-changed.
+    callback copy-vector(string);
+    callback paste-vector();
 
     height: 28px;
     border-radius: 2px;
@@ -829,6 +892,52 @@ component RotationVec3Row inherits Rectangle {
                     }
                     Text { text: "+"; color: Theme.text-secondary; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
                 }
+            }
+        }
+
+        // Copy / Paste pair — same behaviour as `Vec3Row`, kept on
+        // its own row slot so the step buttons don't overflow.
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: r-copy-touch.has-hover ? Theme.button-hover : transparent;
+            r-copy-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.copy-vector(rx-edit.text + ", " + ry-edit.text + ", " + rz-edit.text);
+                }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/copy.svg");
+                image-fit: contain;
+                colorize: r-copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+            }
+        }
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: r-paste-touch.has-hover ? Theme.button-hover : transparent;
+            r-paste-touch := TouchArea {
+                mouse-cursor: pointer;
+                enabled: root.editable;
+                clicked => { root.paste-vector(); }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/paste.svg");
+                image-fit: contain;
+                colorize: root.editable
+                    ? (r-paste-touch.has-hover ? Theme.text-primary : Theme.text-disabled)
+                    : Theme.text-disabled;
             }
         }
     }
@@ -1037,6 +1146,15 @@ export component PropertiesPanel inherits Rectangle {
     callback on-open-learn-url(string);
     // Fired when any input field gains or loses focus — Rust uses this to pause property sync
     callback on-input-focus-changed(bool);
+    // Fired when the copy icon on a Vec3 / Rotation row is clicked —
+    // Rust pushes the `"x, y, z"` triple to the OS clipboard.
+    callback on-copy-property-vector(string, string);
+    // Fired when the paste icon on a Vec3 / Rotation row is clicked —
+    // Rust reads the clipboard, parses whichever format the user
+    // copied (`"x, y, z"`, `(x, y, z)`, `x y z`, `Vector3.new(x, y, z)`
+    // are all accepted) and synthesises a matching
+    // `on-property-changed(name, "x, y, z")` call.
+    callback on-paste-property-vector(string);
     
     background: Theme.panel-background;
     
@@ -1213,6 +1331,8 @@ export component PropertiesPanel inherits Rectangle {
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                         focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        copy-vector(val) => { root.on-copy-property-vector(prop.name, val); }
+                        paste-vector() => { root.on-paste-property-vector(prop.name); }
                     }
 
                     // Rotation property — degrees with +/- buttons, supports negatives
@@ -1229,6 +1349,8 @@ export component PropertiesPanel inherits Rectangle {
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                         focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        copy-vector(val) => { root.on-copy-property-vector(prop.name, val); }
+                        paste-vector() => { root.on-paste-property-vector(prop.name); }
                     }
                     
                     // Color property

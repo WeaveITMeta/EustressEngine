@@ -546,13 +546,25 @@ pub fn poll_agentic_responses(
                 let mut any_awaiting_approval = false;
 
                 for tool_use in &agentic.tool_uses {
-                    // Look up the tool's approval requirement.
+                    // Look up the tool's approval requirement against the
+                    // FULL catalogue (`all_tools`), not the active-mode
+                    // subset. Claude is given every tool up-front
+                    // (`claude_tools_for(..., WorkshopMode::ALL)`), so the
+                    // filter used for approval has to match — otherwise a
+                    // cross-mode call (e.g. Claude picks `run_scenario`
+                    // while the user is in General mode) misses the
+                    // lookup, falls through to `requires_approval=true`,
+                    // and hangs the pipeline forever because
+                    // `awaiting_tool_approval` never clears. Unknown
+                    // tools (truly unregistered) drop to `false` now so
+                    // dispatch runs and returns an "Unknown tool" error
+                    // Claude can recover from, rather than hanging.
                     let requires_approval = tool_registry.as_ref()
-                        .and_then(|r| r.tools_for_modes(&pipeline.active_modes.all())
+                        .and_then(|r| r.all_tools()
                             .into_iter()
                             .find(|d| d.name == tool_use.name))
                         .map(|d| d.requires_approval)
-                        .unwrap_or(true); // unknown tool → safer to require approval
+                        .unwrap_or(false);
 
                     // Create the Mcp message card.
                     let card_content = format!("{}({})", tool_use.name,

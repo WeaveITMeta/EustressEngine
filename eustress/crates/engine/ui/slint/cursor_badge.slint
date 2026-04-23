@@ -1,0 +1,37 @@
+// ============================================================================
+// CursorBadge — in-viewport cursor-follower workaround for the OS
+// custom-cursor blocker (Slint hasn't exposed image-cursor binding yet).
+// ============================================================================
+//
+// Renders the active tool's 16×16 badge SVG at the cursor's current
+// viewport position, offset down-right so it doesn't cover the OS
+// cursor. When the user is over non-viewport UI (ribbon, explorer,
+// panels), `visible` goes false to avoid visual noise.
+//
+// State is driven entirely by Rust (`CursorBadgeState` resource), so
+// the Slint side is a pure projection.
+
+import { Theme } from "theme.slint";
+
+export component CursorBadge inherits Rectangle {
+    in property <bool>   visible-when: false;
+    in property <float>  cursor-x: 0;       // viewport-relative px
+    in property <float>  cursor-y: 0;
+    in property <image>  badge-icon;
+    in property <color>  badge-tint: Theme.accent-eustress;
+
+    visible: root.visible-when;
+    x: root.cursor-x * 1px + 10px;
+    y: root.cursor-y * 1px + 12px;
+    width:  16px;
+    height: 16px;
+    // No background — the badge is the whole visual.
+
+    Image {
+        source: root.badge-icon;
+        width:  16px;
+        height: 16px;
+        colorize: root.badge-tint;
+        image-fit: contain;
+    }
+}

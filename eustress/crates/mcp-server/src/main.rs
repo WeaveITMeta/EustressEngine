@@ -71,6 +71,19 @@ async fn main() -> anyhow::Result<()> {
         search_roots: resolve_search_roots(),
     }));
 
+    // Boot-time tool-surface summary — goes to stderr so the stdio
+    // JSON-RPC channel stays clean. Helps operators confirm the
+    // server binary was rebuilt after a tool addition without having
+    // to call `tools/list` through the IDE.
+    let shared_tools = crate::shared_registry::list_shared_tools();
+    let local_tool_count = tools::all_tools().len();
+    tracing::info!(
+        "🔧 {} v{} ready — {} hand-rolled tools + {} shared-registry tools = {} total surface",
+        SERVER_NAME, SERVER_VERSION,
+        local_tool_count, shared_tools.len(),
+        local_tool_count + shared_tools.len()
+    );
+
     // Outgoing writes must be serialized — both tool responses and watcher
     // notifications write to the same stdout. A Mutex-guarded tokio stdout
     // prevents interleaved bytes.

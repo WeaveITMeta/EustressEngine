@@ -1,0 +1,11 @@
+<!-- Resize Align — a growing part with an arrow pushing its face to meet
+     a fixed target plane at right. Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Source block (left), with dashed right edge suggesting extension -->
+  <path d="M3 7 H13 V17 H3 Z"/>
+  <!-- Target plane (right) — a vertical bar representing the target face -->
+  <line x1="20" y1="4" x2="20" y2="20"/>
+  <!-- Resize arrow pointing from source right edge to target plane -->
+  <line x1="14" y1="12" x2="19" y2="12"/>
+  <path d="M17 10 L19 12 L17 14"/>
+</svg>

@@ -1,0 +1,129 @@
+// ============================================================================
+// ToastUndo — dedicated commit-toast with inline Undo action.
+// ============================================================================
+//
+// Reflects `ToastUndoState` (Rust resource) — surfaces when a
+// ModalTool commit lands with a labeled undo entry. The toast fades
+// in from the top-center, holds for the auto-dismiss duration, then
+// fades out. Clicking the inline "Undo" action fires the same
+// `UndoEvent` Ctrl+Z would, then dismisses.
+//
+// Positioned at top-center of the viewport so it doesn't cover the
+// ToolOptionsBar (top-left) or the selection summary (top-right).
+
+import { Theme } from "theme.slint";
+
+export component ToastUndo inherits Rectangle {
+    in property <string> message;         // e.g. "Mirrored 324 parts"
+    in property <string> undo-shortcut;   // e.g. "Ctrl+Z"
+    /// Fades in from 0 → 1 then holds; Rust drives this so the
+    /// auto-dismiss timer + undo-click dismissal route through the
+    /// same observable state.
+    in property <float>  progress: 1.0;
+
+    /// Fires when the user clicks the inline Undo button. Rust sends
+    /// `UndoEvent` (same path Ctrl+Z uses) + sets state.visible = false.
+    callback undo-clicked();
+    /// Fires when the dismiss × is clicked (user saw the toast, doesn't
+    /// want to undo). Rust clears state.visible.
+    callback dismissed();
+
+    // Custom clamp via `toast-max-width` — `max-width` is a built-in
+    // on Rectangle and redeclaring it as an input property is
+    // rejected by the Slint compiler. The property name change is
+    // purely local to this component; callers pass
+    // `toast-max-width:` when overriding the 360px default.
+    in property <length> toast-max-width: 360px;
+
+    width: toast-max-width > 0 ? min(root.toast-max-width, 360px) : 360px;
+    height: 44px;
+
+    background:        Theme.panel-glass;
+    border-radius:     Theme.radius-lg;
+    border-width:      1px;
+    border-color:      Theme.border-color;
+    drop-shadow-blur:  16px;
+    drop-shadow-color: Theme.shadow-float;
+    opacity:           root.progress;
+
+    // Top hairline per UX §6.1.
+    Rectangle {
+        y: 0; width: 100%; height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    HorizontalLayout {
+        padding-left:  12px;
+        padding-right: 8px;
+        spacing:       8px;
+        alignment:     start;
+
+        // Success dot.
+        Rectangle {
+            width: 8px; height: 8px;
+            y: (parent.height - self.height) / 2;
+            background:    Theme.accent-green;
+            border-radius: 4px;
+        }
+
+        Text {
+            text: root.message;
+            color: Theme.text-primary;
+            font-size: Theme.font-md;
+            vertical-alignment: center;
+        }
+
+        // Spacer.
+        Rectangle { horizontal-stretch: 1; }
+
+        // Undo action.
+        undo-btn := Rectangle {
+            width: 92px;
+            height: 28px;
+            y: (parent.height - self.height) / 2;
+            background: undo-touch.has-hover ? Theme.accent-blue : transparent;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.accent-blue;
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 4px;
+                Text {
+                    text: "Undo";
+                    color: undo-touch.has-hover ? #ffffff : Theme.accent-blue;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.undo-shortcut;
+                    color: undo-touch.has-hover ? #ffffffbb : #ffffff88;
+                    font-size: Theme.font-xs;
+                    vertical-alignment: center;
+                }
+            }
+            undo-touch := TouchArea {
+                clicked => { root.undo-clicked(); }
+            }
+        }
+
+        // Dismiss ×.
+        dismiss-btn := Rectangle {
+            width: 24px;
+            height: 24px;
+            y: (parent.height - self.height) / 2;
+            background: dismiss-touch.has-hover ? #ffffff15 : transparent;
+            border-radius: Theme.radius-md;
+            Text {
+                text: "×";
+                color: Theme.text-secondary;
+                font-size: 18px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            dismiss-touch := TouchArea {
+                clicked => { root.dismissed(); }
+            }
+        }
+    }
+}

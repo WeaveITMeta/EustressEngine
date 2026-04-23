@@ -1,0 +1,11 @@
+<!-- Resize Align cursor badge — arrows between boundaries. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Left boundary -->
+  <line x1="2" y1="3" x2="2" y2="13"/>
+  <!-- Right boundary -->
+  <line x1="14" y1="3" x2="14" y2="13"/>
+  <!-- Double-arrow between -->
+  <line x1="4" y1="8" x2="12" y2="8"/>
+  <path d="M5 6 L3 8 L5 10"/>
+  <path d="M11 6 L13 8 L11 10"/>
+</svg>

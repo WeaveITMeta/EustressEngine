@@ -101,15 +101,29 @@ impl FileType {
     /// Get file type from full path (handles compound extensions like .glb.toml, .part.toml)
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         let path_str = path.to_string_lossy();
-        
+
         // Check for compound extensions first (order matters - check specific before generic)
-        
-        // EEP marker files (folder containers per EEP_SPECIFICATION.md)
-        // _service.toml - marks a folder as a Service (Workspace, Lighting, etc.)
-        // _instance.toml - marks a folder as a container (Model, Folder, ScreenGui, etc.)
-        // These are metadata files, NOT entities — return None so they are never spawned.
-        if path_str.ends_with("_service.toml") || path_str.ends_with("_instance.toml") {
+
+        // `_service.toml` — service marker, never an entity.
+        if path_str.ends_with("_service.toml") {
             return None;
+        }
+
+        // `_instance.toml` — folder-based entity marker. On INITIAL SCAN
+        // the folder walker classifies the parent directory via
+        // `scan_dir_entries` + `spawn_directory_entry`, so the marker
+        // itself is skipped by filename inside that path
+        // (scan_dir_entries line ~329). But on HOT-CREATE we need this
+        // file to route through the file-watcher's FileType::Toml
+        // branch — otherwise a brand-new `Workspace/Foo/_instance.toml`
+        // written by a Workshop tool (create_entity, etc.) is dropped
+        // by `process_event`'s `FileType::from_path(...)?` and the
+        // entity never spawns until the next full rescan. Returning
+        // `Some(Self::Toml)` makes `load_instance_definition_with_defaults`
+        // read this file directly; its InstanceDefinition captures the
+        // same data the folder-walker would have derived.
+        if path_str.ends_with("_instance.toml") {
+            return Some(Self::Toml);
         }
         
         // Instance files (spawn as entities)
@@ -309,6 +323,18 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
 
             // Skip hidden/system directories (.eustress, .git, node_modules, target, trash)
             if name.starts_with('.') || name == "node_modules" || name == "target" || name == "trash" {
+                continue;
+            }
+            // EEP reserved names — `_instance.toml` and `_service.toml`
+            // are MARKER FILE names, never valid as directory names.
+            // The file branch below already skips these when they're
+            // files; applying the same rule to directories means a
+            // directory that happens to share one of these names is
+            // ignored rather than spawned as a phantom child entity.
+            // This isn't self-healing — it's respecting the EEP
+            // convention that the name is reserved for a marker,
+            // regardless of which filesystem node-type backs it.
+            if name == "_instance.toml" || name == "_service.toml" {
                 continue;
             }
             let children = scan_dir_entries(&path, service);
@@ -917,6 +943,18 @@ pub fn spawn_directory_entry(
                 "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,
                 "BillboardGui"   => eustress_common::classes::ClassName::BillboardGui,
                 "SurfaceGui"     => eustress_common::classes::ClassName::SurfaceGui,
+                // Leaf UI classes — previously loaded only from flat
+                // compound-extension files (`Name.textlabel.toml`).
+                // Now also recognised in folder form so Insert-menu
+                // folders round-trip on reload. The spawn branch
+                // (below) routes them through the same
+                // `spawn_gui_element` path as the flat files.
+                "TextLabel"      => eustress_common::classes::ClassName::TextLabel,
+                "TextButton"     => eustress_common::classes::ClassName::TextButton,
+                "TextBox"        => eustress_common::classes::ClassName::TextBox,
+                "ImageLabel"     => eustress_common::classes::ClassName::ImageLabel,
+                "ImageButton"    => eustress_common::classes::ClassName::ImageButton,
+                "ViewportFrame"  => eustress_common::classes::ClassName::ViewportFrame,
                 "Model"          => eustress_common::classes::ClassName::Model,
                 _                => eustress_common::classes::ClassName::Folder,
             })
@@ -1180,6 +1218,47 @@ pub fn spawn_directory_entry(
                 )).id()
             }
         }
+    } else if matches!(class_name,
+        eustress_common::classes::ClassName::TextLabel
+        | eustress_common::classes::ClassName::TextButton
+        | eustress_common::classes::ClassName::TextBox
+        | eustress_common::classes::ClassName::ImageLabel
+        | eustress_common::classes::ClassName::ImageButton
+        | eustress_common::classes::ClassName::ViewportFrame,
+    ) {
+        // Leaf UI class in folder form — new Insert-menu convention
+        // writes `Name/_instance.toml` with `class_name = "TextLabel"`
+        // (etc.) instead of the legacy flat `Name.textlabel.toml`.
+        // Route through the same `spawn_gui_element` helper the flat
+        // path uses so Bevy UI components, click handlers, and text
+        // rendering all stay in one implementation. The loader at
+        // `gui_class_from_extension` now peeks the `_instance.toml`
+        // metadata when the file ends in `_instance.toml`, so
+        // `spawn_gui_element` resolves the right class without any
+        // extra parameter threading here.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        match super::gui_loader::load_gui_definition(&instance_toml) {
+            Ok(gui_def) => {
+                super::gui_loader::spawn_gui_element(commands, &instance_toml, &gui_def)
+            }
+            Err(e) => {
+                warn!("Failed to load leaf UI folder {:?}: {}", dir_meta.path, e);
+                commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_meta.name.clone(),
+                        class_name: eustress_common::classes::ClassName::Folder,
+                        archivable: true, id: 0, ai: false, uuid: String::new(),
+                    },
+                    LoadedFromFile {
+                        path: dir_meta.path.clone(),
+                        file_type: FileType::Directory,
+                        service: dir_meta.service.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Node { display: Display::None, ..default() },
+                )).id()
+            }
+        }
     } else {
         // Regular Folder / Model — 3D entity
         let display_name = {
@@ -1233,6 +1312,18 @@ pub fn spawn_directory_entry(
     }
 
     registry.register(dir_meta.path.clone(), folder_entity, dir_meta.clone());
+    // Also index the entity under its `_instance.toml` marker when one
+    // exists. The file watcher delivers Modify/Remove events against
+    // the FILE (the marker), not the enclosing folder; without this
+    // secondary entry, UPDATE / DELETE hot-reloads on an initially-
+    // scanned Part folder couldn't resolve the entity and silently
+    // no-op'd. Hot-created entities already register under the
+    // `_instance.toml` path (see `handle_file_created` Toml branch),
+    // so this just brings initial-scan registration into parity.
+    let instance_marker = dir_meta.path.join("_instance.toml");
+    if instance_marker.is_file() {
+        registry.register(instance_marker, folder_entity, dir_meta.clone());
+    }
     info!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
 
     // Script and Part folders are leaf entities — their children are internal files

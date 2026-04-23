@@ -1,0 +1,82 @@
+// ============================================================================
+// FloatingNumericInput — live numeric entry during a gizmo drag.
+// ============================================================================
+//
+// Renders a small glass popover near the cursor anchor while the Rust
+// `NumericInputState` resource is active. Reads:
+//   - `visible`    — NumericInputState.active
+//   - `anchor-x/y` — captured cursor pos (pixels, parent-relative)
+//   - `text`       — the in-progress typed buffer
+//   - `axis-label` — "along X axis", "around Y axis", etc.
+//   - `unit`       — "studs", "°", "×"
+//
+// Key input is consumed by Bevy (`handle_numeric_input_keys` in
+// `numeric_input.rs`) so this component has no interactivity — it's a
+// pure reflection of Rust state.
+//
+// Visual spec per TOOLSET_UX.md §3.3 + §6.1 (glass chrome, top hairline).
+
+import { Theme } from "theme.slint";
+
+export component FloatingNumericInput inherits Rectangle {
+    in property <float>  anchor-x: 0;   // in px, viewport-relative
+    in property <float>  anchor-y: 0;
+    in property <string> text: "";
+    in property <string> axis-label: "";
+    in property <string> unit: "";
+
+    // Position: bottom-right of the cursor by default (matches Blender's
+    // header-strip feel), offset enough to not sit under the click point.
+    x: root.anchor-x * 1px + 16px;
+    y: root.anchor-y * 1px + 16px;
+
+    width: 180px;
+    height: 46px;
+
+    background:    Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width:  1px;
+    border-color:  Theme.border-color;
+    drop-shadow-blur:  16px;
+    drop-shadow-color: Theme.shadow-float;
+
+    // Top hairline — macOS-style depth trick per TOOLSET_UX.md §6.1.
+    Rectangle {
+        y: 0;
+        width: 100%;
+        height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: 4px;
+
+            Text {
+                text: root.text == "" ? "_" : root.text;
+                color: Theme.accent-cyan;
+                font-size: Theme.font-md;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+
+            Text {
+                text: root.unit;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.axis-label;
+            color: Theme.text-secondary;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+        }
+    }
+}

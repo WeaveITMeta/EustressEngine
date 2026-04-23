@@ -1,0 +1,9 @@
+<!-- Part Swap cursor badge — circular swap arrows. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Top arrow (left to right) -->
+  <path d="M3 5 C 5 5 11 5 13 5"/>
+  <path d="M11 3 L13 5 L11 7"/>
+  <!-- Bottom arrow (right to left) -->
+  <path d="M13 11 C 11 11 5 11 3 11"/>
+  <path d="M5 9 L3 11 L5 13"/>
+</svg>

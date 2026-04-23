@@ -792,20 +792,47 @@ pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
 }
 
 /// Pick a unique entity name in `dir`, falling back to `BASE`, `BASE1`, …
-/// `BASE9999`, then `BASE_<unix-timestamp>` if all are taken. Centralizes
-/// the collision check so every creation / paste / duplicate site gets the
-/// flat-file-aware behavior from [`entity_name_is_available`].
+/// the flat-file-aware behavior from [`entity_name_is_available`].
+///
+/// **Collision strategy.** The first occurrence of a name keeps the
+/// plain base (`Block/`). Subsequent collisions get a short stable
+/// hex suffix derived from the system clock + a retry index
+/// (`Block-a3f2/`, `Block-9d1c/`, …) — deliberately **not** the
+/// sequential `Block1`, `Block2` convention an earlier version of
+/// this function used. The display name inside `_instance.toml`
+/// (`[metadata] name = "Block"`) is what the Explorer shows, so any
+/// number of sibling "Block" entities render identically in the UI
+/// while staying uniquely addressable on disk.
 pub fn unique_entity_name(dir: &Path, base: &str) -> String {
     if entity_name_is_available(dir, base) {
         return base.to_string();
     }
-    for i in 1..10_000u32 {
-        let candidate = format!("{}{}", base, i);
+    // Hex suffix pool. 4 chars = 65k values; collisions are vanishingly
+    // rare at any realistic sibling count, but we still iterate up to
+    // 10_000 attempts to be sure. Seeding off the nanosecond clock
+    // plus the attempt index means two `unique_entity_name` calls in
+    // the same microsecond don't both return the same candidate.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    for i in 0u32..10_000 {
+        // Mix seed + retry index with a cheap splittable hash so
+        // successive candidates don't share prefix bits.
+        let mut x = seed.wrapping_add(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        x ^= x >> 30;
+        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^= x >> 27;
+        let tag = (x as u32) & 0xFFFF;
+        let candidate = format!("{}-{:04x}", base, tag);
         if entity_name_is_available(dir, &candidate) {
             return candidate;
         }
     }
-    format!("{}_{}", base, chrono::Utc::now().timestamp())
+    // Last-resort fallback: full timestamp. We've effectively never
+    // seen this path in practice — if it fires, something's already
+    // very wrong with the directory.
+    format!("{}-{}", base, chrono::Utc::now().timestamp())
 }
 
 /// Return a [`CreatorStamp`] for the currently-authenticated user, or `None`
@@ -991,11 +1018,29 @@ pub fn spawn_instance(
         &instance.metadata.class_name
     ).unwrap_or(eustress_common::classes::ClassName::Part);
 
+    // Tags → component. Populated from `instance.tags` in the TOML.
+    // Previously the loader always inserted `Tags::new()` (empty),
+    // silently dropping any tags the user authored — fixed
+    // 2026-04-22. Declared here at function scope so all three spawn
+    // branches (no-asset, custom-mesh, primitive) can `tags.clone()`
+    // uniformly; the branches below each moved their own local copy
+    // prior, which is why the custom-mesh branch later lost access
+    // to it when the no-asset block scoped its `let` locally.
+    //
+    // Any `CollectionService`-style API calls at runtime (`AddTag` /
+    // `RemoveTag` MCP tools) write back through the instance_loader's
+    // signed-write path so disk stays canonical.
+    let tags: Tags = match &instance.tags {
+        Some(t) if !t.is_empty() => Tags(t.clone()),
+        _ => Tags::new(),
+    };
+
     // ── No mesh: spawn a non-visual Instance entity (Atmosphere, Sky, Moon, Star, etc.) ──
     if instance.asset.is_none() {
         // Parse rich-schema sections: each entry in `extra` is either a flat value
         // OR a named section (Table) whose entries are { type, value, description } inline tables.
         // Both cases are stored in Attributes for the Properties panel to display.
+
         let mut attrs = Attributes::new();
         for (_section_name, section_val) in &instance.extra {
             // Each top-level entry under [extra] is a section table (e.g. [Appearance])
@@ -1031,7 +1076,7 @@ pub fn spawn_instance(
             },
             Transform::from(instance.transform),
             Visibility::default(),
-            Tags::new(),
+            tags.clone(),
             attrs,
             InstanceFile {
                 toml_path: toml_path.clone(),
@@ -1160,13 +1205,24 @@ pub fn spawn_instance(
             eustress_common::classes::Part { shape: part_shape },
             PartEntity { part_id: String::new() }, // filled in below
             Attributes::new(),
-            Tags::new(),
+            tags.clone(),
             InstanceFile {
                 toml_path: toml_path.clone(),
-                mesh_path: absolute_mesh_path,
+                mesh_path: absolute_mesh_path.clone(),
                 name: name.clone(),
             },
             Name::new(name.clone()),
+            // `MeshSource` marks this as a file-system-first part so
+            // the scale tool's `apply_size_to_entity` follows the
+            // "Transform.scale = size" branch instead of regenerating
+            // the mesh + pinning Transform.scale at ONE. Without this
+            // insertion on the reload path, a resize → save round-
+            // trip was collapsing TOML scale to [1, 1, 1] (user-
+            // reported 2026-04-23: "sizes are not saving, reverting
+            // to 1,1,1"). Stringified path mirrors what
+            // `spawn::spawn_part_glb` stores on freshly-spawned parts
+            // so both entry points produce identical components.
+            crate::spawn::MeshSource::new(asset_ref.mesh.clone()),
             // Mark this entity so `update_base_part_size_from_mesh` computes
             // `BasePart.size` from the mesh AABB once the asset finishes
             // loading. Works for any custom-mesh part, not just V-Cell.
@@ -1239,13 +1295,20 @@ pub fn spawn_instance(
         eustress_common::classes::Part { shape: part_shape },
         PartEntity { part_id: String::new() }, // filled in below
         Attributes::new(),
-        Tags::new(),
+        tags.clone(),
         InstanceFile {
             toml_path: toml_path.clone(),
             mesh_path: absolute_mesh_path,
             name: name.clone(),
         },
         Name::new(name.clone()),
+        // `MeshSource` keeps the primitive-reload path aligned with
+        // the custom-mesh path above: the scale tool resizes by
+        // setting `Transform.scale` instead of regenerating the
+        // mesh, so the save round-trip writes the real dimensions
+        // back to TOML. See the detailed comment on the custom-mesh
+        // branch for the exact bug this closes.
+        crate::spawn::MeshSource::new(glb_path),
     )).id();
     let part_id = format!("{}v{}", entity.index(), entity.generation());
     let mut ec = commands.entity(entity);
@@ -1264,6 +1327,24 @@ pub fn spawn_instance(
             _ => Collider::cuboid(half.x, half.y, half.z),
         };
         ec.insert((collider, RigidBody::Static));
+    }
+
+    // Material Flip loader roundtrip — if the instance's `attributes`
+    // carry `material_uv_ops` (written by the Material Flip tool),
+    // stash them on the entity as a `PendingMaterialUvOps` component.
+    // A system in `tools_smart` picks these up once the material asset
+    // finishes loading and composes them into the cloned material's
+    // `uv_transform`. Without this, flipped parts come back un-flipped
+    // on reload. Phase-1 roundtrip per TOOLSET.md §4.13.5.
+    if let Some(ref attrs) = instance.attributes {
+        if let Some(toml::Value::Array(arr)) = attrs.get("material_uv_ops") {
+            let ops: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            if !ops.is_empty() {
+                ec.insert(crate::tools_smart::PendingMaterialUvOps { ops });
+            }
+        }
     }
 
     // Attach realism components if present in TOML

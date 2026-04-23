@@ -2,8 +2,15 @@
 
 use bevy::prelude::*;
 
-/// Configuration for terrain generation and rendering
-#[derive(Component, Clone, Reflect, Debug)]
+/// Configuration for terrain generation and rendering.
+///
+/// Both a `Component` (per-chunk override) *and* a `Resource`
+/// (world-level defaults) — the part-to-terrain converter reads it
+/// as a `Res<TerrainConfig>`, and the chunk spawner copies the
+/// resource into a matching component on each chunk entity so
+/// reflection-driven tools (Inspector / TOML mirror) still pick it
+/// up per-entity.
+#[derive(Component, Resource, Clone, Reflect, Debug)]
 #[reflect(Component)]
 pub struct TerrainConfig {
     /// Size of each chunk in world units

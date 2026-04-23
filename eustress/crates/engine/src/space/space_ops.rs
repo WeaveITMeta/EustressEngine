@@ -391,6 +391,42 @@ pub fn save_space(world: &mut World) {
                 .trim_start_matches("ClassName::")
                 .to_string();
 
+            // Preserve the display-name override when the folder name
+            // and instance name don't match — e.g. a second sibling
+            // "Block" lives in `Block-a3f2/` with `name = "Block"` in
+            // the TOML so the Explorer still renders it as "Block".
+            // Writing `name: None` unconditionally (as this path did
+            // previously) clobbered that override on every save, so
+            // after one Save the Explorer would start showing the hex
+            // suffix. Reading back the folder-stem lets us detect the
+            // mismatch without plumbing the original `InstanceFile`
+            // metadata through every save site.
+            let folder_stem = toml_path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+            let name_override = match &folder_stem {
+                Some(stem) if *stem != instance.name => Some(instance.name.clone()),
+                _ => None,
+            };
+
+            // **TOML scale = BasePart.size, NOT Transform.scale.**
+            //
+            // Rationale: the scale-tool has two internal paths:
+            //   * "mesh-source" parts write size into Transform.scale
+            //     and leave the unit-scale GLB mesh alone
+            //   * "legacy inline" parts keep Transform.scale = ONE
+            //     and regenerate the mesh at the new size
+            // Both paths update `BasePart.size` to the authoritative
+            // dimensions. Reading Transform.scale here was silently
+            // wrong for the legacy branch — after every save, scale
+            // was pinned at [1, 1, 1] because that's what
+            // Transform.scale had stayed at. `BasePart.size` is the
+            // one field that's correct in both branches, so the TOML
+            // round-trip now uses it as the source of truth for
+            // dimensions. (User caught the bug 2026-04-23 — parts
+            // reverted to 1×1×1 on reload.)
+            let authoritative_size = base_part.size;
             let def = InstanceDefinition {
                 asset: Some(AssetReference {
                     mesh,
@@ -399,7 +435,7 @@ pub fn save_space(world: &mut World) {
                 transform: TransformData {
                     position: [t.translation.x, t.translation.y, t.translation.z],
                     rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
-                    scale: [t.scale.x, t.scale.y, t.scale.z],
+                    scale: [authoritative_size.x, authoritative_size.y, authoritative_size.z],
                 },
                 properties: InstanceProperties {
                     color: {
@@ -417,7 +453,7 @@ pub fn save_space(world: &mut World) {
                 metadata: InstanceMetadata {
                     class_name,
                     archivable: instance.archivable,
-                    name: None,
+                    name: name_override,
                     created: String::new(),
                     last_modified: now.clone(),
                     ..Default::default()

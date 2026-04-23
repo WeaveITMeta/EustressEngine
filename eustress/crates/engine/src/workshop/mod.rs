@@ -1530,47 +1530,18 @@ pub struct WorkshopPlugin;
 
 impl Plugin for WorkshopPlugin {
     fn build(&self, app: &mut App) {
-        // Build the tool registry — General + domain-specific tools
+        // Build the tool registry — General + domain-specific tools.
+        //
+        // Delegate the baseline (every tool shipped by `eustress-tools`)
+        // to `register_all_tools`. The previous manual enumeration
+        // drifted: tools added to the shared crate (list_directory,
+        // run_bash, the universe_tools family, etc.) never made it
+        // into Workshop because the list was hand-maintained in two
+        // places at once. The MCP server already used
+        // `register_all_tools`, so the drift was invisible until users
+        // tried to call a tool here that only existed over MCP.
         let mut registry = tools::ToolRegistry::default();
-        // General tools (always available in every mode)
-        registry.register(tools::entity_tools::CreateEntityTool);
-        registry.register(tools::entity_tools::QueryEntitiesTool);
-        registry.register(tools::entity_tools::UpdateEntityTool);
-        registry.register(tools::entity_tools::DeleteEntityTool);
-        registry.register(tools::file_tools::ReadFileTool);
-        registry.register(tools::file_tools::WriteFileTool);
-        registry.register(tools::script_tools::ExecuteRuneTool);
-        registry.register(tools::script_tools::ExecuteLuauTool);
-        registry.register(tools::script_tools::ImageToCodeTool);
-        registry.register(tools::script_tools::DocumentToCodeTool);
-        registry.register(tools::script_tools::GenerateDocsTool);
-        registry.register(tools::memory_tools::RememberTool);
-        registry.register(tools::memory_tools::RecallTool);
-        registry.register(tools::memory_tools::ListRulesTool);
-        registry.register(tools::memory_tools::ListWorkflowsTool);
-        registry.register(tools::memory_tools::QueryStreamEventsTool);
-        registry.register(tools::diff_tools::StageFileChangeTool);
-        registry.register(tools::git_tools::GitStatusTool);
-        registry.register(tools::git_tools::GitCommitTool);
-        registry.register(tools::git_tools::GitLogTool);
-        registry.register(tools::git_tools::GitDiffTool);
-        // Simulation bridge tools (shared with Rune/Luau scripting API)
-        registry.register(tools::simulation_tools::GetSimValueTool);
-        registry.register(tools::simulation_tools::SetSimValueTool);
-        registry.register(tools::simulation_tools::ListSimValuesTool);
-        registry.register(tools::simulation_tools::GetTaggedEntitiesTool);
-        registry.register(tools::simulation_tools::RaycastTool);
-        registry.register(tools::simulation_tools::HttpRequestTool);
-        registry.register(tools::simulation_tools::DataStoreGetTool);
-        registry.register(tools::simulation_tools::DataStoreSetTool);
-        registry.register(tools::simulation_tools::AddTagTool);
-        registry.register(tools::simulation_tools::RemoveTagTool);
-        // Physics tools (Realism system bridge)
-        registry.register(tools::physics_tools::QueryMaterialTool);
-        registry.register(tools::physics_tools::CalculatePhysicsTool);
-        // Spatial tools
-        registry.register(tools::spatial_tools::MeasureDistanceTool);
-        registry.register(tools::spatial_tools::ListSpaceContentsTool);
+        tools::register_all_tools(&mut registry);
         // Manufacturing mode tools
         registry.register(modes::manufacturing::NormalizeBriefTool);
         registry.register(modes::manufacturing::QueryManufacturersTool);

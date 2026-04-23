@@ -44,6 +44,16 @@ impl ToolHandler for QueryMaterialTool {
         // still the canonical source for runtime rendering; this copy
         // exists only for tool introspection.
         let (roughness, metallic, reflectance, description) = pbr_entry(material_name);
+        // Round to 3 decimals before JSON emission. The table stores
+        // f32 (cheap, close to the rendering path's precision), but
+        // serde_json promotes f32 → f64 literally, so `0.3_f32`
+        // serialized as f64 became `0.30000001192092896` in the tool
+        // response. Rounding collapses the ULP noise into the
+        // human-readable value while preserving enough resolution for
+        // downstream math.
+        let r = ((roughness    as f64) * 1000.0).round() / 1000.0;
+        let m = ((metallic     as f64) * 1000.0).round() / 1000.0;
+        let f = ((reflectance  as f64) * 1000.0).round() / 1000.0;
 
         ToolResult {
             tool_name: "query_material".to_string(),
@@ -55,9 +65,9 @@ impl ToolHandler for QueryMaterialTool {
             ),
             structured_data: Some(serde_json::json!({
                 "material": material_name,
-                "roughness": roughness,
-                "metallic": metallic,
-                "reflectance": reflectance,
+                "roughness": r,
+                "metallic": m,
+                "reflectance": f,
                 "description": description,
             })),
             stream_topic: None,

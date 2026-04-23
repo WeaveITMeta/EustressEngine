@@ -589,6 +589,20 @@ pub fn handle_copy_event(
                 properties.insert("shape".to_string(), serde_json::json!(shape_str));
             }
             
+            // `scale` field feeds the pasted entity's
+            // `TransformData.scale` — which the instance loader
+            // interprets as `BasePart.size` for primitive parts and
+            // `Transform.scale` for custom-GLB meshes. For parts,
+            // `Transform.scale` is kept at `[1, 1, 1]` (mesh is
+            // regenerated at the authored size), so reading from
+            // `transform.scale` here gave every duplicate + paste a
+            // unit-size body — the exact bug user caught
+            // 2026-04-23. Prefer `BasePart.size` when present so the
+            // duplicate matches the source's real dimensions.
+            let capture_scale = match basepart {
+                Some(bp) => [bp.size.x, bp.size.y, bp.size.z],
+                None     => [transform.scale.x, transform.scale.y, transform.scale.z],
+            };
             let entity_data = ClipboardEntityData2 {
                 id: instance.id,
                 name: instance.name.clone(),
@@ -596,7 +610,7 @@ pub fn handle_copy_event(
                 parent: None,
                 position: [transform.translation.x, transform.translation.y, transform.translation.z],
                 rotation: [x.to_degrees(), y.to_degrees(), z.to_degrees()],
-                scale: [transform.scale.x, transform.scale.y, transform.scale.z],
+                scale: capture_scale,
                 properties,
                 parameters: None,
             };

@@ -89,7 +89,7 @@ pub fn try_dispatch(
                 tool_use_id: String::new(),
                 success: false,
                 content:
-                    "No Universe resolved. Set `EUSTRESS_UNIVERSE`, run `eustress_set_default_universe`, or invoke from inside a Universe directory."
+                    "No Universe resolved. Call `set_active_universe` with the absolute path to a Universe root, or set the `EUSTRESS_UNIVERSE` env var before starting the server, or launch the server from inside a Universe directory."
                         .to_string(),
                 structured_data: None,
                 stream_topic: None,

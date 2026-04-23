@@ -1,0 +1,9 @@
+<!-- Mirror cursor badge — symmetric triangles on a central axis. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Mirror axis -->
+  <line x1="8" y1="2" x2="8" y2="14" stroke-dasharray="1.5 1.5"/>
+  <!-- Left triangle -->
+  <path d="M2 4 L7 4 L7 12 Z"/>
+  <!-- Right triangle -->
+  <path d="M14 4 L9 4 L9 12 Z"/>
+</svg>

@@ -329,11 +329,20 @@ fn handle_plugin_action_events(
                         toml.parent().unwrap_or(toml.as_path()).to_path_buf()
                     } else {
                         // Flat file (e.g. MyPart.part.toml) → promote to folder
-                        // 1. Derive folder name from file stem (strip .part, .glb, etc.)
+                        // 1. Derive folder name from file stem. We strip every
+                        // known variant, including plain `.toml` — omitting
+                        // it used to yield `folder_name = "MyPart.toml"`,
+                        // then `create_dir_all("MyPart.toml")` would try to
+                        // make a directory on top of the existing flat file
+                        // and either fail or corrupt the tree. Order matters:
+                        // check the LONGER suffixes first so `.glb.toml`
+                        // doesn't get chopped to `.glb` before we see it.
                         let file_name = toml.file_name().unwrap_or_default().to_string_lossy().to_string();
                         let folder_name = file_name
-                            .strip_suffix(".part.toml").or_else(|| file_name.strip_suffix(".glb.toml"))
+                            .strip_suffix(".part.toml")
+                            .or_else(|| file_name.strip_suffix(".glb.toml"))
                             .or_else(|| file_name.strip_suffix(".instance.toml"))
+                            .or_else(|| file_name.strip_suffix(".toml"))
                             .unwrap_or(&file_name)
                             .to_string();
                         let parent = toml.parent().unwrap_or(toml.as_path());

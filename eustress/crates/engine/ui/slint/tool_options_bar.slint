@@ -1,0 +1,442 @@
+// ============================================================================
+// ToolOptionsBar — reflects `ToolOptionsBarState` (Rust resource) into a
+// floating options strip at the top-left of the viewport.
+// ============================================================================
+//
+// Shows when a ModalTool is active. Displays:
+//   [icon] Tool Name — current step   [inline controls]   [⋯ Advanced] [× Cancel]
+//
+// Controls are data-driven — the Rust side emits a Vec<ToolOptionControl>,
+// this component iterates and renders one widget per entry based on its
+// `kind`. Number / Bool / Choice / Label are the supported kinds.
+//
+// The bar stays below the Default-layout switcher in main.slint. Glass
+// background + hairline + shadow per TOOLSET_UX.md §6.1.
+
+import { Theme } from "theme.slint";
+import { ComboBox, SpinBox } from "std-widgets.slint";
+
+// ─ Data struct mirroring `ToolOptionControl` on the Rust side ─────────────
+//
+// Flat union because Slint doesn't have tagged variants. `kind` names
+// which of the typed fields to read:
+//   "number" → number-value / min / max / step / unit
+//   "bool"   → bool-value
+//   "choice" → choice-options + choice-selected
+//   "label"  → label-text
+// The Rust side populates only the relevant fields per row; the rest
+// stay at their defaults.
+
+export struct ToolOptionControlData {
+    /// Stable id matching `ToolOptionControl::id` on the Rust side.
+    /// Returned on `control-changed` so the tool can dispatch.
+    id: string,
+    /// Human-readable label shown inline before the control.
+    label: string,
+    /// "number" | "bool" | "choice" | "label"
+    kind: string,
+    /// Visible only in the `⋯` expander when true.
+    advanced: bool,
+
+    // Number kind
+    number-value: float,
+    number-min: float,
+    number-max: float,
+    number-step: float,
+    number-unit: string,
+
+    // Bool kind
+    bool-value: bool,
+
+    // Choice kind
+    choice-options: [string],
+    choice-selected: string,
+
+    // Label kind
+    label-text: string,
+}
+
+// ─ A single row rendered inside the bar (or the advanced popover) ─────────
+
+component OptionControlRow inherits HorizontalLayout {
+    in property <ToolOptionControlData> data;
+    callback value-changed(string /* id */, string /* value */);
+
+    spacing: 6px;
+    alignment: center;
+    padding-left: 4px;
+    padding-right: 4px;
+
+    // Label for every kind EXCEPT "label" (that one is its own text).
+    if root.data.kind != "label" && root.data.label != "": Text {
+        text: root.data.label + ":";
+        color: Theme.text-secondary;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+
+    // Number: SpinBox.
+    if root.data.kind == "number": Rectangle {
+        width: 84px;  height: 22px;
+        background: Theme.input-background;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Theme.input-border;
+
+        spin := SpinBox {
+            width: 100%;  height: 100%;
+            value: Math.round(root.data.number-value * 100);
+            minimum: Math.round(root.data.number-min * 100);
+            maximum: Math.round(root.data.number-max * 100);
+            step-size: Math.max(1, Math.round(root.data.number-step * 100));
+            edited(v) => {
+                // Slint SpinBox only supports ints — we store × 100 to
+                // give users 2 decimals of precision. Rust side divides.
+                root.value-changed(root.data.id, (v / 100.0) + "");
+            }
+        }
+        if root.data.number-unit != "": Text {
+            x: parent.width - unit-text-width - 4px;  y: 3px;
+            text: root.data.number-unit;
+            color: Theme.text-disabled;
+            font-size: 10px;
+            property <length> unit-text-width: 20px;
+        }
+    }
+
+    // Bool: a minimal toggle pill — small rectangle that flips background.
+    if root.data.kind == "bool": Rectangle {
+        width: 36px;  height: 18px;
+        background: root.data.bool-value
+            ? Theme.accent-eustress.with-alpha(0.8)
+            : Theme.button-background;
+        border-radius: 9px;
+        border-width: 1px;
+        border-color: root.data.bool-value
+            ? Theme.accent-eustress
+            : Theme.border-color;
+        animate background { duration: 120ms; easing: ease-out; }
+
+        // Knob
+        Rectangle {
+            x: root.data.bool-value ? parent.width - 16px : 2px;
+            y: 2px;
+            width: 14px;  height: 14px;
+            background: white;
+            border-radius: 7px;
+            animate x { duration: 120ms; easing: ease-out; }
+        }
+
+        TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.value-changed(
+                    root.data.id,
+                    root.data.bool-value ? "false" : "true"
+                );
+            }
+        }
+    }
+
+    // Choice: ComboBox over `choice-options` with current `choice-selected`.
+    if root.data.kind == "choice": Rectangle {
+        width: 96px;  height: 22px;
+
+        choice-box := ComboBox {
+            model: root.data.choice-options;
+            current-value: root.data.choice-selected;
+            selected(v) => {
+                root.value-changed(root.data.id, v);
+            }
+        }
+    }
+
+    // Label: just text.
+    if root.data.kind == "label": Text {
+        text: root.data.label-text;
+        color: Theme.text-secondary;
+        font-size: 11px;
+        vertical-alignment: center;
+    }
+}
+
+// ─ Separator between rows in the horizontal bar ───────────────────────────
+component RowSeparator inherits Rectangle {
+    width: 1px;
+    height: 14px;
+    background: Theme.ribbon-separator;
+}
+
+// ─ ToolOptionsBar — main export ───────────────────────────────────────────
+
+export component ToolOptionsBar inherits Rectangle {
+    // Bound from Rust via StudioWindow properties populated from
+    // `ToolOptionsBarState`. When `visible-when` goes false, the bar
+    // hides entirely (Slint collapses it out of layout).
+    in property <bool> visible-when: false;
+    in property <string> tool-name: "";
+    in property <string> step-label: "";
+    in property <image> tool-icon;
+    in property <[ToolOptionControlData]> controls: [];
+
+    /// When true, the `⋯` advanced popover is expanded below the bar.
+    /// `in-out` so Slint can toggle locally; Rust reads state via the
+    /// callback for telemetry (P1).
+    in-out property <bool> advanced-expanded: false;
+
+    /// When true, collapse the bar to a 24px strip with only the tool
+    /// name + step label visible. Toggled via double-click on the bar.
+    /// Doesn't affect tool functionality — just UI vertical footprint.
+    in-out property <bool> collapsed: false;
+
+    /// Called when any control's value changes. Rust routes this to
+    /// `ActiveModalTool::on_option_changed(id, value)`.
+    callback control-changed(string, string);
+    /// Called when the user clicks × or presses Esc on this bar. Rust
+    /// fires `CancelModalToolEvent`.
+    callback cancel();
+
+    visible: root.visible-when;
+    // Vertical footprint: 44px main row, +40px advanced popover when
+    // expanded, collapsed = 28px (title strip only). The bumps are
+    // intentional — the old 32px strip had no room to breathe and
+    // made tiny hit targets out of every control.
+    height: root.visible-when
+        ? (root.collapsed
+            ? 28px
+            : (root.advanced-expanded ? 44px + 40px : 44px))
+        : 0px;
+    opacity: root.visible-when ? 1.0 : 0.0;
+    animate height  { duration: Theme.panel-anim-duration * Theme.motion-scale; easing: ease-in-out; }
+    animate opacity { duration: Theme.panel-anim-duration * Theme.motion-scale; easing: ease-in-out; }
+    // Fixed cap at 900px. The instantiator (main.slint) positions the
+    // bar inside the viewport area and can override `width` if a
+    // narrower clamp is desired. Referencing `parent.width` at
+    // component-root definition time is a Slint design rule we can't
+    // break, and bare-float × length breaks the type system.
+    width: 900px;
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 20px;
+    drop-shadow-color: Theme.shadow-float;
+
+    // Double-click-to-collapse covers the whole bar body.
+    // Clicks on individual controls still bubble; this only fires on
+    // double-click so it doesn't interfere with drags or selects.
+    TouchArea {
+        double-clicked => { root.collapsed = !root.collapsed; }
+    }
+
+    // 1px top highlight — the macOS-style depth cue from TOOLSET_UX.md.
+    Rectangle {
+        y: 0;  width: 100%;  height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    // ── Main row (44px) ────────────────────────────────────────────
+    //
+    // Layout (left → right):
+    //   [tinted icon disc] · [Tool Name ↵ step-hint]  |  [inline controls]
+    //   |  [⋯ Advanced] [Commit button (if exposed)] [× Cancel + Esc]
+    //
+    // The step-hint becomes the PRIMARY label when a tool is active —
+    // 12px cyan "pick first part" sits right under the tool name.
+    // A prominent green Commit button appears when the tool exposes a
+    // control with id "commit"; clicking it routes the same
+    // control-changed event that the old tiny toggle did.
+    HorizontalLayout {
+        x: 0;
+        y: 0;
+        height: 44px;
+        width: 100%;
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 12px;
+        alignment: start;
+
+        // Tool icon inside a tinted disc. 28px disc / 16px glyph gives
+        // the bar an unambiguous "a tool is active" anchor point.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px;  height: 28px;
+                border-radius: 14px;
+                background: Theme.accent-eustress.with-alpha(0.18);
+                border-width: 1px;
+                border-color: Theme.accent-eustress.with-alpha(0.4);
+                Image {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 16px;  height: 16px;
+                    source: root.tool-icon;
+                    image-fit: contain;
+                    colorize: Theme.accent-eustress;
+                }
+            }
+        }
+
+        // Tool name + step label stack. Step label is now primary
+        // (13px cyan) so multi-step tools (Gap Fill, Resize Align,
+        // Part Swap, Edge Align) read their "do this next" cue at a
+        // glance. Tool name falls to secondary (11px, secondary text).
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+
+            if root.step-label != "": Text {
+                text: root.step-label;
+                color: Theme.accent-cyan;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if root.step-label == "": Text {
+                text: root.tool-name;
+                color: Theme.text-primary;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if root.step-label != "": Text {
+                text: root.tool-name;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        RowSeparator {}
+
+        // Non-advanced controls rendered inline (including any
+        // `commit` toggle). A separate for-loop over the same model
+        // for the Commit-only button triggered Slint's
+        // layout-info recursion on render — safer to render commit
+        // through the shared control row like every other bool
+        // toggle. Visual presence of the commit action is still
+        // stronger than before because the row is 44px not 32px
+        // and the step-label leads the eye.
+        for ctrl[i] in root.controls: Rectangle {
+            visible: !ctrl.advanced;
+            width: self.visible ? inline-row.preferred-width : 0px;
+            height: 100%;
+
+            inline-row := OptionControlRow {
+                data: ctrl;
+                value-changed(id, v) => { root.control-changed(id, v); }
+            }
+        }
+
+        // Spacer pushes ⋯ / Commit / × to the right edge.
+        Rectangle { horizontal-stretch: 1; }
+
+        // `⋯` advanced popover toggle. Wrapped in VerticalLayout so
+        // the child is centered on the 44px row without setting `y`
+        // on a HorizontalLayout child (which triggers Slint's
+        // layout-info recursion panic on the current master).
+        if has-advanced-controls(): VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 30px;  height: 28px;
+                background: advanced-touch.has-hover || root.advanced-expanded
+                    ? Theme.button-hover
+                    : transparent;
+                border-radius: Theme.radius-sm;
+
+                Text {
+                    text: "⋯";
+                    color: root.advanced-expanded
+                        ? Theme.accent-eustress
+                        : Theme.text-secondary;
+                    font-size: 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                advanced-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.advanced-expanded = !root.advanced-expanded;
+                    }
+                }
+            }
+        }
+
+        // Cancel button — VerticalLayout wrap for centering.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 30px;  height: 28px;
+                background: cancel-touch.has-hover
+                    ? Theme.accent-red.with-alpha(0.2)
+                    : transparent;
+                border-radius: Theme.radius-sm;
+
+                Text {
+                    text: cancel-touch.has-hover ? "Esc" : "×";
+                    color: cancel-touch.has-hover
+                        ? Theme.accent-red
+                        : Theme.text-secondary;
+                    font-size: cancel-touch.has-hover ? 10px : 18px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                cancel-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.cancel(); }
+                }
+            }
+        }
+    }
+
+    // Advanced popover strip (expands below the main bar when toggled).
+    if root.advanced-expanded: Rectangle {
+        y: 44px;
+        width: 100%;
+        height: 40px;
+        background: Theme.background-tertiary.with-alpha(0.6);
+
+        // 1px top divider between main strip and popover
+        Rectangle {
+            y: 0;  width: 100%;  height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 12px;
+            alignment: start;
+
+            for ctrl[i] in root.controls: Rectangle {
+                visible: ctrl.advanced;
+                width: self.visible ? advanced-row.preferred-width : 0px;
+                height: 100%;
+
+                advanced-row := OptionControlRow {
+                    data: ctrl;
+                    value-changed(id, v) => { root.control-changed(id, v); }
+                }
+            }
+        }
+    }
+
+    // Helper: does the controls list have any `advanced` entries?
+    // Needed to decide whether to render the `⋯` toggle at all.
+    pure function has-advanced-controls() -> bool {
+        // Slint doesn't have a convenient `any` over a model; iterate
+        // via an aggregator pattern. The model is a Vec<struct> and
+        // Slint supports this `for ... in` over models — but not as
+        // an expression. We instead rely on the fact that the parent
+        // control-changed wiring only needs to be shown when advanced
+        // controls exist, so we approximate: show the ⋯ when any ctrl
+        // reports advanced=true via a property tracker. Simplest
+        // correct answer: always show ⋯ when the controls vec is
+        // non-empty. Empty controls → no ⋯ makes sense anyway.
+        root.controls.length > 0
+    }
+}

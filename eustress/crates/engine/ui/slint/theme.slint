@@ -57,13 +57,51 @@ export global Theme {
     out property <color> dialog-background: #1a1a1a;
     out property <color> modal-backdrop: #000000a0;
     
-    // Accent colors — vibrant against dark backgrounds
-    out property <color> accent-blue: #0078d4;
-    out property <color> accent-green: #3cba54;
-    out property <color> accent-orange: #e8912d;
+    // Accent colors — vibrant against dark backgrounds.
+    // See docs/development/TOOLSET_UX.md §2.1 for the full palette spec.
+    //
+    // **2026-04-23** — `accent-eustress` reverted from `#00d4a8` (teal)
+    // back to cyan per user feedback: "we used a cyan selection color
+    // not teal". Every active-tool ring, selected-row glow, and drop-
+    // shadow tint derived from this token now reads cyan again. The
+    // name stays `accent-eustress` so existing callers don't need to
+    // be rewritten — it's still the brand-accent token, just in the
+    // cyan hue it used before the teal drift.
+    out property <color> accent-blue: #0078d4;          // Primary action, selection outlines
+    out property <color> accent-cyan: #00bcd4;          // Tool Options Bar, numeric input, preview outline
+    out property <color> accent-eustress: #00bcd4;      // Selection / active tool — cyan (was teal `#00d4a8`)
+    out property <color> accent-green: #3cba54;         // Success, ghost-preview base
+    out property <color> accent-green-bright: #00e676;  // Commit-success flash (150ms burst)
+    out property <color> accent-orange: #e8912d;        // Warning
     out property <color> accent-purple: #b180d7;
-    out property <color> accent-red: #e74856;
+    out property <color> accent-red: #e74856;           // Error, over-constrained
     out property <color> accent-yellow: #f9c74f;
+
+    // Floating-overlay surface treatments — see TOOLSET_UX.md §6.1
+    out property <color> panel-glass: #121212e8;        // Frosted-glass backdrop for ToolOptionsBar / toasts / popups
+    out property <color> border-highlight: #ffffff10;   // 1px top hairline (macOS depth trick)
+    out property <color> shadow-float: #00000060;       // Drop shadow for floating panels (16px blur)
+
+    // Panel enter/exit motion — 180ms slide+fade per TOOLSET_UX.md §2.4.
+    // Prefers-reduced-motion gate collapses this to 30ms at runtime
+    // via `reduce-motion` input; components multiply the duration by
+    // `motion-scale` to honor it.
+    out property <duration> panel-anim-duration: 180ms;
+    out property <duration> panel-anim-duration-fast: 120ms; // hover
+    out property <duration> panel-anim-duration-flash: 150ms; // commit flash
+
+    /// When true, pulses / tweens clamp to a short static duration —
+    /// set from the OS `prefers-reduced-motion` flag. Slint bindings
+    /// that care multiply their animation by `motion-scale`.
+    in property <bool>  reduce-motion: false;
+    out property <float> motion-scale: root.reduce-motion ? 0.15 : 1.0;
+
+    // Backdrop-blur intent token — Slint doesn't expose GPU backdrop
+    // filters directly, but declaring the design radius here keeps
+    // the intent centralized so renderer-level wiring (when it
+    // lands) has a single source of truth. Components approximate
+    // via `panel-glass` opacity today.
+    out property <length> backdrop-blur-lg: 12px;
     
     // Ribbon colors
     out property <color> ribbon-background: #101010;
@@ -148,9 +186,16 @@ export component IconButton inherits Rectangle {
         font-size: 10px;
     }
     border-radius: Theme.radius-md;
-    background: self.selected ? Theme.selection-background : 
+    // Selected = the currently-active tool. Brand-teal halo with a subtle
+    // tinted fill (not a full blue block like before) — matches the
+    // active-tool ring convention in TOOLSET_UX.md §5.2.
+    background: self.selected ? #00bcd415 :
                 touch.has-hover ? Theme.button-hover : transparent;
-    
+    border-width: self.selected ? 1px : 0px;
+    border-color: self.selected ? Theme.accent-eustress : transparent;
+    drop-shadow-blur: self.selected ? 8px : 0px;
+    drop-shadow-color: self.selected ? #00bcd440 : transparent;
+
     opacity: self.enabled ? 1.0 : 0.5;
     clip: false;
     
@@ -206,27 +251,36 @@ export component IconButton inherits Rectangle {
         }
     }
     
+    // Unified icon-over-label layout. Every child is horizontally
+    // centered within the button's full width; the VerticalLayout centers
+    // the whole stack on the button's cross-axis. Previously the Image
+    // drifted off-center because the VerticalLayout had no horizontal
+    // alignment rule and Slint defaulted to stretch+left.
     VerticalLayout {
-        padding-top: root.label != "" ? 3px : 7px;
-        padding-bottom: root.label != "" ? 3px : 7px;
-        spacing: 1px;
+        padding-top: root.label != "" ? 4px : 7px;
+        padding-bottom: root.label != "" ? 4px : 7px;
+        spacing: 2px;
         alignment: center;
-        
+
+        // Icon row — HorizontalLayout centers horizontally within the full button width.
         HorizontalLayout {
             alignment: center;
             Image {
-                width: 20px;
-                height: 20px;
+                width: 22px;
+                height: 22px;
                 source: root.icon;
                 image-fit: contain;
-                colorize: root.tint != transparent ? root.tint : transparent;
+                // Selected state tints to Eustress brand teal — matches the
+                // active-tool ring elsewhere in the UI for visual continuity.
+                colorize: root.selected ? Theme.accent-eustress :
+                          (root.tint != transparent ? root.tint : transparent);
             }
         }
-        
+
         if root.label != "": btn-label := Text {
             text: root.label;
-            color: Theme.text-secondary;
-            font-size: 9px;
+            color: root.selected ? Theme.accent-eustress : Theme.text-secondary;
+            font-size: 10px;
             horizontal-alignment: center;
             overflow: elide;
         }
@@ -234,7 +288,7 @@ export component IconButton inherits Rectangle {
         if root.label != "" && root.shortcut != "": Text {
             text: root.shortcut;
             color: Theme.text-disabled;
-            font-size: 8px;
+            font-size: 9px;
             horizontal-alignment: center;
             overflow: elide;
         }
@@ -274,6 +328,77 @@ export component ToolbarSeparator inherits Rectangle {
     width: 1px;
     height: 20px;
     background: Theme.ribbon-separator;
+}
+
+// Unified side-panel header — matches the Properties panel's top bar
+// so every right-hand panel (History, Soul, Workshop, Problems) shares
+// the same 36px gradient, bold title, and optional count badge. New
+// side panels should use this rather than hand-rolling a title row.
+export component SidePanelHeader inherits Rectangle {
+    in property <string> title: "";
+    // Optional icon — pass `@image-url(...)` from the caller. Empty
+    // SharedString / null image renders without an icon slot.
+    in property <image> icon;
+    in property <bool> show-icon: false;
+    // Optional right-aligned badge (e.g. message count, pending
+    // problems count). `0` hides it; any non-zero value shows the
+    // blue pill with the number.
+    in property <int> count: 0;
+
+    height: 36px;
+    background: @linear-gradient(180deg, #1e1e1e 0%, #181818 100%);
+
+    // 1px bottom separator — matches Properties panel treatment
+    Rectangle {
+        y: parent.height - 1px;
+        width: 100%;
+        height: 1px;
+        background: #2a2a2a;
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        alignment: start;
+
+        if root.show-icon: VerticalLayout {
+            width: 16px;
+            alignment: center;
+            Image {
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+                image-fit: contain;
+            }
+        }
+
+        Text {
+            text: root.title;
+            color: Theme.text-primary;
+            font-weight: 600;
+            font-size: 12px;
+            letter-spacing: 0.3px;
+            vertical-alignment: center;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        if root.count > 0: Rectangle {
+            width: 24px;
+            height: 18px;
+            border-radius: 9px;
+            background: Theme.accent-blue;
+            Text {
+                text: root.count;
+                color: white;
+                font-size: 10px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
 }
 
 // Panel header component

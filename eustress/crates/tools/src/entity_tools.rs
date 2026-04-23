@@ -9,20 +9,54 @@ use crate::modes::WorkshopMode;
 
 pub struct CreateEntityTool;
 
+/// Map a primitive shape id (or class name) to its shared-mesh asset
+/// path. Must stay in sync with `toolbox::get_mesh_catalog` on the
+/// engine side — the engine's file-watcher resolves this path via
+/// `PRIMITIVE_MESHES` + `material_loader::resolve_material`.
+///
+/// Without an `[asset]` section the file watcher's `spawn_instance`
+/// hits its `asset.is_none()` branch and attaches only a bare
+/// `Instance + Transform + Visibility` (no `BasePart`, `Part`,
+/// `Mesh3d`, `MeshMaterial3d`, `Collider`) — which is why the
+/// previous version of this tool produced entities that were
+/// invisible and unselectable in the viewport.
+fn primitive_mesh_path(shape: &str) -> Option<&'static str> {
+    match shape.to_ascii_lowercase().as_str() {
+        "block" | "part" | "cube"                 => Some("assets/parts/block.glb"),
+        "ball" | "sphere"                         => Some("assets/parts/ball.glb"),
+        "cylinder"                                => Some("assets/parts/cylinder.glb"),
+        "wedge"                                   => Some("assets/parts/wedge.glb"),
+        "corner_wedge" | "corner" | "cornerwedge" => Some("assets/parts/corner_wedge.glb"),
+        "cone"                                    => Some("assets/parts/cone.glb"),
+        _                                         => None,
+    }
+}
+
 impl ToolHandler for CreateEntityTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "create_entity",
-            description: "Create a new 3D entity in the current Space's Workspace. Supported classes: Part, Model. Writes a .part.toml file that the engine hot-reloads.",
+            description: "Create a new 3D entity in the current Space's Workspace. Writes a folder with _instance.toml so the engine's file watcher hot-spawns it with full rendering + selection components. Supported primitive classes (Part) use the shared mesh assets under `assets/parts/*.glb`; Model creates a container folder for grouped Parts.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "class": { "type": "string", "description": "Entity class: Part (3D primitive or custom mesh via asset path), Model (group of Parts)", "default": "Part" },
-                    "name": { "type": "string", "description": "Entity name" },
-                    "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] world position" },
-                    "size": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] size in studs" },
-                    "material": { "type": "string", "description": "Material preset: Plastic, SmoothPlastic, Wood, WoodPlanks, Metal, CorrodedMetal, DiamondPlate, Foil, Grass, Concrete, Brick, Granite, Marble, Slate, Sand, Fabric, Glass, Neon, Ice" },
-                    "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] color (0-1 range)" }
+                    "class": {
+                        "type": "string",
+                        "description": "Entity class. `Part` (default) = visible 3D primitive. `Model` = folder container (no mesh). Any other string is passed through for service/script classes.",
+                        "default": "Part"
+                    },
+                    "shape": {
+                        "type": "string",
+                        "description": "Primitive shape for Part class: block (default), ball, cylinder, wedge, corner_wedge, cone. Determines which shared mesh asset is referenced in the `[asset]` section.",
+                        "default": "block"
+                    },
+                    "name":     { "type": "string",  "description": "Entity name (used as folder + Instance.name)" },
+                    "position": { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] world position in studs" },
+                    "size":     { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] size in studs (maps to Transform.scale)" },
+                    "material": { "type": "string",  "description": "Material preset: Plastic, SmoothPlastic, Wood, WoodPlanks, Metal, CorrodedMetal, DiamondPlate, Foil, Grass, Concrete, Brick, Granite, Marble, Slate, Sand, Fabric, Glass, Neon, Ice" },
+                    "color":    { "type": "array",   "items": { "type": "number" }, "description": "[r, g, b] color — either 0.0-1.0 floats or 0-255 integers" },
+                    "anchored":     { "type": "boolean", "description": "Prevents physics from moving the part (default true)" },
+                    "can_collide":  { "type": "boolean", "description": "Whether the part participates in collisions (default true)" }
                 },
                 "required": ["name"]
             }),
@@ -34,11 +68,14 @@ impl ToolHandler for CreateEntityTool {
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("Part");
+        let shape = input.get("shape").and_then(|v| v.as_str()).unwrap_or("block");
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("NewPart");
         let position = parse_vec3(&input, "position", [0.0, 0.0, 0.0]);
         let size = parse_vec3(&input, "size", [1.0, 1.0, 1.0]);
         let material = input.get("material").and_then(|v| v.as_str()).unwrap_or("Plastic");
         let color = parse_vec3(&input, "color", [0.639, 0.635, 0.647]);
+        let anchored = input.get("anchored").and_then(|v| v.as_bool()).unwrap_or(true);
+        let can_collide = input.get("can_collide").and_then(|v| v.as_bool()).unwrap_or(true);
 
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace_dir = ctx.space_root.join("Workspace");
@@ -46,26 +83,50 @@ impl ToolHandler for CreateEntityTool {
         let _ = std::fs::create_dir_all(&instance_dir);
         let filepath = instance_dir.join("_instance.toml");
 
+        // Pick the mesh asset for the class. `Part` + any known
+        // primitive shape gets a real `assets/parts/*.glb` reference.
+        // `Model` / unknown classes skip the `[asset]` section (they
+        // render as folder-containers, not meshes).
+        let asset_section = if class.eq_ignore_ascii_case("Part") {
+            let mesh = primitive_mesh_path(shape)
+                .unwrap_or("assets/parts/block.glb");
+            format!(
+"[asset]\nmesh = \"{mesh}\"\nscene = \"Scene0\"\n\n"
+            )
+        } else if let Some(mesh) = primitive_mesh_path(class) {
+            // Caller passed a shape name as `class` (e.g. "Ball") —
+            // accept it so older prompts keep working.
+            format!(
+"[asset]\nmesh = \"{mesh}\"\nscene = \"Scene0\"\n\n"
+            )
+        } else {
+            String::new()
+        };
+
         let toml_content = format!(
 r#"[metadata]
 class_name = "{class}"
 name = "{name}"
+archivable = true
 
-[transform]
-position = [{}, {}, {}]
+{asset_section}[transform]
+position = [{px}, {py}, {pz}]
 rotation = [0.0, 0.0, 0.0, 1.0]
-scale = [{}, {}, {}]
+scale = [{sx}, {sy}, {sz}]
 
 [properties]
 material = "{material}"
-color = [{}, {}, {}, 1.0]
+color = [{cr}, {cg}, {cb}, 1.0]
 transparency = 0.0
-anchored = true
-can_collide = true
+anchored = {anchored}
+can_collide = {can_collide}
+cast_shadow = true
+reflectance = 0.0
+locked = false
 "#,
-            position[0], position[1], position[2],
-            size[0], size[1], size[2],
-            color[0], color[1], color[2],
+            px = position[0], py = position[1], pz = position[2],
+            sx = size[0],     sy = size[1],     sz = size[2],
+            cr = color[0],    cg = color[1],    cb = color[2],
         );
 
         match std::fs::write(&filepath, &toml_content) {
@@ -73,8 +134,18 @@ can_collide = true
                 tool_name: "create_entity".to_string(),
                 tool_use_id: String::new(),
                 success: true,
-                content: format!("Created {} '{}' at [{:.1}, {:.1}, {:.1}]", class, name, position[0], position[1], position[2]),
-                structured_data: Some(serde_json::json!({ "class": class, "name": name, "file": filepath.to_string_lossy() })),
+                content: format!(
+                    "Created {} '{}' at [{:.1}, {:.1}, {:.1}] (shape={}, asset={})",
+                    class, name, position[0], position[1], position[2], shape,
+                    if asset_section.is_empty() { "none" } else { "attached" }
+                ),
+                structured_data: Some(serde_json::json!({
+                    "class": class,
+                    "shape": shape,
+                    "name": name,
+                    "file": filepath.to_string_lossy(),
+                    "has_asset": !asset_section.is_empty(),
+                })),
                 stream_topic: Some("workshop.tool.create_entity".to_string()),
             },
             Err(e) => ToolResult {
@@ -134,7 +205,17 @@ impl ToolHandler for QueryEntitiesTool {
                 if let Ok(content) = std::fs::read_to_string(&toml_path) {
                     if let Ok(val) = toml::from_str::<toml::Value>(&content) {
                         let class = val.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).unwrap_or("Unknown");
-                        let name = val.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or(fname);
+                        // Name fallback: strip the compound extension
+                        // from the filename so `Grid.part.toml` yields
+                        // "Grid", not the full filename. Folder-based
+                        // entities use their parent directory name
+                        // (`Block/` with `_instance.toml` → "Block").
+                        let stem = if path.is_dir() {
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or(fname).to_string()
+                        } else {
+                            fname.split('.').next().unwrap_or(fname).to_string()
+                        };
+                        let name = val.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or(&stem);
                         if let Some(f) = class_filter { if class != f { continue; } }
                         entities.push(serde_json::json!({ "name": name, "class": class, "file": fname }));
                     }

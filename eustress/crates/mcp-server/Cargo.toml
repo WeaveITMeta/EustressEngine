@@ -1,8 +1,8 @@
 [package]
 name = "eustress-mcp-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Eustress MCP stdio server — exposes a Universe (Spaces, scripts, entities, assets, conversations) to MCP-compatible AI clients (Claude Desktop, Cursor, Windsurf)."
+description = "Eustress MCP stdio server — exposes a Universe (Spaces, scripts, entities, assets, conversations) to MCP-compatible AI clients (Claude Desktop, Cursor, Windsurf). 0.4.0 adds 4 embedvec AI tools (find_similar_entities, suggest_swap_template, suggest_contextual_edits, suggest_tool_defaults)."
 authors = ["EustressEngine Contributors"]
 license = "MIT OR Apache-2.0"
 

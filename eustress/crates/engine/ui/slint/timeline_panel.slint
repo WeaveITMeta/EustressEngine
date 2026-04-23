@@ -1,0 +1,335 @@
+// ============================================================================
+// Timeline Panel — data-agnostic timeline of keyframes / watchpoints /
+// breakpoints. Shares the bottom-panel slot with Output; title-bar
+// buttons flip between them.
+// ============================================================================
+//
+// Visual spec:
+// - Yellow diamond markers = Keyframe
+// - Orange dot markers     = Watchpoint
+// - Red asterisk markers   = Breakpoint
+// - Tracks stack vertically, grouped by first-tag of each event
+// - Each track gets a color stripe matching the event-kind palette
+// - Top row: legend (three kind chips) + filter button
+// - Bottom row: time axis with ticks
+// - Hover on a marker shows its label + tooltip
+
+import { Theme } from "theme.slint";
+
+// ─── Data shapes ───────────────────────────────────────────────────────────
+
+export struct TimelineTrackData {
+    /// Tag this track represents (e.g. "tool.commit", "physics.contact").
+    tag: string,
+    /// Whether the user has this track visible via the filter modal.
+    visible: bool,
+    /// Number of events in this track (for the legend badge).
+    count: int,
+}
+
+export struct TimelineMarkerData {
+    /// 0..1 normalized position along the timeline (x-axis).
+    t: float,
+    /// 0..N row index — tells the component which track to draw on.
+    track_index: int,
+    /// "keyframe" | "watchpoint" | "breakpoint"
+    kind: string,
+    /// Display label shown on hover.
+    label: string,
+    /// Free-form tooltip body (first tag, timestamp, payload JSON).
+    tooltip: string,
+}
+
+export struct TimelineFilterChipData {
+    kind: string,  // "keyframe" | "watchpoint" | "breakpoint"
+    visible: bool,
+    count: int,
+}
+
+// ─── Marker primitives ────────────────────────────────────────────────────
+
+/// Yellow diamond (rotated square) for keyframes.
+///
+/// Slint's `Rectangle` doesn't accept `rotation-angle` — that's an
+/// `Image`-only property at the version this workspace tracks. We
+/// use a Unicode diamond glyph (U+25C6) coloured by the Text element
+/// instead; the result is pixel-close to the rotated rectangle the
+/// earlier implementation tried to draw, and avoids needing a
+/// per-marker SVG asset.
+component KeyframeMarker inherits Rectangle {
+    in property <string> tooltip;
+    width: 12px;
+    height: 12px;
+    background: transparent;
+    Text {
+        text: "◆";
+        color: #f9c74f;        // accent-yellow per TOOLSET_UX.md §2.1
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+/// Orange circle for watchpoints.
+component WatchpointMarker inherits Rectangle {
+    in property <string> tooltip;
+    width: 9px;
+    height: 9px;
+    background: #e8912d;       // accent-orange
+    border-radius: 4.5px;
+    drop-shadow-blur: 4px;
+    drop-shadow-color: #e8912d80;
+}
+
+/// Red asterisk / six-pointed star for breakpoints. Same rationale
+/// as `KeyframeMarker`: the Slint build rejected the rotated-bar
+/// stack, so we fall back to a Unicode asterisk glyph ("✻" U+273B)
+/// coloured red.
+component BreakpointMarker inherits Rectangle {
+    in property <string> tooltip;
+    width: 14px;
+    height: 14px;
+    background: transparent;
+    Text {
+        text: "✻";
+        color: #e74856;        // accent-red
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ─── Legend chip ──────────────────────────────────────────────────────────
+
+component KindChip inherits Rectangle {
+    in property <string> kind;
+    in property <bool>   visible-when: true;
+    in property <int>    count: 0;
+    in property <color>  chip-color: #f9c74f;
+    in property <string> label;
+
+    callback toggled();
+
+    height: 22px;
+    width: label-text.preferred-width + count-text.preferred-width + 32px;
+    background: root.visible-when ? #ffffff08 : transparent;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: root.visible-when ? root.chip-color : #ffffff20;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        // Color dot.
+        Rectangle {
+            width: 6px; height: 6px;
+            y: (parent.height - self.height) / 2;
+            background: root.chip-color;
+            border-radius: 3px;
+            opacity: root.visible-when ? 1.0 : 0.3;
+        }
+        label-text := Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        count-text := Text {
+            text: "(" + root.count + ")";
+            color: Theme.text-secondary;
+            font-size: Theme.font-xs;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        clicked => { root.toggled(); }
+    }
+}
+
+// ─── Main panel ───────────────────────────────────────────────────────────
+
+export component TimelinePanel inherits Rectangle {
+    in property <[TimelineTrackData]>      tracks;
+    in property <[TimelineMarkerData]>     markers;
+    in property <[TimelineFilterChipData]> kind-chips;
+    in property <string>                   search-text;
+    /// Time range currently displayed, formatted as `"12.34 s – 45.67 s"`.
+    in property <string>                   time-range-label;
+
+    /// User clicked a kind chip → toggle that kind's visibility.
+    callback kind-toggled(string);   // passes the kind: "keyframe" etc.
+    /// User edited the search field.
+    callback search-changed(string);
+    /// User clicked the filter button → open the tag-checkbox modal.
+    callback open-filter-modal();
+    /// User clicked a marker → select the source entity in the viewport.
+    callback marker-clicked(int);    // passes index into `markers`
+
+    background: Theme.panel-background;
+    border-radius: 0;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+
+        // ── Top row: legend + search + filter button ──
+        HorizontalLayout {
+            spacing: 8px;
+            height: 26px;
+
+            // Legend — the three kind chips.
+            for chip in root.kind-chips: KindChip {
+                kind:         chip.kind;
+                label:        chip.kind == "keyframe" ? "Keyframe"
+                            : chip.kind == "watchpoint" ? "Watchpoint"
+                            : "Breakpoint";
+                count:        chip.count;
+                visible-when: chip.visible;
+                chip-color:   chip.kind == "keyframe" ? #f9c74f
+                            : chip.kind == "watchpoint" ? #e8912d
+                            : #e74856;
+                toggled => { root.kind-toggled(chip.kind); }
+            }
+
+            // Spacer.
+            Rectangle { horizontal-stretch: 1; }
+
+            // Search field.
+            Rectangle {
+                width: 180px;
+                background: #00000030;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                search-input := TextInput {
+                    x: 8px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width - 16px;
+                    font-size: Theme.font-sm;
+                    color: Theme.text-primary;
+                    text: root.search-text;
+                    edited => { root.search-changed(self.text); }
+                }
+            }
+
+            // Filter button → opens the tag-checkbox modal.
+            filter-btn := Rectangle {
+                width: 78px;
+                background: filter-touch.has-hover ? #ffffff10 : transparent;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Text {
+                        text: "Filter";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "⋯";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-md;
+                        vertical-alignment: center;
+                    }
+                }
+                filter-touch := TouchArea {
+                    clicked => { root.open-filter-modal(); }
+                }
+            }
+        }
+
+        // ── Timeline body ──
+        Rectangle {
+            background: #00000020;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-color;
+            vertical-stretch: 1;
+
+            // Track labels on the left.
+            track-labels := VerticalLayout {
+                x: 8px; y: 8px;
+                width: 120px;
+                spacing: 4px;
+                for track[i] in root.tracks: Rectangle {
+                    height: 18px;
+                    opacity: track.visible ? 1.0 : 0.4;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: track.tag;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-xs;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: "(" + track.count + ")";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Timeline canvas — markers laid out by (t, track_index).
+            canvas := Rectangle {
+                x: track-labels.x + track-labels.width + 8px;
+                y: 8px;
+                width: parent.width - (track-labels.width + 24px);
+                height: parent.height - 40px;
+                background: transparent;
+
+                // Horizontal track stripes.
+                for track[i] in root.tracks: Rectangle {
+                    x: 0;
+                    y: i * 22px;
+                    width: parent.width;
+                    height: 1px;
+                    background: #ffffff10;
+                }
+
+                // Markers.
+                for marker[m_ix] in root.markers: Rectangle {
+                    x: marker.t * (parent.width - 10px);
+                    y: marker.track_index * 22px + 5px;
+                    width:  12px;
+                    height: 12px;
+                    background: transparent;
+
+                    if marker.kind == "keyframe":  KeyframeMarker  { tooltip: marker.tooltip; }
+                    if marker.kind == "watchpoint": WatchpointMarker { tooltip: marker.tooltip; }
+                    if marker.kind == "breakpoint": BreakpointMarker { tooltip: marker.tooltip; }
+
+                    TouchArea {
+                        clicked => { root.marker-clicked(m_ix); }
+                    }
+                }
+
+                // Time-axis tick row at the bottom.
+                axis := Rectangle {
+                    x: 0;
+                    y: parent.height - 20px;
+                    width: parent.width;
+                    height: 20px;
+                    background: #00000020;
+                    Text {
+                        x: 4px;
+                        text: root.time-range-label;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

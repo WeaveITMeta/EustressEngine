@@ -1962,6 +1962,24 @@ fn restore_gui_on_stop(
     mut gui_query: Query<(Entity, &mut eustress_common::gui::billboard_renderer::GuiElementDisplay)>,
 ) {
     let Some(snapshot) = snapshot else { return };
+
+    // Drain any GUI commands the last-frame `on_update` pushed before
+    // the Stop was processed. `apply_gui_commands` runs unconditionally
+    // each frame (not play-state-gated), so leftover commands in the
+    // queue would get applied AFTER our restore — reproducing the
+    // bug the user reported: labels snap back to TOML defaults for a
+    // frame, then the script's last `gui_set_text` rewrites them
+    // with the live simulation values. Throwing the queue away here
+    // closes the race without touching the GuiBridgePlugin ordering.
+    let stale = eustress_common::gui::drain_gui_commands();
+    if !stale.is_empty() {
+        debug!("🧹 Discarded {} pending GUI commands from last play frame", stale.len());
+    }
+    // Same reasoning for `gui_get_text`'s read-side snapshot — if any
+    // script checks it on the first Editing frame it should read
+    // empty, not the stale live values.
+    eustress_common::gui::clear_gui_snapshot();
+
     let mut restored = 0;
     for (entity, mut display) in &mut gui_query {
         if let Some(saved) = snapshot.snapshots.get(&entity) {

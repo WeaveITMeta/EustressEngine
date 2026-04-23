@@ -238,7 +238,20 @@ pub enum SlintAction {
     
     // Transform mode
     SetTransformMode(String),
-    
+
+    // Tool Options Bar callbacks — a ModalTool's option changed, or the
+    // user clicked × / pressed Esc on the bar. Drained into
+    // ActiveModalTool::on_option_changed / CancelModalToolEvent.
+    ToolOptionsControlChanged(String, String),
+    ToolOptionsCancel,
+    /// Activate a modal tool by id — fired by the ribbon CAD tab and
+    /// (eventually) MCP calls. Drained into `ActivateModalToolEvent`.
+    ActivateModalTool(String),
+
+    /// ToastUndo — inline Undo / dismiss × from the commit toast.
+    ToastUndoClicked,
+    ToastUndoDismissed,
+
     // Play controls
     PlaySolo,
     PlayWithCharacter,
@@ -283,6 +296,13 @@ pub enum SlintAction {
     // Properties
     PropertyChanged(String, String),
     SectionToggle(String), // Toggle collapse/expand of a property section by category name
+    /// Vec3 row copy icon — `(property_name, "x, y, z")`. Rust pushes
+    /// the triple to the OS clipboard via `arboard`.
+    CopyPropertyVector(String, String),
+    /// Vec3 row paste icon — property name only. Rust reads the
+    /// clipboard, parses whatever format the user copied, and
+    /// synthesises a `PropertyChanged(name, "x, y, z")` event.
+    PastePropertyVector(String),
     
     // Command bar
     ExecuteCommand(String),
@@ -422,6 +442,7 @@ pub enum SlintAction {
     WorkshopSkipMcp(i32),
     WorkshopEditMcp(i32),
     WorkshopOpenArtifact(String),
+    WorkshopSelectEntity(String),
     WorkshopStartPipeline,
     WorkshopPausePipeline,
     WorkshopResumePipeline,
@@ -1016,6 +1037,11 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<super::viewport_context_menu::ViewportRightClickState>()
             .add_systems(Update, super::viewport_context_menu::detect_viewport_right_click)
             .add_systems(Update, sync_bevy_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_tool_options_bar_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_numeric_input_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_commit_flash_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, render_slint_to_texture.after(sync_bevy_to_slint))
@@ -1226,6 +1252,24 @@ fn setup_slint_overlay(world: &mut World) {
     // Transform mode
     let q = queue.clone();
     ui.on_set_transform_mode(move |mode| q.push(SlintAction::SetTransformMode(mode.to_string())));
+
+    // Tool Options Bar
+    let q = queue.clone();
+    ui.on_tool_options_control_changed(move |id, value| {
+        q.push(SlintAction::ToolOptionsControlChanged(id.to_string(), value.to_string()))
+    });
+    let q = queue.clone();
+    ui.on_tool_options_cancel(move || q.push(SlintAction::ToolOptionsCancel));
+    let q = queue.clone();
+    ui.on_activate_modal_tool(move |tool_id| {
+        q.push(SlintAction::ActivateModalTool(tool_id.to_string()))
+    });
+
+    // Toast Undo — inline Undo action + dismiss ×.
+    let q = queue.clone();
+    ui.on_toast_undo_clicked(move || q.push(SlintAction::ToastUndoClicked));
+    let q = queue.clone();
+    ui.on_toast_undo_dismissed(move || q.push(SlintAction::ToastUndoDismissed));
     let q = queue.clone();
     ui.on_toggle_snap(move || q.push(SlintAction::ToggleSnap));
     let q = queue.clone();
@@ -1298,6 +1342,11 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
     let q = queue.clone();
     ui.on_section_toggle(move |category| q.push(SlintAction::SectionToggle(category.to_string())));
+    // Vec3 row copy/paste icons — see SlintAction docs.
+    let q = queue.clone();
+    ui.on_copy_property_vector(move |name, val| q.push(SlintAction::CopyPropertyVector(name.to_string(), val.to_string())));
+    let q = queue.clone();
+    ui.on_paste_property_vector(move |name| q.push(SlintAction::PastePropertyVector(name.to_string())));
 
     // Help icon — open /learn URL (tabbed viewer or system browser per settings)
     let q = queue.clone();
@@ -1554,6 +1603,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_edit_mcp(move |id| q.push(SlintAction::WorkshopEditMcp(id)));
     let q = queue.clone();
     ui.on_workshop_open_artifact(move |path| q.push(SlintAction::WorkshopOpenArtifact(path.to_string())));
+    let q = queue.clone();
+    ui.on_workshop_select_entity(move |name| q.push(SlintAction::WorkshopSelectEntity(name.to_string())));
     let q = queue.clone();
     ui.on_workshop_start_pipeline(move || q.push(SlintAction::WorkshopStartPipeline));
     let q = queue.clone();
@@ -2492,8 +2543,11 @@ struct DrainEventWriters<'w> {
     menu_events: MessageWriter<'w, MenuActionEvent>,
     undo_events: MessageWriter<'w, crate::commands::UndoCommandEvent>,
     redo_events: MessageWriter<'w, crate::commands::RedoCommandEvent>,
+    resize_part_events: MessageWriter<'w, crate::scale_tool::ResizePartEvent>,
     undo_action_events: MessageWriter<'w, crate::undo::UndoEvent>,
     redo_action_events: MessageWriter<'w, crate::undo::RedoEvent>,
+    undo_single_events: MessageWriter<'w, crate::undo::UndoSingleEvent>,
+    revert_to_events: MessageWriter<'w, crate::undo::RevertToEvent>,
     history_events: MessageWriter<'w, crate::commands::HistoryActionEvent>,
     exit_events: MessageWriter<'w, bevy::app::AppExit>,
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
@@ -2509,6 +2563,16 @@ struct DrainEventWriters<'w> {
     workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
     workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
     plugin_action: MessageWriter<'w, crate::studio_plugins::PluginActionEvent>,
+    // Modal tool activations — ToolOptionsBar control edits + explicit cancel.
+    modal_tool_option: MessageWriter<'w, crate::modal_tool::ToolOptionChangedEvent>,
+    modal_tool_cancel: MessageWriter<'w, crate::modal_tool::CancelModalToolEvent>,
+    modal_tool_activate: MessageWriter<'w, crate::modal_tool::ActivateModalToolEvent>,
+    // Align & Distribute — ribbon menu-action strings route here.
+    align_events: MessageWriter<'w, crate::align_distribute::AlignEntitiesEvent>,
+    distribute_events: MessageWriter<'w, crate::align_distribute::DistributeEntitiesEvent>,
+    // Toast Undo — Slint callbacks route here.
+    toast_undo_clicked: MessageWriter<'w, crate::toast_undo::ToastUndoClickedEvent>,
+    toast_undo_dismissed: MessageWriter<'w, crate::toast_undo::ToastUndoDismissedEvent>,
 }
 
 /// Terrain brush settings state
@@ -3000,7 +3064,28 @@ fn drain_slint_actions(
                     };
                 }
             }
-            
+
+            // Tool Options Bar — control edit + cancel, routed to modal_tool.
+            SlintAction::ToolOptionsControlChanged(id, value) => {
+                events.modal_tool_option.write(crate::modal_tool::ToolOptionChangedEvent {
+                    control_id: id,
+                    value,
+                });
+            }
+            SlintAction::ToolOptionsCancel => {
+                events.modal_tool_cancel.write(crate::modal_tool::CancelModalToolEvent);
+            }
+            SlintAction::ActivateModalTool(tool_id) => {
+                events.modal_tool_activate.write(crate::modal_tool::ActivateModalToolEvent { tool_id });
+            }
+
+            SlintAction::ToastUndoClicked => {
+                events.toast_undo_clicked.write(crate::toast_undo::ToastUndoClickedEvent);
+            }
+            SlintAction::ToastUndoDismissed => {
+                events.toast_undo_dismissed.write(crate::toast_undo::ToastUndoDismissedEvent);
+            }
+
             // Play controls → StudioState flags (consumed by play_mode.rs)
             SlintAction::PlaySolo => {
                 info!("▶ SlintAction::PlaySolo received");
@@ -3738,21 +3823,42 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ScriptContentChanged(text) => {
-                // Update the correct field based on current mode (Summary or Code)
+                // Update the correct field based on current mode (Summary / Markdown / Code)
                 if let Some(ref mut mgr) = res.tab_manager {
                     let idx = mgr.active_tab;
                     if let Some(active) = mgr.tabs.get_mut(idx) {
                         let is_summary = matches!(&active.tab_type,
                             super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
                         );
+                        let is_markdown = matches!(&active.tab_type,
+                            super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Markdown }
+                        );
+                        // Summary + Markdown views display the content
+                        // after `render_markdown_inline` has replaced
+                        // `**bold**` / `*italic*` / `` `code` `` with
+                        // Unicode Math letters. If the user edits in
+                        // that view, those Unicode chars ride along in
+                        // `text` — writing them to disk would silently
+                        // corrupt the raw markdown file. Round-trip
+                        // them back to ASCII + markdown markers on the
+                        // save path so the on-disk source stays clean.
                         if is_summary {
-                            active.summary_content = text.clone();
+                            let normalized = unrender_markdown_inline(&text);
+                            active.summary_content = normalized.clone();
                             // Auto-save summary to disk using canonical
                             // `<folder>/<folder>.md` path.
                             if let Some(ref path) = active.file_path {
                                 if path.is_dir() {
                                     let target = super::center_tabs::script_summary_path_canonical(path);
-                                    let _ = std::fs::write(&target, &text);
+                                    let _ = std::fs::write(&target, &normalized);
+                                }
+                            }
+                        } else if is_markdown {
+                            let normalized = unrender_markdown_inline(&text);
+                            active.content = normalized.clone();
+                            if let Some(ref path) = active.file_path {
+                                if path.is_file() {
+                                    let _ = std::fs::write(path, &normalized);
                                 }
                             }
                         } else {
@@ -4632,7 +4738,75 @@ fn drain_slint_actions(
                     s.show_properties = true;
                 }
             }
-            
+
+            // Vec3-row copy icon — write the current `"x, y, z"`
+            // triple to the OS clipboard so the user can paste it
+            // into another property row, another instance, or out to
+            // a script / spreadsheet. We normalise the format to
+            // two-decimal floats before writing so the clipboard
+            // contents stay stable regardless of which field the
+            // user was editing mid-copy.
+            SlintAction::CopyPropertyVector(name, value_raw) => {
+                let parts: Vec<f32> = value_raw
+                    .split(',')
+                    .map(|s| s.trim().parse::<f32>().unwrap_or(0.0))
+                    .collect();
+                let normalized = if parts.len() == 3 {
+                    format!("{:.3}, {:.3}, {:.3}", parts[0], parts[1], parts[2])
+                } else {
+                    value_raw.clone()
+                };
+                #[cfg(feature = "clipboard")]
+                {
+                    use arboard::Clipboard;
+                    if let Ok(mut clipboard) = Clipboard::new() {
+                        let _ = clipboard.set_text(normalized.clone());
+                    }
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Copied {}: {}", name, normalized));
+                }
+                // Mark the variable used even when the `clipboard`
+                // feature is off so `cargo build --no-default-features`
+                // doesn't flag it.
+                let _ = normalized;
+            }
+
+            // Vec3-row paste icon — read the OS clipboard, parse it
+            // with a forgiving grammar (accepts `x, y, z`, `x y z`,
+            // `(x, y, z)`, `[x, y, z]`, `Vector3.new(x, y, z)`, or
+            // even a JSON array `[x, y, z]`), and synthesise a
+            // matching `PropertyChanged(name, "x, y, z")` event so
+            // the existing write-back path handles rotation, scale,
+            // or position uniformly.
+            SlintAction::PastePropertyVector(name) => {
+                #[cfg(feature = "clipboard")]
+                let clipboard_text: Option<String> = {
+                    use arboard::Clipboard;
+                    Clipboard::new().ok().and_then(|mut c| c.get_text().ok())
+                };
+                #[cfg(not(feature = "clipboard"))]
+                let clipboard_text: Option<String> = None;
+
+                if let Some(text) = clipboard_text {
+                    if let Some([x, y, z]) = parse_vector3_flexible(&text) {
+                        let formatted = format!("{:.3}, {:.3}, {:.3}", x, y, z);
+                        // Re-enter the drain by pushing PropertyChanged
+                        // rather than duplicating the write-back logic.
+                        // Next frame picks it up + applies exactly as
+                        // if the user had typed the values in.
+                        queue.push(SlintAction::PropertyChanged(name.clone(), formatted.clone()));
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Pasted {} ← {}", name, formatted));
+                        }
+                    } else if let Some(ref mut out) = res.output {
+                        out.warn(format!("Paste failed: clipboard '{}' isn't a vector3", text.trim()));
+                    }
+                } else if let Some(ref mut out) = res.output {
+                    out.warn("Paste failed: clipboard is empty or unavailable".to_string());
+                }
+            }
+
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
@@ -4975,6 +5149,37 @@ fn drain_slint_actions(
                                     tf.scale.y = parts[1].max(1e-4);
                                     tf.scale.z = parts[2].max(1e-4);
                                 }
+                            }
+                        }
+                        "Size" => {
+                            // Parts expose `Size` sourced from
+                            // `BasePart.size` (Transform.scale is kept
+                            // at `[1, 1, 1]` for primitives since the
+                            // mesh is regenerated at the requested
+                            // size instead of relying on scaling).
+                            // Route through `ResizePartEvent` so the
+                            // scale-tool's `apply_size_to_entity`
+                            // helper handles mesh regen + `cframe`
+                            // bookkeeping in one code path. Without
+                            // this branch, pasting a Size triple
+                            // landed on no component (just fell
+                            // through to the `_` arm) — the exact
+                            // "paste always ends up 1, 1, 1" bug the
+                            // user caught on 2026-04-23.
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            if parts.len() == 3 {
+                                events.resize_part_events.write(
+                                    crate::scale_tool::ResizePartEvent {
+                                        entity,
+                                        new_size: Vec3::new(
+                                            parts[0].max(1e-4),
+                                            parts[1].max(1e-4),
+                                            parts[2].max(1e-4),
+                                        ),
+                                    },
+                                );
                             }
                         }
                         "Material" => {
@@ -5540,6 +5745,32 @@ fn drain_slint_actions(
             SlintAction::WorkshopOpenArtifact(path) => {
                 events.workshop_open_artifact.write(crate::workshop::WorkshopOpenArtifactEvent { path });
             }
+            SlintAction::WorkshopSelectEntity(name) => {
+                // Click on an entity chip in a chat bubble → find the
+                // entity by `Instance.name` and select it the same way
+                // an Explorer tree click would. This is the Workshop's
+                // equivalent of "Reveal in Explorer": updates the
+                // primary SelectedItem, replays through BevySelectionManager
+                // so multi-select + selection-box adornments come
+                // along for the ride, and flags the Explorer sync
+                // loop to scroll the row into view on the next frame.
+                let target = queries.instances.iter()
+                    .find(|(_, inst)| inst.name == name)
+                    .map(|(e, _)| e);
+                if let Some(entity) = target {
+                    if let Some(ref mut es) = res.explorer_state {
+                        es.selected = SelectedItem::Entity(entity);
+                        es.needs_immediate_sync = true;
+                    }
+                    if let Some(ref sel_mgr) = res.selection_manager {
+                        let sm = sel_mgr.0.write();
+                        sm.clear();
+                        sm.select(format!("{}v{}", entity.index(), entity.generation()));
+                    }
+                } else if let Some(ref mut out) = res.output {
+                    out.warn(format!("Workshop: no entity named '{}' — tool may not have spawned one yet", name));
+                }
+            }
             SlintAction::WorkshopStartPipeline => {
                 // Start pipeline is implicit — happens when user sends first message
                 info!("Workshop: Start pipeline requested");
@@ -5646,20 +5877,58 @@ fn drain_slint_actions(
             // user closed their currently-active tab, we also reset the
             // pipeline so the chat area swaps to a blank state.
             SlintAction::WorkshopCloseConversation(session_id) => {
+                let space = res.space_root.as_ref().map(|sr| sr.0.clone());
                 let was_active = res.workshop_pipeline.as_ref()
                     .map(|p| p.session_id == session_id)
                     .unwrap_or(false);
                 if was_active {
                     if let Some(ref mut pipeline) = res.workshop_pipeline {
-                        let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
-                        let _ = crate::workshop::persistence::save_session_to_space(pipeline, space);
+                        // Save state before closing so the history file
+                        // reflects the final message count before we
+                        // move it to trash (belt-and-braces — trash is
+                        // undo-able but a fresh save makes the file a
+                        // clean snapshot if the user un-trashes later).
+                        let _ = crate::workshop::persistence::save_session_to_space(pipeline, space.as_deref());
                         pipeline.reset();
                     }
                 }
-                // The sync system reads the live list from disk, so the
-                // tab disappears only when we actually remove the folder.
-                // For now "close" = "just deselect"; a follow-up can wire
-                // a Shift+click "delete permanently" if needed.
+
+                // Actually remove the session folder so the tab
+                // disappears. The sync system reads the live list from
+                // disk — without deleting the folder the tab stayed
+                // visible forever, which is exactly what the user
+                // caught with the close-X button. Move to
+                // `.eustress/trash/workshop/<session_id>` so the undo
+                // flow + disk recovery stay consistent with entity
+                // deletion (see `keybindings.rs` for the canonical
+                // trash-rename pattern).
+                if let Some(ref space_root) = space {
+                    let session_dir = crate::workshop::persistence::session_dir_in_space(
+                        Some(space_root.as_path()), &session_id,
+                    );
+                    if session_dir.exists() {
+                        let trash_dir = space_root
+                            .join(".eustress").join("trash").join("workshop");
+                        let _ = std::fs::create_dir_all(&trash_dir);
+                        // Make the trash entry unique per close so two
+                        // closes with the same session_id don't clash.
+                        let trash_target = trash_dir.join(format!(
+                            "{}-{}",
+                            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+                            &session_id,
+                        ));
+                        if let Err(e) = std::fs::rename(&session_dir, &trash_target) {
+                            // Fallback: hard remove. Rename can fail
+                            // across volumes or when the folder is
+                            // open in another process.
+                            let _ = std::fs::remove_dir_all(&session_dir);
+                            if let Some(ref mut out) = res.output {
+                                out.warn(format!("Workshop: fallback hard-delete after rename failed ({})", e));
+                            }
+                        }
+                    }
+                }
+
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Workshop: closed session {}", &session_id[..8.min(session_id.len())]));
                 }
@@ -6259,6 +6528,21 @@ fn drain_slint_actions(
                     "delete" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete)); }
                     "duplicate" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Duplicate)); }
                     "select_all" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectAll)); }
+                    "select_children" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectChildren));
+                    }
+                    "select_descendants" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectDescendants));
+                    }
+                    "select_parent" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectParent));
+                    }
+                    "select_siblings" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectSiblings));
+                    }
+                    "invert_selection" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::InvertSelection));
+                    }
                     "group" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Group)); }
                     "ungroup" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Ungroup)); }
                     "rename" => {
@@ -6301,6 +6585,26 @@ fn drain_slint_actions(
                             );
                         }
                     }
+                    // History-panel right-click actions. The Slint side
+                    // encodes the row index into the action id so one
+                    // menu entry per row is independent of the current
+                    // selection — no separate cursor state needed.
+                    other if other.starts_with("history:undo-single:") => {
+                        if let Some(rest) = other.strip_prefix("history:undo-single:") {
+                            if let Ok(idx) = rest.parse::<usize>() {
+                                events.undo_single_events
+                                    .write(crate::undo::UndoSingleEvent { index: idx });
+                            }
+                        }
+                    }
+                    other if other.starts_with("history:revert-to:") => {
+                        if let Some(rest) = other.strip_prefix("history:revert-to:") {
+                            if let Ok(idx) = rest.parse::<usize>() {
+                                events.revert_to_events
+                                    .write(crate::undo::RevertToEvent { target: idx });
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -6308,6 +6612,65 @@ fn drain_slint_actions(
             // Ribbon menu actions — route insert:* to InsertPart or log unsupported
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
+
+                // CAD ribbon Boolean group — route `csg:*` menu strings
+                // to the corresponding keybinding Actions so keyboard +
+                // ribbon share one code path.
+                match action {
+                    "csg:union" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::CSGUnion));
+                        continue;
+                    }
+                    "csg:negate" | "csg:difference" | "csg:subtract" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::CSGNegate));
+                        continue;
+                    }
+                    "csg:intersect" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::CSGIntersect));
+                        continue;
+                    }
+                    "csg:separate" => {
+                        events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::CSGSeparate));
+                        continue;
+                    }
+                    // Align & Distribute — Phase-0 tool feature.
+                    // Ribbon strings `align:center:<axis>` +
+                    // `distribute:<axis>` route to the respective
+                    // events; handlers live in align_distribute.rs.
+                    "align:center:x" | "align:center:y" | "align:center:z"
+                    | "align:min:x"    | "align:min:y"    | "align:min:z"
+                    | "align:max:x"    | "align:max:y"    | "align:max:z" => {
+                        use crate::align_distribute::{AlignEntitiesEvent, AlignMode};
+                        use crate::move_tool::Axis3d;
+                        let parts: Vec<&str> = action.split(':').collect();
+                        let mode = match parts.get(1).copied() {
+                            Some("min")    => AlignMode::Min,
+                            Some("max")    => AlignMode::Max,
+                            _              => AlignMode::Center,
+                        };
+                        let axis = match parts.get(2).copied() {
+                            Some("x") => Axis3d::X,
+                            Some("y") => Axis3d::Y,
+                            Some("z") => Axis3d::Z,
+                            _ => continue,
+                        };
+                        events.align_events.write(AlignEntitiesEvent { axis, mode });
+                        continue;
+                    }
+                    "distribute:x" | "distribute:y" | "distribute:z" => {
+                        use crate::align_distribute::DistributeEntitiesEvent;
+                        use crate::move_tool::Axis3d;
+                        let axis = match action.split(':').nth(1) {
+                            Some("x") => Axis3d::X,
+                            Some("y") => Axis3d::Y,
+                            Some("z") => Axis3d::Z,
+                            _ => continue,
+                        };
+                        events.distribute_events.write(DistributeEntitiesEvent { axis });
+                        continue;
+                    }
+                    _ => {}
+                }
 
                 // Script insert → create folder with _instance.toml + empty .rune source
                 if action == "insert:script" || action == "insert:localscript" || action == "insert:modulescript" {
@@ -6674,37 +7037,28 @@ fn drain_slint_actions(
                             })
                             .unwrap_or_else(|| space_root.join(service));
 
-                        // GUI containers (Frame, ScrollingFrame, ScreenGui, BillboardGui, SurfaceGui)
-                        // are created as folders so they can hold child elements.
-                        // Leaf elements (TextLabel, TextButton, etc.) remain flat files.
-                        let is_container = matches!(class_name_str,
-                            "Frame" | "ScrollingFrame" | "ScreenGui" | "BillboardGui" | "SurfaceGui"
-                        );
-
+                        // Everything — containers AND leaf elements — uses
+                        // the folder + `_instance.toml` convention so the
+                        // Explorer can host children under any UI node
+                        // (e.g. dropping a sibling TextLabel inside a
+                        // TextButton for label styling) and so there are
+                        // zero flat `.textlabel.toml` / `.textbutton.toml`
+                        // files lying at the StarterGui root. The
+                        // `_instance.toml` keeps the GuiTomlFile format
+                        // (`[metadata]`/`[instance]`/`[gui]`/`[text]`) so
+                        // the existing GUI loader + file-watcher
+                        // class-detection both keep working — the
+                        // `file_ext` is now discarded on write but still
+                        // used for registry categorisation below.
+                        let _ = file_ext;
                         let base_name = class_name_str;
-                        let (instance_name, toml_path) = if is_container {
-                            // Folder-based: Name/_instance.toml
-                            let name = (0..1000u32).find_map(|i| {
-                                let candidate = if i == 0 { base_name.to_string() }
-                                    else { format!("{}{}", base_name, i) };
-                                if !write_dir.join(&candidate).exists() { Some(candidate) } else { None }
-                            }).unwrap_or_else(|| format!("{}_new", base_name));
-                            let dir = write_dir.join(&name);
-                            let _ = std::fs::create_dir_all(&dir);
-                            let path = dir.join("_instance.toml");
-                            (name, path)
-                        } else {
-                            // Flat file: Name.textlabel.toml
-                            let name = (0..1000u32).find_map(|i| {
-                                let candidate = if i == 0 { base_name.to_string() }
-                                    else { format!("{}{}", base_name, i) };
-                                let path = write_dir.join(format!("{}.{}.toml", candidate, file_ext));
-                                if !path.exists() { Some(candidate) } else { None }
-                            }).unwrap_or_else(|| format!("{}_new", base_name));
-                            let path = write_dir.join(format!("{}.{}.toml", name, file_ext));
-                            let _ = std::fs::create_dir_all(&write_dir);
-                            (name, path)
-                        };
+                        let _ = std::fs::create_dir_all(&write_dir);
+                        let instance_name = crate::space::instance_loader::unique_entity_name(
+                            &write_dir, base_name,
+                        );
+                        let dir = write_dir.join(&instance_name);
+                        let _ = std::fs::create_dir_all(&dir);
+                        let toml_path = dir.join("_instance.toml");
 
                         // Create GUI TOML with proper [instance]/[gui]/[text] format
                         let gui_def = crate::space::gui_loader::create_default_gui_toml(
@@ -6724,19 +7078,21 @@ fn drain_slint_actions(
                                     commands.entity(entity).insert(ChildOf(parent));
                                 }
                                 if let Some(ref mut registry) = res.file_registry {
-                                    let (reg_path, reg_type) = if is_container {
-                                        // Folder-based: register the directory
-                                        let dir = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
-                                        (dir, crate::space::FileType::Directory)
-                                    } else {
-                                        (toml_path.clone(), crate::space::FileType::GuiElement)
-                                    };
+                                    // Every UI insert is now folder-based, so
+                                    // the registry always records the containing
+                                    // directory with `FileType::Directory`.
+                                    // This keeps the file-watcher + Explorer
+                                    // reparent/drag behaviour uniform across
+                                    // containers (Frame / ScreenGui) and
+                                    // what used to be flat leaves (TextLabel /
+                                    // TextButton / …).
+                                    let dir = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
                                     registry.register(
                                         toml_path.clone(),
                                         entity,
                                         crate::space::FileMetadata {
-                                            path: reg_path,
-                                            file_type: reg_type,
+                                            path: dir,
+                                            file_type: crate::space::FileType::Directory,
                                             service: service.to_string(),
                                             name: instance_name.clone(),
                                             size: 0,
@@ -6853,9 +7209,88 @@ fn drain_slint_actions(
                             }
                         }
                     } else {
-                        // Other menu actions (model:negate, edit:lock, etc.) — log unhandled
-                        if let Some(ref mut out) = res.output {
-                            if action.starts_with("insert:") {
+                        // Previously-stubbed Insert menu classes. Each
+                        // follows the folder + `_instance.toml`
+                        // convention — the file watcher picks the
+                        // folder up + spawns the entity, so we avoid
+                        // duplicating the ECS-insert plumbing the
+                        // `insert:model` / `insert:folder` handler has.
+                        //
+                        // Service mapping mirrors the Roblox engine's
+                        // canonical locations — Tool under StarterPack,
+                        // LocalizationTable under LocalizationService,
+                        // etc. — so generated entities show up in the
+                        // Explorer tree exactly where an author would
+                        // expect.
+                        let stub_insert: Option<(&str, &str)> = match action {
+                            "insert:terrain"           => Some(("Terrain",           "Workspace")),
+                            "insert:tool"              => Some(("Tool",              "StarterPack")),
+                            "insert:localization"
+                            | "insert:localizationtable" => Some(("LocalizationTable", "LocalizationService")),
+                            "insert:particle"
+                            | "insert:particleemitter" => Some(("ParticleEmitter",   "Workspace")),
+                            "insert:humanoid"          => Some(("Humanoid",          "Workspace")),
+                            "insert:attachment"        => Some(("Attachment",        "Workspace")),
+                            _ => None,
+                        };
+
+                        if let Some((class_name, service_name)) = stub_insert {
+                            let space_root = crate::space::default_space_root();
+
+                            // Prefer a currently-selected folder as
+                            // the write dir (so inserting an
+                            // Attachment with a Part selected plants
+                            // it as a child), else fall back to the
+                            // class's canonical service.
+                            let selected_entity: Option<Entity> = res.explorer_state
+                                .as_ref()
+                                .and_then(|es| match &es.selected {
+                                    SelectedItem::Entity(e) => Some(*e),
+                                    _ => None,
+                                });
+                            let fallback_dir = space_root.join(service_name);
+                            let _ = std::fs::create_dir_all(&fallback_dir);
+                            let write_dir = selected_entity
+                                .and_then(|pe| queries.loaded_from_file.get(pe).ok())
+                                .map(|(_, lff)| {
+                                    if lff.path.is_dir() { lff.path.clone() }
+                                    else { lff.path.parent().unwrap_or(&fallback_dir).to_path_buf() }
+                                })
+                                .unwrap_or_else(|| fallback_dir.clone());
+
+                            let dir_name = crate::space::instance_loader::unique_entity_name(&write_dir, class_name);
+                            let dir_path = write_dir.join(&dir_name);
+
+                            match std::fs::create_dir_all(&dir_path) {
+                                Ok(_) => {
+                                    let instance_toml = format!(
+                                        "[metadata]\nclass_name = \"{}\"\nname = \"{}\"\narchivable = true\n",
+                                        class_name, dir_name,
+                                    );
+                                    match std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
+                                        Ok(_) => {
+                                            if let Some(ref mut out) = res.output {
+                                                out.info(format!(
+                                                    "Inserted {} '{}' in {}",
+                                                    class_name, dir_name, write_dir.display(),
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(ref mut out) = res.output {
+                                                out.error(format!("Failed to write _instance.toml: {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Failed to create {} folder: {}", class_name, e));
+                                    }
+                                }
+                            }
+                        } else if action.starts_with("insert:") {
+                            if let Some(ref mut out) = res.output {
                                 out.info(format!("TODO: insert {}", &action["insert:".len()..]));
                             }
                         }
@@ -7016,6 +7451,260 @@ fn drain_slint_actions(
                 }
             }
         }
+    }
+}
+
+/// Mirrors `ToolOptionsBarState` (Rust resource) into StudioWindow
+/// properties consumed by the `ToolOptionsBar` component.
+///
+/// Runs every frame but only writes when values changed — avoids
+/// marking Slint dirty on stable state. The controls Vec is rebuilt
+/// as a Slint VecModel on every update for simplicity; building the
+/// model is cheap (usually 0–6 entries per tool) and the alternative
+/// (in-place model mutation) adds much more complexity than it saves.
+fn sync_tool_options_bar_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    bar_state: Option<Res<crate::modal_tool::ToolOptionsBarState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(bar_state) = bar_state else { return };
+    let ui = &slint_context.window;
+
+    // Visible — coarse toggle first; everything else downstream.
+    let current_visible = ui.get_tool_options_visible();
+    if current_visible != bar_state.visible {
+        ui.set_tool_options_visible(bar_state.visible);
+    }
+
+    // Nothing else to sync when the bar is hidden; avoids rebuilding
+    // the model every frame while no tool is active.
+    if !bar_state.visible { return; }
+
+    // Tool name + step label — cheap string compare, only set on change.
+    let current_name: String = ui.get_tool_options_tool_name().into();
+    if current_name != bar_state.tool_name {
+        ui.set_tool_options_tool_name(bar_state.tool_name.as_str().into());
+    }
+    let current_step: String = ui.get_tool_options_step_label().into();
+    if current_step != bar_state.step_label {
+        ui.set_tool_options_step_label(bar_state.step_label.as_str().into());
+    }
+
+    // Controls list → Slint VecModel. Rebuild every frame the bar is
+    // visible; tools typically mutate the list only on state transitions
+    // so this is usually a no-op copy.
+    let slint_controls: Vec<ToolOptionControlData> = bar_state.controls.iter().map(|c| {
+        use crate::modal_tool::ToolOptionKind;
+        match &c.kind {
+            ToolOptionKind::Number { value, min, max, step, unit } => ToolOptionControlData {
+                id: c.id.as_str().into(),
+                label: c.label.as_str().into(),
+                kind: "number".into(),
+                advanced: c.advanced,
+                number_value: *value,
+                number_min: *min,
+                number_max: *max,
+                number_step: *step,
+                number_unit: unit.as_str().into(),
+                bool_value: false,
+                choice_options: slint::ModelRc::default(),
+                choice_selected: slint::SharedString::default(),
+                label_text: slint::SharedString::default(),
+            },
+            ToolOptionKind::Bool { value } => ToolOptionControlData {
+                id: c.id.as_str().into(),
+                label: c.label.as_str().into(),
+                kind: "bool".into(),
+                advanced: c.advanced,
+                number_value: 0.0,
+                number_min: 0.0,
+                number_max: 0.0,
+                number_step: 0.0,
+                number_unit: slint::SharedString::default(),
+                bool_value: *value,
+                choice_options: slint::ModelRc::default(),
+                choice_selected: slint::SharedString::default(),
+                label_text: slint::SharedString::default(),
+            },
+            ToolOptionKind::Choice { options, selected } => {
+                let opts: Vec<slint::SharedString> = options.iter().map(|s| s.as_str().into()).collect();
+                let model = std::rc::Rc::new(slint::VecModel::from(opts));
+                ToolOptionControlData {
+                    id: c.id.as_str().into(),
+                    label: c.label.as_str().into(),
+                    kind: "choice".into(),
+                    advanced: c.advanced,
+                    number_value: 0.0,
+                    number_min: 0.0,
+                    number_max: 0.0,
+                    number_step: 0.0,
+                    number_unit: slint::SharedString::default(),
+                    bool_value: false,
+                    choice_options: slint::ModelRc::from(model),
+                    choice_selected: selected.as_str().into(),
+                    label_text: slint::SharedString::default(),
+                }
+            }
+            ToolOptionKind::Label { text } => ToolOptionControlData {
+                id: c.id.as_str().into(),
+                label: c.label.as_str().into(),
+                kind: "label".into(),
+                advanced: c.advanced,
+                number_value: 0.0,
+                number_min: 0.0,
+                number_max: 0.0,
+                number_step: 0.0,
+                number_unit: slint::SharedString::default(),
+                bool_value: false,
+                choice_options: slint::ModelRc::default(),
+                choice_selected: slint::SharedString::default(),
+                label_text: text.as_str().into(),
+            },
+        }
+    }).collect();
+    let model = std::rc::Rc::new(slint::VecModel::from(slint_controls));
+    ui.set_tool_options_controls(slint::ModelRc::from(model));
+}
+
+/// Reflect the current selection's count + group AABB into the Slint
+/// `selection-summary-*` properties. Hidden when nothing is selected.
+///
+/// Computed against world-rotated AABBs so the readout stays correct
+/// for rotated parts. Cheap — typical selection is 1–10 entities, and
+/// the whole pass is a single iteration + a few float formats. Still
+/// throttled via string equality on the output so stable selections
+/// don't mark Slint dirty every frame.
+fn sync_selection_summary_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    selected: Query<
+        (&GlobalTransform, Option<&eustress_common::classes::BasePart>),
+        With<crate::selection_box::Selected>,
+    >,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let ui = &slint_context.window;
+
+    let mut count = 0usize;
+    let mut bounds_min = Vec3::splat(f32::MAX);
+    let mut bounds_max = Vec3::splat(f32::MIN);
+    for (gt, bp) in selected.iter() {
+        let t = gt.compute_transform();
+        let size = bp.map(|b| b.size).unwrap_or(t.scale);
+        let (mn, mx) = crate::math_utils::calculate_rotated_aabb(
+            t.translation, size * 0.5, t.rotation,
+        );
+        bounds_min = bounds_min.min(mn);
+        bounds_max = bounds_max.max(mx);
+        count += 1;
+    }
+
+    let should_show = count > 0;
+    if ui.get_selection_summary_visible() != should_show {
+        ui.set_selection_summary_visible(should_show);
+    }
+    if !should_show {
+        return;
+    }
+
+    let size = bounds_max - bounds_min;
+    let count_text = format!("{} {}", count, if count == 1 { "part" } else { "parts" });
+    let bounds_text = format!("{:.2} × {:.2} × {:.2}", size.x, size.y, size.z);
+
+    let cur_count: String = ui.get_selection_summary_count().into();
+    if cur_count != count_text {
+        ui.set_selection_summary_count(count_text.as_str().into());
+    }
+    let cur_bounds: String = ui.get_selection_summary_bounds().into();
+    if cur_bounds != bounds_text {
+        ui.set_selection_summary_bounds(bounds_text.as_str().into());
+    }
+}
+
+/// Reflect `NumericInputState` to the Slint `numeric-input-*` properties.
+/// Pure read-out — all keyboard handling happens in Bevy's
+/// `handle_numeric_input_keys`.
+fn sync_numeric_input_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    numeric: Option<Res<crate::numeric_input::NumericInputState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(numeric) = numeric else { return };
+    let ui = &slint_context.window;
+
+    let current_visible = ui.get_numeric_input_visible();
+    if current_visible != numeric.active {
+        ui.set_numeric_input_visible(numeric.active);
+    }
+    if !numeric.active { return; }
+
+    let current_text: String = ui.get_numeric_input_text().into();
+    if current_text != numeric.text {
+        ui.set_numeric_input_text(numeric.text.as_str().into());
+    }
+
+    let axis_label = numeric.owner
+        .map(|o| o.axis_label(numeric.axis))
+        .unwrap_or_default();
+    let current_axis: String = ui.get_numeric_input_axis_label().into();
+    if current_axis != axis_label {
+        ui.set_numeric_input_axis_label(axis_label.as_str().into());
+    }
+
+    let unit = numeric.owner.map(|o| o.unit()).unwrap_or("");
+    let current_unit: String = ui.get_numeric_input_unit().into();
+    if current_unit != unit {
+        ui.set_numeric_input_unit(unit.into());
+    }
+
+    if (ui.get_numeric_input_anchor_x() - numeric.anchor_x).abs() > 0.5 {
+        ui.set_numeric_input_anchor_x(numeric.anchor_x);
+    }
+    if (ui.get_numeric_input_anchor_y() - numeric.anchor_y).abs() > 0.5 {
+        ui.set_numeric_input_anchor_y(numeric.anchor_y);
+    }
+}
+
+/// Reflect `ToastUndoState` to the Slint toast-undo-* properties.
+/// Read-only push; Slint UI emits callbacks back through
+/// `SlintAction::ToastUndo*` when the user interacts.
+fn sync_toast_undo_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    state: Option<Res<crate::toast_undo::ToastUndoState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(state) = state else { return };
+    let ui = &slint_context.window;
+
+    let cur_vis = ui.get_toast_undo_visible();
+    if cur_vis != state.visible {
+        ui.set_toast_undo_visible(state.visible);
+    }
+    if !state.visible { return; }
+
+    let cur_msg: String = ui.get_toast_undo_message().into();
+    if cur_msg != state.message {
+        ui.set_toast_undo_message(state.message.as_str().into());
+    }
+    let cur_short: String = ui.get_toast_undo_shortcut().into();
+    if cur_short != state.undo_shortcut {
+        ui.set_toast_undo_shortcut(state.undo_shortcut.as_str().into());
+    }
+    if (ui.get_toast_undo_progress() - state.progress).abs() > 0.01 {
+        ui.set_toast_undo_progress(state.progress);
+    }
+}
+
+/// Reflect `CommitFlashState.progress` into the Slint
+/// `commit-flash-progress` property each frame.
+fn sync_commit_flash_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    state: Option<Res<crate::commit_flash::CommitFlashState>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(state) = state else { return };
+    let ui = &slint_context.window;
+    if (ui.get_commit_flash_progress() - state.progress).abs() > 0.001 {
+        ui.set_commit_flash_progress(state.progress);
     }
 }
 
@@ -7364,11 +8053,23 @@ fn sync_bevy_to_slint(
             let show_err = ui.get_output_show_errors();
             let show_dbg = ui.get_output_show_debug();
             let all_text: String = output.entries.iter().filter(|e| {
-                // Source filter
-                let source_ok = source_filter == "all"
-                    || (source_filter == "rune" && e.source == "rune")
-                    || (source_filter == "luau" && e.source == "luau")
-                    || (e.source != "rune" && e.source != "luau");
+                // Source filter semantics:
+                //   "" or "all" → every source passes (default)
+                //   "rune"       → rune entries only
+                //   "luau"       → luau entries only
+                //   any other    → entries whose source exactly matches
+                //
+                // The prior version hid rune/luau entries whenever the
+                // filter wasn't explicitly "all" or that exact source —
+                // which is why script errors landed in OutputConsole but
+                // never rendered in the Output panel for the default
+                // filter state (empty string). Errors now show up
+                // regardless of whether the user has touched the
+                // Rune/Luau filter toggles.
+                let source_ok = match source_filter.as_str() {
+                    "" | "all" => true,
+                    f          => e.source == f,
+                };
                 // Level filter
                 let level_ok = match e.level {
                     LogLevel::Info => show_info,
@@ -7460,16 +8161,34 @@ fn sync_workshop_to_slint(
     ui.set_workshop_estimated_cost(pipeline.format_cost().into());
 
     let messages: Vec<ChatMessage> = pipeline.messages.iter().enumerate().map(|(i, msg)| {
+        // Entity chip extraction: inspect the tool name + input to
+        // decide if this MCP card should render a clickable entity
+        // chip (class icon + name + "click to reveal in Explorer"),
+        // and if so pick the right class icon.
+        let (entity_class, entity_name, entity_icon) = extract_entity_chip(msg);
+        // Flatten inline markdown markers to plain text for the chat
+        // bubble. The math-Unicode trick works in the Script-Editor
+        // Markdown view (where a custom font / copy-paste path shows
+        // the math glyphs fine + a round-trip unrender writes clean
+        // `.md` back to disk), but on Windows the Workshop panel uses
+        // Segoe UI, which has no U+1D400 Mathematical-Alphanumeric
+        // glyphs — so bolds rendered invisible. `flatten_markdown_for_display`
+        // drops the markers so text is readable; real per-segment
+        // weight rendering is a TODO tracked on that function.
+        let styled_content = flatten_markdown_for_display(&msg.content);
         ChatMessage {
             id: i as i32,
             role: msg.role.to_slint_string().into(),
-            content: msg.content.clone().into(),
+            content: styled_content.into(),
             timestamp: msg.timestamp.clone().into(),
             mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
             mcp_method: slint::SharedString::default(),
             mcp_status: slint::SharedString::default(),
             artifact_path: slint::SharedString::default(),
             artifact_type: slint::SharedString::default(),
+            entity_class: entity_class.into(),
+            entity_name: entity_name.into(),
+            entity_icon,
         }
     }).collect();
     let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
@@ -7742,15 +8461,27 @@ fn generate_workshop_titles(
                     .trim()
                     .chars().take(60).collect::<String>();
                 if title.is_empty() { return; }
-                if let Err(e) = crate::workshop::persistence::update_session_title(
+                match crate::workshop::persistence::update_session_title(
                     Some(&space_root_buf),
                     &session_id,
                     &title,
                 ) {
-                    tracing::warn!("Workshop: update_session_title({}) failed: {}", session_id, e);
-                } else {
-                    tracing::info!("Workshop: Haiku titled session {} → {:?}",
-                        &session_id[..8.min(session_id.len())], title);
+                    Ok(new_id) => {
+                        if new_id != session_id {
+                            tracing::info!(
+                                "Workshop: Haiku titled + renamed {} → {:?} (folder: {})",
+                                &session_id[..8.min(session_id.len())],
+                                title,
+                                new_id,
+                            );
+                        } else {
+                            tracing::info!("Workshop: Haiku titled session {} → {:?}",
+                                &session_id[..8.min(session_id.len())], title);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Workshop: update_session_title({}) failed: {}", session_id, e);
+                    }
                 }
             }
             Err(e) => {
@@ -8034,6 +8765,10 @@ fn sync_history_to_slint(
             timestamp: slint::SharedString::default(),
             is_current: i == current_index.saturating_sub(1),
             can_undo: i < current_index,
+            // Stable topic string matching the Eustress-Stream topic
+            // (`history.<kind>`). Drives the right-click menu label
+            // ("Undo This Move Change") + any future tag-filter UI.
+            topic: action.topic_kind().into(),
         }
     }).collect();
 
@@ -8827,10 +9562,27 @@ fn sync_unified_explorer_to_slint(
     // Service: ServerScriptService (depth 0) - no editor children
     tree_nodes.push(make_service_node("ServerScriptService", "serverscriptservice", 0, false, false, &explorer_state));
 
-    // Service: SoulService (depth 0) + script children (depth 1+)
+    // Service: SoulService (depth 0) + script children (depth 1+).
+    // Sort the immediate children so the Workshop folder (chat
+    // history root — touched every time the user runs Claude) always
+    // floats to the top. Everything else stays alphabetical so user-
+    // authored scripts keep their stable ordering. Matches how
+    // Workspace floats the Camera above all other parts above.
     let ss_has = !soul_service_roots.is_empty();
     tree_nodes.push(make_service_node("SoulService", "soulservice", 0, ss_has, svc_expanded("SoulService"), &explorer_state));
     if svc_expanded("SoulService") {
+        soul_service_roots.sort_by(|a, b| {
+            let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+            let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+            let a_workshop = a_name.eq_ignore_ascii_case("Workshop");
+            let b_workshop = b_name.eq_ignore_ascii_case("Workshop");
+            match (a_workshop, b_workshop) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a_name.cmp(b_name)
+                    .then_with(|| a.index().cmp(&b.index())),
+            }
+        });
         tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
@@ -9138,6 +9890,16 @@ fn build_file_tree_nodes(
         // Populate reverse lookup cache
         path_cache.insert(path_hash, dir_path.clone());
         
+        // Workshop SoulService folder gets the wrench icon instead
+        // of a generic folder glyph — it's the per-Space chat history
+        // home and the user asked for a distinct "maintenance / tools"
+        // metaphor matching the dock ribbon's Workshop tab.
+        let is_workshop_folder = dir_name.eq_ignore_ascii_case("Workshop")
+            && dir_path.parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.eq_ignore_ascii_case("SoulService"))
+                .unwrap_or(false);
+
         let folder_icon_name = if is_expanded {
             match dir_name.to_lowercase().as_str() {
                 "src" | "source" => "folder-src-open",
@@ -9173,11 +9935,14 @@ fn build_file_tree_nodes(
                 _ => "folder",
             }
         };
-        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join("icons")
-            .join("folders")
-            .join(format!("{}.svg", folder_icon_name));
+        let icon_path = if is_workshop_folder {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("assets").join("icons").join("wrench.svg")
+        } else {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("assets").join("icons").join("folders")
+                .join(format!("{}.svg", folder_icon_name))
+        };
         let icon = slint::Image::load_from_path(&icon_path).unwrap_or_default();
         
         nodes.push(TreeNode {
@@ -9723,9 +10488,30 @@ fn sync_properties_to_slint(
             add_prop("Transform", "Rotation",
                 format!("{:.1}, {:.1}, {:.1}", rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
                 "rotation", true);
-            add_prop("Transform", "Scale",
-                format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
-                "vec3", true);
+            // Size — authoritative dimensions of a Part. Eustress
+            // parts use `BasePart.size` as the real dimensions and
+            // leave `Transform.scale` at `[1, 1, 1]` (mesh is
+            // regenerated at the requested size instead of relying
+            // on transform scaling, so physics colliders + child
+            // bounds stay correct). Reading `Transform.scale` for a
+            // "Size" / "Scale" field would always show 1,1,1 and
+            // writes would be no-ops — which is exactly the
+            // copy-paste bug the user caught. `Size` comes from
+            // `BasePart.size` instead so copy/paste/duplicate round-
+            // trip real values.
+            if let Ok(base_part) = base_parts.get(selected_entity) {
+                add_prop("Transform", "Size",
+                    format!("{:.3}, {:.3}, {:.3}", base_part.size.x, base_part.size.y, base_part.size.z),
+                    "vec3", true);
+            } else {
+                // Non-part entities (Models, Folders, GUI) keep the
+                // old Transform.scale readout — there's no BasePart
+                // to source from, and scale edits on these ARE real
+                // transform-scale operations.
+                add_prop("Transform", "Scale",
+                    format!("{:.2}, {:.2}, {:.2}", transform.scale.x, transform.scale.y, transform.scale.z),
+                    "vec3", true);
+            }
         }
         
         // BasePart properties
@@ -9946,7 +10732,13 @@ fn update_toml_property(
                 def.transform.position = [x, y, z]; true
             } else { false }
         }
-        "Scale" => {
+        "Scale" | "Size" => {
+            // `Size` (authoritative BasePart.size) and `Scale`
+            // (Transform.scale) both persist to the same TOML field —
+            // `def.transform.scale` is how the loader rehydrates the
+            // part's dimensions (see `instance_loader::spawn_instance`
+            // where the scale array is read back into `BasePart.size`
+            // for primitives and `Transform.scale` for custom-GLB).
             if let Some((x, y, z)) = parse_vec3_value(val) {
                 def.transform.scale = [x, y, z]; true
             } else { false }
@@ -10527,8 +11319,18 @@ fn sync_tab_manager_to_studio_state(
                 let is_summary = matches!(&active_tab.tab_type,
                     super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
                 );
+                let is_markdown = matches!(&active_tab.tab_type,
+                    super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Markdown }
+                );
+                // Summary + Markdown views both render user-authored
+                // markdown; preprocess through `render_markdown_inline`
+                // so `**bold**` / `*italic*` / `` `code` `` visibly
+                // style (same Workshop chat rule). Code view is raw
+                // source — no transformation.
                 state.script_editor_content = if is_summary {
-                    active_tab.summary_content.clone()
+                    render_markdown_inline(&active_tab.summary_content)
+                } else if is_markdown {
+                    render_markdown_inline(&active_tab.content)
                 } else {
                     active_tab.content.clone()
                 };
@@ -10560,8 +11362,13 @@ fn sync_tab_manager_to_studio_state(
             let is_summary = matches!(&active_tab.tab_type,
                 super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
             );
+            let is_markdown = matches!(&active_tab.tab_type,
+                super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Markdown }
+            );
             state.script_editor_content = if is_summary {
-                active_tab.summary_content.clone()
+                render_markdown_inline(&active_tab.summary_content)
+            } else if is_markdown {
+                render_markdown_inline(&active_tab.content)
             } else {
                 active_tab.content.clone()
             };
@@ -11316,6 +12123,423 @@ fn sync_asset_manager_to_slint(
         ui.set_universe_asset_count(universe_count);
         ui.set_space_asset_count(space_count);
     }
+}
+
+/// Render a subset of Markdown inline syntax for the Script-Editor
+/// Markdown view — `**bold**`, `*italic*`, and `` `code` `` — by
+/// swapping the marked spans for Unicode Mathematical-Alphanumeric
+/// code points that already carry the weight/slant. Paired with
+/// [`unrender_markdown_inline`] on the save path so edits round-trip
+/// back to clean ASCII Markdown on disk.
+///
+/// **Note — only safe where round-trip is needed.** The Workshop chat
+/// panel cannot use this function: the Slint default font on Windows
+/// (Segoe UI) has no glyphs in the U+1D400 Mathematical-Alphanumeric
+/// block, so bold spans render as tofu / invisible. For the chat
+/// bubble path use [`flatten_markdown_for_display`] instead, which
+/// strips the markers to plain text (lossy — no styling — but
+/// readable, and the source content isn't edited there so losing the
+/// round-trip doesn't matter).
+///
+/// Scope:
+/// * `**…**` → Unicode Mathematical Bold (𝐀–𝐙, 𝐚–𝐳, 𝟎–𝟗)
+/// * `*…*`   → Unicode Mathematical Italic (𝐴–𝑍, 𝑎–𝑧 with h↦ℎ)
+/// * `` `…` `` → Unicode Mathematical Monospace (𝙰–𝚉, 𝚊–𝚣, 𝟶–𝟿)
+/// * Unrecognized chars inside a span (punctuation, accented letters,
+///   emoji, CJK, …) pass through as-is, so the span looks "mostly bold"
+///   rather than breaking. Good enough for the chat content Claude
+///   emits; a full inline-run renderer is a future upgrade.
+/// * Unpaired markers are left alone (no aggressive rewriting).
+///
+/// Multi-line input is preserved — we don't touch newlines.
+/// Parse a human-pasted Vector3 string into `[x, y, z]`, accepting
+/// every common representation the user might have copied from:
+///
+/// * `"1, 2, 3"`, `"1,2,3"`, `"1 2 3"` — bare triples
+/// * `"(1, 2, 3)"`, `"[1, 2, 3]"`, `"{1, 2, 3}"` — wrapped
+/// * `"Vector3.new(1, 2, 3)"`, `"Vec3(1, 2, 3)"` — code-shaped
+/// * `"1.5e2, -3, 0.125"` — scientific + negatives + decimals
+///
+/// Returns `None` if fewer than three finite f32s parse out. Non-digit
+/// separators are collapsed to whitespace before splitting so the
+/// caller doesn't need to normalise input first.
+fn parse_vector3_flexible(s: &str) -> Option<[f32; 3]> {
+    // Replace every char that isn't a digit, dot, minus, plus, `e`,
+    // `E`, or whitespace with a space. This leaves the numeric tokens
+    // intact while stripping brackets, commas, function names, and
+    // any stray unicode the user pasted.
+    let cleaned: String = s.chars()
+        .map(|c| {
+            if c.is_ascii_digit()
+                || c == '.'
+                || c == '-'
+                || c == '+'
+                || c == 'e'
+                || c == 'E'
+                || c.is_whitespace()
+            {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+
+    // Drop tokens that are ONLY letters (e.g. from `Vector3.new`) —
+    // after the char map they'd survive as bare `e`s.
+    let values: Vec<f32> = cleaned
+        .split_whitespace()
+        .filter(|tok| tok.chars().any(|c| c.is_ascii_digit()))
+        .filter_map(|tok| tok.parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .collect();
+
+    if values.len() >= 3 {
+        Some([values[0], values[1], values[2]])
+    } else {
+        None
+    }
+}
+
+fn render_markdown_inline(input: &str) -> String {
+    // Walk the string as bytes for O(n) scanning; the marker
+    // characters (`*`, `` ` ``) are all single-byte ASCII so byte
+    // indices are safe here and bypass the cost of rebuilding a
+    // Vec<char> per message.
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // **bold**
+        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            if let Some(end) = find_double_star(&bytes[i + 2..]) {
+                let span = &input[i + 2..i + 2 + end];
+                for c in span.chars() { out.push(to_math_bold(c)); }
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        // *italic* — only pair if there's a matching `*` before
+        // whitespace-to-end, so `5 * 3` doesn't get rewritten.
+        if bytes[i] == b'*' {
+            if let Some(end) = find_single_star(&bytes[i + 1..]) {
+                let span = &input[i + 1..i + 1 + end];
+                // Skip empty spans and spans that span a newline
+                // (markdown doesn't allow multi-line italic in inline).
+                if !span.is_empty() && !span.contains('\n') {
+                    for c in span.chars() { out.push(to_math_italic(c)); }
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        // `code`
+        if bytes[i] == b'`' {
+            if let Some(end) = find_backtick(&bytes[i + 1..]) {
+                let span = &input[i + 1..i + 1 + end];
+                if !span.is_empty() && !span.contains('\n') {
+                    for c in span.chars() { out.push(to_math_mono(c)); }
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        // Default: copy the current byte (UTF-8 safe via char iteration
+        // at the next multi-byte boundary).
+        let ch_start = i;
+        while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 { i += 1; } // skip UTF-8 continuation bytes (shouldn't happen at this position but be safe)
+        // Emit one full char from ch_start.
+        if let Some(c) = input[ch_start..].chars().next() {
+            out.push(c);
+            i = ch_start + c.len_utf8();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Display-only flattening of inline Markdown markers for chat bubbles.
+/// `**bold**`, `*italic*`, and `` `code` `` spans have their markers
+/// stripped and the inner text copied through verbatim.
+///
+/// **Why separate from [`render_markdown_inline`].** The math-Unicode
+/// trick doesn't work in the Workshop panel — Segoe UI has no glyphs
+/// in the U+1D400 block so bolded spans paint invisibly (user caught
+/// this in a chat where Claude's tool count + category labels
+/// vanished entirely). Stripping is lossy at the display layer but
+/// the Workshop content is ephemeral (we never save edits back to
+/// disk from that view), so the one-way transform is fine.
+///
+/// **TODO — proper segmented rendering.** Replace this whole path
+/// with a `TextSegment { text, bold, italic, mono }` struct flowed
+/// into `ChatMessage` + a `HorizontalLayout` of styled `Text`
+/// elements in `workshop_panel.slint`. That restores real weight /
+/// slant / monospace without any Unicode-glyph dependency.
+fn flatten_markdown_for_display(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // **bold** → copy inner verbatim, drop the four marker bytes.
+        if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            if let Some(end) = find_double_star(&bytes[i + 2..]) {
+                out.push_str(&input[i + 2..i + 2 + end]);
+                i += 2 + end + 2;
+                continue;
+            }
+        }
+        // *italic* — only pair if closing `*` exists on the same line
+        // (keeps arithmetic like `5 * 3` intact).
+        if bytes[i] == b'*' {
+            if let Some(end) = find_single_star(&bytes[i + 1..]) {
+                let span = &input[i + 1..i + 1 + end];
+                if !span.is_empty() && !span.contains('\n') {
+                    out.push_str(span);
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        // `code`
+        if bytes[i] == b'`' {
+            if let Some(end) = find_backtick(&bytes[i + 1..]) {
+                let span = &input[i + 1..i + 1 + end];
+                if !span.is_empty() && !span.contains('\n') {
+                    out.push_str(span);
+                    i += 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        // Default: copy one full UTF-8 char.
+        let ch_start = i;
+        while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 { i += 1; }
+        if let Some(c) = input[ch_start..].chars().next() {
+            out.push(c);
+            i = ch_start + c.len_utf8();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn find_double_star(haystack: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 1 < haystack.len() {
+        if haystack[i] == b'\n' { return None; } // bold doesn't span lines
+        if haystack[i] == b'*' && haystack[i + 1] == b'*' { return Some(i); }
+        i += 1;
+    }
+    None
+}
+
+fn find_single_star(haystack: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i] == b'\n' { return None; }
+        if haystack[i] == b'*' { return Some(i); }
+        i += 1;
+    }
+    None
+}
+
+fn find_backtick(haystack: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i < haystack.len() {
+        if haystack[i] == b'\n' { return None; }
+        if haystack[i] == b'`' { return Some(i); }
+        i += 1;
+    }
+    None
+}
+
+fn to_math_bold(c: char) -> char {
+    match c {
+        'A'..='Z' => char::from_u32(0x1D400 + (c as u32 - 'A' as u32)).unwrap_or(c),
+        'a'..='z' => char::from_u32(0x1D41A + (c as u32 - 'a' as u32)).unwrap_or(c),
+        '0'..='9' => char::from_u32(0x1D7CE + (c as u32 - '0' as u32)).unwrap_or(c),
+        _ => c,
+    }
+}
+
+fn to_math_italic(c: char) -> char {
+    match c {
+        // U+1D434..U+1D44D: 𝐴..𝑍 (note: no italic 𝐼 gap, it's present)
+        'A'..='Z' => char::from_u32(0x1D434 + (c as u32 - 'A' as u32)).unwrap_or(c),
+        // U+1D44E..U+1D467: 𝑎..𝑧 — BUT U+1D455 (math italic small h) is
+        // reserved; Unicode uses U+210E (planck constant) for italic h.
+        'h'       => '\u{210E}',
+        'a'..='z' => char::from_u32(0x1D44E + (c as u32 - 'a' as u32)).unwrap_or(c),
+        _ => c,
+    }
+}
+
+fn to_math_mono(c: char) -> char {
+    match c {
+        'A'..='Z' => char::from_u32(0x1D670 + (c as u32 - 'A' as u32)).unwrap_or(c),
+        'a'..='z' => char::from_u32(0x1D68A + (c as u32 - 'a' as u32)).unwrap_or(c),
+        '0'..='9' => char::from_u32(0x1D7F6 + (c as u32 - '0' as u32)).unwrap_or(c),
+        _ => c,
+    }
+}
+
+/// Inverse of [`render_markdown_inline`]. Walks the string, collects
+/// contiguous runs of Unicode Mathematical-Alphanumeric characters,
+/// converts each run back to its ASCII equivalent, and wraps the run
+/// in the marker (`**` / `*` / `` ` ``) matching its style. Used on
+/// the save path so edits made in the Summary/Markdown view don't
+/// leak Unicode math letters into the on-disk `.md` file — the
+/// raw-markdown source stays round-trippable.
+///
+/// Mixed-style spans (e.g. a bold word with an italic letter inserted
+/// mid-way) are emitted as separate wrapped runs; this is the same
+/// behavior as re-formatting through any markdown editor.
+fn unrender_markdown_inline(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut current_style = UnrenderStyle::Plain;
+    let mut run_buf = String::new();
+
+    fn close_run(out: &mut String, buf: &mut String, style: &UnrenderStyle) {
+        if buf.is_empty() { return; }
+        let marker = match style {
+            UnrenderStyle::Bold   => "**",
+            UnrenderStyle::Italic => "*",
+            UnrenderStyle::Mono   => "`",
+            UnrenderStyle::Plain  => "",
+        };
+        out.push_str(marker);
+        out.push_str(buf);
+        out.push_str(marker);
+        buf.clear();
+    }
+
+    for c in input.chars() {
+        let (ascii, style) = classify_math_char(c);
+        let same = matches!((&current_style, &style),
+            (UnrenderStyle::Plain,  UnrenderStyle::Plain)
+            | (UnrenderStyle::Bold,   UnrenderStyle::Bold)
+            | (UnrenderStyle::Italic, UnrenderStyle::Italic)
+            | (UnrenderStyle::Mono,   UnrenderStyle::Mono));
+        if !same {
+            close_run(&mut out, &mut run_buf, &current_style);
+            current_style = style;
+        }
+        run_buf.push(ascii);
+    }
+    close_run(&mut out, &mut run_buf, &current_style);
+    out
+}
+
+/// Returns the ASCII equivalent of a Unicode Mathematical-Alphanumeric
+/// character and its style, or `(c, Plain)` for any other char so
+/// normal text flows through `unrender_markdown_inline` unchanged.
+fn classify_math_char(c: char) -> (char, UnrenderStyle) {
+    let cp = c as u32;
+    // Bold letters / digits
+    if (0x1D400..=0x1D419).contains(&cp) {
+        return (char::from_u32(cp - 0x1D400 + 'A' as u32).unwrap_or(c), UnrenderStyle::Bold);
+    }
+    if (0x1D41A..=0x1D433).contains(&cp) {
+        return (char::from_u32(cp - 0x1D41A + 'a' as u32).unwrap_or(c), UnrenderStyle::Bold);
+    }
+    if (0x1D7CE..=0x1D7D7).contains(&cp) {
+        return (char::from_u32(cp - 0x1D7CE + '0' as u32).unwrap_or(c), UnrenderStyle::Bold);
+    }
+    // Italic letters (and planck-h special)
+    if (0x1D434..=0x1D44D).contains(&cp) {
+        return (char::from_u32(cp - 0x1D434 + 'A' as u32).unwrap_or(c), UnrenderStyle::Italic);
+    }
+    if (0x1D44E..=0x1D467).contains(&cp) {
+        return (char::from_u32(cp - 0x1D44E + 'a' as u32).unwrap_or(c), UnrenderStyle::Italic);
+    }
+    if cp == 0x210E {
+        return ('h', UnrenderStyle::Italic);
+    }
+    // Monospace letters / digits
+    if (0x1D670..=0x1D689).contains(&cp) {
+        return (char::from_u32(cp - 0x1D670 + 'A' as u32).unwrap_or(c), UnrenderStyle::Mono);
+    }
+    if (0x1D68A..=0x1D6A3).contains(&cp) {
+        return (char::from_u32(cp - 0x1D68A + 'a' as u32).unwrap_or(c), UnrenderStyle::Mono);
+    }
+    if (0x1D7F6..=0x1D7FF).contains(&cp) {
+        return (char::from_u32(cp - 0x1D7F6 + '0' as u32).unwrap_or(c), UnrenderStyle::Mono);
+    }
+    (c, UnrenderStyle::Plain)
+}
+
+#[allow(dead_code)]
+enum UnrenderStyle { Plain, Bold, Italic, Mono }
+
+/// Inspect a `ChatMessage` (usually an MCP tool call) and decide
+/// whether to render a clickable entity chip. Returns (class, name,
+/// icon) — empty class/name means "no chip, render default JSON body".
+///
+/// Supported tool shapes:
+/// * `create_entity({ class, name, ... })` — direct spawn
+/// * `update_entity({ name, ... })` — target reveal for the entity
+///   whose properties are being edited
+/// * `delete_entity({ name })` — surfaces which entity is going away
+/// * `execute_rune({ code })` — when the code defines a Soul script,
+///   picks it up via filename convention; falls through otherwise
+///
+/// Icon is loaded via `load_class_icon` so it matches the Explorer's
+/// visual language exactly.
+fn extract_entity_chip(
+    msg: &crate::workshop::ChatMessage,
+) -> (String, String, slint::Image) {
+    // Only tool-call cards can carry entity info.
+    if !matches!(msg.role, crate::workshop::MessageRole::Mcp) {
+        return (String::new(), String::new(), slint::Image::default());
+    }
+    let tool = match msg.mcp_endpoint.as_deref() {
+        Some(t) => t,
+        None    => return (String::new(), String::new(), slint::Image::default()),
+    };
+    let input = match msg.tool_input.as_ref() {
+        Some(v) => v,
+        None    => return (String::new(), String::new(), slint::Image::default()),
+    };
+
+    // Map the tool name + input → (class_name_str, entity_name).
+    let (class_str, name): (&str, String) = match tool {
+        "create_entity" => {
+            let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("Part");
+            let name  = input.get("name").and_then(|v| v.as_str()).unwrap_or("NewPart").to_string();
+            (class, name)
+        }
+        "update_entity" | "delete_entity" | "query_entity" => {
+            let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if name.is_empty() { return (String::new(), String::new(), slint::Image::default()); }
+            // Class unknown until we reveal; use the generic Part icon
+            // rather than nothing so the chip still reads cleanly.
+            ("Part", name)
+        }
+        _ => return (String::new(), String::new(), slint::Image::default()),
+    };
+
+    // Map the class string to the ClassName enum for icon lookup.
+    let class_enum = match class_str {
+        "Part"            => eustress_common::classes::ClassName::Part,
+        "Folder"          => eustress_common::classes::ClassName::Folder,
+        "Model"           => eustress_common::classes::ClassName::Model,
+        "Script" | "SoulScript" => eustress_common::classes::ClassName::SoulScript,
+        "ScreenGui"       => eustress_common::classes::ClassName::ScreenGui,
+        "Frame"           => eustress_common::classes::ClassName::Frame,
+        "ScrollingFrame"  => eustress_common::classes::ClassName::ScrollingFrame,
+        "TextLabel"       => eustress_common::classes::ClassName::TextLabel,
+        "TextButton"      => eustress_common::classes::ClassName::TextButton,
+        "TextBox"         => eustress_common::classes::ClassName::TextBox,
+        "ImageLabel"      => eustress_common::classes::ClassName::ImageLabel,
+        "ImageButton"     => eustress_common::classes::ClassName::ImageButton,
+        "BillboardGui"    => eustress_common::classes::ClassName::BillboardGui,
+        "SurfaceGui"      => eustress_common::classes::ClassName::SurfaceGui,
+        _                 => eustress_common::classes::ClassName::Part,
+    };
+    let icon = load_class_icon(&class_enum);
+    (class_str.to_string(), name, icon)
 }
 
 /// Load an SVG icon as a slint::Image from the assets/icons directory

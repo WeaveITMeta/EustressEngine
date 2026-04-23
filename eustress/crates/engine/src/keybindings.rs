@@ -20,6 +20,16 @@ pub enum Action {
     Duplicate,
     Delete,
     SelectAll,
+    /// Add the direct children of the current selection (single level).
+    SelectChildren,
+    /// Recursively add every descendant of the current selection.
+    SelectDescendants,
+    /// Replace selection with the parent(s) of the current selection.
+    SelectParent,
+    /// Add siblings sharing the same parent.
+    SelectSiblings,
+    /// Flip selection to everything NOT currently selected.
+    InvertSelection,
     Group,
     Ungroup,
     LockSelection,
@@ -54,9 +64,10 @@ pub enum Action {
     SnapMode2,      // 0.2 unit snapping (2 key)
     SnapModeOff,    // No snapping (3 key)
     
-    // Nudge (+ / -)
-    NudgeUp,        // Move selection up by one grid unit (= / + key)
-    NudgeDown,      // Move selection down by one grid unit (- key)
+    // Nudge: `-` lifts by grid unit, `+` is the smart settle
+    // (raycast-down flush, or pop-on-top when inside a container).
+    NudgeUp,        // Move selection up by one grid unit (- key)
+    NudgeDown,      // Smart settle: raycast down + flush OR pop on top (+ key)
 
     // Quick Rotation
     RotateY90,      // Rotate 90° on Y axis (Ctrl+R)
@@ -72,6 +83,19 @@ pub enum Action {
     CSGUnion,       // Union selected parts
     CSGIntersect,   // Intersect selected parts
     CSGSeparate,    // Separate union into parts
+
+    // Smart Build Modal Tools (activate via ModalToolRegistry)
+    ToolPartSwap,   // Ctrl+Alt+P — swap two parts' positions
+    ToolEdgeAlign,  // Ctrl+Alt+E — translate source to target's edge
+    ToolModelReflect, // Ctrl+Alt+M — reflect selection across a plane
+    ToolGapFill,    // Ctrl+Alt+G — fill the gap between two parts
+    ToolResizeAlign,// Ctrl+Alt+A — resize source until its face meets target's
+    ToolMaterialFlip,// Ctrl+Alt+F — flip texture UVs on selected parts
+
+    // Array tools (Phase 1)
+    ToolLinearArray, // Ctrl+Alt+L — N copies along a step vector
+    ToolRadialArray, // Ctrl+Alt+R — N copies around a pivot axis
+    ToolGridArray,   // Ctrl+Alt+K — Nx × Ny × Nz 3D pattern
 }
 
 impl Action {
@@ -89,6 +113,11 @@ impl Action {
             Action::Duplicate => "Duplicate",
             Action::Delete => "Delete",
             Action::SelectAll => "Select All",
+            Action::SelectChildren => "Select Children",
+            Action::SelectDescendants => "Select Descendants",
+            Action::SelectParent => "Select Parent",
+            Action::SelectSiblings => "Select Siblings",
+            Action::InvertSelection => "Invert Selection",
             Action::Group => "Group",
             Action::Ungroup => "Ungroup",
             Action::LockSelection => "Lock Selection",
@@ -121,6 +150,15 @@ impl Action {
             Action::CSGUnion => "CSG Union",
             Action::CSGIntersect => "CSG Intersect",
             Action::CSGSeparate => "CSG Separate",
+            Action::ToolPartSwap => "Part Swap",
+            Action::ToolEdgeAlign => "Edge Align",
+            Action::ToolModelReflect => "Model Reflect",
+            Action::ToolGapFill => "Gap Fill",
+            Action::ToolResizeAlign => "Resize Align",
+            Action::ToolMaterialFlip => "Material Flip",
+            Action::ToolLinearArray => "Linear Array",
+            Action::ToolRadialArray => "Radial Array",
+            Action::ToolGridArray => "Grid Array",
         }
     }
 }
@@ -262,8 +300,32 @@ impl Default for KeyBindings {
         bindings.insert(Action::Duplicate, KeyBinding::new(KeyCode::KeyD).with_ctrl());
         bindings.insert(Action::Delete, KeyBinding::new(KeyCode::Delete));
         bindings.insert(Action::SelectAll, KeyBinding::new(KeyCode::KeyA).with_ctrl());
+        // Hierarchy selection (Maya / Blender parity):
+        //   Ctrl+Shift+C → Select Children (one level)
+        //   Ctrl+Shift+D → Select Descendants (recursive)
+        //   Ctrl+Shift+U → Select Parent (up one level)
+        //   Ctrl+Shift+S → Select Siblings
+        //   Ctrl+I       → Invert Selection
+        bindings.insert(Action::SelectChildren, KeyBinding::new(KeyCode::KeyC).with_ctrl().with_shift());
+        bindings.insert(Action::SelectDescendants, KeyBinding::new(KeyCode::KeyD).with_ctrl().with_shift());
+        bindings.insert(Action::SelectParent, KeyBinding::new(KeyCode::KeyU).with_ctrl().with_shift());
+        bindings.insert(Action::SelectSiblings, KeyBinding::new(KeyCode::KeyS).with_ctrl().with_shift());
+        bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl());
         bindings.insert(Action::Group, KeyBinding::new(KeyCode::KeyG).with_ctrl());
         bindings.insert(Action::Ungroup, KeyBinding::new(KeyCode::KeyU).with_ctrl());
+
+        // Smart Build Tools — activate modal tools via the registry.
+        // Ctrl+Alt for a distinct namespace from tool-switch shortcuts
+        // (which are bare Alt+Letter for Select/Move/Scale/Rotate).
+        bindings.insert(Action::ToolPartSwap, KeyBinding::new(KeyCode::KeyP).with_ctrl().with_alt());
+        bindings.insert(Action::ToolEdgeAlign, KeyBinding::new(KeyCode::KeyE).with_ctrl().with_alt());
+        bindings.insert(Action::ToolModelReflect, KeyBinding::new(KeyCode::KeyM).with_ctrl().with_alt());
+        bindings.insert(Action::ToolGapFill, KeyBinding::new(KeyCode::KeyG).with_ctrl().with_alt());
+        bindings.insert(Action::ToolResizeAlign, KeyBinding::new(KeyCode::KeyA).with_ctrl().with_alt());
+        bindings.insert(Action::ToolMaterialFlip, KeyBinding::new(KeyCode::KeyF).with_ctrl().with_alt());
+        bindings.insert(Action::ToolLinearArray, KeyBinding::new(KeyCode::KeyL).with_ctrl().with_alt());
+        bindings.insert(Action::ToolRadialArray, KeyBinding::new(KeyCode::KeyR).with_ctrl().with_alt());
+        bindings.insert(Action::ToolGridArray,   KeyBinding::new(KeyCode::KeyK).with_ctrl().with_alt());
         
         // View shortcuts
         bindings.insert(Action::ToggleExplorer, KeyBinding::new(KeyCode::Digit1).with_ctrl());
@@ -292,8 +354,8 @@ impl Default for KeyBindings {
         bindings.insert(Action::SnapMode1, KeyBinding::new(KeyCode::Digit1));    // 1 for 1 unit snapping
         bindings.insert(Action::SnapMode2, KeyBinding::new(KeyCode::Digit2));    // 2 for 0.2 unit snapping
         bindings.insert(Action::SnapModeOff, KeyBinding::new(KeyCode::Digit3));  // 3 for no snapping
-        bindings.insert(Action::NudgeUp, KeyBinding::new(KeyCode::Equal));      // + (=/+ key)
-        bindings.insert(Action::NudgeDown, KeyBinding::new(KeyCode::Minus));    // - key
+        bindings.insert(Action::NudgeUp,   KeyBinding::new(KeyCode::Minus));    // - key
+        bindings.insert(Action::NudgeDown, KeyBinding::new(KeyCode::Equal));    // +/= key
         
         // Quick rotation shortcuts
         bindings.insert(Action::RotateY90, KeyBinding::new(KeyCode::KeyR).with_ctrl()); // Ctrl+R to rotate 90° on Y
@@ -423,7 +485,11 @@ fn dispatch_keyboard_shortcuts(
     let actions = [
         Action::Undo, Action::Redo,
         Action::Copy, Action::Cut, Action::Paste, Action::Duplicate, Action::Delete,
-        Action::SelectAll, Action::Group, Action::Ungroup,
+        Action::SelectAll,
+        Action::SelectChildren, Action::SelectDescendants,
+        Action::SelectParent, Action::SelectSiblings,
+        Action::InvertSelection,
+        Action::Group, Action::Ungroup,
         Action::LockSelection, Action::UnlockSelection, Action::ToggleAnchor,
         Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
         Action::ToggleCommandBar, Action::ToggleAssets, Action::ToggleCollaboration,
@@ -436,6 +502,9 @@ fn dispatch_keyboard_shortcuts(
         Action::RotateY90, Action::TiltZ90,
         Action::StartServer, Action::ToggleNetworkPanel,
         Action::CSGNegate, Action::CSGUnion, Action::CSGIntersect, Action::CSGSeparate,
+        Action::ToolPartSwap, Action::ToolEdgeAlign, Action::ToolModelReflect, Action::ToolGapFill,
+        Action::ToolResizeAlign, Action::ToolMaterialFlip,
+        Action::ToolLinearArray, Action::ToolRadialArray, Action::ToolGridArray,
     ];
 
     for action in actions {
@@ -478,6 +547,18 @@ fn handle_menu_action_events(
     mut editor_settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    // Hierarchy-selection event writers (bundled to stay under Bevy's
+    // 16-param limit on systems).
+    mut selection_events: (
+        MessageWriter<crate::selection_sync::SelectChildrenEvent>,
+        MessageWriter<crate::selection_sync::SelectDescendantsEvent>,
+        MessageWriter<crate::selection_sync::SelectParentEvent>,
+        MessageWriter<crate::selection_sync::SelectSiblingsEvent>,
+        MessageWriter<crate::selection_sync::InvertSelectionEvent>,
+    ),
+    // Modal-tool activation events — fired by the Ctrl+Alt+<Letter>
+    // shortcuts for Smart Build Tools.
+    mut activate_modal_tool: MessageWriter<crate::modal_tool::ActivateModalToolEvent>,
 ) {
     let (
         ref mut undo_events,
@@ -611,6 +692,29 @@ fn handle_menu_action_events(
                         // entities) to .eustress/trash/ so Ctrl+Z can restore.
                         if let Ok(inst_file) = instance_file_query.get(entity) {
                             let toml_path = inst_file.toml_path.clone();
+                            // Non-removable folders: the Workshop folder
+                            // under SoulService is the engine's chat
+                            // history root — deleting it would scramble
+                            // session persistence + trap the Workshop
+                            // panel in a "no Space bound" state. Skip
+                            // silently (match OS convention for
+                            // system-protected paths) and continue so
+                            // the rest of the multi-select delete still
+                            // works.
+                            let is_workshop_root = toml_path
+                                .components()
+                                .rev()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .iter()
+                                .rev()
+                                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                                .collect::<Vec<_>>()
+                                .ends_with(&["soulservice".to_string(), "workshop".to_string(), "_instance.toml".to_string()]);
+                            if is_workshop_root {
+                                info!("🔒 Skipping delete on protected Workshop folder");
+                                continue;
+                            }
                             // Folder-based entities live in `Foo/_instance.toml`;
                             // trashing only the TOML leaves an empty folder on disk
                             // AND orphans sibling files (Summary.md, child instances).
@@ -744,10 +848,162 @@ fn handle_menu_action_events(
                 duplicate_events.write(crate::clipboard::DuplicateEvent);
             }
 
+            // Hierarchy-selection commands — emit the corresponding
+            // event; handler systems in selection_sync.rs do the work.
+            Action::SelectChildren => {
+                selection_events.0.write(crate::selection_sync::SelectChildrenEvent);
+            }
+            Action::SelectDescendants => {
+                selection_events.1.write(crate::selection_sync::SelectDescendantsEvent);
+            }
+            Action::SelectParent => {
+                selection_events.2.write(crate::selection_sync::SelectParentEvent);
+            }
+            Action::SelectSiblings => {
+                selection_events.3.write(crate::selection_sync::SelectSiblingsEvent);
+            }
+            Action::InvertSelection => {
+                selection_events.4.write(crate::selection_sync::InvertSelectionEvent);
+            }
+
+            // Smart Build Tools — activate via the modal-tool registry.
+            // The tool_id strings match the factories registered in
+            // `tools_smart::register_smart_tools`.
+            Action::ToolPartSwap => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "part_swap_positions".to_string(),
+                });
+            }
+            Action::ToolEdgeAlign => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "edge_align".to_string(),
+                });
+            }
+            Action::ToolModelReflect => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "model_reflect".to_string(),
+                });
+            }
+            Action::ToolGapFill => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "gap_fill".to_string(),
+                });
+            }
+            Action::ToolResizeAlign => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "resize_align".to_string(),
+                });
+            }
+            Action::ToolMaterialFlip => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "material_flip".to_string(),
+                });
+            }
+            Action::ToolLinearArray => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "linear_array".to_string(),
+                });
+            }
+            Action::ToolRadialArray => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "radial_array".to_string(),
+                });
+            }
+            Action::ToolGridArray => {
+                activate_modal_tool.write(crate::modal_tool::ActivateModalToolEvent {
+                    tool_id: "grid_array".to_string(),
+                });
+            }
+
+            // ── Boolean (CSG) ribbon group ─────────────────────────
+            //
+            // truck-shapeops 0.4 exports `or` (union) and `and`
+            // (intersect) but NOT `not` (difference). For now, the
+            // ribbon buttons log selection info + emit an Output-panel
+            // entry so users get immediate feedback instead of a
+            // silent no-op (the "buttons don't work" regression
+            // reported 2026-04-23). Wiring the Bevy-mesh → truck
+            // `Solid` → Bevy-mesh round-trip is tracked in
+            // `eustress-cad::eval::boolean_*`; once that round-trip
+            // exposes a `fn apply_csg_to_selection` helper these arms
+            // call into it directly.
+            //
+            // `CSGSeparate` DOES work today: unparent all children of
+            // any selected Model / CSG-union entity so each sub-body
+            // becomes an independent selectable again. No mesh-edit
+            // needed.
+            Action::CSGUnion => {
+                let n = selected_count(&selection_manager);
+                if n < 2 {
+                    warn!("🔨 CSG Union needs ≥2 selected bodies (have {}). Select both parts first.", n);
+                } else {
+                    info!("🔨 CSG Union: {} bodies selected — truck-shapeops wiring pending (v0.2). \
+                           Use Model grouping as a non-destructive placeholder in the meantime.", n);
+                }
+            }
+            Action::CSGNegate => {
+                let n = selected_count(&selection_manager);
+                if n < 2 {
+                    warn!("🔨 CSG Subtract needs ≥2 selected bodies (first = target, others = cutters). Have {}.", n);
+                } else {
+                    warn!("🔨 CSG Subtract: truck-shapeops 0.4 doesn't export `not` — feature lands \
+                           with the upcoming shapeops release. {} bodies selected.", n);
+                }
+            }
+            Action::CSGIntersect => {
+                let n = selected_count(&selection_manager);
+                if n < 2 {
+                    warn!("🔨 CSG Intersect needs ≥2 selected bodies (have {}). Select both parts first.", n);
+                } else {
+                    info!("🔨 CSG Intersect: {} bodies selected — truck-shapeops wiring pending (v0.2).", n);
+                }
+            }
+            Action::CSGSeparate => {
+                // Selection-level ungroup — strip `ChildOf` from
+                // every child of a selected Model / Folder so each
+                // sub-entity becomes an independent selectable
+                // again. Mirror of the standard Ungroup (Ctrl+U)
+                // but scoped to the Boolean-group metaphor.
+                let selected_ids: std::collections::HashSet<String> = selection_manager
+                    .as_ref()
+                    .map(|sm| sm.0.read().get_selected().into_iter().collect())
+                    .unwrap_or_default();
+                let mut separated = 0u32;
+                for (entity, _tf, _bp) in entity_query.iter() {
+                    let id = format!("{}v{}", entity.index(), entity.generation());
+                    if !selected_ids.contains(&id) { continue; }
+                    // Only containers (Model / Folder) have children
+                    // worth separating. Plain Parts get a no-op.
+                    if !matches!(
+                        instance_query.get(entity).map(|i| i.class_name),
+                        Ok(eustress_common::classes::ClassName::Model)
+                        | Ok(eustress_common::classes::ClassName::Folder),
+                    ) { continue; }
+                    commands.entity(entity).remove::<bevy::prelude::Children>();
+                    separated += 1;
+                }
+                if separated > 0 {
+                    info!("🔨 CSG Separate: detached children of {} container(s).", separated);
+                } else {
+                    warn!("🔨 CSG Separate: select a Model or Folder to separate its children.");
+                }
+            }
+
             // Other actions are consumed by their respective systems
             _ => {}
         }
     }
+}
+
+/// Cheap helper for the CSG action arms — returns how many entities
+/// are currently selected via `SelectionSyncManager`. `0` when the
+/// manager resource isn't available (e.g. during startup).
+fn selected_count(
+    sm: &Option<Res<crate::selection_sync::SelectionSyncManager>>,
+) -> usize {
+    sm.as_ref()
+        .map(|m| m.0.read().get_selected().len())
+        .unwrap_or(0)
 }
 
 // ============================================================================
@@ -763,10 +1019,41 @@ struct NudgeTimer {
     down_timer: f32,
 }
 
-/// Initial delay before auto-repeat starts (seconds)
-const NUDGE_DELAY_SECS: f32 = 2.0;
-/// Repeat interval once auto-repeat is active (seconds)
-const NUDGE_REPEAT_SECS: f32 = 1.0;
+/// Initial delay before auto-repeat starts (seconds). ~OS-standard
+/// keyboard-repeat latency — short enough that holding the key feels
+/// responsive, long enough that a deliberate single tap stays a single
+/// nudge.
+const NUDGE_DELAY_SECS: f32 = 0.30;
+/// Repeat interval once auto-repeat is active (seconds). 12 nudges/sec.
+const NUDGE_REPEAT_SECS: f32 = 0.08;
+
+/// Queries + resources needed by `handle_nudge_keys`. Bundled into a
+/// `SystemParam` so the handler itself stays under Bevy's 16-param
+/// limit — the Move-Down settle path needs the selection transforms,
+/// all-part transforms (for AABB containment), and a `SpatialQuery`
+/// for the downward raycast, which together outgrow the flat param
+/// list.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct NudgeContext<'w, 's> {
+    pub selected: Query<
+        'w, 's,
+        (
+            Entity,
+            &'static mut Transform,
+            &'static GlobalTransform,
+            Option<&'static crate::classes::BasePart>,
+        ),
+        With<crate::selection_box::Selected>,
+    >,
+    /// Every other part in the scene — used to detect "selection is
+    /// inside another part's AABB" for the pop-on-top semantics.
+    pub other_parts: Query<
+        'w, 's,
+        (Entity, &'static GlobalTransform, &'static crate::classes::BasePart),
+        Without<crate::selection_box::Selected>,
+    >,
+    pub spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+}
 
 fn handle_nudge_keys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -774,7 +1061,7 @@ fn handle_nudge_keys(
     mut timer: ResMut<NudgeTimer>,
     settings: Option<Res<crate::editor_settings::EditorSettings>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
-    mut selected: Query<&mut Transform, With<crate::selection_box::Selected>>,
+    mut ctx: NudgeContext,
 ) {
     // Block when text input focused or overlay has focus
     if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) { return; }
@@ -782,23 +1069,17 @@ fn handle_nudge_keys(
 
     let snap = settings.as_ref().map(|s| if s.snap_enabled { s.snap_size } else { 1.0 }).unwrap_or(1.0);
 
-    // + key (Equal) = nudge up
-    if keys.pressed(KeyCode::Equal) {
+    // ── `-` = Move Up (simple snap-grid lift) ─────────────────────
+    if keys.pressed(KeyCode::Minus) {
         if !timer.up_held {
-            // First frame pressed — single nudge
             timer.up_held = true;
             timer.up_timer = 0.0;
-            for mut t in selected.iter_mut() {
-                t.translation.y += snap;
-            }
+            nudge_up(&mut ctx.selected, snap);
         } else {
-            // Held — auto-repeat after delay
             timer.up_timer += time.delta_secs();
             if timer.up_timer >= NUDGE_DELAY_SECS {
                 timer.up_timer -= NUDGE_REPEAT_SECS;
-                for mut t in selected.iter_mut() {
-                    t.translation.y += snap;
-                }
+                nudge_up(&mut ctx.selected, snap);
             }
         }
     } else {
@@ -806,25 +1087,138 @@ fn handle_nudge_keys(
         timer.up_timer = 0.0;
     }
 
-    // - key (Minus) = nudge down
-    if keys.pressed(KeyCode::Minus) {
+    // ── `+` = Settle Down (smart raycast + pop-on-top) ───────────
+    if keys.pressed(KeyCode::Equal) {
         if !timer.down_held {
             timer.down_held = true;
             timer.down_timer = 0.0;
-            for mut t in selected.iter_mut() {
-                t.translation.y -= snap;
-            }
+            settle_down(&mut ctx, snap);
         } else {
             timer.down_timer += time.delta_secs();
             if timer.down_timer >= NUDGE_DELAY_SECS {
                 timer.down_timer -= NUDGE_REPEAT_SECS;
-                for mut t in selected.iter_mut() {
-                    t.translation.y -= snap;
-                }
+                settle_down(&mut ctx, snap);
             }
         }
     } else {
         timer.down_held = false;
         timer.down_timer = 0.0;
+    }
+}
+
+/// Simple lift: every selected entity moves up by `snap` on +Y.
+fn nudge_up(
+    selected: &mut Query<
+        (
+            Entity,
+            &mut Transform,
+            &GlobalTransform,
+            Option<&crate::classes::BasePart>,
+        ),
+        With<crate::selection_box::Selected>,
+    >,
+    snap: f32,
+) {
+    for (_, mut t, _, _) in selected.iter_mut() {
+        t.translation.y += snap;
+    }
+}
+
+/// Smart settle: for each selected entity, resolve its vertical
+/// position via (in priority order):
+///   1. **Pop-on-top**: if the selection's center is inside another
+///      part's world-aligned AABB AND above that part's horizontal
+///      midplane, snap the selection so its *bottom* sits flush with
+///      the container's *top* face.
+///   2. **Ground-flush raycast**: cast a ray from the selection's
+///      current center straight down; snap the selection so its
+///      bottom sits flush with the first hit point.
+///   3. **Fallback**: if neither path finds a support surface, fall
+///      back to a plain `-= snap` nudge so the key still feels
+///      responsive on parts floating in empty space.
+fn settle_down(ctx: &mut NudgeContext, snap: f32) {
+    use bevy::math::Dir3;
+    // Snapshot other parts once per key-fire so the inner AABB-
+    // containment check doesn't re-borrow the query per selected entity.
+    let containers: Vec<(Vec3, Vec3)> = ctx
+        .other_parts
+        .iter()
+        .map(|(_, gt, bp)| {
+            let center = gt.translation();
+            let half = bp.size * 0.5;
+            (center - half, center + half) // (aabb_min, aabb_max)
+        })
+        .collect();
+
+    // Collect selected entity snapshots first — we can't hold a
+    // mutable borrow of the query across its own iter_mut body when
+    // we need to read the spatial-query resource too. Use the
+    // *world-space* center via `GlobalTransform` so the AABB
+    // containment check below compares apples-to-apples with
+    // `containers` (which are world-space AABBs).
+    let mut selected_snapshot: Vec<(Entity, Vec3, f32)> = Vec::new();
+    for (entity, _tf, gt, bp) in ctx.selected.iter() {
+        let center = gt.translation();
+        let half_height = bp.map(|b| b.size.y * 0.5).unwrap_or(0.5);
+        selected_snapshot.push((entity, center, half_height));
+    }
+
+    for (entity, center, half_height) in selected_snapshot {
+        let mut target_y: Option<f32> = None;
+
+        // 1. Pop-on-top — is the center inside any container's AABB
+        //    AND above that container's horizontal midplane?
+        for (min, max) in &containers {
+            let inside = center.x >= min.x && center.x <= max.x
+                && center.y >= min.y && center.y <= max.y
+                && center.z >= min.z && center.z <= max.z;
+            if !inside { continue; }
+            let mid_y = (min.y + max.y) * 0.5;
+            if center.y >= mid_y {
+                let candidate = max.y + half_height;
+                target_y = Some(
+                    target_y.map(|y| y.max(candidate)).unwrap_or(candidate)
+                );
+            }
+        }
+
+        // 2. Ground-flush raycast — cast from center straight down.
+        //    Only used when the pop-on-top path didn't fire.
+        if target_y.is_none() {
+            let Ok(down) = Dir3::new(Vec3::NEG_Y) else { continue };
+            let hits = ctx.spatial.ray_hits(
+                center,
+                down,
+                10_000.0,
+                16, // enough to skip any colliders belonging to the
+                    // selected entity itself before landing on a real
+                    // support surface below it
+                true,
+                &avian3d::prelude::SpatialQueryFilter::default(),
+            );
+            // First hit that isn't the selected entity or a child of
+            // it. `avian`'s ray_hits doesn't filter by entity directly
+            // without a filter-mask setup; a simple identity check is
+            // cheap at this scale.
+            for hit in hits {
+                if hit.entity == entity { continue; }
+                let hit_y = center.y - hit.distance;
+                target_y = Some(hit_y + half_height);
+                break;
+            }
+        }
+
+        // 3. Apply the resolved target, or plain nudge as fallback.
+        //    Translate the world-space target into a local-Y delta so
+        //    parented entities (Model children) resolve correctly.
+        if let Ok((_, mut tf, gt, _)) = ctx.selected.get_mut(entity) {
+            let cur_world_y = gt.translation().y;
+            if let Some(new_y) = target_y {
+                let delta = new_y - cur_world_y;
+                tf.translation.y += delta;
+            } else {
+                tf.translation.y -= snap;
+            }
+        }
     }
 }

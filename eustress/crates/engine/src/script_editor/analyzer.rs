@@ -178,7 +178,7 @@ pub fn analyze(source: &str) -> AnalysisResult {
         // "module not found" — noise that drowned out real errors.
         preparer = preparer.with_context(ctx);
     }
-    let _ = preparer
+    let build_result = preparer
         .with_diagnostics(&mut diagnostics)
         .build();
 
@@ -188,7 +188,107 @@ pub fn analyze(source: &str) -> AnalysisResult {
         }
     }
 
+    // 3. Dry-run pass — actually invoke each lifecycle entrypoint with
+    //    mock arguments so runtime-only failures (method dispatch on
+    //    dynamic values, arity mismatches on FFI calls, `.to_string()`
+    //    on a type that doesn't have it, etc.) surface as diagnostics
+    //    BEFORE the user hits Play. Rune's compiler can't catch these
+    //    because method dispatch is resolved at runtime — so we exercise
+    //    the resolution by running it.
+    //
+    //    Only fires when the compile pass succeeded (errors above would
+    //    otherwise shadow the real issue) and the Eustress context is
+    //    available. Side-effects during dry-run go to thread-local
+    //    queues (GUI commands, sim values) that either get drained into
+    //    the editor's empty-target state or get overwritten as soon as
+    //    play mode starts — so there's no user-visible fallout.
+    //
+    //    Diagnostics emitted here use source = "rune-runtime" so the
+    //    Problems panel can distinguish them from compile-time errors.
+    if !out.diagnostics.iter().any(|d| matches!(d.severity, Severity::Error)) {
+        if let (Ok(unit), Some(ctx)) = (build_result, eustress_context()) {
+            let runtime_diagnostics = dry_run_entrypoints(unit, ctx, &out.symbols);
+            out.diagnostics.extend(runtime_diagnostics);
+        }
+    }
+
     out
+}
+
+/// Entrypoint name + synthesized arg tuple. Only entrypoints the script
+/// actually defines get called — others would just produce `Missing entry`
+/// errors and noise up the output. We deliberately skip `on_exit` because
+/// running it in edit mode could trip state-teardown logic the script
+/// assumed happens on shutdown.
+///
+/// Returns a Vec of diagnostics (one per failing entrypoint).
+fn dry_run_entrypoints(
+    unit: rune::Unit,
+    ctx: &rune::Context,
+    symbols: &SymbolIndex,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let Ok(runtime_ctx) = ctx.runtime() else { return diagnostics };
+    let runtime_ctx = std::sync::Arc::new(runtime_ctx);
+    let unit = std::sync::Arc::new(unit);
+
+    // Each entry: (name, has-args). Args are synthesized inline below
+    // because Rune's `Args` trait requires different tuple shapes per
+    // call site — can't bundle them in a single Vec without boxing.
+    let entrypoints: &[&str] = &[
+        "on_init",
+        "on_ready",
+        "on_update",
+        "on_button_click",
+        "on_tick",
+    ];
+
+    for name in entrypoints {
+        // Skip entrypoints the script didn't define — Rune will return
+        // `Missing entry` which is the expected shape, not a real error.
+        if symbols.resolve(name).is_empty() {
+            continue;
+        }
+
+        let mut vm = rune::Vm::new(runtime_ctx.clone(), unit.clone());
+        let result = match *name {
+            "on_update" | "on_tick" => vm.call([*name], (0.016_f64,)),
+            "on_button_click"       => vm.call([*name], ("TestButton".to_string(),)),
+            _                       => vm.call([*name], ()),
+        };
+
+        if let Err(e) = result {
+            let msg = e.to_string();
+            // `Missing entry` here shouldn't happen (we checked symbols
+            // above), but guard anyway in case the script defined the
+            // name as a non-function or in a non-top-level scope.
+            if msg.starts_with("Missing entry ") {
+                continue;
+            }
+            // Range: anchor at the function definition so the squiggle
+            // underlines `on_update` in the source. Falls back to
+            // (1,1) if the symbol resolver drops the slot.
+            let sym = symbols.resolve(name).first().cloned();
+            let range = sym.as_ref().map(|s| s.range.clone()).unwrap_or(Range {
+                start_line: 1, start_column: 1,
+                end_line: 1, end_column: 1,
+            });
+            let byte_range = sym.as_ref().map(|s| s.byte_range).unwrap_or((0, 0));
+            diagnostics.push(Diagnostic {
+                range,
+                byte_range,
+                severity: Severity::Error,
+                message: format!(
+                    "Runtime check failed for `{}`: {}\n\
+                     (Rune caught this by dry-running the function — it will fail at play time too.)",
+                    name, msg,
+                ),
+                source: "rune-runtime",
+            });
+        }
+    }
+
+    diagnostics
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -108,14 +108,37 @@ pub struct BillboardQuad {
 
 /// Mirror `BillboardGui` class fields into `BillboardGuiMarker` so Properties
 /// panel edits are live. Runs only when the class component is changed.
+///
+/// Also writes `units_offset` onto the entity's local `Transform` so the
+/// quad physically moves when the user drags the UnitsOffset value. Prior
+/// versions only applied the offset once at spawn time (in
+/// `spawn::spawn_billboard_gui`), so Properties-panel edits updated the
+/// component but the quad stayed at its initial position — the exact
+/// "UnitsOffset doesn't update in real time" bug the user reported.
 fn sync_billboard_class_to_marker(
-    mut q: Query<(&BillboardGui, &mut BillboardGuiMarker), Changed<BillboardGui>>,
+    mut q: Query<
+        (&BillboardGui, &mut BillboardGuiMarker, &mut Transform),
+        Changed<BillboardGui>,
+    >,
 ) {
-    for (class, mut marker) in &mut q {
+    for (class, mut marker, mut transform) in &mut q {
         marker.size = class.size;
         marker.max_distance = class.max_distance;
         marker.always_on_top = class.always_on_top;
         marker.visible = class.enabled;
+
+        // Local offset from the parent (the adornee, attached via
+        // ChildOf). Writing to `Transform.translation` — not
+        // `GlobalTransform` — keeps parent-child propagation working
+        // so the billboard tracks the part as it moves.
+        let new_translation = Vec3::new(
+            class.units_offset[0],
+            class.units_offset[1],
+            class.units_offset[2],
+        );
+        if (transform.translation - new_translation).length_squared() > f32::EPSILON {
+            transform.translation = new_translation;
+        }
     }
 }
 

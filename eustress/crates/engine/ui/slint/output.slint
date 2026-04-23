@@ -302,7 +302,12 @@ export component OutputConsole inherits Rectangle {
                     }
                 }
 
-                // Rune source filter
+                // Rune source filter — matches the Command Bar's Rune
+                // accent (#ffb74d Material Design Orange 300) so the
+                // language glyph reads as the same concept across
+                // panels. Dark warm-brown background frames the orange
+                // text with the same value relationship the green pair
+                // had (#2d4a1e / #8fce5a).
                 Rectangle {
                     width: 46px;
 
@@ -312,10 +317,10 @@ export component OutputConsole inherits Rectangle {
                         width: 44px;
                         height: 22px;
                         background: rune-touch.has-hover ? Theme.button-hover :
-                                    (root.source-filter == "rune" ? #2d4a1e : transparent);
+                                    (root.source-filter == "rune" ? #4a3a1e : transparent);
                         border-radius: 3px;
                         border-width: root.source-filter == "rune" ? 1px : 0px;
-                        border-color: #4a7a2e;
+                        border-color: #7a5a2e;
 
                         rune-touch := TouchArea {
                             mouse-cursor: pointer;
@@ -330,7 +335,7 @@ export component OutputConsole inherits Rectangle {
 
                         Text {
                             text: "Rune";
-                            color: root.source-filter == "rune" ? #8fce5a : Theme.text-secondary;
+                            color: root.source-filter == "rune" ? #ffb74d : Theme.text-secondary;
                             font-size: 10px;
                             font-weight: 500;
                             horizontal-alignment: center;

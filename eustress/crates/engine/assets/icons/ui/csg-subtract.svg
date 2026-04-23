@@ -1,0 +1,10 @@
+<!-- CSG Subtract — left circle with right-circle bite taken out.
+     Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Primary circle with dominant fill -->
+  <circle cx="9" cy="12" r="6" fill="currentColor" fill-opacity="0.22"/>
+  <!-- Subtracting circle (white punch-out effect via stroke + dash outline) -->
+  <circle cx="15" cy="12" r="6" stroke-dasharray="2.5 1.5"/>
+  <!-- Outline of primary to keep it readable -->
+  <circle cx="9" cy="12" r="6" fill="none"/>
+</svg>

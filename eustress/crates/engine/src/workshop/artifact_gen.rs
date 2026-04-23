@@ -825,6 +825,16 @@ fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &st
 
 /// Write split Part files as folder-based instances.
 /// Each "# --- FILE: name ---" block creates `output_dir/{name}/_instance.toml`.
+///
+/// Root-cause note (2026-04): Claude artifact output occasionally emitted
+/// filename markers whose sanitized form collided with EEP reserved
+/// names (`_instance.toml`, `_service.toml`) or left a bare `.toml`
+/// suffix intact. That produced a directory literally named
+/// `_instance.toml` (or `Block.toml`) under the Workspace, which the
+/// file-loader then surfaced as a phantom child entity in the Explorer.
+/// Guarded against both cases in `sanitize_part_folder_name` — names
+/// that can't be represented as a folder are dropped with a warning
+/// rather than written with a corrupted shape.
 fn write_split_part_folders(output_dir: &PathBuf, content: &str) {
     let _ = std::fs::create_dir_all(output_dir);
 
@@ -834,12 +844,11 @@ fn write_split_part_folders(output_dir: &PathBuf, content: &str) {
     for line in content.lines() {
         if line.starts_with("# --- FILE:") && line.ends_with("---") {
             if let Some(ref name) = current_name {
-                let safe = name.replace(' ', "_").replace('/', "_")
-                    .trim_end_matches(".part.toml").trim_end_matches(".glb.toml")
-                    .to_string();
-                let part_dir = output_dir.join(&safe);
-                let _ = std::fs::create_dir_all(&part_dir);
-                write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
+                if let Some(safe) = sanitize_part_folder_name(name) {
+                    let part_dir = output_dir.join(&safe);
+                    let _ = std::fs::create_dir_all(&part_dir);
+                    write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
+                }
             }
             let name = line.trim_start_matches("# --- FILE:").trim_end_matches("---").trim();
             current_name = Some(name.to_string());
@@ -851,13 +860,64 @@ fn write_split_part_folders(output_dir: &PathBuf, content: &str) {
     }
 
     if let Some(ref name) = current_name {
-        let safe = name.replace(' ', "_").replace('/', "_")
-            .trim_end_matches(".part.toml").trim_end_matches(".glb.toml")
-            .to_string();
-        let part_dir = output_dir.join(&safe);
-        let _ = std::fs::create_dir_all(&part_dir);
-        write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
+        if let Some(safe) = sanitize_part_folder_name(name) {
+            let part_dir = output_dir.join(&safe);
+            let _ = std::fs::create_dir_all(&part_dir);
+            write_artifact_file(&part_dir.join("_instance.toml"), current_content.trim());
+        }
     }
+}
+
+/// Normalize a Claude-generated filename marker into a safe Part folder
+/// name, or `None` if the marker can't be represented as one.
+///
+/// Rejects:
+/// * Empty / whitespace-only names
+/// * Reserved EEP markers (`_instance.toml`, `_service.toml`) — these
+///   MUST be files inside a folder, never folder names themselves.
+///   Writing one as a folder is what produced the "phantom
+///   `_instance.toml` child entity" corruption.
+/// * Anything that reduces to an empty string after stripping.
+///
+/// Accepts and strips every known TOML tail (`.part.toml`, `.glb.toml`,
+/// and plain `.toml`) so `Block`, `Block.toml`, and `Block.part.toml`
+/// all resolve to the same folder name `Block`.
+fn sanitize_part_folder_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return None; }
+
+    // Reject EEP reserved names BEFORE stripping so something like
+    // `_instance.toml` (already the final form) can't slip through.
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "_instance.toml" || lower == "_service.toml"
+        || lower == "_instance" || lower == "_service"
+    {
+        tracing::warn!(
+            "🚫 Workshop artifact filename '{}' is an EEP reserved name — refusing to write as a folder.",
+            raw
+        );
+        return None;
+    }
+
+    let safe = trimmed.replace(' ', "_").replace('/', "_").replace('\\', "_");
+    // Strip TOML suffixes in decreasing-specificity order so `Block.glb.toml`
+    // doesn't get chopped to `Block.glb` by an eager `.toml` match first.
+    let stripped = safe
+        .strip_suffix(".part.toml")
+        .or_else(|| safe.strip_suffix(".glb.toml"))
+        .or_else(|| safe.strip_suffix(".instance.toml"))
+        .or_else(|| safe.strip_suffix(".toml"))
+        .unwrap_or(&safe)
+        .to_string();
+
+    if stripped.is_empty() || stripped.starts_with('.') {
+        tracing::warn!(
+            "🚫 Workshop artifact filename '{}' sanitizes to an invalid folder name — skipping.",
+            raw
+        );
+        return None;
+    }
+    Some(stripped)
 }
 
 /// Resolve the full path for a split file, handling scripts/ subdirectory and default extensions.

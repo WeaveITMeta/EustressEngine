@@ -208,16 +208,22 @@ fn spawn_selection_adornments(
         });
         let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
-        // Get or create wireframe mesh
+        // Get or create wireframe mesh (now baked at the correct `size`)
         let wireframe_handle = get_or_create_wireframe(
             &mut cache, &mut meshes, shape, size,
         );
 
-        // Spawn wireframe child entity
+        // The wireframe mesh now has real-size extents, NOT unit extents.
+        // Parent scale propagation would double-scale it, so counter-scale
+        // by the parent's world scale. Works for BOTH primitive parts
+        // (transform.scale = size) and GLB parts (transform.scale = 1,1,1).
+        let parent_world_scale = global_transform.compute_transform().scale;
+        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+
         commands.spawn((
             Mesh3d(wireframe_handle),
             MeshMaterial3d(mats.selection.clone()),
-            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            Transform::from_scale(counter_scale),
             SelectionAdornment,
             eustress_common::adornments::Adornment { meta: true },
             NotShadowCaster,
@@ -234,9 +240,21 @@ fn spawn_selection_adornments(
                 &mats,
                 entity,
                 size,
+                parent_world_scale,
             );
         }
     }
+}
+
+/// Return a local scale that, after multiplication by `parent_world_scale`,
+/// yields `world_scale_target` on every axis. Guards against divide-by-zero
+/// for parents with degenerate scale.
+fn counter_scale_from(parent_world_scale: Vec3, world_scale_target: f32) -> Vec3 {
+    Vec3::new(
+        world_scale_target / parent_world_scale.x.abs().max(0.0001),
+        world_scale_target / parent_world_scale.y.abs().max(0.0001),
+        world_scale_target / parent_world_scale.z.abs().max(0.0001),
+    )
 }
 
 /// Despawn adornment children when `Selected` is removed.
@@ -276,10 +294,13 @@ fn spawn_hover_adornments(
             &mut cache, &mut meshes, shape, size,
         );
 
+        let parent_world_scale = global_transform.compute_transform().scale;
+        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+
         commands.spawn((
             Mesh3d(wireframe_handle),
             MeshMaterial3d(mats.hover.clone()),
-            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            Transform::from_scale(counter_scale),
             HoverAdornment,
             eustress_common::adornments::Adornment { meta: true },
             NotShadowCaster,
@@ -304,20 +325,26 @@ fn despawn_hover_adornments(
     }
 }
 
-/// Update adornment meshes when the adorned part's shape type changes.
-/// Size changes are handled automatically by parent transform propagation.
-/// Only rebuilds when Part.shape actually changes (Block → Ball etc.).
+/// Rebuild adornment meshes when the adorned part's size or shape changes.
+/// Since wireframe meshes now have size baked in (to support GLB parts
+/// where `transform.scale = 1,1,1`), a size change means a different mesh
+/// from the cache — not just a transform update.
 fn update_changed_adornments(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
-    changed_parts: Query<(Entity, &BasePart, Option<&Part>), (With<Selected>, Or<(Changed<Part>, Changed<BasePart>)>)>,
+    // Intentionally NOT watching `Changed<GlobalTransform>` — a moving part
+    // fires that every frame, and the wireframe is already a child of the
+    // adornee so translation/rotation auto-propagate. We only need to
+    // rebuild when SIZE or SHAPE changes (cache-key changes), which is
+    // what `Changed<BasePart>` / `Changed<Part>` actually represent.
+    changed_parts: Query<(Entity, &BasePart, &GlobalTransform, Option<&Part>), (With<Selected>, Or<(Changed<Part>, Changed<BasePart>)>)>,
     adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
 ) {
     let Some(mats) = materials else { return };
 
-    for (part_entity, base_part, part) in &changed_parts {
+    for (part_entity, base_part, global_transform, part) in &changed_parts {
         let size = base_part.size;
         let shape = part.map(|p| shape_kind(p.shape)).unwrap_or(ShapeKind::Box);
 
@@ -333,10 +360,13 @@ fn update_changed_adornments(
             &mut cache, &mut meshes, shape, size,
         );
 
+        let parent_world_scale = global_transform.compute_transform().scale;
+        let counter_scale = counter_scale_from(parent_world_scale, WIREFRAME_SCALE);
+
         commands.spawn((
             Mesh3d(wireframe_handle),
             MeshMaterial3d(mats.selection.clone()),
-            Transform::from_scale(Vec3::splat(WIREFRAME_SCALE)),
+            Transform::from_scale(counter_scale),
             SelectionAdornment,
             eustress_common::adornments::Adornment { meta: true },
             NotShadowCaster,
@@ -352,6 +382,7 @@ fn update_changed_adornments(
                 &mats,
                 part_entity,
                 size,
+                parent_world_scale,
             );
         }
     }
@@ -384,12 +415,18 @@ fn get_or_create_wireframe(
 }
 
 /// Generate a wireframe box mesh (12 edges = 24 vertices as LineList).
-/// Size is in LOCAL space — the mesh is centered at origin.
-/// The parent part's transform positions it in world space.
-fn generate_box_wireframe(_size: Vec3) -> Mesh {
-    // Wireframe is at unit scale since the parent transform already has the size.
-    // We use half-extents of 0.5 (unit cube) because the parent's scale = BasePart.size.
-    let h = Vec3::splat(0.5);
+/// Half-extents are baked from `size` so the mesh matches the authoritative
+/// `BasePart.size` rather than relying on parent scale propagation.
+///
+/// Why not unit-sized: GLB-mesh parts keep `Transform::scale = (1,1,1)` and
+/// rely on the GLB's intrinsic geometry for visible extents. A unit cube
+/// × unit parent scale = unit wireframe, regardless of the real part size
+/// — so every GLB selection drew the same 1×1×1 outline. Baking the size
+/// in decouples the wireframe from parent scale entirely; the spawn site
+/// counter-scales against the parent's world scale so the wireframe lands
+/// at `size` in world space for BOTH GLB and primitive parts.
+fn generate_box_wireframe(size: Vec3) -> Mesh {
+    let h = size * 0.5;
 
     let corners = [
         Vec3::new(-h.x, -h.y, -h.z), // 0
@@ -419,9 +456,10 @@ fn generate_box_wireframe(_size: Vec3) -> Mesh {
 }
 
 /// Generate a wireframe sphere mesh (3 great circles).
-fn generate_sphere_wireframe(_radius: f32) -> Mesh {
-    // Unit sphere (radius 0.5) — parent scale handles actual size
-    let r = 0.5;
+/// Radius baked in so GLB-sphere parts aren't stuck at r=0.5 — same
+/// reasoning as `generate_box_wireframe`.
+fn generate_sphere_wireframe(radius: f32) -> Mesh {
+    let r = radius;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(CIRCLE_SEGMENTS as usize * 2 * 3);
 
     // XY plane circle
@@ -436,10 +474,11 @@ fn generate_sphere_wireframe(_radius: f32) -> Mesh {
 }
 
 /// Generate a wireframe cylinder mesh (2 end circles + vertical lines).
-fn generate_cylinder_wireframe(_radius: f32, _height: f32) -> Mesh {
-    // Unit cylinder — parent scale handles actual size
-    let r = 0.5;
-    let half_h = 0.5;
+/// Radius and height baked in — see `generate_box_wireframe` for the
+/// reason unit-sized meshes fail for GLB-mesh parts.
+fn generate_cylinder_wireframe(radius: f32, height: f32) -> Mesh {
+    let r = radius;
+    let half_h = height * 0.5;
     let mut positions: Vec<[f32; 3]> = Vec::new();
 
     // Top circle
@@ -490,6 +529,14 @@ fn append_circle_line_list(
 // ============================================================================
 
 /// Spawn 8 small cross-shaped meshes at box corners.
+///
+/// `size` is the part's authoritative size (BasePart.size). `parent_world_scale`
+/// is whatever scale is on the part's Transform — for primitive parts this
+/// equals size, for GLB parts it's typically (1,1,1). We position and size
+/// each dot in parent-local space so the world result is:
+///   - dot at each physical corner of the part (`±size/2` in world)
+///   - dot radius clamped to a readable screen size
+/// regardless of which sizing convention the part uses.
 fn spawn_corner_dots(
     commands: &mut Commands,
     cache: &mut WireframeMeshCache,
@@ -497,33 +544,36 @@ fn spawn_corner_dots(
     mats: &SelectionMaterials,
     parent: Entity,
     size: Vec3,
+    parent_world_scale: Vec3,
 ) {
     let dot_mesh = get_or_create_dot_mesh(cache, meshes);
-    let h = Vec3::splat(0.5); // Unit space
 
+    // Corner positions in PARENT-LOCAL space such that
+    // `parent.scale * local_pos = ±size/2` in world.
+    let hx = (size.x * 0.5) / parent_world_scale.x.abs().max(0.0001);
+    let hy = (size.y * 0.5) / parent_world_scale.y.abs().max(0.0001);
+    let hz = (size.z * 0.5) / parent_world_scale.z.abs().max(0.0001);
     let corners = [
-        Vec3::new(-h.x, -h.y, -h.z),
-        Vec3::new( h.x, -h.y, -h.z),
-        Vec3::new(-h.x,  h.y, -h.z),
-        Vec3::new( h.x,  h.y, -h.z),
-        Vec3::new(-h.x, -h.y,  h.z),
-        Vec3::new( h.x, -h.y,  h.z),
-        Vec3::new(-h.x,  h.y,  h.z),
-        Vec3::new( h.x,  h.y,  h.z),
+        Vec3::new(-hx, -hy, -hz),
+        Vec3::new( hx, -hy, -hz),
+        Vec3::new(-hx,  hy, -hz),
+        Vec3::new( hx,  hy, -hz),
+        Vec3::new(-hx, -hy,  hz),
+        Vec3::new( hx, -hy,  hz),
+        Vec3::new(-hx,  hy,  hz),
+        Vec3::new( hx,  hy,  hz),
     ];
 
-    // Corner dot scale: fraction of part size, clamped.
-    // Since parent transform has scale = size, we need to counter-scale.
-    // Dot radius in world = size.max_element() * CORNER_DOT_FRACTION, clamped.
+    // Dot world radius: a readable fraction of part size, clamped.
     let world_radius = (size.max_element() * CORNER_DOT_FRACTION)
         .max(CORNER_DOT_MIN)
         .min(CORNER_DOT_MAX);
-    // In parent-local space, we need to divide by parent scale per axis
-    // to get uniform world-space dots despite non-uniform parent scale.
+    // Counter-scale parent so the world radius is uniform on all axes even
+    // when the part's transform scale is non-uniform.
     let local_scale = Vec3::new(
-        world_radius / size.x.max(0.001),
-        world_radius / size.y.max(0.001),
-        world_radius / size.z.max(0.001),
+        world_radius / parent_world_scale.x.abs().max(0.0001),
+        world_radius / parent_world_scale.y.abs().max(0.0001),
+        world_radius / parent_world_scale.z.abs().max(0.0001),
     );
 
     for corner in &corners {

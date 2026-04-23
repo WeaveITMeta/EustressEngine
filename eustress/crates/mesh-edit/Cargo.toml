@@ -1,0 +1,22 @@
+[package]
+name = "eustress-mesh-edit"
+version = "0.1.0"
+edition = "2021"
+
+# Half-edge mesh-editing kernel for Eustress. Separate from
+# `eustress-cad` (which operates on parametric BRep bodies via truck)
+# — this crate targets arbitrary non-parametric meshes that the user
+# edits at the vertex / edge / face level.
+#
+# Unblocks TOOLSET.md Phase 2:
+# - Mesh-edit mode (vertex/edge/face select)
+# - Extrude / bevel / inset / loop cut on non-parametric meshes
+# - Loop Subdivider
+#
+# Bevy-free — downstream engine glue lifts `HalfEdgeMesh` to/from
+# `bevy::prelude::Mesh` via the conversion helpers in `bevy_interop`.
+
+[dependencies]
+glam = "0.29"
+thiserror = { workspace = true }
+serde = { workspace = true }

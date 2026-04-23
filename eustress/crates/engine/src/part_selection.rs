@@ -11,6 +11,19 @@ use crate::entity_utils::entity_to_id_string;
 use crate::rendering::BevySelectionManager;
 
 /// System for left-click part selection with raycasting (Modern ECS)
+/// Tool-state bundle for `part_selection_system` — groups the three
+/// active-tool resources so the outer system stays under Bevy's
+/// 16-parameter soft limit. Bevy unwraps this into the individual
+/// resource reads via the `SystemParam` derive.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PartSelectionToolStates<'w> {
+    pub move_state:   Option<Res<'w, crate::move_tool::MoveToolState>>,
+    pub scale_state:  Option<Res<'w, crate::scale_tool::ScaleToolState>>,
+    pub rotate_state: Option<Res<'w, crate::rotate_tool::RotateToolState>>,
+    pub studio_state: Option<Res<'w, crate::ui::StudioState>>,
+}
+
 /// Supports both PartEntity (legacy) and Instance (modern) components
 #[cfg(not(target_arch = "wasm32"))]
 pub fn part_selection_system(
@@ -31,13 +44,22 @@ pub fn part_selection_system(
     // Query to check if a parent entity is a Model
     parent_query: Query<&Instance>,
     selection_manager: Option<Res<BevySelectionManager>>,
-    move_state: Option<Res<crate::move_tool::MoveToolState>>,
-    scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
-    rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
+    tool_states: PartSelectionToolStates,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     spatial_query: avian3d::prelude::SpatialQuery,
 ) {
+    // Re-expose the bundle fields under their pre-bundle names so the
+    // body below needs no further edits. Each field is already the
+    // exact `Option<Res<_>>` the body expects.
+    let PartSelectionToolStates { move_state, scale_state, rotate_state, studio_state } = tool_states;
+    // Transform mode governs whether the Move gizmo is axis-aligned to
+    // world (IDENTITY) or rotated to match the active entity. Hit test
+    // must use the same rotation or clicking the rotated handle fails.
+    let transform_mode = studio_state
+        .as_ref()
+        .map(|s| s.transform_mode)
+        .unwrap_or(crate::ui::TransformMode::World);
     let Some(selection_manager) = selection_manager else { return };
     let move_active = move_state.as_ref().map(|s| s.active).unwrap_or(false);
     let scale_active = scale_state.as_ref().map(|s| s.active).unwrap_or(false);
@@ -81,19 +103,16 @@ pub fn part_selection_system(
         None => return,
     };
 
-    // Block selection if click is outside the 3D viewport area
+    // Block selection if click is outside the 3D viewport area.
+    // `ViewportBounds` is stored in PHYSICAL pixels but `cursor_position`
+    // is LOGICAL, so we go through the contains_logical helper to avoid
+    // the DPI-scale bug that silently rejected every click on any display
+    // with scale_factor ≠ 1.0.
     if let Some(vb) = viewport_bounds.as_ref() {
-        if vb.width > 0.0 && vb.height > 0.0 {
-            let in_viewport = cursor_position.x >= vb.x
-                && cursor_position.x <= vb.x + vb.width
-                && cursor_position.y >= vb.y
-                && cursor_position.y <= vb.y + vb.height;
-            if !in_viewport {
-                trace!("[select] blocked — cursor outside viewport");
-                return;
-            }
-        } else {
-            trace!("[select] viewport bounds zero");
+        let scale = window.scale_factor() as f32;
+        if !vb.contains_logical(cursor_position, scale) {
+            trace!("[select] blocked — cursor outside viewport");
+            return;
         }
     } else {
         trace!("[select] no ViewportBounds");
@@ -163,7 +182,7 @@ pub fn part_selection_system(
             
             if count > 0 {
                 let center = (bounds_min + bounds_max) * 0.5;
-                
+
                 // MUST match move_tool.rs camera_scale_factor exactly!
                 let fov = match projection {
                     Projection::Perspective(p) => p.fov,
@@ -172,8 +191,14 @@ pub fn part_selection_system(
                 let cam_dist = (center - camera_transform.translation()).length().max(0.1);
                 let scale = cam_dist * (fov * 0.5).tan() * 0.16;
                 let handle_length = scale * 1.0;
-                
-                if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::ONE, handle_length, &camera_transform) {
+
+                let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
+                    transform_mode,
+                    selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
+                );
+                if crate::move_tool::is_clicking_move_handle(
+                    &ray, center, Vec3::ONE, handle_length, &camera_transform, gizmo_rotation,
+                ) {
                     return; // Clicking move handle, abort selection
                 }
             }
@@ -213,7 +238,11 @@ pub fn part_selection_system(
             let rot_extent = rot_bmax - rot_bmin;
             // Use same radius calculation as rotate_tool.rs
             let radius = crate::rotate_tool::compute_ring_radius(rot_center, rot_extent, &camera_transform, projection);
-            if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, radius, &camera_transform) {
+            let rotate_rotation = crate::move_tool::gizmo_rotation_for(
+                transform_mode,
+                selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
+            );
+            if crate::rotate_tool::is_clicking_rotate_handle(&ray, rot_center, radius, &camera_transform, rotate_rotation) {
                 return; // Clicking rotate handle, abort selection
             }
         }
@@ -221,25 +250,35 @@ pub fn part_selection_system(
     
     // Check Scale Tool handles
     if scale_active {
-        for (_entity, global_transform, basepart) in selected_query.iter() {
-            let t = global_transform.compute_transform();
-            
-            let part_size = if let Some(bp) = basepart {
-                bp.size
-            } else {
-                t.scale
-            };
-            
-            // MUST match scale_tool.rs camera-distance-based handle length
+        // Group-level scale-handle check — matches the group-aware
+        // `scale_handles` layout. One test replaces the N per-part tests
+        // that used to run.
+        let mut scale_bmin = Vec3::splat(f32::MAX);
+        let mut scale_bmax = Vec3::splat(f32::MIN);
+        let mut scale_count = 0;
+        for (_e, gt, bp) in selected_query.iter() {
+            let t = gt.compute_transform();
+            let sz = bp.map(|b| b.size).unwrap_or(t.scale);
+            let (mn, mx) = crate::math_utils::calculate_rotated_aabb(t.translation, sz * 0.5, t.rotation);
+            scale_bmin = scale_bmin.min(mn);
+            scale_bmax = scale_bmax.max(mx);
+            scale_count += 1;
+        }
+        if scale_count > 0 {
+            let group_center = (scale_bmin + scale_bmax) * 0.5;
+            let group_extent = (scale_bmax - scale_bmin) * 0.5;
             let fov_s = match projection {
                 Projection::Perspective(p) => p.fov,
                 _ => std::f32::consts::FRAC_PI_4,
             };
-            let dist_s = (t.translation - camera_transform.translation()).length().max(0.1);
-            let scale_s = dist_s * (fov_s * 0.5).tan() * 0.16;
-            let handle_length = scale_s * 0.9;
-            
-            if crate::scale_tool::is_clicking_scale_handle(&ray, t.translation, t.rotation, part_size, handle_length) {
+            let effective_extent = crate::scale_tool::effective_scale_extent(
+                group_extent, group_center, camera_transform.translation(), fov_s,
+            );
+            let scale_rotation = crate::move_tool::gizmo_rotation_for(
+                transform_mode,
+                selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
+            );
+            if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
                 return; // Clicking scale handle, abort selection
             }
         }
@@ -432,8 +471,14 @@ pub fn part_selection_system(
                     center /= count as f32;
                     let avg_scale = total_scale / count as f32;
                     let handle_length = (avg_scale * 0.5) + 1.5;
-                    
-                    if crate::move_tool::is_clicking_move_handle(&ray, center, Vec3::splat(avg_scale), handle_length, &camera_transform) {
+
+                    let gizmo_rotation = crate::move_tool::gizmo_rotation_for(
+                        transform_mode,
+                        selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
+                    );
+                    if crate::move_tool::is_clicking_move_handle(
+                        &ray, center, Vec3::splat(avg_scale), handle_length, &camera_transform, gizmo_rotation,
+                    ) {
                         return; // About to click move handle, don't clear selection
                     }
                 }
@@ -442,27 +487,36 @@ pub fn part_selection_system(
         
         // For scale tool: check each selected part
         if scale_active {
-            let sel = selection_manager.0.read();
-            let selected = sel.get_selected();
-            
-            for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
-                // Get part ID from either component (format: "indexVgeneration")
-                let entity_id = entity_to_id_string(entity);
-                let part_id = part_entity.map(|pe| pe.part_id.clone())
-                    .filter(|id| !id.is_empty())
-                    .or_else(|| part_entity_marker.map(|pem| pem.part_id.clone()).filter(|id| !id.is_empty()))
-                    .or_else(|| instance.map(|_| entity_id));
-                
-                if let Some(id) = part_id {
-                    if selected.contains(&id) {
-                        let t = transform.compute_transform();
-                        let part_size = t.scale.max_element();
-                        let handle_length = (part_size * 0.5) + 0.5;
-                        
-                        if crate::scale_tool::is_clicking_scale_handle(&ray, t.translation, t.rotation, t.scale, handle_length) {
-                            return; // About to click scale handle, don't clear selection
-                        }
-                    }
+            // Same group-level hit check as the scale_active path above —
+            // "don't clear selection on empty-space click if it's actually
+            // a scale-handle click on the existing group".
+            let mut s_bmin = Vec3::splat(f32::MAX);
+            let mut s_bmax = Vec3::splat(f32::MIN);
+            let mut s_count = 0;
+            for (_e, gt, bp) in selected_query.iter() {
+                let t = gt.compute_transform();
+                let sz = bp.map(|b| b.size).unwrap_or(t.scale);
+                let (mn, mx) = crate::math_utils::calculate_rotated_aabb(t.translation, sz * 0.5, t.rotation);
+                s_bmin = s_bmin.min(mn);
+                s_bmax = s_bmax.max(mx);
+                s_count += 1;
+            }
+            if s_count > 0 {
+                let group_center = (s_bmin + s_bmax) * 0.5;
+                let group_extent = (s_bmax - s_bmin) * 0.5;
+                let fov_s = match projection {
+                    Projection::Perspective(p) => p.fov,
+                    _ => std::f32::consts::FRAC_PI_4,
+                };
+                let effective_extent = crate::scale_tool::effective_scale_extent(
+                    group_extent, group_center, camera_transform.translation(), fov_s,
+                );
+                let scale_rotation = crate::move_tool::gizmo_rotation_for(
+                    transform_mode,
+                    selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
+                );
+                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
+                    return; // About to click scale handle, don't clear selection
                 }
             }
         }

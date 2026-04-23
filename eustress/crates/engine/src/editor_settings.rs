@@ -43,6 +43,20 @@ pub struct EditorSettings {
     /// Enable surface snapping (raycast to place parts on other parts)
     #[serde(default = "default_surface_snap")]
     pub surface_snap_enabled: bool,
+
+    /// Align-to-normal on surface drop — when free-dragging a part onto
+    /// another surface with `surface_snap_enabled`, also rotate the
+    /// part so its local +Y aligns with the hit surface normal. Default
+    /// off (preserves pre-Phase-1 behaviour).
+    #[serde(default)]
+    pub align_to_normal_on_drop: bool,
+
+    /// Scale Lock — when true, dragging any Scale face handle scales
+    /// uniformly (preserves axis ratios). For CAD features where
+    /// proportional scaling is the common case; disable for free-form
+    /// box-shape edits. Default off — Phase 2 opt-in.
+    #[serde(default)]
+    pub scale_lock_proportional: bool,
     
     /// Angle snap increment in degrees
     pub angle_snap: f32,
@@ -117,6 +131,8 @@ impl Default for EditorSettings {
             snap_enabled: true,
             collision_snap: false,
             surface_snap_enabled: true,
+            align_to_normal_on_drop: false,
+            scale_lock_proportional: false,
             angle_snap: 15.0,
             show_grid: true,
             grid_size: 1.0, // 1m grid lines

@@ -237,18 +237,67 @@ pub fn load_gui_definition(path: &Path) -> Result<GuiTomlFile, String> {
     Ok(parsed)
 }
 
-/// Determine the GUI element type from the file extension
+/// Determine the GUI element type from a path. Prefers the legacy
+/// compound-extension form (`Name.textlabel.toml`) when present so
+/// existing flat files keep working, and falls back to reading
+/// `[metadata] class_name` from `_instance.toml` for the
+/// folder-per-element layout the Insert menu now emits.
+///
+/// Returns `"Frame"` when neither the extension nor the TOML
+/// metadata yields a recognized class — the old default.
 pub fn gui_class_from_extension(path: &Path) -> &'static str {
     let path_str = path.to_string_lossy();
-    if path_str.ends_with(".screengui.toml") { return "ScreenGui"; }
-    if path_str.ends_with(".textlabel.toml") { return "TextLabel"; }
-    if path_str.ends_with(".textbutton.toml") { return "TextButton"; }
-    if path_str.ends_with(".frame.toml") { return "Frame"; }
-    if path_str.ends_with(".imagelabel.toml") { return "ImageLabel"; }
-    if path_str.ends_with(".imagebutton.toml") { return "ImageButton"; }
+    if path_str.ends_with(".screengui.toml")      { return "ScreenGui"; }
+    if path_str.ends_with(".textlabel.toml")      { return "TextLabel"; }
+    if path_str.ends_with(".textbutton.toml")     { return "TextButton"; }
+    if path_str.ends_with(".frame.toml")          { return "Frame"; }
+    if path_str.ends_with(".imagelabel.toml")     { return "ImageLabel"; }
+    if path_str.ends_with(".imagebutton.toml")    { return "ImageButton"; }
     if path_str.ends_with(".scrollingframe.toml") { return "ScrollingFrame"; }
-    if path_str.ends_with(".textbox.toml") { return "TextBox"; }
-    if path_str.ends_with(".viewportframe.toml") { return "ViewportFrame"; }
+    if path_str.ends_with(".textbox.toml")        { return "TextBox"; }
+    if path_str.ends_with(".viewportframe.toml")  { return "ViewportFrame"; }
+    if path_str.ends_with(".videoframe.toml")     { return "VideoFrame"; }
+    if path_str.ends_with(".documentframe.toml")  { return "DocumentFrame"; }
+    if path_str.ends_with(".webframe.toml")       { return "WebFrame"; }
+    if path_str.ends_with(".surfacegui.toml")     { return "SurfaceGui"; }
+    if path_str.ends_with(".billboardgui.toml")   { return "BillboardGui"; }
+
+    // Folder convention: `Name/_instance.toml` — peek the metadata
+    // class_name and map it back to our `&'static str` universe.
+    // Returning a `&'static str` forces an exhaustive match instead
+    // of borrowing from the parsed doc; keeps the caller (which
+    // currently threads this into other `&'static str` lookups) free
+    // of lifetime plumbing.
+    if path_str.ends_with("_instance.toml") {
+        if let Ok(doc) = std::fs::read_to_string(path)
+            .and_then(|s| toml::from_str::<toml::Value>(&s)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+        {
+            if let Some(cn) = doc
+                .get("metadata")
+                .and_then(|m| m.get("class_name"))
+                .and_then(|c| c.as_str())
+            {
+                return match cn {
+                    "ScreenGui"      => "ScreenGui",
+                    "TextLabel"      => "TextLabel",
+                    "TextButton"     => "TextButton",
+                    "Frame"          => "Frame",
+                    "ImageLabel"     => "ImageLabel",
+                    "ImageButton"    => "ImageButton",
+                    "ScrollingFrame" => "ScrollingFrame",
+                    "TextBox"        => "TextBox",
+                    "ViewportFrame"  => "ViewportFrame",
+                    "VideoFrame"     => "VideoFrame",
+                    "DocumentFrame"  => "DocumentFrame",
+                    "WebFrame"       => "WebFrame",
+                    "SurfaceGui"     => "SurfaceGui",
+                    "BillboardGui"   => "BillboardGui",
+                    _                => "Frame",
+                };
+            }
+        }
+    }
     "Frame" // default
 }
 

@@ -325,11 +325,23 @@ pub fn list_sessions_in_space(space_root: Option<&std::path::Path>) -> Vec<Sessi
 /// Haiku title-generation system once the async API call returns.
 /// Round-trips the rest of the manifest untouched so a concurrent
 /// save doesn't lose data.
+///
+/// **Folder rename.** When the session's on-disk folder is still the
+/// raw UUID (hash-named — the default for fresh sessions), this also
+/// renames the folder to `{slug(title)}-{hash8}/` so Explorer + OS
+/// file browsers show the human-readable title at a glance. The
+/// short hash suffix keeps identically-titled sessions unique.
+/// Returns the session's current folder name (which becomes the new
+/// `session_id` if the rename succeeded, or the original id otherwise)
+/// so the caller can update any live references.
+///
+/// If the folder is already slugified (user opened an older session
+/// after this feature shipped), we leave it alone — idempotent.
 pub fn update_session_title(
     space_root: Option<&std::path::Path>,
     session_id: &str,
     title: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path = session_entries_path_in_space(space_root, session_id);
     let body = std::fs::read_to_string(&path)
         .map_err(|e| format!("read {}: {}", path.display(), e))?;
@@ -339,7 +351,73 @@ pub fn update_session_title(
     let updated = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("serialize manifest: {}", e))?;
     std::fs::write(&path, updated)
-        .map_err(|e| format!("write {}: {}", path.display(), e))
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+
+    // Folder rename — only when the current folder name looks like a
+    // raw UUID (32 hex-ish chars with dashes). Avoids clobbering a
+    // custom folder name the user may have set manually.
+    if !looks_like_uuid_folder(session_id) {
+        return Ok(session_id.to_string());
+    }
+
+    let hash_suffix: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    let slug = slugify_title(title);
+    if slug.is_empty() {
+        return Ok(session_id.to_string());
+    }
+    let new_name = format!("{}-{}", slug, hash_suffix);
+    if new_name == session_id {
+        return Ok(session_id.to_string());
+    }
+
+    let old_dir = session_dir_in_space(space_root, session_id);
+    let new_dir = session_dir_in_space(space_root, &new_name);
+    if new_dir.exists() {
+        // Collision with an existing slug+hash folder (very unlikely
+        // but possible if two sessions share the first 8 hex chars
+        // AND identical titles). Keep the UUID name so we don't
+        // merge folders.
+        return Ok(session_id.to_string());
+    }
+    match std::fs::rename(&old_dir, &new_dir) {
+        Ok(_) => Ok(new_name),
+        Err(_) => Ok(session_id.to_string()), // keep old id on failure
+    }
+}
+
+/// True when a folder name looks like a raw UUID4 string
+/// (`a3f24e8b-...`). Used to decide whether to rename on title
+/// generation. We don't do a strict UUID-v4 parse because older
+/// engines produced variant formats; length + hex/dash ratio is
+/// sufficient in practice.
+fn looks_like_uuid_folder(name: &str) -> bool {
+    if name.len() < 32 || name.len() > 40 { return false; }
+    name.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Lowercase, strip non-alphanumerics to hyphens, collapse runs,
+/// trim, cap length. Matches what the file-system + Explorer
+/// tolerate without surprises.
+fn slugify_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_hyphen = true; // suppress leading hyphens
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_hyphen = false;
+        } else if !prev_hyphen {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    while out.ends_with('-') { out.pop(); }
+    if out.len() > 40 { out.truncate(40); }
+    while out.ends_with('-') { out.pop(); }
+    out
 }
 
 /// Summary of a past session for history browsing + tab strip.

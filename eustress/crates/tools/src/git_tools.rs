@@ -4,11 +4,35 @@ use crate::{ToolContext, ToolDefinition, ToolHandler, ToolResult};
 use crate::modes::WorkshopMode;
 use std::process::Command;
 
-/// Run a git command in the Universe root directory.
+/// Walk upward from `start` looking for a `.git` directory, returning
+/// the first ancestor that contains one. Universe folders are usually
+/// children of a larger repo (e.g. `~/Documents/Eustress/Universe1` is
+/// inside a personal notes repo, or the Eustress installer repo) —
+/// running `git` directly in the Universe folder errors with
+/// "not a git repository" even when the Universe is under version
+/// control from a higher-level root.
+fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join(".git").exists() {
+            return Some(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(p) => current = p,
+            None    => return None,
+        }
+    }
+}
+
+/// Run a git command in the nearest `.git`-rooted ancestor of the
+/// Universe root. Falls back to `ctx.universe_root` if no repo is
+/// found so the error message clearly says "not a git repository"
+/// rather than bubbling up a misleading path.
 fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+    let cwd = find_git_root(&ctx.universe_root).unwrap_or_else(|| ctx.universe_root.clone());
     let output = Command::new("git")
         .args(args)
-        .current_dir(&ctx.universe_root)
+        .current_dir(&cwd)
         .output()
         .map_err(|e| format!("Failed to run git: {}", e))?;
 
@@ -16,7 +40,7 @@ fn git(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
+        Err(format!("git {} failed (cwd={}): {}", args.join(" "), cwd.display(), stderr))
     }
 }
 

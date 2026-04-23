@@ -62,7 +62,13 @@
       "Bash(bun --version)",
       "Bash(bun install *)",
       "Bash(bun run *)",
-      "Bash([ -f \"e:/Workspace/EustressEngine/eustress/crates/functions/src/$f.rs\" ])"
+      "Bash([ -f \"e:/Workspace/EustressEngine/eustress/crates/functions/src/$f.rs\" ])",
+      "Bash(grep -E \"\\\\.rs$\")",
+      "Bash(awk 'NR>=960 && NR<=1295 { if \\($0 ~ /^    \\(if|} else|pub fn|fn \\)/\\) print NR\": \"$0 }' crates/engine/src/space/instance_loader.rs)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "eustress"
+  ]
 }

@@ -745,84 +745,28 @@ fn get_conversation_handler(args: &Value, state: &mut ServerState) -> ToolResult
 }
 
 pub fn all_tools() -> Vec<ToolDescriptor> {
+    // Only ONE hand-rolled tool remains: `set_active_universe`. Every
+    // other listing / read / write / search tool that used to live
+    // here as `eustress_*` has been migrated to the shared
+    // `eustress-tools` registry (see `shared_registry.rs`), so
+    // exposing both surfaces produced ~30 duplicate schemas in
+    // `tools/list` — bloating the LLM's context and splitting its
+    // routing heuristic across two equivalent tools per operation.
+    //
+    // `set_active_universe` stays hand-rolled because it's the only
+    // tool that needs to *mutate* the server's live
+    // `ServerState.current_universe`. The shared-registry tools
+    // receive an immutable `ToolContext` per call and can't reach
+    // the MCP server's session state. The shared crate's
+    // `set_next_launch_universe` writes the on-disk sentinel for the
+    // next engine launch — complementary, but doesn't change what
+    // this MCP session resolves paths against.
     vec![
         ToolDescriptor {
-            name: "eustress_list_universes",
-            description: "Discover Universes on disk. Scans the server's search roots (EUSTRESS_UNIVERSES_PATH, or sensible defaults like ~/Eustress) and any enclosing Universe of the current working directory.",
-            input_schema: list_universes_schema,
-            handler: list_universes_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_set_default_universe",
-            description: "Change the server's default Universe mid-session. Subsequent tool calls that don't pass `universe` use this one.",
+            name: "set_active_universe",
+            description: "Switch the MCP session's active Universe. Every subsequent tool call that resolves paths against the Universe (read_file, list_directory, list_space_contents, query_entities, git_*, run_bash, etc.) will operate on the new Universe immediately. Use this when the server's startup-resolved Universe isn't the one you want to work in — the alternative `set_next_launch_universe` only writes a sentinel file read by the ENGINE on its next launch, and has no effect on the current MCP session.",
             input_schema: set_default_universe_schema,
             handler: set_default_universe_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_list_spaces",
-            description: "List every Space in the Universe (subdirectories under {universe}/Spaces/).",
-            input_schema: list_spaces_schema,
-            handler: list_spaces_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_list_scripts",
-            description: "List every folder-based Rune/Luau script in a Space (or all Spaces). Returns class, source path, summary path.",
-            input_schema: list_scripts_schema,
-            handler: list_scripts_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_read_script",
-            description: "Read a script's source + summary together. `path` can point at the script folder or the `.rune` file directly.",
-            input_schema: read_script_schema,
-            handler: read_script_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_find_entity",
-            description: "Find entities by name (case-insensitive substring) across a Space or all Spaces.",
-            input_schema: find_entity_schema,
-            handler: find_entity_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_list_assets",
-            description: "List assets (meshes, textures, GUIs) under a Space. Filters by extension family.",
-            input_schema: list_assets_schema,
-            handler: list_assets_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_search_universe",
-            description: "Case-insensitive text search across `.rune`, `.toml`, and `.md` files under the Universe.",
-            input_schema: search_schema,
-            handler: search_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_git_status",
-            description: "Run `git status --porcelain` in the Universe root. Returns parsed entries.",
-            input_schema: git_status_schema,
-            handler: git_status_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_git_log",
-            description: "Recent commits in the Universe repo. Default: last 20.",
-            input_schema: git_log_schema,
-            handler: git_log_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_git_diff",
-            description: "Show uncommitted diff for a path (or the whole Universe if omitted).",
-            input_schema: git_diff_schema,
-            handler: git_diff_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_create_script",
-            description: "Create a new Rune script folder using the engine's canonical layout: folder/folder.rune + folder.md + _instance.toml.",
-            input_schema: create_script_schema,
-            handler: create_script_handler,
-        },
-        ToolDescriptor {
-            name: "eustress_get_conversation",
-            description: "Load a Workshop conversation persisted under `{universe}/.eustress/knowledge/`.",
-            input_schema: get_conversation_schema,
-            handler: get_conversation_handler,
         },
     ]
 }

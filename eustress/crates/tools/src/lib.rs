@@ -42,6 +42,7 @@ pub use registry::{
 // Tool implementation modules. Each hosts a family of related tools;
 // see the struct docs in the individual files for the full surface.
 pub mod diff_tools;
+pub mod embedvec_tools;
 pub mod entity_tools;
 pub mod file_tools;
 pub mod git_tools;
@@ -82,6 +83,10 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(script_tools::ExecuteRuneTool);
     registry.register(script_tools::ExecuteLuauTool);
     registry.register(script_tools::ImageToCodeTool);
+    // Scene-geometry reconstruction via VIGA (Vision-as-Inverse-Graphics).
+    // Distinct from ImageToCodeTool — that returns a Rune script; this
+    // spawns 3D entities.
+    registry.register(script_tools::ImageToGeometryTool);
     registry.register(script_tools::DocumentToCodeTool);
     registry.register(script_tools::GenerateDocsTool);
 
@@ -131,6 +136,15 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(universe_tools::CreateScriptTool);
     registry.register(universe_tools::SetDefaultUniverseTool);
     registry.register(universe_tools::GetConversationTool);
+
+    // Embedvec-backed AI tools — unblock AI Select Similar,
+    // Part Swap template suggestion, contextual edit suggestions,
+    // and tool-defaults suggestions. All four are thin protocol
+    // wrappers over the engine-side `EmbedvecResource`.
+    registry.register(embedvec_tools::FindSimilarEntitiesTool);
+    registry.register(embedvec_tools::SuggestSwapTemplateTool);
+    registry.register(embedvec_tools::SuggestContextualEditsTool);
+    registry.register(embedvec_tools::SuggestToolDefaultsTool);
 }
 
 /// Convenience constructor — returns a `ToolRegistry` with every

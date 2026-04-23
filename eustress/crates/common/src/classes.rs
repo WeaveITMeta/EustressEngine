@@ -98,6 +98,37 @@ impl Default for Material {
 }
 
 impl Material {
+    /// Canonical string name — inverse of `from_string`. Used by the
+    /// selection-sync + properties label paths when a BasePart has no
+    /// explicit `material_name` override. Round-trips with `Material::
+    /// from_string` modulo case.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Material::Plastic        => "Plastic",
+            Material::SmoothPlastic  => "SmoothPlastic",
+            Material::Wood           => "Wood",
+            Material::WoodPlanks     => "WoodPlanks",
+            Material::Metal          => "Metal",
+            Material::CorrodedMetal  => "CorrodedMetal",
+            Material::DiamondPlate   => "DiamondPlate",
+            Material::Foil           => "Foil",
+            Material::Grass          => "Grass",
+            Material::Concrete       => "Concrete",
+            Material::Brick          => "Brick",
+            Material::Granite        => "Granite",
+            Material::Marble         => "Marble",
+            Material::Slate          => "Slate",
+            Material::Sand           => "Sand",
+            Material::Fabric         => "Fabric",
+            Material::Glass          => "Glass",
+            Material::Neon           => "Neon",
+            Material::Ice            => "Ice",
+            Material::Gold           => "Gold",
+            Material::Silver         => "Silver",
+            Material::Bronze         => "Bronze",
+        }
+    }
+
     /// Parse material from string name
     pub fn from_string(s: &str) -> Self {
         match s.to_lowercase().as_str() {
@@ -2464,7 +2495,15 @@ impl Default for BillboardGui {
             brightness: 1.0,
             light_influence: 1.0,
             
-            size: [1.0, 1.0],
+            // Pixel dimensions of the canvas — Slint software-renders into
+            // this resolution, and a quad sized `size / PIXELS_PER_METER`
+            // (50 px/m) textures it. [1.0, 1.0] (the old default) produced a
+            // 1×1 pixel texture on a 2 cm × 2 cm quad — effectively
+            // invisible, which is what the "fragment of text" reports
+            // traced back to when a _instance.toml was loaded without an
+            // explicit size field. 200×50 matches the Add-Label default
+            // and reads as a single line of readable text.
+            size: [200.0, 50.0],
             size_offset: [0.0, 0.0],
             extents_offset: [0.0, 0.0, 0.0],
             extents_offset_world_space: [0.0, 0.0, 0.0],

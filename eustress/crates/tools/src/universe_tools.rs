@@ -463,8 +463,16 @@ pub struct SetDefaultUniverseTool;
 impl ToolHandler for SetDefaultUniverseTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "set_default_universe",
-            description: "Write the given Universe name to the sentinel file the engine reads at startup, so it opens that Universe next launch.",
+            // Renamed from `set_default_universe` because the former
+            // name collided semantically with the MCP server's
+            // session-mutating `eustress_set_default_universe` /
+            // `set_active_universe` — clients picked this one by
+            // default and got the sentinel-only behavior. This tool
+            // ONLY writes the sentinel file the engine reads at
+            // startup; it does not change which Universe the current
+            // tool-call session resolves paths against.
+            name: "set_next_launch_universe",
+            description: "Write the given Universe name to the sentinel file the engine reads at startup, so it opens that Universe on its NEXT launch. Does NOT change the universe the current MCP session operates against — call `set_active_universe` for that.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -481,7 +489,7 @@ impl ToolHandler for SetDefaultUniverseTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let Some(name) = input.get("universe").and_then(|v| v.as_str()) else {
             return ToolResult {
-                tool_name: "set_default_universe".to_string(), tool_use_id: String::new(),
+                tool_name: "set_next_launch_universe".to_string(), tool_use_id: String::new(),
                 success: false, content: "Missing 'universe'".into(),
                 structured_data: None, stream_topic: None,
             };
@@ -495,7 +503,7 @@ impl ToolHandler for SetDefaultUniverseTool {
             .join(".default_universe");
         match std::fs::write(&sentinel, name) {
             Ok(_) => ToolResult {
-                tool_name: "set_default_universe".to_string(), tool_use_id: String::new(),
+                tool_name: "set_next_launch_universe".to_string(), tool_use_id: String::new(),
                 success: true,
                 content: format!("Set default Universe to '{}'", name),
                 structured_data: Some(serde_json::json!({
@@ -505,7 +513,7 @@ impl ToolHandler for SetDefaultUniverseTool {
                 stream_topic: None,
             },
             Err(e) => ToolResult {
-                tool_name: "set_default_universe".to_string(), tool_use_id: String::new(),
+                tool_name: "set_next_launch_universe".to_string(), tool_use_id: String::new(),
                 success: false, content: format!("Write failed: {}", e),
                 structured_data: None, stream_topic: None,
             },

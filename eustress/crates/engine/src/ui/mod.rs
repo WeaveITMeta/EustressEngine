@@ -205,14 +205,35 @@ pub struct ServiceOwner(pub ServiceType);
 // UI State Resources
 // ============================================================================
 
-/// Viewport bounds reported by Slint layout (in physical pixels from top-left)
-/// Used by camera controller to clip 3D rendering to the viewport area
+/// Viewport bounds reported by Slint layout (in PHYSICAL pixels from top-left).
+/// Used by the camera controller to clip 3D rendering to the viewport area.
+///
+/// IMPORTANT: these fields are physical pixels (logical × scale_factor). When
+/// comparing against `Window::cursor_position()` — which returns LOGICAL
+/// pixels — call `contains_logical` or divide by the window scale factor
+/// first. Forgetting this is the bug that made 3D click selection silently
+/// reject every click on any display with DPI scaling ≠ 1.0.
 #[derive(Resource, Default, Clone, Copy)]
 pub struct ViewportBounds {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+impl ViewportBounds {
+    /// Test whether a cursor point (in LOGICAL pixels, as returned by
+    /// `Window::cursor_position()`) falls inside the viewport rectangle.
+    /// Converts physical bounds to logical using the provided scale factor.
+    pub fn contains_logical(&self, cursor: bevy::math::Vec2, scale_factor: f32) -> bool {
+        if self.width <= 0.0 || self.height <= 0.0 { return true; }
+        let s = scale_factor.max(0.0001);
+        let x = self.x / s;
+        let y = self.y / s;
+        let w = self.width / s;
+        let h = self.height / s;
+        cursor.x >= x && cursor.x <= x + w && cursor.y >= y && cursor.y <= y + h
+    }
 }
 
 #[derive(Resource)]
@@ -503,6 +524,12 @@ pub struct ExplorerState {
 // ExplorerToggleEvent is defined in slint_ui module
 pub use slint_ui::ExplorerToggleEvent;
 pub use slint_ui::SlintSystems;
+// `SlintUiState` is the `NonSend` host of the compiled Slint
+// `StudioWindow` + its Rust-side sync caches. Re-exported so modules
+// outside `ui/` (e.g. timeline_slint_sync) can read it via
+// `crate::ui::SlintUiState` instead of reaching into the 8k+ line
+// `slint_ui` module directly.
+pub use slint_ui::SlintUiState;
 
 #[derive(Resource, Default)]
 pub struct ExplorerCache {

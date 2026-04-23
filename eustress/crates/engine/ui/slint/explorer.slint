@@ -245,7 +245,24 @@ export component ExplorerPanel inherits Rectangle {
                             && root.drag-mouse-y >= self.absolute-position.y
                             && root.drag-mouse-y < self.absolute-position.y + self.height
                             && node.visible;
-                        // drag-target-id is tracked by the overlay TouchArea
+                        // Each TreeItem self-reports as the drop target
+                        // when its own `drop-target` prop goes true.
+                        // This is the source of truth — it uses the
+                        // row's real `absolute-position.y`, so it
+                        // naturally accounts for scroll offset +
+                        // collapsed-node visibility, neither of which
+                        // the overlay's `floor(mouse-y / 22px)`
+                        // arithmetic respected. The math was giving
+                        // wrong target ids on scrolled/collapsed trees,
+                        // which is why the drop produced no reparent.
+                        changed drop-target => {
+                            if self.drop-target {
+                                root.drag-target-id = node.id;
+                            } else if root.drag-target-id == node.id {
+                                root.drag-target-id = -1;
+                            }
+                        }
+                        // drag-target-id is also updated by the overlay TouchArea
                         // below (abs-y → row index). A `changed drop-target`
                         // handler that wrote back to `root.drag-target-id`
                         // was cleaner but Slint flagged it as a property
@@ -355,10 +372,19 @@ export component ExplorerPanel inherits Rectangle {
                     }
                 }
 
-                // Ghost — position is absolute mouse coords minus overlay's absolute position.
+                // Ghost — cursor anchors at the top-left of the pill
+                // with a tiny 10px / 4px offset so the cursor arrow
+                // stays visible and points AT the ghost rather than
+                // sitting inside it. Prior `+14 / -11` offset centered
+                // the pill vertically on the cursor, which made the
+                // pill appear to "float loose" of the pointer and
+                // landed rows above / below the user's intent on tall
+                // trees. Anchor now matches the "you're holding this"
+                // affordance of every other Explorer (VS Code,
+                // Windows File Explorer, etc.).
                 Rectangle {
-                    x: root.drag-mouse-x - overlay-rect.absolute-position.x + 14px;
-                    y: root.drag-mouse-y - overlay-rect.absolute-position.y - 11px;
+                    x: root.drag-mouse-x - overlay-rect.absolute-position.x + 10px;
+                    y: root.drag-mouse-y - overlay-rect.absolute-position.y + 4px;
                     width: drag-ghost-text.preferred-width + 40px;
                     height: 22px;
                     background: Theme.accent-blue;

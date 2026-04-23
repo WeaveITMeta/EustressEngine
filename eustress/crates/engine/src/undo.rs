@@ -191,6 +191,18 @@ pub enum Action {
         /// (original_path, trash_path) pairs
         paths: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     },
+
+    /// Entities spawned by a Smart Build Tool (Gap Fill, Model Reflect,
+    /// Resize Align's Rounded Join, etc.) — undo moves the folders to
+    /// `.eustress/trash/` and despawns the entities; redo moves them
+    /// back and respawns via the file watcher.
+    ///
+    /// Each pair is `(original_folder_path, reserved_trash_path)`. The
+    /// trash path is chosen at action-record time so undo/redo are
+    /// symmetric file-rename operations — no search.
+    SpawnFolders {
+        folders: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    },
 }
 
 /// Snapshot of a property value for undo/redo
@@ -205,6 +217,39 @@ pub enum PropertyValueSnapshot {
 }
 
 impl Action {
+    /// Stable topic key used for Eustress Stream publication + history
+    /// panel filtering. One word per variant so subscribers can pattern
+    /// match on `history.<kind>` without parsing descriptions.
+    pub fn topic_kind(&self) -> &'static str {
+        match self {
+            Action::CreatePart { .. }             => "create",
+            Action::DeletePart { .. }             => "delete",
+            Action::MovePart { .. }               => "move",
+            Action::RotatePart { .. }             => "rotate",
+            Action::ScalePart { .. }              => "scale",
+            Action::ChangeColor { .. }            => "color",
+            Action::GroupParts { .. }             => "group",
+            Action::UngroupParts { .. }           => "ungroup",
+            Action::Batch { .. }                  => "batch",
+            Action::ChangeProperty { .. }         => "property",
+            Action::ChangePropertyMulti { .. }    => "property",
+            Action::ChangeParameters { .. }       => "parameters",
+            Action::ChangeParametersMulti { .. }  => "parameters",
+            Action::ChangeFolderDomain { .. }     => "domain",
+            Action::ChangeFolderSyncConfig { .. } => "sync",
+            Action::ChangeAttributes { .. }       => "attributes",
+            Action::ChangeTags { .. }             => "tags",
+            Action::AddAttribute { .. }           => "attributes",
+            Action::RemoveAttribute { .. }        => "attributes",
+            Action::AddTag { .. }                 => "tags",
+            Action::RemoveTag { .. }              => "tags",
+            Action::TransformEntities { .. }      => "transform",
+            Action::ScaleEntities { .. }          => "scale",
+            Action::TrashEntities { .. }          => "delete",
+            Action::SpawnFolders { .. }           => "create",
+        }
+    }
+
     /// Get a human-readable description of the action
     pub fn description(&self) -> String {
         match self {
@@ -237,8 +282,25 @@ impl Action {
             Action::TransformEntities { old_transforms, .. } => format!("Transform {} objects", old_transforms.len()),
             Action::ScaleEntities { old_states, .. } => format!("Scale {} objects", old_states.len()),
             Action::TrashEntities { paths, .. } => format!("Delete {} objects", paths.len()),
+            Action::SpawnFolders { folders, .. } => format!("Spawn {} objects", folders.len()),
         }
     }
+}
+
+/// Snapshot payload for a single pushed Action, queued for publication
+/// to the `"history.<kind>"` Eustress Stream topic. The history-stream
+/// bridge (`history_stream.rs`) drains this each frame + tees events
+/// into the in-process stream so MCP/CLI/LSP subscribers see every
+/// mutation in sequential order without touching `UndoStack` directly.
+#[derive(Debug, Clone)]
+pub struct PendingHistoryStreamEvent {
+    pub topic: String,
+    pub kind: &'static str,
+    pub description: String,
+    pub label: Option<String>,
+    /// Monotonic sequence number across the program's lifetime — lets
+    /// subscribers detect gaps if the stream restarts.
+    pub sequence: u64,
 }
 
 /// Undo/Redo stack resource
@@ -246,25 +308,130 @@ impl Action {
 pub struct UndoStack {
     /// Stack of undoable actions
     history: VecDeque<Action>,
+    /// Parallel stack of human-readable labels for each action —
+    /// displayed in the History panel and toast hints (e.g.
+    /// `"Linear Array (24 parts)"`, `"Align Y Center (5 parts)"`).
+    /// `None` = action shown by its structural name only.
+    labels: VecDeque<Option<String>>,
     /// Current position in history (for redo)
     current_index: usize,
+    /// Monotonic push counter. Increments on every `push_internal`
+    /// regardless of trim/pop; subscribers use it to detect lost
+    /// events across restarts.
+    push_sequence: u64,
+    /// Events queued for the `"history.<kind>"` Eustress Stream topic
+    /// but not yet drained. `history_stream.rs` drains + clears.
+    pending_stream: Vec<PendingHistoryStreamEvent>,
 }
 
 impl UndoStack {
     /// Push a new action onto the stack
     pub fn push(&mut self, action: Action) {
+        self.push_internal(action, None);
+    }
+
+    /// Push with a human-readable label. Same semantics as `push`
+    /// otherwise. Tools that bulk-mutate many entities should use
+    /// this so the user sees one meaningful entry per operation
+    /// instead of a run of generic "Transform" entries.
+    pub fn push_labeled(&mut self, label: impl Into<String>, action: Action) {
+        self.push_internal(action, Some(label.into()));
+    }
+
+    fn push_internal(&mut self, action: Action, label: Option<String>) {
         // Remove any actions after current index (they were undone)
         self.history.truncate(self.current_index);
-        
+        self.labels.truncate(self.current_index);
+
+        // Queue the stream-publication payload before we move `action`
+        // into the deque. `history_stream.rs` tees these into the
+        // in-process EustressStream on the `history.<kind>` topic.
+        self.push_sequence = self.push_sequence.wrapping_add(1);
+        let kind = action.topic_kind();
+        self.pending_stream.push(PendingHistoryStreamEvent {
+            topic: format!("history.{}", kind),
+            kind,
+            description: action.description(),
+            label: label.clone(),
+            sequence: self.push_sequence,
+        });
+
         // Add new action
         self.history.push_back(action);
-        
+        self.labels.push_back(label);
+
         // Maintain max size
         if self.history.len() > MAX_HISTORY_SIZE {
             self.history.pop_front();
+            self.labels.pop_front();
         } else {
             self.current_index += 1;
         }
+    }
+
+    /// Drain queued stream events. Called by `publish_history_stream`
+    /// in `history_stream.rs` once per frame.
+    pub fn drain_pending_stream(&mut self) -> Vec<PendingHistoryStreamEvent> {
+        std::mem::take(&mut self.pending_stream)
+    }
+
+    /// Topic-kind for the action at `index`, if it exists. Used by the
+    /// History panel row renderer to drive the topic chip + filter.
+    pub fn topic_kind_at(&self, index: usize) -> Option<&'static str> {
+        self.history.get(index).map(|a| a.topic_kind())
+    }
+
+    /// Remove a single action at `index` after applying its inverse.
+    /// Returns the action so the caller (World-access system) can feed
+    /// it to `apply_undo_action`. After removal, `current_index` shifts
+    /// down if it was past the removed slot — the rest of the history
+    /// stays intact, so subsequent redo targets remain reachable.
+    ///
+    /// This is the backing operation for the History panel's
+    /// `"Undo This Event"` right-click action.
+    pub fn take_at(&mut self, index: usize) -> Option<Action> {
+        if index >= self.history.len() { return None; }
+        let removed = self.history.remove(index);
+        let _ = self.labels.remove(index);
+        if self.current_index > index {
+            self.current_index -= 1;
+        }
+        removed
+    }
+
+    /// Collect the actions that need to be undone to walk the cursor
+    /// back to `target` (inclusive — `target` stays applied). Used by
+    /// the History panel's `"Revert to Here"` right-click action.
+    ///
+    /// Returns them in reverse application order (newest first) so the
+    /// caller can apply them with `apply_undo_action` in sequence.
+    pub fn drain_until(&mut self, target: usize) -> Vec<Action> {
+        let mut out = Vec::new();
+        // `current_index` points one past the most-recently-applied
+        // action. To keep `target` applied we stop when the cursor
+        // equals `target + 1`.
+        let stop = target.saturating_add(1);
+        while self.current_index > stop && self.current_index > 0 {
+            self.current_index -= 1;
+            if let Some(action) = self.history.get(self.current_index).cloned() {
+                out.push(action);
+            }
+        }
+        out
+    }
+
+    /// Human-readable label for the action at `index`, or `None` if
+    /// no label was attached at push time. History-panel code reads
+    /// this to populate row text.
+    pub fn label_at(&self, index: usize) -> Option<&str> {
+        self.labels.get(index).and_then(|l| l.as_deref())
+    }
+
+    /// Label of the most recently pushed action (= top of the undo
+    /// stack), if any. Convenience for toast messages.
+    pub fn last_label(&self) -> Option<&str> {
+        if self.current_index == 0 { return None; }
+        self.label_at(self.current_index - 1)
     }
     
     /// Check if we can undo
@@ -341,6 +508,19 @@ pub struct UndoEvent;
 #[derive(Message)]
 pub struct RedoEvent;
 
+/// Undo just the action at `index` (right-click → "Undo This Event").
+/// The inverse is applied + the slot removed from the stack; the rest
+/// of the history is preserved.
+#[derive(Message)]
+pub struct UndoSingleEvent { pub index: usize }
+
+/// Revert the undo cursor back to `target` (right-click → "Revert to
+/// Here"). Applies the inverse of every action between the current
+/// cursor and `target`, newest first, but leaves them in the stack so
+/// the user can redo forward again.
+#[derive(Message)]
+pub struct RevertToEvent { pub target: usize }
+
 /// Plugin for undo/redo functionality
 pub struct UndoPlugin;
 
@@ -350,7 +530,14 @@ impl Plugin for UndoPlugin {
             .init_resource::<UndoStack>()
             .add_message::<UndoEvent>()
             .add_message::<RedoEvent>()
-            .add_systems(Update, (handle_undo_events, handle_redo_events));
+            .add_message::<UndoSingleEvent>()
+            .add_message::<RevertToEvent>()
+            .add_systems(Update, (
+                handle_undo_events,
+                handle_redo_events,
+                handle_undo_single_events,
+                handle_revert_to_events,
+            ));
     }
 }
 
@@ -415,6 +602,54 @@ fn handle_redo_events(world: &mut World) {
     if !events.is_empty() && !had_actions {
         let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
         notifications.warning("Nothing to redo");
+    }
+}
+
+/// Handle `UndoSingleEvent`: apply the inverse of a single entry at
+/// `index` and remove it from the stack. Other history entries keep
+/// their meaning — this is "reverse this one change, leave the rest".
+pub fn handle_undo_single_events(world: &mut World) {
+    let mut events = world.resource_mut::<Messages<UndoSingleEvent>>();
+    let targets: Vec<usize> = events.drain().map(|e| e.index).collect();
+    drop(events);
+    if targets.is_empty() { return; }
+
+    for idx in targets {
+        let action = {
+            let mut stack = world.resource_mut::<UndoStack>();
+            stack.take_at(idx)
+        };
+        let Some(action) = action else { continue };
+        info!("Undo-single [{}]: {}", idx, action.description());
+        apply_undo_ecs(&action, world);
+        let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
+        notifications.info(format!("↶ Reversed: {}", action.description()));
+    }
+}
+
+/// Handle `RevertToEvent`: walk the cursor back to `target`, applying
+/// each action's inverse in reverse order. Entries remain in the stack
+/// so the user can redo forward again.
+pub fn handle_revert_to_events(world: &mut World) {
+    let mut events = world.resource_mut::<Messages<RevertToEvent>>();
+    let targets: Vec<usize> = events.drain().map(|e| e.target).collect();
+    drop(events);
+    if targets.is_empty() { return; }
+
+    for target in targets {
+        let actions = {
+            let mut stack = world.resource_mut::<UndoStack>();
+            stack.drain_until(target)
+        };
+        let count = actions.len();
+        for action in &actions {
+            info!("Revert: {}", action.description());
+            apply_undo_ecs(action, world);
+        }
+        let mut notifications = world.resource_mut::<crate::notifications::NotificationManager>();
+        if count > 0 {
+            notifications.info(format!("↶ Reverted {} change{}", count, if count == 1 { "" } else { "s" }));
+        }
     }
 }
 
@@ -587,6 +822,20 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
             }
             // The file watcher will detect the restored files and respawn entities
         }
+        Action::SpawnFolders { folders } => {
+            // Undo spawn: move the newly-created folders into the trash.
+            // File watcher detects the removal + despawns the entities.
+            for (original_path, trash_path) in folders {
+                if !original_path.exists() { continue; }
+                if let Some(parent) = trash_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::rename(original_path, trash_path) {
+                    Ok(_) => info!("↶ Moved spawned {:?} to trash", original_path.file_name().unwrap_or_default()),
+                    Err(e) => warn!("Failed to move {:?} to trash: {}", original_path, e),
+                }
+            }
+        }
         _ => {
             warn!("Undo not yet implemented for: {}", action.description());
         }
@@ -735,6 +984,20 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                     }
                     let _ = std::fs::rename(original_path, trash_path);
                     info!("↷ Re-trashed {:?}", original_path.file_name().unwrap_or_default());
+                }
+            }
+        }
+        Action::SpawnFolders { folders } => {
+            // Redo spawn: restore from trash back to original location.
+            // File watcher will detect and respawn entities.
+            for (original_path, trash_path) in folders {
+                if !trash_path.exists() { continue; }
+                if let Some(parent) = original_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::rename(trash_path, original_path) {
+                    Ok(_) => info!("↷ Respawned {:?}", original_path.file_name().unwrap_or_default()),
+                    Err(e) => warn!("Failed to respawn {:?}: {}", original_path, e),
                 }
             }
         }

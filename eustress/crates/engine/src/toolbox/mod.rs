@@ -7,7 +7,6 @@
 use bevy::prelude::*;
 use std::path::PathBuf;
 use std::fs;
-use chrono::Utc;
 
 use crate::space::instance_loader::{
     InstanceDefinition, AssetReference, TransformData, InstanceProperties, InstanceMetadata,
@@ -95,25 +94,15 @@ pub fn insert_mesh_instance_at(
     let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Generate unique FOLDER NAME within target_dir.
-    // Each instance is a folder with _instance.toml inside (folder-first architecture).
-    let folder_name = {
-        let test_path = target_dir.join(&base_name);
-        if !test_path.exists() {
-            base_name.clone()
-        } else {
-            let mut found = format!("{}_{}", base_name, now.len()); // fallback
-            for i in 1..1000usize {
-                let candidate = format!("{}{}", base_name, i);
-                if !target_dir.join(&candidate).exists() {
-                    found = candidate;
-                    break;
-                }
-            }
-            found
-        }
-    };
-    // Display name is always the base name (no number suffix)
+    // Generate unique FOLDER NAME within target_dir via the shared
+    // `unique_entity_name` helper — gives the first instance the bare
+    // base name (`Block/`) and subsequent collisions a short hex
+    // suffix (`Block-a3f2/`), matching the convention enforced
+    // everywhere else that creates entities. Display name is always
+    // the original base, so multiple sibling "Block" entities render
+    // identically in the Explorer while staying uniquely addressable
+    // on disk.
+    let folder_name = crate::space::instance_loader::unique_entity_name(target_dir, &base_name);
     let instance_name = base_name;
 
     let instance_dir = target_dir.join(&folder_name);
@@ -164,20 +153,6 @@ pub fn insert_mesh_instance(
 ) -> Result<PathBuf, String> {
     let workspace_path = space_root.join("Workspace");
     insert_mesh_instance_at(&workspace_path, mesh_id, position, instance_name)
-}
-
-/// Generate a unique folder name by appending numbers if needed
-fn generate_unique_folder_name(parent_dir: &std::path::Path, base_name: &str) -> String {
-    if !parent_dir.join(base_name).exists() {
-        return base_name.to_string();
-    }
-    for i in 1..1000 {
-        let candidate = format!("{}{}", base_name, i);
-        if !parent_dir.join(&candidate).exists() {
-            return candidate;
-        }
-    }
-    format!("{}_{}", base_name, Utc::now().timestamp())
 }
 
 /// Plugin for Toolbox system (mesh catalog + insert_mesh_instance)

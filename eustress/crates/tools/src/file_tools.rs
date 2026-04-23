@@ -46,6 +46,44 @@ impl ToolHandler for ReadFileTool {
             Some(p) => p,
             None => return err_result("read_file", format!("Path '{}' outside sandbox", path_str)),
         };
+
+        // If the caller passed a directory, don't silently error. Soul
+        // scripts and other entities use a folder-per-entity layout
+        // (e.g. `SoulService/cycle_life_test/cycle_life_test.rune`),
+        // and Claude tends to reach for the folder path first. Suggest
+        // `list_directory` + the most likely source-file candidates so
+        // the next tool call goes to the right place instead of looping
+        // with "file not found".
+        if resolved.is_dir() {
+            let hints: Vec<String> = std::fs::read_dir(&resolved)
+                .ok()
+                .map(|rd| rd.flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        let is_source = n.ends_with(".rune")
+                            || n.ends_with(".luau") || n.ends_with(".lua")
+                            || n.ends_with(".md")
+                            || n == "_instance.toml";
+                        if is_source { Some(n) } else { None }
+                    })
+                    .collect::<Vec<_>>())
+                .unwrap_or_default();
+            let suggestion = if hints.is_empty() {
+                format!("'{}' is a directory and contains no obvious source files. Use `list_directory(path=\"{}\")` to enumerate it.", path_str, path_str)
+            } else {
+                let concrete: Vec<String> = hints.iter()
+                    .map(|f| format!("{}/{}", path_str, f))
+                    .collect();
+                format!(
+                    "'{}' is a directory, not a file. For soul scripts and similar entities, the source lives INSIDE the folder. Try:\n  - {}\nOr call `list_directory(path=\"{}\")` for the full listing.",
+                    path_str,
+                    concrete.join("\n  - "),
+                    path_str,
+                )
+            };
+            return err_result("read_file", suggestion);
+        }
+
         match std::fs::read_to_string(&resolved) {
             Ok(content) => {
                 let truncated = if content.len() > 10_000 {

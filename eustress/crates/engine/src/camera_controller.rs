@@ -599,8 +599,7 @@ fn eustress_camera_controls(
         !f.has_focus
     } else if let (Some(vb), Ok(window)) = (viewport_bounds.as_deref(), windows.single()) {
         window.cursor_position().map(|pos| {
-            pos.x >= vb.x && pos.x <= vb.x + vb.width
-                && pos.y >= vb.y && pos.y <= vb.y + vb.height
+            vb.contains_logical(pos, window.scale_factor() as f32)
         }).unwrap_or(true)
     } else {
         true

@@ -38,9 +38,44 @@ mod select_tool;
 mod move_tool;
 mod rotate_tool;
 mod scale_tool;
+mod move_handles;
+mod scale_handles;
+mod rotate_handles;
+mod adornment_renderer;
+mod modal_tool;
+mod numeric_input;
+mod align_distribute;
+mod array_tools;
+mod measure_tool;
+mod duplicate_place_tool;
+mod selection_sets;
+mod pivot_mode;
+mod geom_snap;
+mod smart_guides;
+mod mirror_link;
+mod part_to_terrain;
+mod lasso_paint_select;
+mod saved_viewpoints;
+mod attachment_editor_tool;
+mod constraint_editor_tool;
+mod transform_constraints;
+mod toast_undo;
+mod commit_flash;
+mod embedvec_dispatch;
+mod rune_tool_sandbox;
+mod mesh_import;
+mod cursor_badge;
+mod timeline_panel;
+mod timeline_slint_sync;
+mod timeline_animation;
+mod attribute_tag_migration;
+mod accessibility;
+mod tools_smart;
 mod selection_sync;
 mod editor_settings;
 mod undo;
+mod history_stream;
+mod soul_script_migration;
 mod notifications;
 mod keybindings;
 mod part_selection;
@@ -209,6 +244,12 @@ fn main() {
         .add_plugins(NotificationPlugin)
         // Undo/Redo (must be before SlintUiPlugin which uses UndoStack)
         .add_plugins(UndoPlugin)
+        // Tees every UndoStack push onto the `history.<kind>` topic so
+        // MCP / LSP / CLI subscribers see the edit log in real-time.
+        .add_plugins(history_stream::HistoryStreamPlugin)
+        // One-shot migration: promotes legacy flat `SoulService/*.rune`
+        // files to the folder-per-script convention on space load.
+        .add_plugins(soul_script_migration::SoulScriptMigrationPlugin)
         // (Streaming registered below — cfg-block required, not inline chain)
         // Play mode (must be before SlintUiPlugin which uses PlayModeState)
         .add_plugins(PlayModePlugin)
@@ -279,6 +320,15 @@ fn main() {
         // a 3D quad. Replaces the deprecated fontdue/atlas path; the legacy
         // BillboardRendererPlugin in `common` is now a no-op shim.
         .add_plugins(eustress_engine::billboard_gui::BillboardGuiPlugin)
+        // Adornments — Roblox-style mesh-based tool handles. Registers the
+        // HandleAdornment / BoxHandle / ConeHandle / CylinderHandle /
+        // ArcHandles / Handles component types so tools can spawn them and
+        // the renderer can attach meshes.
+        .add_plugins(eustress_common::adornments::AdornmentPlugin)
+        // Adornment renderer — watches Added<*HandleAdornment> markers and
+        // attaches the right Mesh3d + MeshMaterial3d + NotShadowCaster. Keeps
+        // the tool code free of mesh-asset details.
+        .add_plugins(adornment_renderer::AdornmentRendererPlugin)
         // Selection box
         .add_plugins(SelectionBoxPlugin)
         // Tools
@@ -286,6 +336,119 @@ fn main() {
         .add_plugins(MoveToolPlugin)
         .add_plugins(RotateToolPlugin)
         .add_plugins(ScaleToolPlugin)
+        // Mesh-based Move handles (replaces gizmo-based draw_move_gizmos).
+        .add_plugins(move_handles::MoveHandlesPlugin)
+        // Mesh-based Scale handles (replaces gizmo-based draw_scale_gizmos).
+        .add_plugins(scale_handles::ScaleHandlesPlugin)
+        // Mesh-based Rotate handles — torus rings per axis.
+        .add_plugins(rotate_handles::RotateHandlesPlugin)
+        // Modal tool framework — ModalTool trait, ActiveModalTool
+        // resource, ToolOptionsBarState reflection, activation/cancel
+        // event handlers. Required by every Smart Build Tool.
+        .add_plugins(modal_tool::ModalToolPlugin)
+        // Floating Numeric Input — live numeric entry during gizmo drag.
+        // Blender / Maya parity: type `2.5 <Enter>` during a Move axis
+        // drag to commit exactly 2.5 units. Independent of ModalTool —
+        // operates on Move/Scale/Rotate drag state directly.
+        .add_plugins(numeric_input::NumericInputPlugin)
+        // Align & Distribute — last Phase-0 tool feature. Event-driven
+        // (`AlignEntitiesEvent` / `DistributeEntitiesEvent`); fired
+        // from ribbon buttons + keybindings. Uses the same signed-write
+        // TOML persistence path Move does.
+        .add_plugins(align_distribute::AlignDistributePlugin)
+        // Array Tools (Phase 1) — Linear / Radial / Grid array
+        // ModalTool implementations. Registered with ModalToolRegistry
+        // at startup; activated via CAD-tab Pattern group or keybinding.
+        .add_plugins(array_tools::ArrayToolsPlugin)
+        // Measure distance tool (Phase 1). Pure read-only ModalTool —
+        // click two viewport points, get a distance readout.
+        .add_plugins(measure_tool::MeasureToolPlugin)
+        // Duplicate & Place (Phase 1) — clone selection, follow-cursor
+        // placement on click. Repeatable until user Esc.
+        .add_plugins(duplicate_place_tool::DuplicatePlaceToolPlugin)
+        // Selection Sets (Phase 1) — named, persistent selections per
+        // universe. Save/Load/Delete events, TOML-backed storage at
+        // `.eustress/selection_sets.toml`.
+        .add_plugins(selection_sets::SelectionSetsPlugin)
+        // Pivot Modes (Phase 1) — Median/Active/Individual/Cursor.
+        // v1 ships the resource + events + helper; per-tool drag-math
+        // integration to honor non-Median modes lands in follow-ups.
+        .add_plugins(pivot_mode::PivotModePlugin)
+        // Vertex / Edge / Face Snap (Phase 1) — hold V/E/F during
+        // drag to force the snap category. v1 ships resolver +
+        // modifier-key detection; Move-tool integration to actually
+        // apply the snap during drag is a follow-up.
+        .add_plugins(geom_snap::GeomSnapPlugin)
+        // Smart Alignment Guides (Phase 1) — per-frame AABB plane
+        // sensor. v1 scans all unselected parts; R-tree acceleration
+        // lands in v2 when universe size warrants.
+        .add_plugins(smart_guides::SmartGuidesPlugin)
+        // Model Reflect Linked (Phase 1) — live-mirror link propagation.
+        // When ModelReflect's "Linked" option is enabled, it inserts a
+        // MirrorLink on each clone; the runtime keeps the pair in sync.
+        .add_plugins(mirror_link::MirrorLinkPlugin)
+        // Part to Terrain (Phase 1 scaffold) — event + handler skeleton.
+        // Actual voxel rasterization lands in a follow-up using the
+        // common/terrain chunk APIs.
+        .add_plugins(part_to_terrain::PartToTerrainPlugin)
+        // Lasso + Paint Select (Phase 2) — screen-space selection
+        // gestures. Events + handlers ship; cursor-sample collection
+        // UI wiring lives in select_tool / MCP.
+        .add_plugins(lasso_paint_select::LassoPaintSelectPlugin)
+        // Saved Viewpoints (Phase 2) — named camera poses persisted
+        // to `.eustress/viewpoints.toml` per universe.
+        .add_plugins(saved_viewpoints::SavedViewpointsPlugin)
+        // Attachment Editor (Phase 2) — click-to-place `Attachment`
+        // children on part surfaces, oriented to hit normal.
+        .add_plugins(attachment_editor_tool::AttachmentEditorPlugin)
+        // Constraint Editor (Phase 2) — visual joint authoring.
+        .add_plugins(constraint_editor_tool::ConstraintEditorPlugin)
+        // Transform Constraints (Phase 2) — non-physical authoring
+        // constraints: AlignToAxis, DistributeAlong, LockAxis.
+        .add_plugins(transform_constraints::TransformConstraintsPlugin)
+        // Toast Undo (UX polish) — surfaces a top-center toast with
+        // inline Undo on labeled commits.
+        .add_plugins(toast_undo::ToastUndoPlugin)
+        // Commit-success flash (UX polish) — 150ms accent-green-bright
+        // border pulse anchored to ToolOptionsBar on every commit.
+        .add_plugins(commit_flash::CommitFlashPlugin)
+        // Embedvec dispatcher (UX + AI) — routes MCP tool calls into
+        // EmbedvecResource lookups + emits typed results back to UI.
+        .add_plugins(embedvec_dispatch::EmbedvecDispatchPlugin)
+        // Rune tool sandbox (Phase 2) — script-authored ModalTools.
+        // Registration is runtime via `RegisterRuneToolEvent`; VM
+        // callback routing is the follow-up.
+        .add_plugins(rune_tool_sandbox::RuneToolSandboxPlugin)
+        // Mesh Import Watcher — auto-converts STL / STEP / OBJ /
+        // PLY / FBX files dropped into a Space to canonical GLB,
+        // hides the source from the Explorer view.
+        .add_plugins(mesh_import::MeshImportWatcherPlugin)
+        // Cursor Badge — in-viewport cursor-follower. Workaround for
+        // the Slint OS-cursor blocker.
+        .add_plugins(cursor_badge::CursorBadgePlugin)
+        // Timeline panel (Phase 2) — data-agnostic marker timeline.
+        // Subscribes to the Stream topic `"timeline/*"`; shares the
+        // bottom-panel slot with Output via `BottomPanelMode`.
+        .add_plugins(timeline_panel::TimelinePanelPlugin)
+        // Timeline → Slint sync. Separate plugin so the timeline
+        // feature iterates without touching the 8k-line slint_ui.rs.
+        .add_plugins(timeline_slint_sync::TimelineSlintSyncPlugin)
+        // Timeline animation (Phase 2+) — keyframed + procedural
+        // tracks playback via AnimationClock.
+        .add_plugins(timeline_animation::TimelineAnimationPlugin)
+        // Accessibility manifest — design-time ARIA-style role +
+        // label registry. Populates immediately; applies to Slint's
+        // accessibility tree when the upstream API lands.
+        .add_plugins(accessibility::AccessibilityPlugin)
+        // Attribute + Tag migration — ensures every non-service
+        // instance's TOML has `[attributes]` + `[tags]` sections.
+        // Fire `RunAttributeTagMigrationEvent` to invoke (Settings
+        // UI + scripted tests wire the event).
+        .add_plugins(attribute_tag_migration::AttributeTagMigrationPlugin)
+        // Smart Build Tools (Gap Fill, Resize Align, Edge Align,
+        // Part Swap, Model Reflect). Each registers its factory with
+        // ModalToolRegistry.
+        .add_plugins(tools_smart::SmartToolsPlugin)
         // Selection sync
         .add_plugins(SelectionSyncPlugin {
             selection_manager: selection_manager.clone(),
