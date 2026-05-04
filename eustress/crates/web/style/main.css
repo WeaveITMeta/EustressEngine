@@ -673,8 +673,10 @@ p {
 
 .feature-icon {
     font-size: 40px;
-    margin-bottom: var(--space-md);
-    display: block;
+    margin: 0 auto var(--space-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .feature-card h3 {
@@ -10552,7 +10554,10 @@ p {
 
 .feature-item {
     display: flex;
-    gap: var(--space-md);
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: var(--space-sm);
     padding: var(--space-lg);
     background: rgba(25, 28, 35, 0.6);
     border: 1px solid rgba(128, 144, 160, 0.1);
@@ -16866,6 +16871,9 @@ a.experience-card {
     background: rgba(25, 28, 35, 0.6);
     border-radius: var(--radius-lg);
     border: 1px solid rgba(128, 144, 160, 0.1);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     text-align: center;
     transition: all 0.2s ease;
 }
@@ -16882,6 +16890,9 @@ a.experience-card {
     padding: var(--space-sm);
     background: rgba(59, 130, 246, 0.15);
     border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .feature-icon img {
@@ -16901,6 +16912,20 @@ a.experience-card {
     font-size: var(--text-sm);
     color: var(--color-text-muted);
     margin: 0;
+}
+
+.feature-link {
+    margin-top: auto;
+    padding-top: var(--space-sm);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: rgba(59, 130, 246, 0.9);
+    text-decoration: none;
+}
+
+.feature-link:hover {
+    color: rgba(59, 130, 246, 1);
+    text-decoration: underline;
 }
 
 /* Code Block with Header */

@@ -131,6 +131,13 @@ pub enum FileEvent {
     OpenRecent(PathBuf),
     /// Publish Universe or Space to Eustress platform
     Publish(PublishRequest),
+    /// User picked an image / video / model file to import. Handler
+    /// copies the file into the appropriate `Universe/assets/<kind>/`
+    /// folder and writes a folder + `_instance.toml` under the active
+    /// Space's `StarterGui` (or `Workspace` for 3D models) so the file
+    /// watcher spawns the entity. Source path is the user-picked
+    /// absolute path on the host filesystem.
+    ImportAsset(PathBuf),
 }
 
 /// Show file picker for opening scenes

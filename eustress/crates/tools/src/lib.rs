@@ -105,6 +105,8 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(git_tools::GitCommitTool);
     registry.register(git_tools::GitLogTool);
     registry.register(git_tools::GitDiffTool);
+    registry.register(git_tools::GitBranchTool);
+    registry.register(git_tools::FeedbackDiffTool);
 
     // Simulation bridge (shared with Rune/Luau scripting API).
     registry.register(simulation_tools::GetSimValueTool);
@@ -117,6 +119,17 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(simulation_tools::DataStoreSetTool);
     registry.register(simulation_tools::AddTagTool);
     registry.register(simulation_tools::RemoveTagTool);
+
+    // Simulation control — proactive Workshop can start/stop/inspect sims.
+    registry.register(simulation_tools::RunSimulationTool);
+    registry.register(simulation_tools::StopSimulationTool);
+    registry.register(simulation_tools::GetSimulationStateTool);
+
+    // Telemetry — tail live watchpoint streams for feedback loops.
+    registry.register(simulation_tools::TailTelemetryTool);
+
+    // Audit log — query the Claude API call audit trail.
+    registry.register(simulation_tools::QueryAuditLogTool);
 
     // Physics + spatial.
     registry.register(physics_tools::QueryMaterialTool);

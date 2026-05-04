@@ -27,6 +27,10 @@ use crate::move_tool::Axis3d;
 pub struct ScaleToolState {
     pub active: bool,
     pub dragged_axis: Option<ScaleAxis>,
+    /// Axis the cursor is currently hovering over (when not dragging).
+    /// Drives the gizmo's hover-color swap so the user gets immediate
+    /// feedback that a handle is hot-spot.
+    pub hovered_axis: Option<ScaleAxis>,
     pub initial_scale: Vec3,
     pub initial_position: Vec3,
     pub drag_start_pos: Vec2,
@@ -118,7 +122,50 @@ impl Plugin for ScaleToolPlugin {
                 // Absolute-resize handler for `ResizePartEvent` (emitted
                 // by the Properties-panel paste path + future tools).
                 handle_resize_part_events,
+                // Rebuild the Avian collider whenever `BasePart.size`
+                // changes. Runs after resize events so the collider
+                // update picks up the final size in the same frame.
+                rebuild_collider_on_size_change.after(handle_resize_part_events),
             ));
+    }
+}
+
+/// Rebuild the Avian `Collider` in-place whenever an entity's
+/// `BasePart.size` changes — scale-tool drag, Properties-panel type-in,
+/// paste-props, MCP resize, undo/redo, any write-back from disk. Without
+/// this, the visual mesh resized but the collider stayed at the spawn
+/// dimensions, so raycasts, surface snapping, selection hit-test, and
+/// physics all stepped into "shadow-of-the-old-size" territory.
+///
+/// Only runs for entities that already have a `Collider` — we never
+/// add physics to a part that was spawned without `can_collide`.
+fn rebuild_collider_on_size_change(
+    mut commands: Commands,
+    changed: Query<
+        (Entity, &crate::classes::BasePart, Option<&crate::classes::Part>),
+        (Changed<crate::classes::BasePart>, With<avian3d::prelude::Collider>),
+    >,
+) {
+    use avian3d::prelude::Collider;
+    use crate::classes::PartType;
+
+    for (entity, base_part, part_opt) in changed.iter() {
+        // Sanitise dimensions the same way the scale-tool does — a
+        // degenerate 0 / negative / non-finite size would panic Avian's
+        // collider builder on the next physics step.
+        let half = Vec3::new(
+            if base_part.size.x.is_finite() { (base_part.size.x * 0.5).abs().max(0.05) } else { 0.05 },
+            if base_part.size.y.is_finite() { (base_part.size.y * 0.5).abs().max(0.05) } else { 0.05 },
+            if base_part.size.z.is_finite() { (base_part.size.z * 0.5).abs().max(0.05) } else { 0.05 },
+        );
+        let collider = match part_opt.map(|p| p.shape) {
+            Some(PartType::Ball) => Collider::sphere(half.x),
+            Some(PartType::Cylinder) | Some(PartType::Cone) => {
+                Collider::cylinder(half.x, half.y)
+            }
+            _ => Collider::cuboid(half.x, half.y, half.z),
+        };
+        commands.entity(entity).insert(collider);
     }
 }
 
@@ -142,6 +189,8 @@ fn handle_resize_part_events(
         else { continue };
         let has_mesh_source = mesh_source.is_some();
         let pos = transform.translation;
+        // One-shot resize (Properties paste-write): bake the mesh now,
+        // no in-progress drag to defer to. mesh_baked_size unused.
         apply_size_to_entity(
             &mut *transform,
             base_part,
@@ -151,6 +200,8 @@ fn handle_resize_part_events(
             event.new_size,
             pos,
             has_mesh_source,
+            true,
+            Vec3::ONE,
         );
     }
 }
@@ -276,7 +327,15 @@ fn handle_scale_interaction(
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     studio_state: Option<Res<crate::ui::StudioState>>,
 ) {
-    if !state.active { return; }
+    if !state.active {
+        // Clear stale hover state so the gizmo doesn't briefly flash a
+        // hover color on the first frame after the scale tool is
+        // re-activated.
+        if state.hovered_axis.is_some() {
+            state.hovered_axis = None;
+        }
+        return;
+    }
 
     // Transform mode governs whether scale handles are axis-aligned to
     // world (World mode) or rotated to match the active entity (Local).
@@ -326,6 +385,7 @@ fn handle_scale_interaction(
 
     let camera_forward = camera_transform.forward().as_vec3();
     let camera_right   = camera_transform.right().as_vec3();
+    let camera_up      = camera_transform.up().as_vec3();
 
     let ctrl_pressed = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
 
@@ -334,91 +394,40 @@ fn handle_scale_interaction(
         _ => std::f32::consts::FRAC_PI_4,
     };
 
+    // Snapshot the selected entities so we can re-use the same data
+    // for hover detection and click-to-drag without re-iterating the
+    // query (and to side-step Bevy's `iter().map().clone()` constraints).
+    let selected_snapshot: Vec<(Vec3, Quat, Vec3)> = query
+        .iter()
+        .map(|(_, gt, _, bp, _, _, _)| {
+            let t = gt.compute_transform();
+            let size = bp.as_ref().map(|b| b.size).unwrap_or(t.scale);
+            (t.translation, t.rotation, size)
+        })
+        .collect();
+
+    // Group-aware hit test for the scale handles. Used both for hover
+    // highlighting (every frame) and for click-to-drag.
+    let pick = pick_scale_handle(
+        ray.origin,
+        *ray.direction,
+        camera_transform.translation(),
+        fov,
+        transform_mode,
+        &selected_snapshot,
+    );
+
+    // Update hover state every frame when not dragging — drives the
+    // yellow color swap on the scale gizmo handles.
+    if state.dragged_axis.is_none() {
+        let new_hover = pick.map(|(axis, _, _, _)| axis);
+        if state.hovered_axis != new_hover {
+            state.hovered_axis = new_hover;
+        }
+    }
+
     if mouse.just_pressed(MouseButton::Left) {
-        // Group-aware hit test: positions match `scale_handles::sync_scale_handle_root`
-        // exactly. We read the shared constants from scale_handles so
-        // visual and hit zones can never drift apart.
-        use crate::scale_handles::{
-            HANDLE_EXT_FRAC, CUBE_SIZE_FRAC, CENTER_CUBE_FRAC, MIN_SCREEN_FRACTION,
-        };
-
-        // Compute group frame (center + extent + active rotation).
-        let mut bounds_min = Vec3::splat(f32::MAX);
-        let mut bounds_max = Vec3::splat(f32::MIN);
-        let mut active_rotation = Quat::IDENTITY;
-        let mut entity_count = 0;
-        for (_entity, global_transform, _trans, basepart_opt, _, _, _) in query.iter() {
-            let t = global_transform.compute_transform();
-            let size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(t.scale);
-            let (mn, mx) = crate::math_utils::calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
-            bounds_min = bounds_min.min(mn);
-            bounds_max = bounds_max.max(mx);
-            active_rotation = t.rotation;
-            entity_count += 1;
-        }
-        if entity_count == 0 { return; }
-
-        let group_center = (bounds_min + bounds_max) * 0.5;
-        let group_extent = (bounds_max - bounds_min) * 0.5;
-        let size_extent = group_extent.max_element();
-
-        // Match scale_handles' min-size floor so tiny parts still have
-        // clickable handles.
-        let cam_dist = (group_center - camera_transform.translation()).length().max(0.1);
-        let min_screen_size = cam_dist * (fov * 0.5).tan() * MIN_SCREEN_FRACTION;
-        let effective_extent = size_extent.max(min_screen_size);
-
-        // Layout constants from scale_handles.rs — shared so visual and
-        // hit zones stay in lockstep.
-        let handle_ext = effective_extent * HANDLE_EXT_FRAC;
-        let cube_size = effective_extent * CUBE_SIZE_FRAC;
-        let center_size = effective_extent * CENTER_CUBE_FRAC;
-        // Hit radius: 75% of the cube's half-extent, so user can be
-        // slightly off the cube and still register.
-        let hit_radius = (cube_size * 0.75).max(0.05);
-        let center_hit_radius = (center_size * 0.75).max(0.05);
-
-        // Gizmo rotation captured for this click — matches scale_handles'
-        // rotation choice. Locked into drag_rotation for the whole drag.
-        let rotation = crate::move_tool::gizmo_rotation_for(
-            transform_mode,
-            query.iter().map(|(_, gt, _, _, _, _, _)| gt.compute_transform().rotation),
-        );
-
-        // Candidate handle positions in world-space, matching
-        // scale_handles.rs layout: face cubes at `extent + handle_ext`
-        // along each ±-axis direction; center cube at group origin.
-        let dirs: &[(ScaleAxis, Vec3)] = &[
-            (ScaleAxis::XPos, Vec3::X),
-            (ScaleAxis::XNeg, Vec3::NEG_X),
-            (ScaleAxis::YPos, Vec3::Y),
-            (ScaleAxis::YNeg, Vec3::NEG_Y),
-            (ScaleAxis::ZPos, Vec3::Z),
-            (ScaleAxis::ZNeg, Vec3::NEG_Z),
-        ];
-
-        let mut best: Option<(ScaleAxis, f32)> = None;
-        // Face cubes
-        for &(ax, dir) in dirs {
-            let world_pos = group_center + rotation * dir * (effective_extent + handle_ext);
-            let d = ray_to_point_distance(ray.origin, *ray.direction, world_pos);
-            if d < hit_radius {
-                if best.map_or(true, |(_, dist)| d < dist) {
-                    best = Some((ax, d));
-                }
-            }
-        }
-        // Center cube (uniform)
-        {
-            let d = ray_to_point_distance(ray.origin, *ray.direction, group_center);
-            if d < center_hit_radius {
-                if best.map_or(true, |(_, dist)| d < dist) {
-                    best = Some((ScaleAxis::Uniform, d));
-                }
-            }
-        }
-
-        if let Some((axis, _)) = best {
+        if let Some((axis, group_center, _group_extent, rotation)) = pick {
             state.dragged_axis = Some(axis);
             // Store drag rotation for consistency with dragged delta math.
             // Unused inside scale_tool today (drag is camera-relative), but
@@ -448,26 +457,60 @@ fn handle_scale_interaction(
             let progressive_factor = 1.0 + drag_distance * 0.002;
             let sensitivity = base_sensitivity * progressive_factor;
 
+            // Project the screen-space cursor delta onto the GIZMO's
+            // world-space axis (not the world's X/Y/Z axis). The gizmo
+            // frame is `drag_rotation` captured at click — IDENTITY in
+            // World mode, active entity rotation in Local mode — so a
+            // rotated part's Local-mode gizmo no longer produces an
+            // inverted drag when its +X points toward world -X, and a
+            // World-mode gizmo always scales along the world axes the
+            // user is visually grabbing.
+            let gizmo_x = state.drag_rotation * Vec3::X;
+            let gizmo_y = state.drag_rotation * Vec3::Y;
+            let gizmo_z = state.drag_rotation * Vec3::Z;
+            // Project a world-space gizmo axis onto the screen plane
+            // and dot it with the cursor delta. Returns a signed scalar
+            // proportional to "how much the user dragged in the
+            // direction the handle visibly moved on screen". Cursor
+            // moving with the handle's screen-space direction grows
+            // the axis; opposite direction shrinks.
+            //
+            // Earlier this function only consulted `camera_right` and
+            // `camera_forward`, never `camera_up`. For the Y axis at a
+            // typical viewing angle (camera looking slightly down)
+            // both `right.dot(Y)` and `fwd.dot(Y)` are near zero, the
+            // heuristic fell into the `fwd.signum()` branch and
+            // produced the WRONG sign — dragging the YPos handle up
+            // shrank the part toward the YPos face (the "scales the
+            // opposite end" symptom). Using `camera_up` (negated for
+            // screen y, which is down-positive in cursor coords)
+            // captures the vertical screen direction correctly for
+            // the world-Y axis regardless of camera tilt.
+            let project = |axis_world: Vec3| -> f32 {
+                // Screen-space direction of the gizmo axis: the X
+                // component is `camera_right · axis`, the Y component
+                // is `-camera_up · axis` (cursor Y is inverted from
+                // world up).
+                let sx = camera_right.dot(axis_world);
+                let sy = -camera_up.dot(axis_world);
+                let mag_sq = sx * sx + sy * sy;
+                if mag_sq < 0.0025 {
+                    // Axis is near-perpendicular to the screen plane
+                    // (e.g. world-Y when looking straight down). Fall
+                    // back to a forward-signed combined-delta so a
+                    // top-down user can still scale by dragging
+                    // toward / away from the camera.
+                    let fwd_sign = -camera_forward.dot(axis_world);
+                    return (delta_screen.x - delta_screen.y) * sensitivity * fwd_sign.signum();
+                }
+                let mag = mag_sq.sqrt();
+                (delta_screen.x * sx + delta_screen.y * sy) / mag * sensitivity
+            };
+
             let drag_amount = match axis {
-                ScaleAxis::YPos | ScaleAxis::YNeg => -delta_screen.y * sensitivity,
-                ScaleAxis::XPos | ScaleAxis::XNeg => {
-                    let x_dot_right = camera_right.dot(Vec3::X);
-                    let x_dot_fwd   = camera_forward.dot(Vec3::X);
-                    if x_dot_right.abs() > x_dot_fwd.abs() {
-                        delta_screen.x * sensitivity * x_dot_right.signum()
-                    } else {
-                        -delta_screen.y * sensitivity * x_dot_fwd.signum()
-                    }
-                }
-                ScaleAxis::ZPos | ScaleAxis::ZNeg => {
-                    let z_dot_right = camera_right.dot(Vec3::Z);
-                    let z_dot_fwd   = camera_forward.dot(Vec3::Z);
-                    if z_dot_right.abs() > z_dot_fwd.abs() {
-                        delta_screen.x * sensitivity * z_dot_right.signum()
-                    } else {
-                        -delta_screen.y * sensitivity * z_dot_fwd.signum()
-                    }
-                }
+                ScaleAxis::YPos | ScaleAxis::YNeg => project(gizmo_y),
+                ScaleAxis::XPos | ScaleAxis::XNeg => project(gizmo_x),
+                ScaleAxis::ZPos | ScaleAxis::ZNeg => project(gizmo_z),
                 ScaleAxis::Uniform => (delta_screen.x - delta_screen.y) * sensitivity * 0.5,
             };
 
@@ -500,16 +543,33 @@ fn handle_scale_interaction(
                     let has_mesh_source = mesh_source.is_some();
 
                     if ctrl_pressed {
-                        // Symmetric: position stays centered
+                        // Symmetric: position stays centered. Mid-drag —
+                        // skip mesh regen, use Transform.scale instead.
+                        // initial_size is the legacy mesh's baked size
+                        // (the part hasn't been resized yet this drag).
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
                             &mut meshes, final_size, *initial_pos, has_mesh_source,
+                            false, *initial_size,
                         );
                     } else {
-                        // One-sided: opposite face stays fixed
-                        let rot = transform.rotation;
+                        // One-sided: opposite face (in GIZMO frame) stays
+                        // fixed. Using `state.drag_rotation` means:
+                        //   * World mode (drag_rotation = IDENTITY) → the
+                        //     world-axis face opposite the grabbed handle
+                        //     stays anchored, so grabbing world +X moves
+                        //     the world +X face and world -X stays put —
+                        //     regardless of the part's own rotation. This
+                        //     closes the "World mode resizes the opposite
+                        //     end" bug: the old code used
+                        //     `transform.rotation` which pointed the
+                        //     offset along the ENTITY's X axis, not the
+                        //     gizmo's world X.
+                        //   * Local mode (drag_rotation = entity rotation)
+                        //     → identical result to the previous code,
+                        //     since both produce the same world vector.
                         let size_diff = final_size - *initial_size;
-                        let local_offset = match axis {
+                        let gizmo_offset = match axis {
                             ScaleAxis::XPos => Vec3::X   * size_diff.x * 0.5,
                             ScaleAxis::XNeg => Vec3::NEG_X * size_diff.x * 0.5,
                             ScaleAxis::YPos => Vec3::Y   * size_diff.y * 0.5,
@@ -518,11 +578,13 @@ fn handle_scale_interaction(
                             ScaleAxis::ZNeg => Vec3::NEG_Z * size_diff.z * 0.5,
                             ScaleAxis::Uniform => Vec3::ZERO,
                         };
-                        let world_offset = rot * local_offset;
+                        let world_offset = state.drag_rotation * gizmo_offset;
                         let new_pos = *initial_pos + world_offset;
+                        // Mid-drag: defer mesh regen.
                         apply_size_to_entity(
                             &mut transform, basepart_opt, part_opt, mesh_opt,
                             &mut meshes, final_size, new_pos, has_mesh_source,
+                            false, *initial_size,
                         );
                     }
                 }
@@ -532,6 +594,28 @@ fn handle_scale_interaction(
         if state.dragged_axis.is_some() && !state.initial_scales.is_empty() {
             let mut old_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
             let mut new_states: Vec<(u64, [f32; 3], [f32; 3])> = Vec::new();
+
+            // First pass: bake the legacy primitive mesh at the final
+            // size + restore Transform.scale = ONE. During the drag we
+            // deferred regen and used Transform.scale = size/baked
+            // for performance — now is the moment to settle that into
+            // a real mesh so save_space + selection adornments see the
+            // correct geometry. File-system parts (has_mesh_source =
+            // true) keep Transform.scale = size and skip this branch.
+            for (entity, _, mut transform, basepart_opt, part_opt, mesh_opt, mesh_source) in query.iter_mut() {
+                let Some(initial_pos)  = state.initial_positions.get(&entity).copied() else { continue };
+                let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
+                let has_mesh_source = mesh_source.is_some();
+                let final_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
+                let final_pos  = transform.translation;
+                let size_changed = (initial_size - final_size).length() > 0.001;
+                if !size_changed { continue; }
+                apply_size_to_entity(
+                    &mut *transform, basepart_opt, part_opt, mesh_opt,
+                    &mut meshes, final_size, final_pos, has_mesh_source,
+                    true, initial_size,
+                );
+            }
 
             for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
                 if let (Some(initial_pos), Some(initial_size)) = (
@@ -630,12 +714,13 @@ fn finalize_numeric_input_on_scale(
                 }
             };
 
-            // One-sided scale — opposite face stays fixed. Matches the
-            // cursor drag when Ctrl isn't held (Ctrl = symmetric, which
-            // keeps the origin centered; skipping that v1).
-            let rot = transform.rotation;
+            // One-sided scale — opposite face (in GIZMO frame) stays
+            // fixed. Uses `state.drag_rotation` so World-mode numeric
+            // commits anchor the world-opposite face and Local-mode
+            // commits anchor the entity-opposite face — same invariant
+            // as the cursor drag, fixed in the same commit.
             let size_diff = new_size - initial_size;
-            let local_offset = match axis {
+            let gizmo_offset = match axis {
                 ScaleAxis::XPos    => Vec3::X     * size_diff.x * 0.5,
                 ScaleAxis::XNeg    => Vec3::NEG_X * size_diff.x * 0.5,
                 ScaleAxis::YPos    => Vec3::Y     * size_diff.y * 0.5,
@@ -644,7 +729,7 @@ fn finalize_numeric_input_on_scale(
                 ScaleAxis::ZNeg    => Vec3::NEG_Z * size_diff.z * 0.5,
                 ScaleAxis::Uniform => Vec3::ZERO,
             };
-            let world_offset = rot * local_offset;
+            let world_offset = state.drag_rotation * gizmo_offset;
             let new_pos = initial_pos + world_offset;
 
             // Record undo BEFORE we mutate.
@@ -658,6 +743,10 @@ fn finalize_numeric_input_on_scale(
             // Apply — file-system-first parts are unit-scale GLBs so
             // size lands on Transform.scale. BasePart.size + cframe
             // stay the authoritative source the TOML writer reads.
+            // Sanitize: any NaN/inf reaching Transform.translation
+            // panics Avian's Position validator on the next physics step.
+            let new_pos = sane_translation(new_pos);
+            let new_size = sane_size(new_size);
             transform.translation = new_pos;
             transform.scale = new_size;
             if let Some(mut bp) = basepart_opt {
@@ -683,38 +772,44 @@ fn finalize_numeric_input_on_scale(
 
 /// Check if a ray hits any scale handle for the GROUP bounds.
 /// Layout matches `scale_handles::sync_scale_handle_root` — face cubes
-/// at `group_extent + handle_ext` along each axis (rotated by `rotation`),
+/// at `face_extent + handle_ext` along each axis (rotated by `rotation`),
 /// plus the uniform-scale cube at the group center.
 ///
-/// `group_extent` is the half-size of the group's AABB
-/// (`group_bounds_max - group_center`).
-/// `effective_extent` should be `group_extent.max_element()` clamped to
-/// `MIN_SCREEN_FRACTION * camera_distance` so tiny parts still have
-/// clickable handles — matches the same clamp in `scale_handles.rs`.
-///
-/// `rotation`: `Quat::IDENTITY` for World mode, active entity's rotation
-/// for Local mode. Must match the rotation the visual layout uses.
+/// - `group_extent` — per-axis half-size of the group AABB. Used for
+///   per-axis face anchoring (a tall thin part puts Y handles further
+///   out than X).
+/// - `screen_scale` — camera-distance gizmo scale from
+///   [`compute_scale_screen_scale`]. Cube and shaft sizes derive from
+///   this so handles stay constant on screen.
+/// - `rotation` — `Quat::IDENTITY` for World mode, active entity's
+///   rotation for Local mode. Must match the visual layout's rotation.
 pub fn is_clicking_scale_handle_group(
     ray: &Ray3d,
     group_center: Vec3,
-    effective_extent: f32,
+    group_extent: Vec3,
+    screen_scale: f32,
     rotation: Quat,
 ) -> bool {
-    use crate::scale_handles::{HANDLE_EXT_FRAC, CUBE_SIZE_FRAC, CENTER_CUBE_FRAC};
+    use crate::scale_handles::{SCREEN_HANDLE_EXT, SCREEN_CUBE_SIZE, SCREEN_CENTER_SIZE};
 
-    let handle_ext = effective_extent * HANDLE_EXT_FRAC;
-    let cube_size = effective_extent * CUBE_SIZE_FRAC;
-    let center_size = effective_extent * CENTER_CUBE_FRAC;
+    let handle_ext = screen_scale * SCREEN_HANDLE_EXT;
+    let cube_size = screen_scale * SCREEN_CUBE_SIZE;
+    let center_size = screen_scale * SCREEN_CENTER_SIZE;
     let hit_radius = (cube_size * 0.75).max(0.05);
     let center_hit_radius = (center_size * 0.75).max(0.05);
 
-    let dirs: [Vec3; 6] = [
-        Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z,
+    let dirs: [(Vec3, f32); 6] = [
+        (Vec3::X,     group_extent.x),
+        (Vec3::NEG_X, group_extent.x),
+        (Vec3::Y,     group_extent.y),
+        (Vec3::NEG_Y, group_extent.y),
+        (Vec3::Z,     group_extent.z),
+        (Vec3::NEG_Z, group_extent.z),
     ];
 
-    // Face cubes
-    for dir in dirs {
-        let world_pos = group_center + rotation * dir * (effective_extent + handle_ext);
+    // Face cubes — anchor at per-axis face + constant screen offset.
+    for (dir, face) in dirs {
+        let world_pos = group_center + rotation * dir * (face + handle_ext);
         if ray_to_point_distance(ray.origin, *ray.direction, world_pos) < hit_radius {
             return true;
         }
@@ -726,19 +821,18 @@ pub fn is_clicking_scale_handle_group(
     false
 }
 
-/// Convenience: compute effective extent (with min-screen floor) for a
-/// group, matching `scale_handles::sync_scale_handle_root`. Use this when
-/// calling `is_clicking_scale_handle_group` to stay in lockstep.
-pub fn effective_scale_extent(
-    group_extent: Vec3,
+/// Convenience: compute the camera-distance screen scale for the scale
+/// gizmo, matching `scale_handles::sync_scale_handle_root`. Pass the
+/// result into [`is_clicking_scale_handle_group`] so visual + hit zones
+/// stay in lockstep.
+pub fn compute_scale_screen_scale(
     group_center: Vec3,
     camera_translation: Vec3,
     fov: f32,
 ) -> f32 {
-    use crate::scale_handles::MIN_SCREEN_FRACTION;
+    use crate::scale_handles::SCREEN_FRACTION;
     let cam_dist = (group_center - camera_translation).length().max(0.1);
-    let min_screen_size = cam_dist * (fov * 0.5).tan() * MIN_SCREEN_FRACTION;
-    group_extent.max_element().max(min_screen_size)
+    cam_dist * (fov * 0.5).tan() * SCREEN_FRACTION
 }
 
 // ============================================================================
@@ -746,21 +840,67 @@ pub fn effective_scale_extent(
 // ============================================================================
 
 fn compute_new_size(axis: ScaleAxis, initial: Vec3, drag: f32) -> Vec3 {
-    match axis {
+    // Sanitize inputs — a degenerate part (size component = 0, NaN, or inf)
+    // would propagate non-finite values through the drag math and end up in
+    // Transform.translation, which Avian then rejects with a panic. Floor
+    // every component to 0.1 before any arithmetic.
+    let initial = Vec3::new(
+        sane_pos(initial.x).max(0.1),
+        sane_pos(initial.y).max(0.1),
+        sane_pos(initial.z).max(0.1),
+    );
+    let drag = if drag.is_finite() { drag } else { 0.0 };
+
+    let raw = match axis {
         ScaleAxis::XPos | ScaleAxis::XNeg => Vec3::new((initial.x + drag).max(0.1), initial.y, initial.z),
         ScaleAxis::YPos | ScaleAxis::YNeg => Vec3::new(initial.x, (initial.y + drag).max(0.1), initial.z),
         ScaleAxis::ZPos | ScaleAxis::ZNeg => Vec3::new(initial.x, initial.y, (initial.z + drag).max(0.1)),
         ScaleAxis::Uniform => {
-            let f = (1.0 + drag / initial.max_element()).max(0.1);
+            // `initial.max_element()` is now guaranteed >= 0.1 by the
+            // sanitize step above, so `drag / m` cannot divide by zero.
+            let m = initial.max_element();
+            let f = (1.0 + drag / m).max(0.1);
             initial * f
         }
-    }
+    };
+    sane_size(raw)
+}
+
+#[inline]
+fn sane_size(v: Vec3) -> Vec3 {
+    Vec3::new(
+        if v.x.is_finite() { v.x.max(0.1) } else { 0.1 },
+        if v.y.is_finite() { v.y.max(0.1) } else { 0.1 },
+        if v.z.is_finite() { v.z.max(0.1) } else { 0.1 },
+    )
+}
+
+/// Replace a non-finite scalar with 0.0. Used inside `compute_new_size`
+/// before the floor-to-0.1 step so NaN initial sizes don't leak into
+/// drag arithmetic. Position-clamping for `Transform.translation`
+/// lives in `instance_loader::safe_translation`; this is purely a
+/// per-axis NaN guard for size-space math.
+#[inline]
+fn sane_pos(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+/// NaN-and-distance-clamping translation guard. Routes through the
+/// centralized `instance_loader::safe_translation` helper so the
+/// scale-tool inherits the same `MAX_WORLD_EXTENT` (5000) cap that
+/// move + select use. Falls back to origin if no better fallback is
+/// available; callers that have an `initial_pos` should pass it
+/// directly to `safe_translation` for a less jarring recovery.
+#[inline]
+fn sane_translation(v: Vec3) -> Vec3 {
+    crate::space::instance_loader::safe_translation(v, Vec3::ZERO)
 }
 
 fn apply_snap(size: Vec3, settings: &crate::editor_settings::EditorSettings) -> Vec3 {
     const MIN: f32 = 0.1;
     if settings.snap_enabled {
-        let s = settings.snap_size;
+        // Guard against snap_size = 0 (would produce inf in `size / s`).
+        let s = settings.snap_size.max(0.001);
         Vec3::new(
             ((size.x / s).round() * s).max(MIN),
             ((size.y / s).round() * s).max(MIN),
@@ -780,7 +920,26 @@ fn apply_size_to_entity(
     size: Vec3,
     pos: Vec3,
     has_mesh_source: bool,
+    // When `false`, skip the per-frame primitive mesh regeneration and
+    // express size via Transform.scale instead. Per-frame mesh regen
+    // during drag (1 mesh asset per frame, GPU upload, then dropped)
+    // is the dominant source of scale-tool input lag; deferring the
+    // regen to drag-release is functionally identical visually.
+    regenerate_mesh: bool,
+    // Size already baked into the cached mesh — needed only on the
+    // legacy "no mesh source + skip regen" path so we can compute
+    // `transform.scale = size / mesh_baked_size` and have the visual
+    // dimensions match `size`. Pass `Vec3::ONE` if irrelevant.
+    mesh_baked_size: Vec3,
 ) {
+    // Defense-in-depth sanitize — callers should already pass clean values,
+    // but a single NaN reaching Transform.translation panics Avian
+    // (`avian3d/src/schedule/mod.rs:313: NaN or infinity found in Avian
+    // component: type=Position`). Drop the bad component to a safe default
+    // rather than letting it propagate.
+    let size = sane_size(size);
+    let pos = sane_translation(pos);
+
     transform.translation = pos;
 
     if let Some(mut bp) = basepart_opt {
@@ -789,10 +948,10 @@ fn apply_size_to_entity(
     }
 
     if has_mesh_source {
-        // File-system-first: .glb mesh is unit-scale, apply size via Transform.scale
+        // File-system-first: .glb mesh is unit-scale, apply size via Transform.scale.
         transform.scale = size;
-    } else {
-        // Legacy: inline mesh generation at actual size, scale stays ONE
+    } else if regenerate_mesh {
+        // Legacy + final commit: bake `size` into the mesh, scale = ONE.
         transform.scale = Vec3::ONE;
         if let (Some(part), Some(mut mesh3d)) = (part_opt, mesh_opt) {
             let new_mesh = match part.shape {
@@ -803,6 +962,17 @@ fn apply_size_to_entity(
             };
             mesh3d.0 = new_mesh;
         }
+    } else {
+        // Legacy + mid-drag: defer regen. Cached mesh is at `mesh_baked_size`;
+        // visually scale to `size` via Transform.scale. On drag release the
+        // caller invokes `apply_size_to_entity(..., true)` once to bake
+        // `size` into a fresh mesh and restore scale = ONE.
+        let bake = sane_size(mesh_baked_size);
+        transform.scale = Vec3::new(
+            size.x / bake.x,
+            size.y / bake.y,
+            size.z / bake.z,
+        );
     }
 }
 
@@ -818,4 +988,83 @@ fn is_descendant(
         current = parent;
     }
     false
+}
+
+/// Hit-test the scale gizmo handles against a ray and return the picked
+/// axis along with the group's center, extent, and gizmo rotation. Used
+/// for both hover detection (every frame) and click-to-drag.
+///
+/// `selected_iter` yields one `(translation, rotation, size)` tuple per
+/// selected entity — the function rebuilds the same group AABB and
+/// rotation as `scale_handles::sync_scale_handle_root` so visual cube
+/// position and hit zone stay perfectly aligned.
+fn pick_scale_handle(
+    ray_origin: Vec3,
+    ray_direction: Vec3,
+    cam_position: Vec3,
+    fov: f32,
+    transform_mode: crate::ui::TransformMode,
+    selected: &[(Vec3, Quat, Vec3)],
+) -> Option<(ScaleAxis, Vec3, Vec3, Quat)> {
+    use crate::scale_handles::{
+        SCREEN_FRACTION, SCREEN_HANDLE_EXT, SCREEN_CUBE_SIZE, SCREEN_CENTER_SIZE,
+    };
+
+    if selected.is_empty() { return None; }
+
+    let mut bounds_min = Vec3::splat(f32::MAX);
+    let mut bounds_max = Vec3::splat(f32::MIN);
+    for &(pos, rot, size) in selected {
+        let (mn, mx) = crate::math_utils::calculate_rotated_aabb(pos, size * 0.5, rot);
+        bounds_min = bounds_min.min(mn);
+        bounds_max = bounds_max.max(mx);
+    }
+
+    let group_center = (bounds_min + bounds_max) * 0.5;
+    let group_extent = (bounds_max - bounds_min) * 0.5;
+
+    let cam_dist = (group_center - cam_position).length().max(0.1);
+    let screen_scale = cam_dist * (fov * 0.5).tan() * SCREEN_FRACTION;
+
+    let handle_ext = screen_scale * SCREEN_HANDLE_EXT;
+    let cube_size = screen_scale * SCREEN_CUBE_SIZE;
+    let center_size = screen_scale * SCREEN_CENTER_SIZE;
+    let hit_radius = (cube_size * 0.75).max(0.05);
+    let center_hit_radius = (center_size * 0.75).max(0.05);
+
+    let rotation = crate::move_tool::gizmo_rotation_for(
+        transform_mode,
+        selected.iter().map(|&(_, rot, _)| rot),
+    );
+
+    let dirs: &[(ScaleAxis, Vec3, f32)] = &[
+        (ScaleAxis::XPos, Vec3::X,     group_extent.x),
+        (ScaleAxis::XNeg, Vec3::NEG_X, group_extent.x),
+        (ScaleAxis::YPos, Vec3::Y,     group_extent.y),
+        (ScaleAxis::YNeg, Vec3::NEG_Y, group_extent.y),
+        (ScaleAxis::ZPos, Vec3::Z,     group_extent.z),
+        (ScaleAxis::ZNeg, Vec3::NEG_Z, group_extent.z),
+    ];
+
+    let mut best: Option<(ScaleAxis, f32)> = None;
+    for &(ax, dir, face) in dirs {
+        let world_pos = group_center + rotation * dir * (face + handle_ext);
+        let d = ray_to_point_distance(ray_origin, ray_direction, world_pos);
+        if d < hit_radius {
+            if best.map_or(true, |(_, dist)| d < dist) {
+                best = Some((ax, d));
+            }
+        }
+    }
+    // Center cube — uniform scale handle. Tested last so it doesn't
+    // out-prioritize a face cube if both happen to fall under the
+    // cursor (face cubes are visually further out, so prefer them).
+    let d = ray_to_point_distance(ray_origin, ray_direction, group_center);
+    if d < center_hit_radius {
+        if best.map_or(true, |(_, dist)| d < dist) {
+            best = Some((ScaleAxis::Uniform, d));
+        }
+    }
+
+    best.map(|(axis, _)| (axis, group_center, group_extent, rotation))
 }

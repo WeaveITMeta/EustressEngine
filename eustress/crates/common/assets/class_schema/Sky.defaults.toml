@@ -1,0 +1,18 @@
+# Sky — Skybox and celestial body display
+# Bevy: Skybox / EnvironmentMapLight
+
+[sky]
+celestial_bodies_shown = true
+star_count = 3000
+sun_angular_size = 21.0
+moon_angular_size = 11.0
+skybox_front = ""
+skybox_back = ""
+skybox_left = ""
+skybox_right = ""
+skybox_top = ""
+skybox_bottom = ""
+
+[metadata]
+class_name = "Sky"
+archivable = true

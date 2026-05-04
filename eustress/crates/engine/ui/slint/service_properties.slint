@@ -5,6 +5,7 @@
 
 import { VerticalBox, HorizontalBox, ScrollView, Slider, CheckBox, LineEdit } from "std-widgets.slint";
 import { Theme, PanelHeader } from "theme.slint";
+import { HelpIcon } from "properties.slint";
 
 // Service type enum
 export struct ServiceData {
@@ -58,6 +59,7 @@ export component ServiceProperties inherits Rectangle {
     
     // Callbacks
     callback on-property-changed(string, string);
+    callback open-learn-url(string);
     
     background: Theme.panel-background;
     
@@ -108,10 +110,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Acceleration due to gravity in studs/s². Earth-like default.";
+                        learn-url: "/learn/services/workspace";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 120px;
+                        width: 110px;
                         text: "Gravity";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -132,10 +140,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Air density for aerodynamic drag calculations.";
+                        learn-url: "/learn/services/workspace";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 120px;
+                        width: 110px;
                         text: "Air Density";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -156,10 +170,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Y coordinate below which parts are automatically destroyed.";
+                        learn-url: "/learn/services/workspace";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 120px;
+                        width: 110px;
                         text: "Destroy Height";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -189,9 +209,19 @@ export component ServiceProperties inherits Rectangle {
                     font-weight: 600;
                 }
                 
-                CheckBox {
-                    text: "Streaming Enabled";
-                    checked <=> root.streaming-enabled;
+                HorizontalBox {
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Enable instance streaming for large worlds. Parts load/unload based on player distance.";
+                        learn-url: "/learn/services/workspace";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
+                    
+                    CheckBox {
+                        text: "Streaming Enabled";
+                        checked <=> root.streaming-enabled;
+                    }
                 }
                 
                 if root.streaming-enabled: VerticalBox {
@@ -269,10 +299,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Time of day (0-24). Controls sun position and sky color.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 100px;
+                        width: 90px;
                         text: "Clock Time";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -295,10 +331,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Latitude for sun angle calculation. Affects shadow length.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 100px;
+                        width: 90px;
                         text: "Latitude";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -331,10 +373,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Overall scene brightness multiplier.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 100px;
+                        width: 90px;
                         text: "Brightness";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -357,10 +405,16 @@ export component ServiceProperties inherits Rectangle {
                 }
                 
                 HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "EV bias for HDR tone mapping. Positive = brighter.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 100px;
+                        width: 90px;
                         text: "Exposure";
                         color: Theme.text-primary;
                         vertical-alignment: center;
@@ -392,16 +446,32 @@ export component ServiceProperties inherits Rectangle {
                     font-weight: 600;
                 }
                 
-                CheckBox {
-                    text: "Global Shadows";
-                    checked <=> root.global-shadows;
+                HorizontalBox {
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Whether shadow maps are computed for directional light.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
+                    
+                    CheckBox {
+                        text: "Global Shadows";
+                        checked <=> root.global-shadows;
+                    }
                 }
                 
                 if root.global-shadows: HorizontalBox {
-                    spacing: 8px;
+                    spacing: 4px;
+                    
+                    HelpIcon {
+                        description: "Blur radius for shadow edges. 0 = sharp, 1 = very soft.";
+                        learn-url: "/learn/services/lighting";
+                        open-learn-url(url) => { root.open-learn-url(url); }
+                    }
                     
                     Text {
-                        width: 100px;
+                        width: 90px;
                         text: "Softness";
                         color: Theme.text-primary;
                         vertical-alignment: center;

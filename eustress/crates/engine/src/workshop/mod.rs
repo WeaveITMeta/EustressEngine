@@ -39,10 +39,12 @@ pub mod tools;
 pub mod context;
 pub mod streams;
 pub mod api_reference;
+pub mod watchman;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use crate::manufacturing::AllocationDecision;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -1106,20 +1108,34 @@ fn handle_send_message(
     }
 }
 
-/// Process MCP command approvals — mark approved and, when the card is a
-/// tool-use from the agentic loop, immediately dispatch the tool via
-/// [`ToolRegistry`] and store the result on the same message so the next
-/// `dispatch_chat_request` sees it and continues the Claude conversation.
+/// In-flight tool dispatch — background thread result container.
+/// Mirrors the `AgenticInFlight` pattern from `claude_bridge.rs`.
+struct ToolDispatchInFlight {
+    message_id: u32,
+    tool_name: String,
+    result: Arc<Mutex<Option<tools::ToolResult>>>,
+}
+
+/// Resource holding all in-flight (background-threaded) tool dispatches.
+#[derive(Resource, Default)]
+pub struct ToolDispatchTasks {
+    in_flight: Vec<ToolDispatchInFlight>,
+}
+
+/// Process MCP command approvals — mark as Running and spawn the tool
+/// dispatch on a background thread so long-running tools (e.g. run_bash
+/// with curl) don't block the Bevy frame loop.
 fn handle_approve_mcp(
     mut events: MessageReader<WorkshopApproveMcpEvent>,
     mut pipeline: ResMut<IdeationPipeline>,
     tool_registry: Option<Res<tools::ToolRegistry>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
+    mut tasks: ResMut<ToolDispatchTasks>,
 ) {
     for event in events.read() {
-        pipeline.update_mcp_status(event.message_id, McpCommandStatus::Approved);
-        info!("Workshop: MCP command {} approved", event.message_id);
+        pipeline.update_mcp_status(event.message_id, McpCommandStatus::Running);
+        info!("Workshop: MCP command {} approved → dispatching async", event.message_id);
 
         // Extract the tool-use metadata from the approved card.
         let (tool_name, tool_use_id, tool_input) = {
@@ -1153,6 +1169,7 @@ fn handle_approve_mcp(
                     universe_root,
                     user_id,
                     username,
+                    luau_executor: None,
                 }
             }
             _ => {
@@ -1163,38 +1180,127 @@ fn handle_approve_mcp(
             }
         };
 
-        let result = match tool_registry.as_ref() {
-            Some(reg) => reg.dispatch(&tool_name, &tool_use_id, tool_input, &ctx),
-            None => {
-                pipeline.add_error_message(
-                    "Workshop: ToolRegistry missing — cannot dispatch approved tool.".to_string()
-                );
-                continue;
+        // Verify the registry is loaded (sanity check). We build a fresh
+        // registry in the thread rather than cloning the Bevy Res.
+        if tool_registry.is_none() {
+            pipeline.add_error_message(
+                "Workshop: ToolRegistry missing — cannot dispatch approved tool.".to_string()
+            );
+            continue;
+        }
+
+        let dispatch_name = tool_name.clone();
+        let dispatch_id = tool_use_id.clone();
+        let dispatch_input = tool_input.clone();
+        let dispatch_ctx = ctx;
+
+        let result_container: Arc<Mutex<Option<tools::ToolResult>>> =
+            Arc::new(Mutex::new(None));
+        let result_clone = result_container.clone();
+
+        // Spawn the tool dispatch on a background thread so long-running
+        // tools (run_bash with multi-minute curl) don't block the frame.
+        // We build a fresh ToolRegistry in the thread — ToolHandler impls
+        // are all Send+Sync unit structs so this is cheap.
+        std::thread::spawn(move || {
+            let mut thread_registry = tools::ToolRegistry::default();
+            tools::register_all_tools(&mut thread_registry);
+            // Mode-specific tools (mirrors the plugin's build_fn registration)
+            thread_registry.register(modes::manufacturing::NormalizeBriefTool);
+            thread_registry.register(modes::manufacturing::QueryManufacturersTool);
+            thread_registry.register(modes::manufacturing::QueryInvestorsTool);
+            thread_registry.register(modes::manufacturing::AllocateProductTool);
+            thread_registry.register(modes::simulation::ControlSimulationTool);
+            thread_registry.register(modes::simulation::SetBreakpointTool);
+            thread_registry.register(modes::simulation::ExportRecordingTool);
+            thread_registry.register(modes::supply_chain::RunScenarioTool);
+            thread_registry.register(modes::supply_chain::ForecastDemandTool);
+            thread_registry.register(modes::supply_chain::ScoreSupplierRiskTool);
+            thread_registry.register(modes::warehousing::InventoryCheckTool);
+            thread_registry.register(modes::warehousing::StorageOptimizeTool);
+            thread_registry.register(modes::finance::CalculateCostTool);
+            thread_registry.register(modes::finance::EstimateTaxTool);
+            thread_registry.register(modes::fabrication::SelectProcessTool);
+            thread_registry.register(modes::shopping::PriceProductTool);
+            thread_registry.register(modes::travel::EstimateShippingTool);
+
+            let result = thread_registry.dispatch(
+                &dispatch_name,
+                &dispatch_id,
+                dispatch_input,
+                &dispatch_ctx,
+            );
+
+            match result_clone.lock() {
+                Ok(mut lock) => *lock = Some(result),
+                Err(poisoned) => {
+                    tracing::error!("Workshop: tool dispatch mutex poisoned, recovering");
+                    *poisoned.into_inner() = Some(tools::ToolResult {
+                        tool_name: dispatch_name,
+                        tool_use_id: dispatch_id,
+                        success: false,
+                        content: "Internal error: thread lock poisoned".to_string(),
+                        structured_data: None,
+                        stream_topic: None,
+                    });
+                }
             }
-        };
-
-        let new_status = if result.success {
-            McpCommandStatus::Done
-        } else {
-            McpCommandStatus::Error
-        };
-        pipeline.update_mcp_status(event.message_id, new_status);
-        if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == event.message_id) {
-            msg.tool_result = Some(result.content.clone());
-        }
-        info!("Workshop: dispatched approved tool '{}' → success={}", tool_name, result.success);
-
-        // Clear the approval gate if every agentic tool_use card now has a
-        // result. Dispatch will re-fire on the next tick and Claude will see
-        // the tool_result in the next turn.
-        let all_resolved = pipeline.messages.iter().all(|m| {
-            m.mcp_method.as_deref() != Some("tool_use")
-                || m.tool_result.is_some()
-                || m.mcp_status == Some(McpCommandStatus::Skipped)
         });
-        if all_resolved {
-            pipeline.awaiting_tool_approval = false;
+
+        tasks.in_flight.push(ToolDispatchInFlight {
+            message_id: event.message_id,
+            tool_name,
+            result: result_container,
+        });
+    }
+}
+
+/// Poll background tool dispatch threads for completion. When a result
+/// arrives, update the pipeline message and clear the approval gate.
+fn poll_tool_dispatches(
+    mut pipeline: ResMut<IdeationPipeline>,
+    mut tasks: ResMut<ToolDispatchTasks>,
+) {
+    let mut completed_indices = Vec::new();
+
+    for (i, task) in tasks.in_flight.iter().enumerate() {
+        let result = match task.result.lock() {
+            Ok(lock) => lock.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+
+        if let Some(result) = result {
+            let new_status = if result.success {
+                McpCommandStatus::Done
+            } else {
+                McpCommandStatus::Error
+            };
+            pipeline.update_mcp_status(task.message_id, new_status);
+            if let Some(msg) = pipeline.messages.iter_mut().find(|m| m.id == task.message_id) {
+                msg.tool_result = Some(result.content.clone());
+            }
+            info!("Workshop: tool '{}' (msg {}) completed → success={}",
+                task.tool_name, task.message_id, result.success);
+
+            completed_indices.push(i);
         }
+    }
+
+    // Remove completed tasks (reverse order to preserve indices)
+    for i in completed_indices.into_iter().rev() {
+        tasks.in_flight.swap_remove(i);
+    }
+
+    // Clear the approval gate if every agentic tool_use card now has a
+    // result. Dispatch will re-fire on the next tick and Claude will see
+    // the tool_result in the next turn.
+    let all_resolved = pipeline.messages.iter().all(|m| {
+        m.mcp_method.as_deref() != Some("tool_use")
+            || m.tool_result.is_some()
+            || m.mcp_status == Some(McpCommandStatus::Skipped)
+    });
+    if all_resolved && pipeline.awaiting_tool_approval {
+        pipeline.awaiting_tool_approval = false;
     }
 }
 
@@ -1585,6 +1691,10 @@ impl Plugin for WorkshopPlugin {
             // below (post-init, after the Universe root is known).
             .init_resource::<mention::MentionIndex>()
             .init_resource::<mention_scanner::UniverseScanTask>()
+            .init_resource::<ToolDispatchTasks>()
+            // Watchman — proactive simulation monitor
+            .init_resource::<watchman::WatchmanConfig>()
+            .init_resource::<watchman::WatchmanState>()
             // Events
             .add_message::<WorkshopSendMessageEvent>()
             .add_message::<WorkshopApproveMcpEvent>()
@@ -1606,6 +1716,8 @@ impl Plugin for WorkshopPlugin {
                 handle_claude_response,
                 handle_claude_error,
             ).chain().after(crate::ui::SlintSystems::Drain).in_set(WorkshopCoreSystems))
+            // Poll background tool dispatch threads (non-blocking approve)
+            .add_systems(Update, poll_tool_dispatches.after(WorkshopCoreSystems))
             // Claude bridge: dispatch async requests + poll responses
             // Must run AFTER WorkshopCoreSystems so pipeline.state is updated before dispatch checks it
             .add_systems(Update, (
@@ -1621,6 +1733,21 @@ impl Plugin for WorkshopPlugin {
             ).after(WorkshopCoreSystems))
             // Autosave: check dirty flag each frame (cheap when not dirty)
             .add_systems(Update, autosave_conversation)
+            // Watchman: proactive simulation monitor — injects alert
+            // messages into the pipeline when sim values breach thresholds.
+            // Runs only during Playing state, after the Claude bridge so
+            // alerts don't collide with in-flight dispatches.
+            .add_systems(
+                Update,
+                watchman::watchman_monitor
+                    .run_if(in_state(crate::play_mode::PlayModeState::Playing))
+                    .after(WorkshopCoreSystems),
+            )
+            // Reset Watchman cooldowns when entering Play mode
+            .add_systems(
+                OnEnter(crate::play_mode::PlayModeState::Playing),
+                watchman::watchman_reset_on_play,
+            )
             // Mention index systems — see workshop/mention.rs and
             // workshop/mention_scanner.rs for architecture notes.
             //

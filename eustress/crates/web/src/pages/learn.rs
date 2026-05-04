@@ -342,6 +342,11 @@ pub fn LearnPage() -> impl IntoView {
                         <h3>"UI Systems"</h3>
                         <p>"TOML definitions, Slint components, Rune scripting API"</p>
                     </a>
+                    <a href="/docs/services" class="doc-card">
+                        <img src="/assets/icons/network.svg" alt="Services" class="doc-icon" />
+                        <h3>"Services"</h3>
+                        <p>"Workspace, Lighting, Players, Teams, Storage, Scripting, Audio"</p>
+                    </a>
                     <a href="/docs/simulation" class="doc-card featured">
                         <img src="/assets/icons/physics.svg" alt="Simulation" class="doc-icon" />
                         <h3>"Simulation"</h3>

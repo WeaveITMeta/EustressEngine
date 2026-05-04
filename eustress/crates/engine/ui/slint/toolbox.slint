@@ -233,7 +233,7 @@ export component Toolbox inherits Rectangle {
                 Rectangle {
                     height: 64px;
                     property <length> row-w: 2 * 64px + 1 * 4px;
-                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Spawn"; tooltip: "Player spawn location"; clicked => { root.on-insert-part("SpawnPoint"); } }
+                    ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Spawn"; tooltip: "Player spawn location"; clicked => { root.on-insert-part("SpawnLocation"); } }
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 1 * 68px; icon: @image-url("../../assets/icons/ui/seat.svg"); label: "Seat"; tooltip: "Sittable seat"; clicked => { root.on-insert-part("Seat"); } }
                 }
                 

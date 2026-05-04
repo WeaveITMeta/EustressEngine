@@ -1,0 +1,28 @@
+# SpawnLocation — Player spawn point (extends Part)
+# Green translucent platform where players appear on join/respawn.
+
+[properties]
+color = [99, 187, 80]             # Green
+transparency = 0.0
+anchored = true
+can_collide = true
+cast_shadow = true
+reflectance = 0.0
+material = "Plastic"
+locked = false
+
+[transform]
+position = [0.0, 0.5, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [6.0, 1.0, 6.0]
+
+[spawn]
+allow_team_change_on_touch = true
+duration = 0
+enabled = true
+neutral = true
+team_color = ""
+
+[metadata]
+class_name = "SpawnLocation"
+archivable = true

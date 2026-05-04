@@ -145,7 +145,7 @@ export component HistoryPanel inherits Rectangle {
         // title + optional count badge). Every right-hand side panel
         // now shares this exact top strip.
         SidePanelHeader {
-            title: "HISTORY";
+            title: "History";
             count: root.history.length;
             show-icon: true;
             icon: @image-url("../../assets/icons/ui/undo.svg");
@@ -277,7 +277,9 @@ export component HistoryPanel inherits Rectangle {
         
         if root.history.length > 0: ScrollView {
             vertical-stretch: 1;
-            
+            horizontal-scrollbar-policy: always-off;
+            vertical-scrollbar-policy: as-needed;
+
             VerticalBox {
                 padding: 4px;
                 spacing: 2px;

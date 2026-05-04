@@ -1071,25 +1071,56 @@ impl LanguageServer for EustressLsp {
         // replace the normal identifier completion with the live keys
         // from the runtime snapshot. Typing `get_sim_value("bat` now
         // surfaces `battery.voltage`, `battery.soc`, etc.
+        //
+        // Also provides entity name completion for workspace_find_first,
+        // collection_add_tag, and component type names for ECS-aware
+        // scripting when the snapshot includes entity_names/component_types.
         if let Some(prefix) = sim_key_prefix_at_cursor(&source, line, col) {
             if let Some(universe) = uri.to_file_path().ok().and_then(|p| walk_up_for_universe(&p)) {
                 if let Some(snap) = super::runtime_snapshot::read_snapshot(&universe) {
                     let lower = prefix.to_ascii_lowercase();
-                    let items: Vec<CompletionItem> = snap
-                        .sim_values
-                        .keys()
-                        .filter(|k| k.to_ascii_lowercase().starts_with(&lower))
-                        .take(50)
-                        .map(|k| {
-                            let v = snap.sim_values.get(k).copied().unwrap_or(0.0);
-                            CompletionItem {
+                    let mut items: Vec<CompletionItem> = Vec::new();
+
+                    // Sim value keys (battery.voltage, battery.soc, ...)
+                    for (k, v) in &snap.sim_values {
+                        if k.to_ascii_lowercase().starts_with(&lower) {
+                            items.push(CompletionItem {
                                 label: k.clone(),
                                 kind: Some(CompletionItemKind::CONSTANT),
-                                detail: Some(format!("current value: {}", v)),
+                                detail: Some(format!("sim value: {}", v)),
+                                sort_text: Some(format!("0_{}", k)),
                                 ..Default::default()
-                            }
-                        })
-                        .collect();
+                            });
+                        }
+                    }
+
+                    // Entity names from the ECS scene (Part, Model, Script names)
+                    for (name, class) in &snap.entity_names {
+                        if name.to_ascii_lowercase().starts_with(&lower) {
+                            items.push(CompletionItem {
+                                label: name.clone(),
+                                kind: Some(CompletionItemKind::VALUE),
+                                detail: Some(format!("entity ({})", class)),
+                                sort_text: Some(format!("1_{}", name)),
+                                ..Default::default()
+                            });
+                        }
+                    }
+
+                    // Component type names (Transform, ElectrochemicalState, ...)
+                    for comp in &snap.component_types {
+                        if comp.to_ascii_lowercase().starts_with(&lower) {
+                            items.push(CompletionItem {
+                                label: comp.clone(),
+                                kind: Some(CompletionItemKind::CLASS),
+                                detail: Some("ECS component".to_string()),
+                                sort_text: Some(format!("2_{}", comp)),
+                                ..Default::default()
+                            });
+                        }
+                    }
+
+                    items.truncate(50);
                     return Ok(Some(CompletionResponse::Array(items)));
                 }
             }
@@ -1221,6 +1252,88 @@ impl LanguageServer for EustressLsp {
                 }));
             }
         }
+
+        // Agent-driven SoulScript improvements — proactive suggestions
+        // that agents (Repairman) and humans can act on to improve Rune
+        // scripts. These are SOURCE actions, not QUICKFIX (no diagnostic).
+        //
+        // Pattern: detect common SoulScript idioms and suggest improvements.
+        let lines: Vec<&str> = source.lines().collect();
+        for (line_idx, line_text) in lines.iter().enumerate() {
+            let line_range = Range {
+                start: Position { line: line_idx as u32, character: 0 },
+                end: Position { line: line_idx as u32, character: line_text.len() as u32 },
+            };
+            if !ranges_overlap(line_range, params.range) { continue }
+
+            // Suggest error handling for unwrapped get_sim_value calls
+            if line_text.contains("get_sim_value(") && !line_text.contains("if ") && !line_text.contains("match ") {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Eustress: Add bounds check for sim value".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR),
+                    diagnostics: None,
+                    edit: None,
+                    command: Some(Command {
+                        title: "Add bounds check".to_string(),
+                        command: "eustress.agent.suggest".to_string(),
+                        arguments: Some(vec![serde_json::json!({
+                            "action": "add_bounds_check",
+                            "line": line_idx,
+                            "pattern": "get_sim_value",
+                        })]),
+                    }),
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: None,
+                }));
+            }
+
+            // Suggest watchpoint registration for set_sim_value calls
+            if line_text.contains("set_sim_value(") {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Eustress: Add watchpoint comment for traceability".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR),
+                    diagnostics: None,
+                    edit: None,
+                    command: Some(Command {
+                        title: "Add watchpoint comment".to_string(),
+                        command: "eustress.agent.suggest".to_string(),
+                        arguments: Some(vec![serde_json::json!({
+                            "action": "add_watchpoint_comment",
+                            "line": line_idx,
+                            "pattern": "set_sim_value",
+                        })]),
+                    }),
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: None,
+                }));
+            }
+
+            // Suggest async pattern for blocking calls
+            if (line_text.contains("http_request(") || line_text.contains("datastore_get("))
+                && !line_text.contains("await") && !line_text.contains("async")
+            {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Eustress: Consider async pattern for I/O call".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR),
+                    diagnostics: None,
+                    edit: None,
+                    command: Some(Command {
+                        title: "Convert to async".to_string(),
+                        command: "eustress.agent.suggest".to_string(),
+                        arguments: Some(vec![serde_json::json!({
+                            "action": "suggest_async",
+                            "line": line_idx,
+                        })]),
+                    }),
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: None,
+                }));
+            }
+        }
+
         Ok(Some(actions))
     }
 

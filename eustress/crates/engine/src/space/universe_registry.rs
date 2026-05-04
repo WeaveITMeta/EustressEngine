@@ -66,7 +66,14 @@ impl UniverseRegistry {
             let mut dirs: Vec<PathBuf> = entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.is_dir() && !looks_like_space_root(p))
+                .filter(|p| {
+                    p.is_dir()
+                        && !looks_like_space_root(p)
+                        // Skip hidden/metadata directories (.eustress, .git, etc.)
+                        && !p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with('.'))
+                            .unwrap_or(true)
+                })
                 .collect();
             dirs.sort();
 
@@ -77,6 +84,16 @@ impl UniverseRegistry {
                     .unwrap_or_default();
 
                 let spaces = collect_spaces(&universe_path);
+                // Only show directories that actually contain Spaces
+                // (or have a Spaces/ subdirectory). This filters out
+                // stale/unrelated folders that happen to live in
+                // Documents/Eustress/ (game cache dirs, temp folders, etc.)
+                if spaces.is_empty()
+                    && !universe_path.join("Spaces").is_dir()
+                    && !universe_path.join("spaces").is_dir()
+                {
+                    continue;
+                }
                 universes.push(UniverseInfo { path: universe_path, name, spaces });
             }
         }
@@ -173,7 +190,14 @@ fn collect_spaces(universe_path: &Path) -> Vec<SpaceInfo> {
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_dir() && looks_like_space_root(p))
+        .filter(|p| {
+            p.is_dir()
+                && looks_like_space_root(p)
+                // Skip hidden/metadata directories (.eustress, .git, etc.)
+                && !p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with('.'))
+                    .unwrap_or(true)
+        })
         .collect();
     dirs.sort();
 

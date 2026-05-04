@@ -20,11 +20,8 @@ docs/
 
 | Document | Description |
 |----------|-------------|
-| [START_HERE](getting-started/START_HERE.md) | Quick start guide for the class system |
-| [QUICKSTART_CLASSES](getting-started/QUICKSTART_CLASSES.md) | Fast introduction to classes |
-| [BUILD_FIX](getting-started/BUILD_FIX.md) | Common build issues and fixes |
-| [SETTINGS_EXAMPLE](getting-started/SETTINGS_EXAMPLE.md) | Configuration examples |
-| [DEPLOYMENT_CHECKLIST](getting-started/DEPLOYMENT_CHECKLIST.md) | Pre-deployment checklist |
+| [BUILD_FIX](getting-started/BUILD_FIX.md) | Common build issues and fixes (Windows file-lock error 32, etc.) |
+| [SETTINGS_EXAMPLE](getting-started/SETTINGS_EXAMPLE.md) | Editor settings persistence example |
 
 ## 🏗️ Architecture
 
@@ -37,13 +34,15 @@ docs/
 
 ## 🎮 Classes
 
+The live class registry is `eustress/crates/common/assets/class_schema/*.defaults.toml`
+— `common/build.rs` globs that directory at compile time and registers
+each template as a class. See:
+
 | Document | Description |
 |----------|-------------|
-| [README_ROBLOX_CLASSES](classes/README_ROBLOX_CLASSES.md) | Roblox class compatibility overview |
-| [CLASSES_GUIDE](classes/CLASSES_GUIDE.md) | Complete class system guide |
-| [CLASSES_EXTENDED](classes/CLASSES_EXTENDED.md) | Extended class documentation |
-| [CLASS_SYSTEM_COMPLETE](classes/CLASS_SYSTEM_COMPLETE.md) | Class system completion status |
-| [ADDING_NEW_CLASSES](classes/ADDING_NEW_CLASSES.md) | How to add new classes |
+| [classes/README](classes/README.md) | Directory index — entry point for class docs |
+| [CLASS_EXTENSIBILITY](classes/CLASS_EXTENSIBILITY.md) | Canonical guide to adding a new class (template + `ExtraSectionClaim`) |
+| [development/CLASS_CONVERSION](development/CLASS_CONVERSION.md) | Studio class-conversion-tool semantics (orthogonal: changing an existing instance's class, not adding one) |
 
 ## 🌐 Networking & Multiplayer
 
@@ -63,12 +62,10 @@ docs/
 
 ## 🛠️ Development
 
-| Document | Description |
-|----------|-------------|
-| [tools](development/tools.md) | Development tools |
-| [MIGRATION_PLAN](development/MIGRATION_PLAN.md) | Migration planning |
-| [IMPLEMENTATION_STATUS](development/IMPLEMENTATION_STATUS.md) | Current implementation status |
-| [LEGACY_PRUNED](development/LEGACY_PRUNED.md) | Removed legacy code |
+`docs/development/` contains live system docs (architecture for
+specific subsystems: file-watcher hot-reload, lighting, terrain,
+selection, scripting, toolset, etc.). Browse the directory directly —
+docs are added as systems land, no doc-maintained index.
 
 ## 📜 Archive
 

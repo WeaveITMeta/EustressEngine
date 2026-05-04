@@ -2,17 +2,22 @@
 //! 
 //! Uses the shared lighting plugin from eustress_common.
 //! Adds engine-specific light class registrations.
-//! Spawns Sun, Moon, and Atmosphere as proper Explorer entities under Lighting service.
+//! Hydrates file-loaded Lighting/ entities with real ECS components.
 //! 
-//! ## Default Lighting Children
-//! - Sun: Controls day/night cycle, directional lighting based on ClockTime and GeographicLatitude
-//! - Moon: Night lighting with phases
-//! - Atmosphere: Post-processing atmospheric effects (haze, fog, sky color)
+//! ## Architecture
+//! Each Space owns its lighting via `Lighting/*.instance.toml` files.
+//! The file loader spawns them as bare `Instance` entities. This plugin's
+//! `hydrate_lighting_entities` system detects freshly-loaded lighting
+//! class entities (Star, Moon, Sky, Atmosphere) and attaches the real
+//! Bevy components (DirectionalLight, SunMarker, SunClass, etc.).
+//! On Space switch, all entities are despawned; the new Space's TOMLs
+//! are re-loaded and re-hydrated, preserving per-Space lighting config.
 
 use bevy::prelude::*;
+use bevy::light::{light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight, SunDisk};
 use eustress_common::classes::{
     ClassName, Instance, EustressPointLight, EustressSpotLight, SurfaceLight, Terrain, Atmosphere,
-    Sun as SunClass, Moon as MoonClass,
+    Sun as SunClass, Moon as MoonClass, Sky,
 };
 use eustress_common::services::lighting::{Sun as SunMarker, Moon as MoonMarker, EustressAtmosphere, LightingService};
 
@@ -50,8 +55,12 @@ impl Plugin for LightingPlugin {
             .register_type::<Terrain>()
             .register_type::<Atmosphere>()
             
-            // Add system to insert Sun, Moon, Atmosphere as Explorer entities
-            .add_systems(PostStartup, setup_lighting_explorer_entities)
+            // Hydrate file-loaded Lighting/ entities with real ECS components.
+            // Runs every frame — detects Instance entities with lighting
+            // class names that lack their real Bevy components and attaches
+            // DirectionalLight, SunMarker, SunClass, MoonMarker, etc.
+            // This is the authoritative path for per-Space lighting.
+            .add_systems(Update, hydrate_lighting_entities)
             // Sync Sun class properties with LightingService
             .add_systems(Update, sync_sun_with_lighting_service)
             // Update directional light from Sun class (latitude-based positioning)
@@ -63,27 +72,45 @@ impl Plugin for LightingPlugin {
     }
 }
 
-/// Setup Sun, Moon, and Atmosphere as proper Explorer entities under Lighting service
-/// This runs after SharedLightingPlugin's setup_lighting to add Instance and class components
-fn setup_lighting_explorer_entities(
+/// Hydrate file-loaded Lighting/ entities with real ECS components.
+///
+/// The file loader spawns `Instance` entities from `Lighting/*.instance.toml`
+/// but only attaches generic components (Instance, Transform, Visibility,
+/// Attributes, Name). This system detects entities with lighting class names
+/// that lack their real Bevy components and attaches:
+///
+/// - **Star → DirectionalLight + SunMarker + SunClass + cascade shadows + SunDisk**
+/// - **Moon → DirectionalLight + MoonMarker + MoonClass**
+/// - **Sky → Sky component**
+/// - **Atmosphere → Atmosphere + EustressAtmosphere**
+///
+/// Runs every `Update` frame; cheap no-op when all entities are hydrated
+/// (the `Without<>` filter ensures empty query iteration).
+fn hydrate_lighting_entities(
     mut commands: Commands,
-    sun_query: Query<Entity, (With<SunMarker>, Without<Instance>)>,
-    moon_query: Query<Entity, (With<MoonMarker>, Without<Instance>)>,
-    atmosphere_query: Query<Entity, (With<EustressAtmosphere>, With<Instance>)>,
     lighting: Res<LightingService>,
+    // Star entities that have Instance but lack SunMarker (not yet hydrated)
+    unhydrated_sun: Query<(Entity, &Instance), (Without<SunMarker>, Without<MoonMarker>)>,
+    // Moon entities that have Instance but lack MoonMarker
+    unhydrated_moon: Query<(Entity, &Instance), (Without<MoonMarker>, Without<SunMarker>)>,
+    // Sky entities that lack Sky component
+    unhydrated_sky: Query<(Entity, &Instance), Without<Sky>>,
+    // Atmosphere entities that lack EustressAtmosphere component
+    unhydrated_atmo: Query<(Entity, &Instance), Without<EustressAtmosphere>>,
 ) {
-    // Add Instance and SunClass to Sun entity so it appears in Explorer under Lighting
-    for entity in sun_query.iter() {
-        info!("☀️ Adding Explorer components to Sun entity");
-        
-        // Create Sun class with properties from LightingService
+    // ── Star → Sun (DirectionalLight + SunMarker + SunClass) ──────────
+    for (entity, instance) in unhydrated_sun.iter() {
+        if instance.class_name != ClassName::Star { continue; }
+
+        info!("☀️ Hydrating Sun entity {:?} from Lighting/ TOML", entity);
+
         let sun_class = SunClass {
             enabled: true,
-            time_of_day: lighting.time_of_day * 24.0, // Convert 0-1 to 0-24
+            time_of_day: lighting.time_of_day * 24.0,
             cycle_speed: 0.0,
             cycle_paused: true,
             latitude: lighting.geographic_latitude,
-            day_of_year: 172, // Summer solstice
+            day_of_year: 172,
             angular_size: lighting.sun_angular_radius * 2.0,
             noon_color: lighting.sun_color,
             horizon_color: [1.0, 0.5, 0.2, 1.0],
@@ -97,64 +124,88 @@ fn setup_lighting_explorer_entities(
             god_rays_intensity: 0.0,
             texture: String::new(),
         };
-        
+
+        let sun_dir = lighting.sun_direction();
+        let cascade_shadow_config = CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.1,
+            maximum_distance: 2048.0,
+            first_cascade_far_bound: 16.0,
+            overlap_proportion: 0.3,
+            ..default()
+        }
+        .build();
+
         commands.entity(entity).insert((
-            Instance {
-                name: "Sun".to_string(),
-                class_name: ClassName::Star,
-                archivable: true,
-                id: entity.index().index(),
-                ..Default::default()
+            DirectionalLight {
+                color: Color::srgba(
+                    lighting.sun_color[0],
+                    lighting.sun_color[1],
+                    lighting.sun_color[2],
+                    lighting.sun_color[3],
+                ),
+                illuminance: lux::RAW_SUNLIGHT,
+                shadows_enabled: true,
+                shadow_depth_bias: 0.02,
+                shadow_normal_bias: 1.8,
+                ..default()
             },
+            SunDisk {
+                angular_size: sun_class.angular_size.to_radians(),
+                intensity: 1.0,
+            },
+            Transform::from_translation(sun_dir * 100.0)
+                .looking_at(Vec3::ZERO, Vec3::Y),
+            VolumetricLight,
+            cascade_shadow_config,
+            SunMarker,
             sun_class,
             LightingServiceOwner,
         ));
     }
-    
-    // Add Instance and MoonClass to Moon entity if it exists
-    for entity in moon_query.iter() {
-        info!("🌙 Adding Explorer components to Moon entity");
+
+    // ── Moon → DirectionalLight + MoonMarker + MoonClass ──────────────
+    for (entity, instance) in unhydrated_moon.iter() {
+        if instance.class_name != ClassName::Moon { continue; }
+
+        info!("🌙 Hydrating Moon entity {:?} from Lighting/ TOML", entity);
+
         commands.entity(entity).insert((
-            Instance {
-                name: "Moon".to_string(),
-                class_name: ClassName::Moon,
-                archivable: true,
-                id: entity.index().index(),
-                ..Default::default()
+            DirectionalLight {
+                color: Color::srgb(0.7, 0.75, 0.9),
+                illuminance: 500.0,
+                shadows_enabled: false,
+                ..default()
             },
+            Transform::from_xyz(50.0, 80.0, -30.0)
+                .looking_at(Vec3::ZERO, Vec3::Y),
+            MoonMarker,
             MoonClass::default(),
             LightingServiceOwner,
         ));
     }
-    
-    // NOTE: Moon is already spawned by SharedLightingPlugin in eustress_common
-    // Do NOT spawn another one here - that causes duplicate moons!
-    
-    // If no Atmosphere exists, spawn one as default child of Lighting
-    if atmosphere_query.is_empty() {
-        info!("🌫️ Spawning Atmosphere entity for Lighting service");
-        let atmo_entity = commands.spawn((
-            Atmosphere::default(),
-            EustressAtmosphere::default(),
-            Name::new("Atmosphere"),
+
+    // ── Sky → Sky component ───────────────────────────────────────────
+    for (entity, instance) in unhydrated_sky.iter() {
+        if instance.class_name != ClassName::Sky { continue; }
+
+        info!("�️ Hydrating Sky entity {:?} from Lighting/ TOML", entity);
+        commands.entity(entity).insert((
+            Sky::default(),
             LightingServiceOwner,
-            Instance {
-                name: "Atmosphere".to_string(),
-                class_name: ClassName::Atmosphere,
-                archivable: true,
-                id: 0,
-                ..Default::default()
-            },
-        )).id();
-        
-        // Update instance ID
-        commands.entity(atmo_entity).insert(Instance {
-            name: "Atmosphere".to_string(),
-            class_name: ClassName::Atmosphere,
-            archivable: true,
-            id: atmo_entity.index().index(),
-            ..Default::default()
-        });
+        ));
+    }
+
+    // ── Atmosphere → Atmosphere + EustressAtmosphere ──────────────────
+    for (entity, instance) in unhydrated_atmo.iter() {
+        if instance.class_name != ClassName::Atmosphere { continue; }
+
+        info!("🌫️ Hydrating Atmosphere entity {:?} from Lighting/ TOML", entity);
+        commands.entity(entity).insert((
+            Atmosphere::clear_day(),
+            EustressAtmosphere::default(),
+            LightingServiceOwner,
+        ));
     }
 }
 

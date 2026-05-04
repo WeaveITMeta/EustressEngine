@@ -14,14 +14,28 @@ use std::collections::HashMap;
 
 /// Instance data extracted from the Luau VM after script execution.
 /// Used to bridge Luau Instance.new() to Bevy ECS entity spawning.
+///
+/// Despite the `Luau` prefix, this struct is the SHARED bridge for both
+/// Luau and Rune one-shot drains — both languages converge here on the
+/// way to the engine spawner. Field changes affect both pipelines.
 #[derive(Debug, Clone)]
 pub struct LuauCreatedInstance {
     pub class_name: String,
     pub name: String,
     pub position: [f32; 3],
+    /// Quaternion `[x, y, z, w]`. Identity = `[0, 0, 0, 1]`. Either
+    /// drain may populate this from a `CFrame` userdata or by
+    /// converting an `Orientation` Vector3 of Euler degrees to a
+    /// quaternion. Without this field, scripts could not produce
+    /// rotated parts — every Luau/Rune procgen scene was forced to
+    /// axis-aligned cubes regardless of script intent.
+    pub rotation: [f32; 4],
     pub size: [f32; 3],
     pub color: [f32; 4],
     pub material: String,
+    /// Part shape string — "Block", "Ball", "Cylinder", "Wedge",
+    /// "CornerWedge", "Cone". Maps to the correct primitive GLB.
+    pub shape: String,
     pub transparency: f32,
     pub anchored: bool,
     pub can_collide: bool,
@@ -37,6 +51,35 @@ thread_local! {
 /// Returns (text, is_error) pairs.
 pub fn drain_luau_output() -> Vec<(String, bool)> {
     LUAU_OUTPUT.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
+/// Convert Roblox-style Euler angles (degrees, YXZ-intrinsic per Roblox's
+/// `CFrame.fromOrientation` convention) to a quaternion `[x, y, z, w]`
+/// in Bevy's coordinate space.
+///
+/// **Y axis is negated for Roblox parity.** Despite both engines being
+/// nominally right-handed Y-up, their yaw conventions empirically run
+/// in opposite directions in Bevy/glam vs Roblox Studio (likely a
+/// camera-forward-direction quirk between the two — Roblox treats +Z
+/// as "back" while glam's standard rotation matrix takes +X to -Z on
+/// positive yaw, producing visually mirrored rotation around Y from a
+/// Studio viewer's perspective). Without the Y negation, the same
+/// `Orientation = Vector3.new(0, 90, 0)` Luau code visibly rotates
+/// parts the OPPOSITE way in Eustress vs Roblox — breaking the goal
+/// of "same script → same scene." The negation closes that gap.
+#[inline]
+fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
+    let rx = (deg_x as f32).to_radians() * 0.5;
+    let ry = (deg_y as f32).to_radians() * 0.5;
+    let rz = (deg_z as f32).to_radians() * 0.5;
+    let (sx, cx) = (rx.sin(), rx.cos());
+    let (sy, cy) = (ry.sin(), ry.cos());
+    let (sz, cz) = (rz.sin(), rz.cos());
+    let qx = cy * sx * cz + sy * cx * sz;
+    let qy = -(sy * cx * cz - cy * sx * sz);
+    let qz = cy * cx * sz - sy * sx * cz;
+    let qw = cy * cx * cz + sy * sx * sz;
+    [qx, qy, qz, qw]
 }
 
 // ============================================================================
@@ -135,6 +178,7 @@ impl LuauRuntime {
 
             // Extract Part-specific properties
             let material: String = inst.get("Material").unwrap_or_else(|_| "Plastic".to_string());
+            let shape: String = inst.get("Shape").unwrap_or_else(|_| "Block".to_string());
             let transparency: f64 = inst.get("Transparency").unwrap_or(0.0);
             let anchored: bool = inst.get("Anchored").unwrap_or(false);
             let can_collide: bool = inst.get("CanCollide").unwrap_or(true);
@@ -152,13 +196,24 @@ impl LuauRuntime {
                 .and_then(|ud| ud.borrow::<super::types::LuauColor3>().ok().map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32, 1.0]))
                 .unwrap_or([0.639, 0.635, 0.647, 1.0]);
 
+            // Rotation — read from `Orientation` Vector3 (Euler degrees)
+            // since that's the Roblox-Part convention and is already
+            // populated by `apply_class_defaults` for every spawned Part.
+            // Identity quaternion when absent.
+            let rotation = inst.get::<mlua::AnyUserData>("Orientation").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok()
+                    .map(|v| euler_deg_to_quat(v.0.x, v.0.y, v.0.z)))
+                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+
             instances.push(LuauCreatedInstance {
                 class_name,
                 name,
                 position,
+                rotation,
                 size,
                 color,
                 material,
+                shape,
                 transparency: transparency as f32,
                 anchored,
                 can_collide,
@@ -424,6 +479,36 @@ impl LuauRuntime {
             .map_err(|error| format!("Failed to set workspace.Gravity: {}", error))?;
         globals.set("workspace", workspace_table)
             .map_err(|error| format!("Failed to set workspace: {}", error))?;
+
+        // tick() — Roblox-compatible time function (seconds since Unix epoch)
+        let tick_fn = lua.create_function(|_, ()| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            Ok(now.as_secs_f64())
+        }).map_err(|error| format!("Failed to create tick: {}", error))?;
+        globals.set("tick", tick_fn)
+            .map_err(|error| format!("Failed to set tick: {}", error))?;
+
+        // Enum — Roblox-style enum namespace injected as pure Lua so we
+        // avoid mlua metatable API differences across versions. Unknown
+        // Enum.Foo.Bar accesses return a string token "Foo.Bar" so scripts
+        // that use Enum values for comparison or assignment don't error out.
+        lua.load(r#"
+Enum = setmetatable({}, {
+    __index = function(self, category)
+        local sub = rawget(self, category)
+        if sub then return sub end
+        sub = setmetatable({}, {
+            __index = function(_, key)
+                return category .. "." .. key
+            end
+        })
+        rawset(self, category, sub)
+        return sub
+    end
+})
+"#).exec().map_err(|e| format!("Failed to inject Enum: {}", e))?;
 
         Ok(())
     }

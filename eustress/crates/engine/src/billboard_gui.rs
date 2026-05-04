@@ -43,7 +43,7 @@ use eustress_common::classes::BillboardGui;
 use eustress_common::gui::billboard_renderer::{BillboardGuiMarker, GuiElementDisplay};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 // Pulls in BillboardCard + BillboardLabelData generated from the engine's
 // `main.slint` (which imports `billboard_card.slint`).
@@ -68,9 +68,15 @@ const ALWAYS_ON_TOP_DEPTH_BIAS: f32 = 10_000.0;
 /// Off-thread-hostile state for one billboard: the Slint component and the
 /// window adapter backing it. Stored in a NonSend resource because
 /// `BillboardCard` wraps `Rc` internally.
+///
+/// We hold a STRONG `Rc` to the adapter — not a `Weak`. Slint's component
+/// internals don't reliably keep the adapter alive across the component's
+/// full lifetime (we hit "adapter Weak couldn't upgrade" warnings on
+/// every render frame after the initial `show()` cycle), so the
+/// off-screen renderer needs to pin it itself.
 struct BillboardSlint {
     card: BillboardCard,
-    adapter_weak: Weak<crate::ui::slint_ui::BevyWindowAdapter>,
+    adapter: Rc<crate::ui::slint_ui::BevyWindowAdapter>,
 }
 
 /// NonSend map of per-billboard Slint state. Keyed by the entity that carries
@@ -110,34 +116,42 @@ pub struct BillboardQuad {
 /// panel edits are live. Runs only when the class component is changed.
 ///
 /// Also writes `units_offset` onto the entity's local `Transform` so the
-/// quad physically moves when the user drags the UnitsOffset value. Prior
-/// versions only applied the offset once at spawn time (in
-/// `spawn::spawn_billboard_gui`), so Properties-panel edits updated the
-/// component but the quad stayed at its initial position — the exact
-/// "UnitsOffset doesn't update in real time" bug the user reported.
+/// quad physically moves when the user drags the UnitsOffset value.
+///
+/// **Directionality fix (2026-04-24).** Previously this sync overwrote
+/// `transform.translation` with `class.units_offset` on *every*
+/// `Changed<BillboardGui>` event — which includes edits to unrelated
+/// fields like `size` or `always_on_top`. Result: any Properties-panel
+/// tweak reset a gizmo-moved billboard back to its authored offset.
+/// The cache below tracks the last-applied units_offset per entity so
+/// we only write Transform when the user genuinely edited UnitsOffset
+/// through the Properties panel. Gizmo moves (which mutate Transform
+/// directly, leaving units_offset alone) now survive property edits.
 fn sync_billboard_class_to_marker(
     mut q: Query<
-        (&BillboardGui, &mut BillboardGuiMarker, &mut Transform),
+        (Entity, &BillboardGui, &mut BillboardGuiMarker, &mut Transform),
         Changed<BillboardGui>,
     >,
+    mut last_offsets: Local<std::collections::HashMap<Entity, [f32; 3]>>,
 ) {
-    for (class, mut marker, mut transform) in &mut q {
+    for (entity, class, mut marker, mut transform) in &mut q {
         marker.size = class.size;
         marker.max_distance = class.max_distance;
         marker.always_on_top = class.always_on_top;
         marker.visible = class.enabled;
 
-        // Local offset from the parent (the adornee, attached via
-        // ChildOf). Writing to `Transform.translation` — not
-        // `GlobalTransform` — keeps parent-child propagation working
-        // so the billboard tracks the part as it moves.
-        let new_translation = Vec3::new(
-            class.units_offset[0],
-            class.units_offset[1],
-            class.units_offset[2],
-        );
-        if (transform.translation - new_translation).length_squared() > f32::EPSILON {
-            transform.translation = new_translation;
+        // Only apply units_offset → Transform when the offset field
+        // itself changed vs. the cached last-seen value. First-time
+        // entries (no cache hit) still sync so initial load works.
+        let cached = last_offsets.get(&entity).copied();
+        let units_changed = cached.map_or(true, |c| c != class.units_offset);
+        if units_changed {
+            transform.translation = Vec3::new(
+                class.units_offset[0],
+                class.units_offset[1],
+                class.units_offset[2],
+            );
+            last_offsets.insert(entity, class.units_offset);
         }
     }
 }
@@ -166,15 +180,27 @@ fn spawn_billboard_render_state(
                 continue;
             }
         };
-        let adapter_weak = crate::ui::slint_ui::take_latest_window_adapter()
-            .unwrap_or_else(Weak::new);
+        let adapter = match crate::ui::slint_ui::take_latest_window_adapter() {
+            Some(a) => a,
+            None => {
+                // SLINT_WINDOWS thread-local was empty OR the latest
+                // entry's strong count was already 0 — either the
+                // platform isn't pushing adapters or Slint dropped the
+                // Rc before we could grab it. Without an adapter the
+                // software renderer has nowhere to draw, so skip the
+                // spawn entirely; we'll retry next frame because the
+                // marker still doesn't have a `BillboardRenderHandle`.
+                warn!(
+                    "🪧 billboard {:?}: no window adapter from Slint platform — billboard skipped this frame",
+                    entity
+                );
+                continue;
+            }
+        };
 
         card.set_canvas_width(w as i32);
         card.set_canvas_height(h as i32);
-
-        if let Some(adapter) = adapter_weak.upgrade() {
-            adapter.resize(slint::PhysicalSize::new(w, h), 1.0);
-        }
+        adapter.resize(slint::PhysicalSize::new(w, h), 1.0);
 
         if let Err(e) = card.show() {
             warn!("Failed to show BillboardCard for {:?}: {}", entity, e);
@@ -202,7 +228,7 @@ fn spawn_billboard_render_state(
 
         states
             .map
-            .insert(entity, BillboardSlint { card, adapter_weak });
+            .insert(entity, BillboardSlint { card, adapter });
         commands.entity(entity).insert(BillboardRenderHandle {
             image,
             material,
@@ -257,9 +283,9 @@ fn sync_billboard_properties(
 
             slint_state.card.set_canvas_width(new_w as i32);
             slint_state.card.set_canvas_height(new_h as i32);
-            if let Some(adapter) = slint_state.adapter_weak.upgrade() {
-                adapter.resize(slint::PhysicalSize::new(new_w, new_h), 1.0);
-            }
+            slint_state
+                .adapter
+                .resize(slint::PhysicalSize::new(new_w, new_h), 1.0);
 
             // Update the quad's material handle + scale to match.
             if let Ok((mut quad_tf, _)) = quads.get_mut(handle.quad_entity) {
@@ -330,18 +356,47 @@ fn update_and_render_billboards(
     mut materials: ResMut<Assets<StandardMaterial>>,
     states: NonSend<BillboardSlintStates>,
     mut billboards: Query<(Entity, &mut BillboardRenderHandle)>,
-    children_q: Query<&Children>,
-    gui_elements: Query<&GuiElementDisplay>,
+    // Per-billboard log-once gate so the render diagnostic doesn't
+    // spam every frame. We log the first 3 renders per billboard —
+    // enough to catch warmup transients (label-push delay,
+    // texture-changed ramp) without flooding.
+    mut diag_count: Local<std::collections::HashMap<Entity, u32>>,
+    // Discover children via the authoritative `ChildOf` relation rather
+    // than the derived `Children` component. `Children` is populated by
+    // Bevy's hierarchy-propagation system (PostUpdate), so reading it
+    // from an Update system can miss freshly-spawned children for one
+    // or more frames — exactly the symptom on freshly-loaded
+    // BillboardGui folders where the child TextLabel was spawned in
+    // the same frame as the parent. Walking `ChildOf` instead means
+    // every TextLabel under this billboard is visible to us the
+    // moment it's inserted, no propagation wait.
+    gui_elements: Query<(&GuiElementDisplay, &ChildOf)>,
 ) {
     slint::platform::update_timers_and_animations();
 
     for (entity, mut handle) in &mut billboards {
-        let Some(slint_state) = states.map.get(&entity) else { continue };
-        let Ok(children) = children_q.get(entity) else { continue };
+        let Some(slint_state) = states.map.get(&entity) else {
+            // First-time observation only — log a missing Slint state
+            // once per entity by piggybacking on `last_label_hash == 0`,
+            // the initial value before any push.
+            if handle.last_label_hash == 0 {
+                warn!(
+                    "🪧 billboard {:?}: no Slint state — spawn_billboard_render_state didn't run yet?",
+                    entity
+                );
+            }
+            continue;
+        };
 
-        let mut elems: Vec<GuiElementDisplay> = children
+        let mut elems: Vec<GuiElementDisplay> = gui_elements
             .iter()
-            .filter_map(|c| gui_elements.get(c).ok().cloned())
+            .filter_map(|(disp, child_of)| {
+                if child_of.parent() == entity {
+                    Some(disp.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         elems.sort_by_key(|e| e.z_order);
 
@@ -367,14 +422,87 @@ fn update_and_render_billboards(
             push_labels_to_card(&slint_state.card, &elems);
         }
 
-        let Some(adapter) = slint_state.adapter_weak.upgrade() else { continue };
+        // `slint_state.adapter` is a strong Rc held in the NonSend
+        // resource — guaranteed alive as long as this billboard's
+        // BillboardSlint entry exists, so no upgrade dance.
+        let adapter = &slint_state.adapter;
 
-        let Some(image) = images.get_mut(&handle.image) else { continue };
-        let Some(data) = image.data.as_mut() else { continue };
+        let Some(image) = images.get_mut(&handle.image) else {
+            warn!(
+                "🪧 billboard {:?}: GPU image handle no longer in Assets<Image>",
+                entity
+            );
+            continue;
+        };
+        let Some(data) = image.data.as_mut() else {
+            warn!(
+                "🪧 billboard {:?}: image.data is None — buffer not allocated",
+                entity
+            );
+            continue;
+        };
 
         let pixels: &mut [slint::platform::software_renderer::PremultipliedRgbaColor] =
             bytemuck::cast_slice_mut(data);
+
+        // Diagnostic — was the buffer touched at all by `render_to_buffer`?
+        // Sample two pixels at known empty coordinates so we can detect
+        // "Slint painted nothing" vs "Slint painted but the GPU upload
+        // is broken." If `pre == post` for the corner samples after the
+        // first few frames AND no labels are rendered visibly, the
+        // problem is upstream of the buffer (font missing, component
+        // not shown, labels-list empty, etc.). If pre/post differ AND
+        // a non-trivial amount of buffer is non-zero but nothing
+        // appears on the quad, the problem is downstream (texture
+        // upload, material binding, mesh UV).
+        let pre_corner = (pixels[0].red as u32, pixels[0].green as u32, pixels[0].blue as u32, pixels[0].alpha as u32);
+        let pre_centre = {
+            let i = (handle.height as usize / 2) * (handle.width as usize) + (handle.width as usize / 2);
+            let p = pixels.get(i).copied().unwrap_or_default();
+            (p.red as u32, p.green as u32, p.blue as u32, p.alpha as u32)
+        };
+
         adapter.render_to_buffer(pixels, handle.width as usize);
+
+        // Per-billboard one-shot diagnostic. Logs the first 3 renders
+        // of each billboard so we catch warmup transients (label-push
+        // delay, ReusedBuffer first-frame full repaint, etc.) without
+        // flooding ongoing logs. Samples corner + centre pre/post
+        // and counts non-transparent pixels across the buffer.
+        //
+        // Reading the output:
+        //   - `non_alpha=0 pixels: 0 / N` → Slint painted nothing.
+        //     Renderer is silently no-op'ing. Most likely: missing
+        //     font (cosmic-text can't find Segoe UI), labels list
+        //     is empty when render fires, OR component never
+        //     completed `show()`. Check that "pushing N labels"
+        //     log fires BEFORE this one.
+        //   - `non_alpha > 0` and visible content but corner pre==post
+        //     → ReusedBuffer working as expected (corner stays
+        //     transparent because nothing draws there).
+        //   - `non_alpha > 0` but nothing on the quad → buffer is
+        //     painted but downstream binding broken. Check material
+        //     `base_color_texture` handle matches `handle.image`,
+        //     check Bevy's render world picks up the asset Changed
+        //     mark, check quad mesh UVs don't sample outside [0,1].
+        let render_count = diag_count.entry(entity).or_insert(0);
+        if *render_count < 3 {
+            *render_count += 1;
+            let post_corner = (pixels[0].red as u32, pixels[0].green as u32, pixels[0].blue as u32, pixels[0].alpha as u32);
+            let post_centre = {
+                let i = (handle.height as usize / 2) * (handle.width as usize) + (handle.width as usize / 2);
+                let p = pixels.get(i).copied().unwrap_or_default();
+                (p.red as u32, p.green as u32, p.blue as u32, p.alpha as u32)
+            };
+            let non_transparent = pixels.iter().filter(|p| p.alpha > 0).count();
+            info!(
+                "🪧 billboard {:?} render #{}: corner pre={:?} post={:?} | centre pre={:?} post={:?} | non_alpha>0: {}/{} ({:.1}%) | labels: {}",
+                entity, *render_count, pre_corner, post_corner, pre_centre, post_centre,
+                non_transparent, pixels.len(),
+                100.0 * non_transparent as f32 / pixels.len() as f32,
+                elems.len(),
+            );
+        }
 
         let _ = materials.get_mut(&handle.material);
     }

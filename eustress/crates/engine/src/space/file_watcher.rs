@@ -312,6 +312,18 @@ pub fn process_file_changes(
 }
 
 /// Handle file modification (hot-reload)
+/// True when every component of the `Transform` is finite (no NaN, no Inf).
+/// Used by the TOML hot-reload path to detect mid-write partial parses
+/// that would inject a non-finite Position into Avian.
+fn raw_transform_is_finite(t: &Transform) -> bool {
+    t.translation.is_finite()
+        && t.rotation.x.is_finite()
+        && t.rotation.y.is_finite()
+        && t.rotation.z.is_finite()
+        && t.rotation.w.is_finite()
+        && t.scale.is_finite()
+}
+
 fn handle_file_modified(
     event: &FileChangeEvent,
     registry: &mut SpaceFileRegistry,
@@ -408,8 +420,34 @@ fn handle_file_modified(
                             } else {
                                 match toml::from_str::<crate::space::instance_loader::InstanceDefinition>(&toml_content) {
                                     Ok(instance_def) => {
-                                        // Update transform
-                                        let transform: Transform = instance_def.transform.into();
+                                        // Sanitise BEFORE inserting so a
+                                        // mid-write partial parse (which
+                                        // can leave numeric fields at
+                                        // their `Default::default()`
+                                        // produced 0.0 / 0.0 / 0.0 / 0.0
+                                        // quaternion — degenerate, would
+                                        // panic Avian's
+                                        // `assert_components_finite`
+                                        // on the next physics step) is
+                                        // turned into a benign clamp
+                                        // instead of crashing the
+                                        // engine. The same sanity
+                                        // clamps that `spawn_instance`
+                                        // applies at load time apply
+                                        // here at reload time too —
+                                        // single source of truth lives
+                                        // in `instance_loader`.
+                                        let raw: Transform = instance_def.transform.into();
+                                        let transform = crate::space::instance_loader::sanitize_transform(raw);
+                                        if !raw_transform_is_finite(&raw) {
+                                            warn!(
+                                                "🛡️ {:?}: hot-reload Transform had non-finite fields (pos={:?} rot={:?} scale={:?}) — clamped before insert",
+                                                event.path,
+                                                raw.translation,
+                                                raw.rotation,
+                                                raw.scale,
+                                            );
+                                        }
                                         commands.entity(entity).insert(transform);
 
                                         if let Some(ref mat) = instance_def.material {

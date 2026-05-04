@@ -77,6 +77,8 @@ pub enum CenterTabType {
     WebBrowser,
     /// API Reference browser
     ApiBrowser,
+    /// Services Browser (catalog of all default Space services)
+    ServicesBrowser,
 }
 
 /// Document sub-types for the Document tab
@@ -111,6 +113,7 @@ impl CenterTabType {
             CenterTabType::VideoPlayer => "video",
             CenterTabType::WebBrowser => "web",
             CenterTabType::ApiBrowser => "api",
+            CenterTabType::ServicesBrowser => "services",
         }
     }
 
@@ -133,6 +136,7 @@ impl CenterTabType {
             CenterTabType::VideoPlayer => "video",
             CenterTabType::WebBrowser => "globe",
             CenterTabType::ApiBrowser => "code",
+            CenterTabType::ServicesBrowser => "package",
         }
     }
 }
@@ -364,6 +368,30 @@ impl CenterTabManager {
             id,
             name: "API Reference".to_string(),
             tab_type: CenterTabType::ApiBrowser,
+            entity: None,
+            file_path: None,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: String::new(),
+            summary_content: String::new(),
+        })
+    }
+
+    /// Open or focus the Services Browser tab.
+    pub fn open_services_browser(&mut self) -> usize {
+        if let Some(idx) = self.tabs.iter().position(|t| t.tab_type == CenterTabType::ServicesBrowser) {
+            self.active_tab = idx;
+            self.focus_only = true;
+            self.dirty = true;
+            return idx;
+        }
+        let id = self.next_id();
+        self.push_tab(CenterTabEntry {
+            id,
+            name: "Services Browser".to_string(),
+            tab_type: CenterTabType::ServicesBrowser,
             entity: None,
             file_path: None,
             url: None,

@@ -277,3 +277,222 @@ impl ToolHandler for GitDiffTool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Git Branch
+// ---------------------------------------------------------------------------
+
+pub struct GitBranchTool;
+
+impl ToolHandler for GitBranchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "git_branch",
+            description: "List, create, switch, or delete git branches in the Universe repository. Actions: 'list' (default), 'create', 'switch', 'delete'. Prototype lattice branches (v0001, v0002, ...) are managed here.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "Branch action: list, create, switch, delete", "default": "list" },
+                    "name": { "type": "string", "description": "Branch name (required for create, switch, delete)" }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &["workshop.tool.git_branch"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+        match action {
+            "list" => {
+                match git(ctx, &["branch", "-a", "--no-color"]) {
+                    Ok(output) => {
+                        let branches: Vec<&str> = output.lines().collect();
+                        let current = branches.iter()
+                            .find(|b| b.starts_with('*'))
+                            .map(|b| b.trim_start_matches("* ").trim())
+                            .unwrap_or("(detached)");
+                        ToolResult {
+                            tool_name: "git_branch".to_string(),
+                            tool_use_id: String::new(),
+                            success: true,
+                            content: format!("Current: {}\n{} branch(es):\n{}", current, branches.len(), output),
+                            structured_data: Some(serde_json::json!({
+                                "current": current,
+                                "branches": branches.iter().map(|b| b.trim()).collect::<Vec<_>>(),
+                                "count": branches.len(),
+                            })),
+                            stream_topic: None,
+                        }
+                    }
+                    Err(e) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: e, structured_data: None, stream_topic: None,
+                    },
+                }
+            }
+            "create" => {
+                if name.is_empty() {
+                    return ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: "Branch name required for 'create'".to_string(),
+                        structured_data: None, stream_topic: None,
+                    };
+                }
+                match git(ctx, &["checkout", "-b", name]) {
+                    Ok(output) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: true,
+                        content: format!("Created and switched to branch '{}'\n{}", name, output.trim()),
+                        structured_data: Some(serde_json::json!({ "action": "create", "branch": name })),
+                        stream_topic: Some("workshop.tool.git_branch".to_string()),
+                    },
+                    Err(e) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: e, structured_data: None, stream_topic: None,
+                    },
+                }
+            }
+            "switch" => {
+                if name.is_empty() {
+                    return ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: "Branch name required for 'switch'".to_string(),
+                        structured_data: None, stream_topic: None,
+                    };
+                }
+                match git(ctx, &["checkout", name]) {
+                    Ok(output) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: true,
+                        content: format!("Switched to branch '{}'\n{}", name, output.trim()),
+                        structured_data: Some(serde_json::json!({ "action": "switch", "branch": name })),
+                        stream_topic: Some("workshop.tool.git_branch".to_string()),
+                    },
+                    Err(e) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: e, structured_data: None, stream_topic: None,
+                    },
+                }
+            }
+            "delete" => {
+                if name.is_empty() {
+                    return ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: "Branch name required for 'delete'".to_string(),
+                        structured_data: None, stream_topic: None,
+                    };
+                }
+                match git(ctx, &["branch", "-d", name]) {
+                    Ok(output) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: true,
+                        content: format!("Deleted branch '{}'\n{}", name, output.trim()),
+                        structured_data: Some(serde_json::json!({ "action": "delete", "branch": name })),
+                        stream_topic: Some("workshop.tool.git_branch".to_string()),
+                    },
+                    Err(e) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: e, structured_data: None, stream_topic: None,
+                    },
+                }
+            }
+            _ => ToolResult {
+                tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                success: false,
+                content: format!("Unknown action '{}'. Use: list, create, switch, delete.", action),
+                structured_data: None, stream_topic: None,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Feedback Diff — parameterized comparison between branches, commits, or paths
+// ---------------------------------------------------------------------------
+
+pub struct FeedbackDiffTool;
+
+impl ToolHandler for FeedbackDiffTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "feedback_diff",
+            description: "Compare two git refs (branches, commits, tags) or file paths to produce a structured diff. Use for prototype lattice comparisons (e.g. v0001 vs v0003), scenario branch evaluation, or before/after analysis of simulation parameter changes.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "base": { "type": "string", "description": "Base ref — branch name, commit hash, or tag (e.g. 'v0001', 'main', 'HEAD~3')" },
+                    "compare": { "type": "string", "description": "Compare ref — branch name, commit hash, or tag (e.g. 'v0003', 'HEAD')" },
+                    "path": { "type": "string", "description": "Optional path filter — only show diff for files under this path (relative to repo root)" },
+                    "stat_only": { "type": "boolean", "description": "If true, return only file-level change summary (insertions/deletions) instead of full diff", "default": false }
+                },
+                "required": ["base", "compare"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let base = input.get("base").and_then(|v| v.as_str()).unwrap_or("HEAD~1");
+        let compare = input.get("compare").and_then(|v| v.as_str()).unwrap_or("HEAD");
+        let path = input.get("path").and_then(|v| v.as_str());
+        let stat_only = input.get("stat_only").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let range = format!("{}..{}", base, compare);
+        let mut args = if stat_only {
+            vec!["diff", "--stat", &range]
+        } else {
+            vec!["diff", &range]
+        };
+        if let Some(p) = path {
+            args.push("--");
+            args.push(p);
+        }
+
+        match git(ctx, &args) {
+            Ok(output) => {
+                let truncated = if output.len() > 12000 {
+                    format!("{}...\n[diff truncated — {} bytes total]", &output[..12000], output.len())
+                } else {
+                    output.clone()
+                };
+
+                // Parse stat summary if available
+                let files_changed = output.lines()
+                    .filter(|l| l.contains("| ") || l.starts_with("diff --git"))
+                    .count();
+
+                ToolResult {
+                    tool_name: "feedback_diff".to_string(),
+                    tool_use_id: String::new(),
+                    success: true,
+                    content: if truncated.is_empty() {
+                        format!("No differences between {} and {}", base, compare)
+                    } else {
+                        format!("Diff {} → {} ({} file(s) changed):\n{}", base, compare, files_changed, truncated)
+                    },
+                    structured_data: Some(serde_json::json!({
+                        "base": base,
+                        "compare": compare,
+                        "files_changed": files_changed,
+                        "stat_only": stat_only,
+                    })),
+                    stream_topic: None,
+                }
+            }
+            Err(e) => ToolResult {
+                tool_name: "feedback_diff".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: format!("feedback_diff {} → {} failed: {}", base, compare, e),
+                structured_data: None,
+                stream_topic: None,
+            },
+        }
+    }
+}

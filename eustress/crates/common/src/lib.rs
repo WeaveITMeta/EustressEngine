@@ -46,6 +46,10 @@ pub mod sim_record;
 #[cfg(feature = "streaming")]
 pub mod sim_stream;
 pub mod classes;
+// Authoritative per-class TOML schema — embedded templates + self-heal +
+// extra-section claimants. Single source of truth shared between engine,
+// client, and external tooling.
+pub mod class_schema;
 pub mod default_scene;
 pub mod eustress_format;
 pub mod generation;

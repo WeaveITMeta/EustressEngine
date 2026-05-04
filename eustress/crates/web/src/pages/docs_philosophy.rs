@@ -729,8 +729,8 @@ When the player's health reaches zero, show the game over screen."}</code></pre>
                                     <strong>"Join us in building the future of creation."</strong>
                                 </p>
                                 <div class="cta-buttons">
-                                    <a href="/download" class="btn-primary">"Download Eustress"</a>
-                                    <a href="/community" class="btn-secondary">"Join the Community"</a>
+                                    <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
+                                    <a href="/community" class="btn-secondary-steel">"Join the Community"</a>
                                 </div>
                             </div>
                         </div>

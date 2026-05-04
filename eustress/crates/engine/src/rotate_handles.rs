@@ -75,12 +75,16 @@ pub struct RotateHandlesPlugin;
 
 impl Plugin for RotateHandlesPlugin {
     fn build(&self, app: &mut App) {
+        // Run BEFORE Bevy's transform propagation so the rotate ring
+        // stays glued to the part during a drag. Same rationale as
+        // `MoveHandlesPlugin` — see there for the full story.
         app.add_systems(
             PostUpdate,
             (
                 sync_rotate_handle_root,
                 update_ring_colors,
-            ),
+            )
+                .before(bevy::transform::TransformSystems::Propagate),
         );
     }
 }
@@ -93,11 +97,15 @@ fn sync_rotate_handle_root(
     mut commands: Commands,
     studio_state: Option<Res<StudioState>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
+    // Selected parts: LOCAL `Transform` so the rotate-tool's write
+    // this frame is picked up before TransformPropagate runs.
     selected: Query<
-        (Entity, &GlobalTransform, Option<&BasePart>),
+        (Entity, &Transform, Option<&BasePart>),
         With<Selected>,
     >,
-    mut root_query: Query<(&mut RotateHandleRoot, &mut Transform), Without<RotateRing>>,
+    // `Without<Selected>` disjoints this from the `selected` read-only
+    // Transform query above — same fix as scale_handles / move_handles.
+    mut root_query: Query<(&mut RotateHandleRoot, &mut Transform), (Without<RotateRing>, Without<Selected>)>,
     existing_root: Query<Entity, With<RotateHandleRoot>>,
     mut ring_query: Query<
         (&RotateRing, &mut CylinderHandleAdornment),
@@ -126,7 +134,7 @@ fn sync_rotate_handle_root(
     }
 
     let Some(group) = compute_group_frame(
-        selected.iter().map(|(e, gt, bp)| (e, gt, bp)),
+        selected.iter().map(|(e, t, bp)| (e, t, bp)),
     ) else {
         return;
     };
@@ -185,15 +193,14 @@ struct GroupFrame {
 }
 
 fn compute_group_frame<'a>(
-    iter: impl Iterator<Item = (Entity, &'a GlobalTransform, Option<&'a BasePart>)>,
+    iter: impl Iterator<Item = (Entity, &'a Transform, Option<&'a BasePart>)>,
 ) -> Option<GroupFrame> {
     let mut bounds_min = Vec3::splat(f32::MAX);
     let mut bounds_max = Vec3::splat(f32::MIN);
     let mut count = 0;
     let mut last_rotation = Quat::IDENTITY;
 
-    for (_e, gt, base_part) in iter {
-        let t = gt.compute_transform();
+    for (_e, t, base_part) in iter {
         let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
         let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);

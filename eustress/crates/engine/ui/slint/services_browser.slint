@@ -1,0 +1,633 @@
+// ============================================================================
+// Eustress Engine Studio - Services Browser Panel
+// Browsable catalog of all default services included with every Space.
+// Each service shows a description, property summary, and hyperlink to
+// the /learn documentation page on eustress.dev.
+//
+// Table of Contents:
+//   1. Data Structures — ServiceBrowserEntry, ServicePropertySummary
+//   2. ServiceCard — detail view for a selected service
+//   3. ServiceSidebarItem — sidebar row for each service
+//   4. ServicesBrowserPanel — main panel with sidebar + detail
+// ============================================================================
+
+import { VerticalBox, HorizontalBox, ScrollView, LineEdit } from "std-widgets.slint";
+import { Theme, PanelHeader } from "theme.slint";
+
+// ============================================================================
+// 1. Data Structures
+// ============================================================================
+
+// Summary of a single property within a service
+export struct ServicePropertySummary {
+    name: string,
+    property-type: string,   // "float", "bool", "string", "color", "enum", "int"
+    default-value: string,
+    description: string,
+}
+
+// Full entry for a service in the browser
+export struct ServiceBrowserEntry {
+    name: string,               // "Workspace", "Lighting", etc.
+    icon-text: string,          // Emoji or unicode symbol for the service icon
+    icon-color: color,          // Color tint for the icon circle
+    class-name: string,         // ECS class name: "Workspace", "Lighting", etc.
+    category: string,           // "Core", "Player", "Data", "Scripting", "Rendering"
+    summary: string,            // One-line summary
+    description: string,        // Multi-paragraph description
+    learn-url: string,          // URL path: "/learn/services/workspace"
+    property-count: int,
+    properties: [ServicePropertySummary],
+}
+
+// ============================================================================
+// 2. ServiceCard — detail view for a selected service
+// ============================================================================
+
+component ServiceCard inherits Rectangle {
+    in property <ServiceBrowserEntry> service;
+    callback open-learn-url(string);
+
+    background: transparent;
+
+    ScrollView {
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+
+            // ---- Header: icon + name + category badge ----
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+
+                // Service icon circle
+                Rectangle {
+                    width: 48px;
+                    height: 48px;
+                    border-radius: 24px;
+                    background: root.service.icon-color;
+
+                    Text {
+                        text: root.service.icon-text;
+                        font-size: 22px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: center;
+
+                    // Name
+                    Text {
+                        text: root.service.name;
+                        color: Theme.text-primary;
+                        font-size: 18px;
+                        font-weight: 700;
+                    }
+
+                    // Category badge + class name
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        Rectangle {
+                            width: cat-label.preferred-width + 12px;
+                            height: 18px;
+                            border-radius: 3px;
+                            background: root.service.category == "Core" ? #1a2a4a :
+                                        root.service.category == "Player" ? #1a3a2a :
+                                        root.service.category == "Data" ? #3a2a1a :
+                                        root.service.category == "Scripting" ? #2a1a3a :
+                                        #1a2a2a;
+
+                            cat-label := Text {
+                                text: root.service.category;
+                                color: root.service.category == "Core" ? #6699cc :
+                                       root.service.category == "Player" ? #66cc99 :
+                                       root.service.category == "Data" ? #cc9966 :
+                                       root.service.category == "Scripting" ? #9966cc :
+                                       #66cccc;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            text: root.service.class-name;
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-family: "Cascadia Code, Consolas, monospace";
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ---- Learn URL hyperlink ----
+            if root.service.learn-url != "": Rectangle {
+                height: 28px;
+                background: link-touch.has-hover ? #1a2a4a : transparent;
+                border-radius: 4px;
+
+                link-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.open-learn-url(root.service.learn-url); }
+                }
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    spacing: 6px;
+                    alignment: start;
+
+                    // Link icon
+                    Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        y: (parent.height - self.height) / 2;
+
+                        Text {
+                            text: "🔗";
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "View Documentation on eustress.dev";
+                        color: Theme.accent-blue;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "↗";
+                        color: Theme.accent-blue;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- Divider ----
+            Rectangle {
+                height: 1px;
+                background: #2a2a2a;
+            }
+
+            // ---- Summary ----
+            Text {
+                text: root.service.summary;
+                color: Theme.text-primary;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            // ---- Full description ----
+            if root.service.description != "": Text {
+                text: root.service.description;
+                color: Theme.text-secondary;
+                font-size: 11px;
+                wrap: word-wrap;
+            }
+
+            // ---- Properties section header ----
+            if root.service.property-count > 0: Rectangle {
+                height: 1px;
+                background: #2a2a2a;
+            }
+
+            if root.service.property-count > 0: HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+
+                Text {
+                    text: "Properties";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: count-txt.preferred-width + 10px;
+                    height: 18px;
+                    border-radius: 9px;
+                    background: #2a2a2a;
+                    y: (parent.height - self.height) / 2;
+
+                    count-txt := Text {
+                        text: root.service.property-count;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // ---- Property list ----
+            for prop in root.service.properties: Rectangle {
+                height: prop-layout.preferred-height + 8px;
+                background: prop-hover.has-hover ? #1e1e28 : transparent;
+                border-radius: 4px;
+
+                prop-hover := TouchArea {
+                    mouse-cursor: default;
+                }
+
+                prop-layout := VerticalLayout {
+                    padding: 4px;
+                    padding-left: 8px;
+                    spacing: 2px;
+
+                    // Row 1: name + type + default
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        // ? icon
+                        Rectangle {
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            background: prop.description != "" ? #1e4a7a : #2a2a2a;
+                            border-width: 1px;
+                            border-color: prop.description != "" ? Theme.accent-blue : #444444;
+                            y: (parent.height - self.height) / 2;
+
+                            Text {
+                                text: "?";
+                                color: prop.description != "" ? white : Theme.text-secondary;
+                                font-size: 9px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Property name
+                        Text {
+                            text: prop.name;
+                            color: #7cc5f0;
+                            font-size: 12px;
+                            font-weight: 600;
+                            font-family: "Cascadia Code, Consolas, monospace";
+                            vertical-alignment: center;
+                        }
+
+                        // Type badge
+                        Rectangle {
+                            width: type-txt.preferred-width + 8px;
+                            height: 16px;
+                            border-radius: 3px;
+                            background: prop.property-type == "bool" ? #1a3a2a :
+                                        prop.property-type == "float" ? #1a2a3a :
+                                        prop.property-type == "int" ? #1a2a3a :
+                                        prop.property-type == "string" ? #3a2a1a :
+                                        prop.property-type == "color" ? #3a1a2a :
+                                        #2a2a1a;
+                            y: (parent.height - self.height) / 2;
+
+                            type-txt := Text {
+                                text: prop.property-type;
+                                color: prop.property-type == "bool" ? #4caf50 :
+                                       prop.property-type == "float" ? #42a5f5 :
+                                       prop.property-type == "int" ? #42a5f5 :
+                                       prop.property-type == "string" ? #ffb74d :
+                                       prop.property-type == "color" ? #f06292 :
+                                       #ffee58;
+                                font-size: 10px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Spacer
+                        Rectangle { horizontal-stretch: 1; }
+
+                        // Default value
+                        Text {
+                            text: prop.default-value;
+                            color: Theme.text-secondary;
+                            font-size: 11px;
+                            font-family: "Cascadia Code, Consolas, monospace";
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Row 2: description
+                    if prop.description != "": Text {
+                        text: prop.description;
+                        color: Theme.text-secondary;
+                        font-size: 10px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // Bottom spacer
+            Rectangle { height: 20px; }
+        }
+    }
+}
+
+// ============================================================================
+// 3. ServiceSidebarItem — sidebar row
+// ============================================================================
+
+component ServiceSidebarItem inherits Rectangle {
+    in property <string> name;
+    in property <string> icon-text;
+    in property <color> icon-color;
+    in property <bool> selected: false;
+    callback clicked();
+
+    height: 30px;
+    background: root.selected ? #2a2a4a : (item-touch.has-hover ? #2a2a3a : transparent);
+    border-radius: 4px;
+
+    item-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        // Icon
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.icon-color;
+            y: (parent.height - self.height) / 2;
+
+            Text {
+                text: root.icon-text;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.name;
+            color: root.selected ? Theme.text-primary : Theme.text-secondary;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+    }
+}
+
+// ============================================================================
+// 4. ServicesBrowserPanel — main component
+// ============================================================================
+
+export component ServicesBrowserPanel inherits Rectangle {
+    // ---- Data ----
+    in property <[ServiceBrowserEntry]> services: [];
+    in-out property <int> selected-index: 0;
+
+    // ---- Callbacks ----
+    callback open-service-url(string);
+    callback service-selected(int);
+
+    background: Theme.panel-background;
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // ---- Header bar ----
+        Rectangle {
+            height: 36px;
+            background: Theme.header-background;
+
+            HorizontalLayout {
+                padding: 4px;
+                padding-left: 12px;
+                spacing: 8px;
+                alignment: start;
+
+                Text {
+                    text: "📦";
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    text: "Services Browser";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // Service count
+                Rectangle {
+                    width: svc-count.preferred-width + 12px;
+
+                    svc-count := Text {
+                        text: root.services.length + " services";
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ---- Content: sidebar + detail ----
+        Rectangle {
+            vertical-stretch: 1;
+
+            // Sidebar
+            sidebar := Rectangle {
+                x: 0px;
+                y: 0px;
+                width: 180px;
+                height: parent.height;
+                background: #1a1a1e;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+
+                        // Category headers interleaved with service items
+                        // Core Services
+                        Text {
+                            text: "CORE";
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                            horizontal-alignment: left;
+                        }
+
+                        for service[idx] in root.services: ServiceSidebarItem {
+                            visible: service.category == "Core";
+                            height: service.category == "Core" ? 30px : 0px;
+                            name: service.name;
+                            icon-text: service.icon-text;
+                            icon-color: service.icon-color;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.service-selected(idx);
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "PLAYER";
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+
+                        for service[idx] in root.services: ServiceSidebarItem {
+                            visible: service.category == "Player";
+                            height: service.category == "Player" ? 30px : 0px;
+                            name: service.name;
+                            icon-text: service.icon-text;
+                            icon-color: service.icon-color;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.service-selected(idx);
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "DATA";
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+
+                        for service[idx] in root.services: ServiceSidebarItem {
+                            visible: service.category == "Data";
+                            height: service.category == "Data" ? 30px : 0px;
+                            name: service.name;
+                            icon-text: service.icon-text;
+                            icon-color: service.icon-color;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.service-selected(idx);
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "SCRIPTING";
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+
+                        for service[idx] in root.services: ServiceSidebarItem {
+                            visible: service.category == "Scripting";
+                            height: service.category == "Scripting" ? 30px : 0px;
+                            name: service.name;
+                            icon-text: service.icon-text;
+                            icon-color: service.icon-color;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.service-selected(idx);
+                            }
+                        }
+
+                        Rectangle { height: 6px; }
+
+                        Text {
+                            text: "RENDERING";
+                            color: Theme.text-secondary;
+                            font-size: 9px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+
+                        for service[idx] in root.services: ServiceSidebarItem {
+                            visible: service.category == "Rendering";
+                            height: service.category == "Rendering" ? 30px : 0px;
+                            name: service.name;
+                            icon-text: service.icon-text;
+                            icon-color: service.icon-color;
+                            selected: idx == root.selected-index;
+                            clicked => {
+                                root.selected-index = idx;
+                                root.service-selected(idx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Drag handle to resize sidebar
+            Rectangle {
+                x: sidebar.width;
+                y: 0px;
+                width: 5px;
+                height: parent.height;
+                background: splitter-touch.has-hover || splitter-touch.pressed ? #5a5a7a : #333;
+
+                splitter-touch := TouchArea {
+                    mouse-cursor: col-resize;
+                    moved => {
+                        sidebar.width = max(120px, min(parent.width * 0.4, sidebar.width + self.mouse-x - self.pressed-x));
+                    }
+                }
+            }
+
+            // Detail panel
+            Rectangle {
+                x: sidebar.width + 5px;
+                y: 0px;
+                width: parent.width - sidebar.width - 5px;
+                height: parent.height;
+                clip: true;
+
+                // Empty state
+                if root.services.length == 0: Rectangle {
+                    VerticalLayout {
+                        alignment: center;
+
+                        Text {
+                            text: "No services loaded";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // Service detail card
+                if root.services.length > 0 && root.selected-index >= 0 && root.selected-index < root.services.length: ServiceCard {
+                    service: root.services[root.selected-index];
+                    open-learn-url(url) => { root.open-service-url(url); }
+                }
+            }
+        }
+    }
+}

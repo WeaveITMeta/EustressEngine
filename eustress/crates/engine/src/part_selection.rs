@@ -48,6 +48,11 @@ pub fn part_selection_system(
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     spatial_query: avian3d::prelude::SpatialQuery,
+    // Used to signal "scroll the Explorer to the just-selected entity"
+    // when a single-click happens in the 3D viewport. Multi-select
+    // (Ctrl/Shift) deliberately doesn't scroll — it'd be jarring as
+    // each accumulating click whips the tree around.
+    mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
 ) {
     // Re-expose the bundle fields under their pre-bundle names so the
     // body below needs no further edits. Each field is already the
@@ -271,14 +276,14 @@ pub fn part_selection_system(
                 Projection::Perspective(p) => p.fov,
                 _ => std::f32::consts::FRAC_PI_4,
             };
-            let effective_extent = crate::scale_tool::effective_scale_extent(
-                group_extent, group_center, camera_transform.translation(), fov_s,
+            let screen_scale = crate::scale_tool::compute_scale_screen_scale(
+                group_center, camera_transform.translation(), fov_s,
             );
             let scale_rotation = crate::move_tool::gizmo_rotation_for(
                 transform_mode,
                 selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
             );
-            if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
+            if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, group_extent, screen_scale, scale_rotation) {
                 return; // Clicking scale handle, abort selection
             }
         }
@@ -383,7 +388,7 @@ pub fn part_selection_system(
     }
 
     // Update selection
-    if let Some((part_id, distance, _hit_entity, parent_model)) = closest_hit {
+    if let Some((part_id, distance, hit_entity, parent_model)) = closest_hit {
         info!("[select] hit part_id='{}' dist={:.2}", part_id, distance);
         
         // Hit a part - check if we should allow selection changes
@@ -423,6 +428,20 @@ pub fn part_selection_system(
         } else {
             sel.select(selection_id.clone());
             info!("[select] selected '{}'", selection_id);
+
+            // Single-click selection — request the Explorer to scroll
+            // this entity's tree row to the top. Skipped for multi-select
+            // (Ctrl/Shift) above so accumulating clicks don't whip the
+            // tree around with every addition.
+            if let Some(ref mut es) = explorer_state {
+                let target = if alt_pressed {
+                    hit_entity
+                } else {
+                    parent_model.unwrap_or(hit_entity)
+                };
+                es.pending_scroll_target_entity = Some(target);
+                es.needs_immediate_sync = true;
+            }
         }
     } else {
         // Clicked on empty space - check if we should deselect
@@ -508,14 +527,14 @@ pub fn part_selection_system(
                     Projection::Perspective(p) => p.fov,
                     _ => std::f32::consts::FRAC_PI_4,
                 };
-                let effective_extent = crate::scale_tool::effective_scale_extent(
-                    group_extent, group_center, camera_transform.translation(), fov_s,
+                let screen_scale = crate::scale_tool::compute_scale_screen_scale(
+                    group_center, camera_transform.translation(), fov_s,
                 );
                 let scale_rotation = crate::move_tool::gizmo_rotation_for(
                     transform_mode,
                     selected_query.iter().map(|(_, gt, _)| gt.compute_transform().rotation),
                 );
-                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
+                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, group_extent, screen_scale, scale_rotation) {
                     return; // About to click scale handle, don't clear selection
                 }
             }

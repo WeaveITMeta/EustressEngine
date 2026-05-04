@@ -770,38 +770,69 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::ScaleEntities { old_states, .. } => {
-            // Restore old positions and sizes, and regenerate meshes
+            // Restore old positions and sizes for every entity
+            // recorded in this scale group.
+            //
+            // Two paths depending on how the part stores its size:
+            //   * **File-system-first** (entity has `MeshSource`,
+            //     loaded from a `.glb`): the unit-scale GLB mesh is
+            //     authoritative; world size = `Transform.scale`. We
+            //     restore by setting `transform.scale = old_size` and
+            //     **leave the mesh handle alone** — overwriting the
+            //     `Mesh3d` with a fresh `Cuboid::from_size` (what the
+            //     legacy branch below does) destroys the .glb mesh and
+            //     leaves a Cuboid scaled by the old size, producing
+            //     the "undo grows to a random bigger size" symptom
+            //     the user reported.
+            //   * **Legacy primitive** (no `MeshSource`): mesh is
+            //     baked at `BasePart.size`; `Transform.scale = ONE`.
+            //     We bake a fresh primitive mesh at `old_size` and
+            //     reset `transform.scale = ONE`.
             for (entity_bits, old_pos, old_size) in old_states {
                 let entity = Entity::from_bits(*entity_bits);
                 let size = Vec3::from_array(*old_size);
-                
-                // Get part shape for mesh regeneration
+
+                let has_mesh_source = world.get::<crate::spawn::MeshSource>(entity).is_some();
                 let part_shape = world.get::<crate::classes::Part>(entity)
                     .map(|p| p.shape);
-                
-                // Update transform and BasePart
+
                 if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                     if let Some(mut transform) = entity_mut.get_mut::<Transform>() {
                         transform.translation = Vec3::from_array(*old_pos);
+                        if has_mesh_source {
+                            // GLB mesh is unit-scale; world size lives
+                            // entirely in `Transform.scale`.
+                            transform.scale = size;
+                        } else {
+                            // Primitive: mesh holds the size; scale
+                            // stays at ONE so a stale mid-drag ratio
+                            // doesn't double-apply.
+                            transform.scale = Vec3::ONE;
+                        }
                     }
                     if let Some(mut bp) = entity_mut.get_mut::<crate::classes::BasePart>() {
                         bp.cframe.translation = Vec3::from_array(*old_pos);
                         bp.size = size;
                     }
                 }
-                
-                // Regenerate mesh at new size
-                if let Some(shape) = part_shape {
-                    let new_mesh = world.resource_scope(|_world, mut meshes: Mut<Assets<Mesh>>| {
-                        match shape {
-                            crate::classes::PartType::Block => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
-                            crate::classes::PartType::Ball => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
-                            crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
-                            _ => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+
+                // Regenerate primitive mesh at restored size — only
+                // for legacy (non-`MeshSource`) parts. Touching the
+                // Mesh3d handle on a file-system-first part would
+                // overwrite its `.glb` with a Cuboid (the bug above).
+                if !has_mesh_source {
+                    if let Some(shape) = part_shape {
+                        let new_mesh = world.resource_scope(|_world, mut meshes: Mut<Assets<Mesh>>| {
+                            match shape {
+                                crate::classes::PartType::Block => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+                                crate::classes::PartType::Ball => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
+                                crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
+                                _ => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+                            }
+                        });
+                        if let Some(mut mesh3d) = world.get_mut::<Mesh3d>(entity) {
+                            mesh3d.0 = new_mesh;
                         }
-                    });
-                    if let Some(mut mesh3d) = world.get_mut::<Mesh3d>(entity) {
-                        mesh3d.0 = new_mesh;
                     }
                 }
             }
@@ -939,38 +970,45 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::ScaleEntities { new_states, .. } => {
-            // Apply new positions and sizes, and regenerate meshes
+            // Symmetric to the undo branch — see its comment block for
+            // the file-system-first vs. legacy split rationale. Redo
+            // re-applies the post-scale state.
             for (entity_bits, new_pos, new_size) in new_states {
                 let entity = Entity::from_bits(*entity_bits);
                 let size = Vec3::from_array(*new_size);
-                
-                // Get part shape for mesh regeneration
+
+                let has_mesh_source = world.get::<crate::spawn::MeshSource>(entity).is_some();
                 let part_shape = world.get::<crate::classes::Part>(entity)
                     .map(|p| p.shape);
-                
-                // Update transform and BasePart
+
                 if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
                     if let Some(mut transform) = entity_mut.get_mut::<Transform>() {
                         transform.translation = Vec3::from_array(*new_pos);
+                        if has_mesh_source {
+                            transform.scale = size;
+                        } else {
+                            transform.scale = Vec3::ONE;
+                        }
                     }
                     if let Some(mut bp) = entity_mut.get_mut::<crate::classes::BasePart>() {
                         bp.cframe.translation = Vec3::from_array(*new_pos);
                         bp.size = size;
                     }
                 }
-                
-                // Regenerate mesh at new size
-                if let Some(shape) = part_shape {
-                    let new_mesh = world.resource_scope(|_world, mut meshes: Mut<Assets<Mesh>>| {
-                        match shape {
-                            crate::classes::PartType::Block => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
-                            crate::classes::PartType::Ball => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
-                            crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
-                            _ => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+
+                if !has_mesh_source {
+                    if let Some(shape) = part_shape {
+                        let new_mesh = world.resource_scope(|_world, mut meshes: Mut<Assets<Mesh>>| {
+                            match shape {
+                                crate::classes::PartType::Block => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+                                crate::classes::PartType::Ball => meshes.add(bevy::math::primitives::Sphere::new(size.x / 2.0)),
+                                crate::classes::PartType::Cylinder => meshes.add(bevy::math::primitives::Cylinder::new(size.x / 2.0, size.y)),
+                                _ => meshes.add(bevy::math::primitives::Cuboid::from_size(size)),
+                            }
+                        });
+                        if let Some(mut mesh3d) = world.get_mut::<Mesh3d>(entity) {
+                            mesh3d.0 = new_mesh;
                         }
-                    });
-                    if let Some(mut mesh3d) = world.get_mut::<Mesh3d>(entity) {
-                        mesh3d.0 = new_mesh;
                     }
                 }
             }

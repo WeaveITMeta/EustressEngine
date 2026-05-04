@@ -1,0 +1,21 @@
+# SpringConstraint — Spring-damper between two Attachments
+# Avian 0.6: DistanceJoint with compliance (spring behavior)
+
+[constraint]
+enabled = true
+attachment0 = ""
+attachment1 = ""
+stiffness = 100.0
+damping = 0.5
+free_length = 5.0
+min_length = 0.0
+max_length = 0.0
+limits_enabled = false
+visible = true
+coils = 8
+thickness = 0.4
+color = [163, 162, 165]
+
+[metadata]
+class_name = "SpringConstraint"
+archivable = true

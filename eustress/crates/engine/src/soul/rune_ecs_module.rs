@@ -395,12 +395,17 @@ fn query_workspace_entities(class_filter: Option<String>) -> Vec<(String, String
 
                 if let Ok(content) = std::fs::read_to_string(&toml_path) {
                     if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                        let class = val.get("metadata")
-                            .and_then(|m| m.get("class_name"))
+                        // Case-tolerant reads — accepts PascalCase TOMLs
+                        // from the aborted migration alongside canonical
+                        // snake_case.
+                        use eustress_common::class_schema::get_section_insensitive as get_ci;
+                        let meta = get_ci(&val, "metadata");
+                        let class = meta
+                            .and_then(|m| get_ci(m, "class_name"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("Unknown");
-                        let display_name = val.get("metadata")
-                            .and_then(|m| m.get("name"))
+                        let display_name = meta
+                            .and_then(|m| get_ci(m, "name"))
                             .and_then(|n| n.as_str())
                             .unwrap_or(fname);
                         if let Some(ref filter) = class_filter {
@@ -1541,6 +1546,35 @@ impl InstanceRune {
     }
 }
 
+/// Convert Roblox-style Euler angles (degrees, XYZ-extrinsic = YXZ-intrinsic
+/// per Roblox `CFrame.fromOrientation` convention) to a quaternion
+/// `[x, y, z, w]`. Used by the Rune drain to map the `Orientation`
+/// Vector3 property onto the bridge struct's `rotation` field.
+///
+/// The order matches Bevy's `Quat::from_euler(EulerRot::YXZ, y, x, z)`
+/// applied to the rotation field downstream — pick any convention,
+/// commit to it, and ensure round-trips end up where the user expects.
+#[cfg(feature = "realism-scripting")]
+fn euler_deg_to_quat(deg_x: f64, deg_y: f64, deg_z: f64) -> [f32; 4] {
+    let rx = (deg_x as f32).to_radians() * 0.5;
+    let ry = (deg_y as f32).to_radians() * 0.5;
+    let rz = (deg_z as f32).to_radians() * 0.5;
+    let (sx, cx) = (rx.sin(), rx.cos());
+    let (sy, cy) = (ry.sin(), ry.cos());
+    let (sz, cz) = (rz.sin(), rz.cos());
+    // YXZ-intrinsic with Y negated for Roblox-parity. See the matching
+    // helper in `eustress_common::luau::runtime::euler_deg_to_quat`
+    // for the full rationale — short version: Bevy/glam and Roblox
+    // disagree on the visible direction of positive yaw, and the
+    // negation closes that gap so the same script produces the same
+    // scene in both engines.
+    let qx = cy * sx * cz + sy * cx * sz;
+    let qy = -(sy * cx * cz - cy * sx * sz);
+    let qz = cy * cx * sz - sy * sx * cz;
+    let qw = cy * cx * cz + sy * sx * sz;
+    [qx, qy, qz, qw]
+}
+
 /// Execute a Rune script from the command bar with full ECS module support.
 /// Sets up a temporary InstanceRegistry, runs the script, drains created instances.
 #[cfg(feature = "realism-scripting")]
@@ -1578,11 +1612,31 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
             let anchored = inst_data.properties.get("Anchored")
                 .and_then(|v| if let PV::Bool(b) = v { Some(*b) } else { None })
                 .unwrap_or(false);
+            let shape = inst_data.properties.get("Shape")
+                .and_then(|v| if let PV::String(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_else(|| "Block".to_string());
+
+            // Read the `Orientation` Vector3 (Euler degrees, Roblox-Part
+            // convention — see `apply_class_defaults` in
+            // `common/src/scripting/instance.rs`) and convert to a
+            // quaternion for the bridge struct. Identity when absent —
+            // matches the pre-rotation behaviour.
+            //
+            // CFrame-as-property is intentionally not consumed here:
+            // `eustress_common::scripting::CFrame` stores rotation as a
+            // private 3×3 matrix, and adding a public quaternion accessor
+            // belongs in the common crate, not this drain. Users get
+            // exactly the same rotation expressivity through `Orientation`.
+            let rotation = inst_data.properties.get("Orientation")
+                .and_then(|v| if let PV::Vector3(vec) = v {
+                    Some(euler_deg_to_quat(vec.x, vec.y, vec.z))
+                } else { None })
+                .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
             created.push(eustress_common::luau::runtime::LuauCreatedInstance {
                 class_name: inst_data.class_name.clone(),
                 name: inst_data.name.clone(),
-                position: pos, size, color, material,
+                position: pos, rotation, size, color, material, shape,
                 transparency: 0.0, anchored, can_collide: true,
             });
         }
@@ -3333,12 +3387,14 @@ fn instance_delete(entity_name: &str) -> bool {
                 if fname.ends_with(".glb.toml") || fname.ends_with(".part.toml") {
                     if let Ok(content) = std::fs::read_to_string(&candidate) {
                         if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                            // Check [asset].path or [metadata].asset for referenced .glb
-                            let mesh_path = val.get("asset")
-                                .and_then(|a| a.get("path"))
+                            // Check [asset].path or [metadata].asset for referenced .glb,
+                            // case-tolerant (handles leftover PascalCase TOMLs).
+                            use eustress_common::class_schema::get_section_insensitive as get_ci;
+                            let mesh_path = get_ci(&val, "asset")
+                                .and_then(|a| get_ci(a, "path"))
                                 .and_then(|p| p.as_str())
-                                .or_else(|| val.get("metadata")
-                                    .and_then(|m| m.get("asset"))
+                                .or_else(|| get_ci(&val, "metadata")
+                                    .and_then(|m| get_ci(m, "asset"))
                                     .and_then(|a| a.as_str()));
 
                             if let Some(mesh_rel) = mesh_path {

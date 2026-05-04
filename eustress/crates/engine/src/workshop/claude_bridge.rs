@@ -28,6 +28,7 @@ use super::{
     McpCommandStatus, MessageRole, normalizer,
 };
 use super::tools::ToolRegistry;
+use eustress_tools::registry::{LuauCreatedEntity, LuauExecutionResult, LuauExecutor};
 use super::modes::ActiveModes;
 use crate::soul::claude_client::{AgenticResponse, ClaudeClient, ClaudeTool};
 
@@ -267,10 +268,88 @@ Your behaviour:
 - Never fabricate tool names. Only call tools defined in the tools array.
 - If a tool requires approval, the UI will prompt the user; continue your reasoning afterwards once results arrive.
 
-@ References:
-- The user can attach items from their Universe via `@kind:space/path` tokens. You'll see these inline in their message plus resolved context blocks (entity summaries, file contents, images) that follow.
+@ References and Path Resolution:
+- The user can attach items via `@kind:space/path` tokens. Resolved content blocks (entity summaries, file contents, images) ride alongside the user message automatically.
 - When the user references an image with `@file:...` and wants code from it, call `image_to_code`. For textual documents, call `document_to_code`.
-- Cross-Space references (e.g. `@entity:Space2/Foo` while the user is in Space1) are valid — use `query_entities` / `read_file` to pull live state from the referenced Space if needed.
+- Cross-Space references are valid — any `@kind:` token can point to any Space in the Universe.
+
+PATH RESOLUTION — CRITICAL (avoid wasting tool calls):
+@ tokens follow the format `@kind:<SpaceName>/<relative_path>`. Tools use two path roots:
+
+  1. `read_file`, `list_directory`, `write_file`, `run_bash` (cwd):
+     Paths are relative to the SANDBOX ROOT. On first use, call `list_directory(path="")` ONCE
+     to discover the layout. The root is typically one of:
+       a. The Universe root → contains `Spaces/` → each Space is `Spaces/<SpaceName>/...`
+       b. The current Space root → contains `Workspace/`, `SoulService/`, etc. directly
+     Whichever layout you see, use it consistently for all subsequent calls.
+
+     Converting @ references:
+       Layout (a): `@file:<Space>/<path>` → `Spaces/<Space>/<path>`
+       Layout (b): `@file:<Space>/<path>` → `<path>` (drop the Space prefix)
+
+     Entity folders contain `_instance.toml`. To read properties:
+       `read_file(path="<resolved_entity_folder>/_instance.toml")`
+     Script folders contain a source file named after the folder (e.g. `<name>/<name>.rune`).
+
+  2. `list_space_contents`:
+     Paths are always relative to the CURRENT SPACE ROOT (no Space prefix, no `Spaces/`).
+     `@entity:<Space>/Workspace/Foo/Bar` → `list_space_contents(path="Workspace/Foo")`
+
+  RULES:
+  - Call `list_directory(path="")` exactly ONCE if your first path-based tool call errors. Use
+    the result to determine layout (a) or (b). Never guess repeatedly.
+  - If @ resolved content blocks are already attached to the message, read them directly —
+    they contain the file contents. Only call read_file for files NOT already resolved.
+
+Units and Scale:
+  Eustress uses METERS as the base unit. 1 unit = 1 meter in all axes.
+  - Position [x, y, z]: world coordinates in meters
+  - Size/Scale [x, y, z]: dimensions in meters
+  - A human is ~1.8m tall. A table is ~0.75m tall. A building floor is ~3m.
+  - When the user says "studs" they mean meters (legacy Roblox terminology).
+  - Luau scripts: Vector3.new(x, y, z) values are in meters.
+  - create_entity: position and size arrays are in meters.
+
+Entity Creation — Hierarchy and Grouping:
+  When building multi-part assemblies (products, vehicles, machines), ALWAYS group
+  Parts under a Model folder using the `parent` parameter on `create_entity`:
+
+  1. Create the Model container FIRST:
+     create_entity(class="Model", name="MyProduct", parent="")
+  2. Create each child Part WITH the parent path:
+     create_entity(class="Part", name="Housing", parent="MyProduct", ...)
+     create_entity(class="Part", name="Anode", parent="MyProduct", ...)
+
+  For nested hierarchies (e.g. versioned products):
+     create_entity(class="Model", name="V2", parent="V-Cell")
+     create_entity(class="Part", name="Housing", parent="V-Cell/V2", ...)
+
+  NEVER create all Parts at the Workspace root then try to move them — there is no
+  move/reparent tool. Always specify `parent` at creation time.
+
+Gradio-Hosted Mesh Generation (via run_bash):
+  External Gradio APIs (e.g. Hugging Face Spaces) use a TWO-STEP async pattern.
+  You MUST issue separate run_bash calls for each step — never pipe or chain them.
+
+  Step 1 — Submit (fast):
+    curl -s --connect-timeout 15 --max-time 30 -X POST "<GRADIO_API_URL>" \
+      -H "Content-Type: application/json" -d '{"data":[...]}'
+    Use timeout_seconds=60. Returns JSON with an event_id.
+
+  Step 2 — Poll for result (slow — generation can take minutes):
+    curl -s --connect-timeout 15 --max-time 480 -N "<GRADIO_API_URL>/<EVENT_ID>"
+    Use timeout_seconds=600. Streams SSE events; extract the result URL from the last `data:` line.
+
+  Step 3 — Download the artifact:
+    curl -s --connect-timeout 15 --max-time 120 -L -o "<TARGET_PATH>" "<RESULT_URL>"
+    Use timeout_seconds=180. Save to the correct sandbox-relative path for the target Space.
+
+  Step 4 — Write any config files (e.g. _instance.toml) referencing the downloaded artifact.
+
+  RULES:
+  - Always use --connect-timeout and --max-time on EVERY curl command.
+  - Never combine steps into a single piped command — extract intermediate values between steps.
+  - Set timeout_seconds generously — complex generation can take 5+ minutes.
 "#;
 
 fn build_system_prompt(active_modes: &ActiveModes) -> String {
@@ -646,11 +725,58 @@ fn build_tool_context(
         .and_then(|a| a.user.as_ref())
         .map(|u| (Some(u.id.clone()), Some(u.username.clone())))
         .unwrap_or((None, None));
+    // Build a Luau executor that creates a fresh sandboxed runtime per
+    // invocation. LuauRuntime is !Send so we can't share one across
+    // threads — creating a fresh VM per script is ~1 ms and avoids
+    // cross-thread issues entirely.
+    let luau_executor: Option<LuauExecutor> = Some(Arc::new(
+        |source: &str, chunk_name: &str| -> LuauExecutionResult {
+            let mut runtime = match eustress_common::luau::runtime::LuauRuntime::new() {
+                Ok(r) => r,
+                Err(e) => return LuauExecutionResult {
+                    success: false,
+                    message: format!("Failed to create Luau runtime: {}", e),
+                    created_entities: Vec::new(),
+                },
+            };
+            if let Err(e) = runtime.execute_chunk(source, chunk_name) {
+                return LuauExecutionResult {
+                    success: false,
+                    message: e,
+                    created_entities: Vec::new(),
+                };
+            }
+            let instances = runtime.drain_created_instances();
+            let entities: Vec<LuauCreatedEntity> = instances.into_iter().map(|i| {
+                LuauCreatedEntity {
+                    class_name: i.class_name,
+                    name: i.name,
+                    position: i.position,
+                    rotation: i.rotation,
+                    size: i.size,
+                    color: i.color,
+                    material: i.material,
+                    shape: i.shape,
+                    transparency: i.transparency,
+                    anchored: i.anchored,
+                    can_collide: i.can_collide,
+                }
+            }).collect();
+            let count = entities.len();
+            LuauExecutionResult {
+                success: true,
+                message: format!("OK — {} instances created", count),
+                created_entities: entities,
+            }
+        }
+    ));
+
     Some(super::tools::ToolContext {
         space_root: sr.0.clone(),
         universe_root,
         user_id,
         username,
+        luau_executor,
     })
 }
 

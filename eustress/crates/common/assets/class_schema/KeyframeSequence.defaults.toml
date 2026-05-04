@@ -1,0 +1,10 @@
+# KeyframeSequence — Animation data (keyframes for bones/joints)
+# Bevy: AnimationClip asset
+
+[animation]
+priority = 0
+looped = false
+
+[metadata]
+class_name = "KeyframeSequence"
+archivable = true

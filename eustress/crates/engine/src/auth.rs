@@ -623,6 +623,93 @@ pub fn show_login_dialog_stub(_auth_state: &mut AuthState) {
     // This function is kept for API compatibility
 }
 
+// ============================================================================
+// Bliss Earnings — local accrual + persistence
+// ============================================================================
+//
+// Bliss accrues at a fixed rate while the engine runs. Light mode earns
+// `BLS_PER_SECOND_LIGHT`, Full mode adds the +10% bonus baked into
+// `BlissNodeState::set_full`. The total is written to a file under the
+// user's home dir at `~/.eustress_engine/bliss_balance.toml` every
+// `PERSIST_INTERVAL` (currently 10 s) AND on graceful exit. On the next
+// launch the balance is restored from that file so accrued Bliss
+// survives between sessions.
+//
+// The display strings on `BlissNodeState` are derived from the f64
+// total each frame: `balance_short` is two decimals (badge), `balance`
+// is full 18 decimals (dropdown). The 18-decimal target matches BLS
+// on-chain precision so when a real cloud sync lands, today's local
+// balance can flow through unchanged.
+
+/// BLS earned per real-time second in Light mode.
+/// 0.005 → 0.30 BLS/min, ~18 BLS/hour. Visible ticking without being
+/// silly — tune later when economics matter.
+const BLS_PER_SECOND_LIGHT: f64 = 0.005;
+
+/// Persist-to-disk cadence. Cheap: a single small TOML write.
+const PERSIST_INTERVAL_SECS: f64 = 10.0;
+
+/// Persistent balance + accrual bookkeeping. Lives alongside `BlissNodeState`;
+/// the latter holds the *display* strings (what the UI binds to), this one
+/// holds the *truth* and the persistence path.
+#[derive(Resource)]
+pub struct BlissEarnings {
+    /// Cumulative BLS earned across every session, accruing in real time.
+    pub total: f64,
+    /// Seconds since the last disk write — flushed every
+    /// `PERSIST_INTERVAL_SECS`.
+    pub since_persist: f64,
+    /// Where the balance is persisted on disk. `None` if `dirs::home_dir()`
+    /// failed (rare; falls back to in-memory accrual that resets on exit).
+    pub persist_path: Option<std::path::PathBuf>,
+}
+
+impl Default for BlissEarnings {
+    fn default() -> Self {
+        let persist_path = dirs::home_dir().map(|h| {
+            h.join(".eustress_engine").join("bliss_balance.toml")
+        });
+        let total = persist_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| toml::from_str::<BlissBalanceFile>(&s).ok())
+            .map(|f| f.total)
+            .unwrap_or(0.0);
+        Self {
+            total,
+            since_persist: 0.0,
+            persist_path,
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct BlissBalanceFile {
+    total: f64,
+}
+
+impl BlissEarnings {
+    /// Write the current total to disk. No-op if the persist path is
+    /// missing (no home dir) or the write fails (read-only volume); the
+    /// next interval will retry.
+    pub fn persist(&self) {
+        let Some(path) = self.persist_path.as_ref() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = match toml::to_string_pretty(&BlissBalanceFile { total: self.total }) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("BlissEarnings: serialize failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(path, body) {
+            warn!("BlissEarnings: write {path:?} failed: {e}");
+        }
+    }
+}
+
 /// Bliss node handle — holds the running API server task.
 #[derive(Resource)]
 pub struct BlissNodeHandle {
@@ -647,8 +734,70 @@ impl Plugin for StudioAuthPlugin {
         app.init_resource::<AuthState>()
             .init_resource::<BlissNodeState>()
             .init_resource::<BlissNodeHandle>()
-            .add_systems(Startup, start_bliss_node)
-            .add_systems(Update, auth_poll_system);
+            // BlissEarnings::default() loads the persisted balance from
+            // disk so the user's accrued Bliss survives restarts. The
+            // accrue/persist systems below tick the in-memory total and
+            // write it back periodically.
+            .init_resource::<BlissEarnings>()
+            .add_systems(Startup, (start_bliss_node, sync_bliss_initial_display))
+            .add_systems(Update, (auth_poll_system, accrue_bliss));
+    }
+}
+
+/// Seed the display strings on `BlissNodeState` from the just-loaded
+/// `BlissEarnings.total` so the badge/dropdown show the persisted
+/// balance immediately on startup, before the first accrue tick fires.
+fn sync_bliss_initial_display(
+    earnings: Res<BlissEarnings>,
+    mut display: ResMut<BlissNodeState>,
+) {
+    display.balance = format!("{:.18}", earnings.total);
+    display.balance_short = format!("{:.2}", earnings.total);
+}
+
+/// Accrue Bliss every frame based on real elapsed time, push the
+/// updated balance into the display resource, and flush to disk every
+/// `PERSIST_INTERVAL_SECS`. Light vs. Full bonus is folded in by
+/// reading the bonus multiplier off `BlissNodeState.bonus` (set by
+/// `set_light` / `set_full`).
+fn accrue_bliss(
+    time: Res<Time>,
+    mut earnings: ResMut<BlissEarnings>,
+    mut display: ResMut<BlissNodeState>,
+) {
+    if !display.enabled {
+        return;
+    }
+
+    // Parse the bonus string ("1.0x", "1.1x", …) into a multiplier.
+    // Falling back to 1.0 keeps accrual going if the field ever lands
+    // in an unexpected shape rather than freezing the balance.
+    let bonus = display
+        .bonus
+        .strip_suffix('x')
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1.0);
+
+    let dt = time.delta_secs() as f64;
+    let earned = BLS_PER_SECOND_LIGHT * bonus * dt;
+    if earned > 0.0 {
+        earnings.total += earned;
+    }
+
+    // Push to display every frame — string formatting is ~50 ns and the
+    // Slint sync system change-detects on string equality so a stable
+    // value is a no-op anyway.
+    display.balance = format!("{:.18}", earnings.total);
+    display.balance_short = format!("{:.2}", earnings.total);
+    // Pending mirrors per-frame earnings × ~60 so the dropdown can show
+    // an "incoming" hint. Fine to leave at the per-second rate; the
+    // dropdown text is "+0.005000…" which is small but truthful.
+    display.pending = format!("+{:.18}", BLS_PER_SECOND_LIGHT * bonus);
+
+    earnings.since_persist += dt;
+    if earnings.since_persist >= PERSIST_INTERVAL_SECS {
+        earnings.since_persist = 0.0;
+        earnings.persist();
     }
 }
 

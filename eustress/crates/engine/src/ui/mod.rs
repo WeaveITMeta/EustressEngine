@@ -78,6 +78,17 @@ pub enum Tool {
     Rotate,
     Scale,
     Terrain,
+    /// Click-to-lock paint mode — every part the user clicks toggles to
+    /// `BasePart.locked = true`. Activated by the ribbon "Lock" button.
+    /// Press Escape to return to Select.
+    Lock,
+    /// Click-to-unlock paint mode — clicks on locked parts flip them to
+    /// `BasePart.locked = false`. The hit-test deliberately includes
+    /// locked parts (which the Select tool excludes), so this is the
+    /// only way to interactively recover a locked part without going
+    /// through the Properties panel. Activated by the ribbon "Unlock"
+    /// button. Press Escape to return to Select.
+    Unlock,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]

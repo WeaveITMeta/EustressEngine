@@ -65,7 +65,7 @@ impl PartType {
 pub fn texture_repeat_default() -> [f32; 2] { [1.0, 1.0] }
 
 /// Eustress Material enum (PBR rendering presets)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 pub enum Material {
     Plastic,
     SmoothPlastic,
@@ -158,31 +158,46 @@ impl Material {
         }
     }
     
-    /// Get PBR parameters for this material (roughness, metallic, reflectance)
+    /// PBR parameters for this material — `(roughness, metallic, reflectance)`.
+    ///
+    /// **Reflectance** here is Bevy's `StandardMaterial.reflectance`, the
+    /// F0 control for dielectrics — `0.5` ≈ 4% Fresnel base reflection
+    /// (the canonical value for plain dielectric surfaces). Values below
+    /// ~0.35 produce visibly dull, unphysical-looking materials, so the
+    /// non-metal entries below all sit in the 0.35–0.5 band rather than
+    /// the previous 0.08–0.30 range.
+    ///
+    /// **Metallic** is read by `material_loader::resolve_material` for
+    /// the initial-spawn material build, then `material_sync` overrides
+    /// per-frame from `BasePart.reflectance` — the user-facing knob that
+    /// lets any material be dialed metallic/mirror-like. The preset
+    /// metallic stays here for first-spawn fidelity (e.g. Metal looks
+    /// metallic the moment it appears, before `material_sync` ever
+    /// runs).
     pub fn pbr_params(&self) -> (f32, f32, f32) {
         match self {
-            Material::Plastic => (0.6, 0.0, 0.4),           // More reflective for better lighting
-            Material::SmoothPlastic => (0.2, 0.0, 0.5),     // Very smooth and reflective
-            Material::Wood => (0.85, 0.0, 0.15),            // Natural matte wood
-            Material::WoodPlanks => (0.75, 0.0, 0.2),       // Slightly smoother than raw wood
-            Material::Metal => (0.3, 1.0, 0.6),             // Shiny metal with good reflectance
-            Material::CorrodedMetal => (0.65, 0.7, 0.25),   // Rougher but still metallic
-            Material::DiamondPlate => (0.35, 0.9, 0.65),    // Industrial metal texture
-            Material::Foil => (0.08, 1.0, 0.92),            // Very reflective and metallic
-            Material::Grass => (0.95, 0.0, 0.1),            // Very rough and matte
-            Material::Concrete => (0.92, 0.0, 0.18),         // Very rough surface
-            Material::Brick => (0.88, 0.0, 0.22),            // Rough with slight reflection
-            Material::Granite => (0.55, 0.0, 0.35),          // Polished stone
-            Material::Marble => (0.25, 0.0, 0.55),           // Very smooth and reflective
-            Material::Slate => (0.65, 0.0, 0.28),            // Natural stone texture
-            Material::Sand => (0.98, 0.0, 0.08),             // Extremely matte
-            Material::Fabric => (0.92, 0.0, 0.12),           // Soft and matte
-            Material::Glass => (0.02, 0.0, 0.95),            // Very smooth and reflective
-            Material::Neon => (0.1, 0.0, 0.0),               // Smooth for glow effect
-            Material::Ice => (0.08, 0.0, 0.88),              // Very reflective and smooth
-            Material::Gold => (0.2, 1.0, 0.95),              // Polished gold
-            Material::Silver => (0.15, 1.0, 0.97),           // Polished silver
-            Material::Bronze => (0.35, 0.9, 0.85),           // Aged bronze
+            Material::Plastic        => (0.55, 0.0, 0.50),  // typical injection-moulded plastic
+            Material::SmoothPlastic  => (0.20, 0.0, 0.50),  // polished plastic — high gloss
+            Material::Wood           => (0.85, 0.0, 0.40),  // matte wood grain
+            Material::WoodPlanks     => (0.70, 0.0, 0.40),  // varnished planks
+            Material::Metal          => (0.30, 1.0, 0.50),  // brushed metal
+            Material::CorrodedMetal  => (0.65, 0.8, 0.40),  // weathered, slight oxide layer
+            Material::DiamondPlate   => (0.35, 1.0, 0.55),  // industrial polished
+            Material::Foil           => (0.08, 1.0, 0.60),  // mirror-like
+            Material::Grass          => (0.95, 0.0, 0.35),  // organic matte
+            Material::Concrete       => (0.92, 0.0, 0.40),  // porous, slightly damp
+            Material::Brick          => (0.85, 0.0, 0.40),  // fired clay
+            Material::Granite        => (0.45, 0.0, 0.55),  // polished crystalline stone
+            Material::Marble         => (0.20, 0.0, 0.60),  // very polished
+            Material::Slate          => (0.60, 0.0, 0.45),  // natural stone, slight sheen
+            Material::Sand           => (0.98, 0.0, 0.30),  // dry granular
+            Material::Fabric         => (0.92, 0.0, 0.35),  // matte cloth
+            Material::Glass          => (0.02, 0.0, 0.85),  // smooth + transmissive (see material_sync)
+            Material::Neon           => (0.30, 0.0, 0.50),  // emissive — roughness mostly irrelevant
+            Material::Ice            => (0.05, 0.0, 0.70),  // smooth + slightly transmissive
+            Material::Gold           => (0.20, 1.0, 0.70),  // polished gold
+            Material::Silver         => (0.15, 1.0, 0.75),  // polished silver
+            Material::Bronze         => (0.30, 1.0, 0.65),  // polished bronze
         }
     }
 }
@@ -297,7 +312,8 @@ pub enum ClassName {
     SnapIndicator,           // Ghost preview showing snapped position
     // Asset Classes (file-system-first)
     Material,                // .mat.toml material definition
-    Image,                   // .png/.jpg texture image asset
+    Image,                   // .png/.jpg texture image asset — instanceable as a 3D quad with image as albedo
+    Video,                   // .mp4/.webm video asset — instanceable as a 3D quad (placeholder render until decoder lands)
 }
 
 impl ClassName {
@@ -396,6 +412,7 @@ impl ClassName {
             ClassName::SnapIndicator => "SnapIndicator",
             ClassName::Material => "Material",
             ClassName::Image => "Image",
+            ClassName::Video => "Video",
         }
     }
     
@@ -464,6 +481,13 @@ impl ClassName {
             "Moon" => Ok(ClassName::Moon),
             "Seat" => Ok(ClassName::Seat),
             "VehicleSeat" => Ok(ClassName::VehicleSeat),
+            // Legacy: VCell maps to Part. V-Cell components are just
+            // Parts that happen to carry [material] / [thermodynamic] /
+            // [electrochemical] sections — the realism data is dynamic
+            // on every Part, no subclass needed. Existing _instance.toml
+            // files written with `class_name = "VCell"` keep loading
+            // through this alias.
+            "VCell" => Ok(ClassName::Part),
             "Document" => Ok(ClassName::Document),
             "ImageAsset" => Ok(ClassName::ImageAsset),
             "VideoAsset" => Ok(ClassName::VideoAsset),
@@ -499,6 +523,7 @@ impl ClassName {
             "SnapIndicator" => Ok(ClassName::SnapIndicator),
             "Material" => Ok(ClassName::Material),
             "Image" => Ok(ClassName::Image),
+            "Video" => Ok(ClassName::Video),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -697,7 +722,17 @@ impl Default for BasePart {
             cframe: Transform::IDENTITY,
             size: Vec3::new(1.0, 1.0, 1.0), // Default 1m³ cube (meters, not studs)
             pivot_offset: Transform::IDENTITY,
-            color: Color::srgb(0.6, 0.6, 0.6), // Medium gray
+            // Roblox's canonical "Medium stone grey" (BrickColor 194 / sRGB
+            // 163,162,165). The Luau drain fallback and `apply_class_defaults`
+            // both use this exact value, so every spawn path — Studio
+            // import, Luau script, hand-placed in editor — produces the
+            // same neutral stone tone for an untinted Part. Material PBR
+            // params (roughness/metallic/reflectance) modulate the
+            // surface, but the base color stays this exact tone until
+            // the part's `color` is explicitly set, at which point
+            // `material_sync` writes `part.color` straight into
+            // `StandardMaterial.base_color` so colours take cleanly.
+            color: Color::srgb_u8(163, 162, 165),
             material: Material::Plastic,
             material_name: String::new(),
             transparency: 0.0,
@@ -4840,13 +4875,13 @@ impl Default for Terrain {
             water_wave_size: 0.15,
             water_transparency: 0.3,
             water_color: Color::srgb(0.0, 0.3, 0.6),
-            // New terrain defaults
+            // New terrain defaults (must match TerrainConfig::default())
             chunk_size: 64.0,
-            chunk_resolution: 64,
-            chunks_x: 4,
-            chunks_z: 4,
+            chunk_resolution: 32,
+            chunks_x: 3,
+            chunks_z: 3,
             lod_levels: 4,
-            view_distance: 1000.0,
+            view_distance: 512.0,
             height_scale: 50.0,
             seed: 42,
             heightmap_path: None,
@@ -7353,3 +7388,81 @@ impl HasAssemblyMass for Folder {
     fn set_assembly_mass(&mut self, mass: f32) { self.assembly_mass = mass; }
 }
 
+// ============================================================================
+// Image / Video instance classes
+//
+// `Image` and `Video` are user-instantiable classes that point at an asset
+// file living under `Universe/assets/images/` or `Universe/assets/videos/`.
+// At spawn time `file_loader` builds a 3D quad parented to the entity and
+// loads the asset as the quad's albedo texture (Image) or as a placeholder
+// material with the filename rendered on it (Video — pending decoder
+// integration).
+//
+// Both keep the same Position / Size / Color tint / Transparency knobs as
+// a Part so the Properties panel UX is identical, and they round-trip
+// through `_instance.toml` like every other class.
+// ============================================================================
+
+/// Image instance — references an asset under `Universe/assets/images/` and
+/// renders as a textured 3D quad. The `asset_path` is stored relative to
+/// the Universe root so saved scenes stay portable across machines.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Image {
+    /// Universe-relative path to the image file, e.g. "assets/images/logo.png".
+    /// Loaded by Bevy's AssetServer at spawn.
+    pub asset_path: String,
+    /// Quad dimensions in meters. Texture is stretched to fill the quad
+    /// (UV [0,1] on each axis).
+    pub size: [f32; 2],
+    /// Tint colour multiplied with the texture's albedo. White = no tint.
+    pub color: [f32; 4],
+    /// 0.0 = opaque, 1.0 = invisible. Maps to AlphaMode::Blend when > 0.
+    pub transparency: f32,
+}
+
+impl Default for Image {
+    fn default() -> Self {
+        Self {
+            asset_path: String::new(),
+            size: [4.0, 4.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            transparency: 0.0,
+        }
+    }
+}
+
+/// Video instance — references an asset under `Universe/assets/videos/`.
+/// Until video decoding is wired in, `file_loader` renders a placeholder
+/// quad (mid-grey with the filename visible). The component carries the
+/// same fields as `Image` plus loop / autoplay knobs that the future
+/// decoder integration will read.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Video {
+    /// Universe-relative path to the video file, e.g. "assets/videos/intro.mp4".
+    pub asset_path: String,
+    pub size: [f32; 2],
+    pub color: [f32; 4],
+    pub transparency: f32,
+    /// Begin playback as soon as the entity spawns.
+    pub autoplay: bool,
+    /// Restart from frame 0 when playback reaches the end.
+    pub looped: bool,
+    /// Audio gain in [0.0, 1.0]. Ignored by the placeholder renderer.
+    pub volume: f32,
+}
+
+impl Default for Video {
+    fn default() -> Self {
+        Self {
+            asset_path: String::new(),
+            size: [6.0, 3.375],         // 16:9 aspect default
+            color: [1.0, 1.0, 1.0, 1.0],
+            transparency: 0.0,
+            autoplay: true,
+            looped: true,
+            volume: 0.5,
+        }
+    }
+}

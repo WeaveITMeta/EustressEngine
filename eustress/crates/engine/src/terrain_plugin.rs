@@ -33,6 +33,7 @@ impl Plugin for EngineTerrainPlugin {
             .register_type::<TerrainData>()
             .register_type::<Chunk>()
             .init_resource::<eustress_common::terrain::LodUpdateState>()
+            .init_resource::<eustress_common::terrain::ChunkSpawnThrottle>()
             .add_systems(Update, (
                 eustress_common::terrain::process_terrain_generation_queue,
                 eustress_common::terrain::update_lod_system,

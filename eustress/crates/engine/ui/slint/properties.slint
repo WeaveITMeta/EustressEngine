@@ -22,6 +22,10 @@ export struct PropertyData {
     x-value: string,
     y-value: string,
     z-value: string,
+    // Color preview swatch — populated by Rust for color rows. Slint
+    // can't parse the "r, g, b" string at runtime, so we pre-compute a
+    // typed `color` here for the chip background.
+    color-value: color,
     // Help tooltip text from TOML description field (empty = no icon shown)
     description: string,
     // URL path for the /learn documentation link (e.g. "/learn/atmosphere#density")
@@ -31,7 +35,7 @@ export struct PropertyData {
 // Help icon button — shown left of property label when description is present.
 // Displays a tooltip on hover; on click opens the /learn documentation page.
 // Color: grey by default, turns blue (accent) when description has a learn-url.
-component HelpIcon inherits Rectangle {
+export component HelpIcon inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
@@ -179,7 +183,10 @@ component SectionHeader inherits Rectangle {
     }
 }
 
-// Searchable material dropdown with scroll — shows all MaterialService options
+// Searchable material dropdown with scroll — shows all MaterialService options.
+// Supports keyboard navigation: arrow keys move highlight, Enter confirms,
+// letter keys jump to the first option starting with that letter (type-ahead).
+// No visible text input — keys are consumed silently for fast selection.
 component MaterialDropdown inherits Rectangle {
     in property <string> label: "Material";
     in property <string> value: "Plastic";
@@ -192,11 +199,60 @@ component MaterialDropdown inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
+    // Type-ahead callback — Rust side finds matching option index.
+    // Arguments: (pressed-key, current-highlight-index) -> new-index
+    callback find-material-by-key(string, int) -> int;
 
     property <bool> dropdown-open: false;
+    // Keyboard-highlighted option index (-1 = none)
+    property <int> highlight-index: -1;
 
     height: 28px;
     border-radius: 2px;
+
+    mat-focus := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.DownArrow && root.dropdown-open {
+                if root.highlight-index < root.options.length - 1 { root.highlight-index += 1; }
+                else { root.highlight-index = 0; }
+                return accept;
+            }
+            if event.text == Key.UpArrow && root.dropdown-open {
+                if root.highlight-index > 0 { root.highlight-index -= 1; }
+                else { root.highlight-index = root.options.length - 1; }
+                return accept;
+            }
+            if event.text == Key.Return {
+                if root.dropdown-open {
+                    if root.highlight-index >= 0 && root.highlight-index < root.options.length {
+                        root.value-changed(root.options[root.highlight-index]);
+                    }
+                    root.dropdown-open = false;
+                    root.highlight-index = -1;
+                    dropdown-popup.close();
+                } else {
+                    root.dropdown-open = true;
+                    root.highlight-index = 0;
+                    dropdown-popup.show();
+                }
+                return accept;
+            }
+            if event.text == Key.Escape && root.dropdown-open {
+                root.dropdown-open = false;
+                root.highlight-index = -1;
+                dropdown-popup.close();
+                return accept;
+            }
+            // Type-ahead: any other key calls Rust to find matching option
+            if root.dropdown-open {
+                if event.text == Key.Shift { return reject; }
+                if event.text == Key.Control { return reject; }
+                if event.text == Key.Alt { return reject; }
+                root.highlight-index = root.find-material-by-key(event.text, root.highlight-index);
+                return accept;
+            }
+            return reject;
+        }
 
     HorizontalLayout {
         padding-left: 8px;
@@ -226,15 +282,18 @@ component MaterialDropdown inherits Rectangle {
             background: mat-btn-touch.has-hover ? Theme.explorer-item-hover : Theme.input-background;
             border-radius: 3px;
             border-width: 1px;
-            border-color: root.dropdown-open ? Theme.accent-blue : Theme.input-border;
+            border-color: root.dropdown-open ? Theme.accent-blue : (mat-focus.has-focus ? Theme.accent-blue : Theme.input-border);
 
             mat-btn-touch := TouchArea {
                 mouse-cursor: pointer;
                 clicked => {
+                    mat-focus.focus();
                     root.dropdown-open = !root.dropdown-open;
                     if root.dropdown-open {
+                        root.highlight-index = 0;
                         dropdown-popup.show();
                     } else {
+                        root.highlight-index = -1;
                         dropdown-popup.close();
                     }
                 }
@@ -257,6 +316,7 @@ component MaterialDropdown inherits Rectangle {
             }
         }
     }
+    } // close FocusScope
 
     // Dropdown popup — uses PopupWindow to render above all other content
     dropdown-popup := PopupWindow {
@@ -292,7 +352,8 @@ component MaterialDropdown inherits Rectangle {
 
                     for option[idx] in root.options: Rectangle {
                         height: 24px;
-                        background: opt-touch.has-hover ? #3a3a3a : (option == root.value ? #2a2a2a : transparent);
+                        // Highlight keyboard-navigated row, hover row, or selected row
+                        background: idx == root.highlight-index ? #4a4a4a : (opt-touch.has-hover ? #3a3a3a : (option == root.value ? #2a2a2a : transparent));
                         border-radius: 3px;
 
                         opt-touch := TouchArea {
@@ -300,6 +361,7 @@ component MaterialDropdown inherits Rectangle {
                             clicked => {
                                 root.value-changed(option);
                                 root.dropdown-open = false;
+                                root.highlight-index = -1;
                                 dropdown-popup.close();
                             }
                         }
@@ -320,7 +382,7 @@ component MaterialDropdown inherits Rectangle {
 
                             Text {
                                 text: option;
-                                color: option == root.value ? Theme.accent-blue : Theme.text-primary;
+                                color: (idx == root.highlight-index || option == root.value) ? Theme.accent-blue : Theme.text-primary;
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
@@ -344,6 +406,7 @@ component MaterialDropdown inherits Rectangle {
         TouchArea {
             clicked => {
                 root.dropdown-open = false;
+                root.highlight-index = -1;
             }
         }
     }
@@ -361,6 +424,12 @@ component PropRow inherits Rectangle {
     
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: input-edit.has-focus;
+
+    // Fire focus-changed immediately on click-in / tab-out so the
+    // Delete key doesn't delete the selected part while the user is
+    // typing (relying on the `edited(text)` callback below missed
+    // the pre-first-keystroke window).
+    changed has-focus => { root.focus-changed(self.has-focus); }
 
     callback value-changed(string);
     callback open-learn-url(string);
@@ -448,6 +517,14 @@ component Vec3Row inherits Rectangle {
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: x-edit.has-focus || y-edit.has-focus || z-edit.has-focus;
 
+    // Fire focus-changed the INSTANT any of the three fields gains
+    // or loses focus — not just on the first keystroke. Without this
+    // binding the `edited(text)` callback below only fires after the
+    // user types, leaving a window where the field is focused but
+    // Bevy thinks no input is active and the Delete key deletes the
+    // selected part instead of a character.
+    changed has-focus => { root.focus-changed(self.has-focus); }
+
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
@@ -476,16 +553,49 @@ component Vec3Row inherits Rectangle {
             open-learn-url(url) => { root.open-learn-url(url); }
         }
         
-        // Label
+        // Label — 92px instead of 110 to make room for the copy/
+        // paste pair we now anchor on the left edge of the row.
         Text {
-            width: 110px;
+            width: 92px;
             text: root.label;
             color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
-        
+
+        // Copy button (LEFT-anchored, no paste twin).
+        //
+        // Paste doesn't need a button: the X/Y/Z LineEdits use
+        // `input-type: text` so a Ctrl+V of "5, 10, 20" keeps its
+        // commas. Hitting Enter fires the `accepted` handler, which
+        // concatenates `self.text + ", " + y + ", " + z` → the Rust
+        // value-changed handler reads ≥ 3 comma parts and takes the
+        // first three, so the pasted triple wins over the sibling
+        // fields. A single-scalar edit produces exactly 3 parts and
+        // still commits normally.
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: copy-touch.has-hover ? Theme.button-hover : transparent;
+            copy-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.copy-vector(x-edit.text + ", " + y-edit.text + ", " + z-edit.text);
+                }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/copy.svg");
+                image-fit: contain;
+                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+            }
+        }
+
         // X field with accent border
         Rectangle {
             horizontal-stretch: 1;
@@ -523,7 +633,12 @@ component Vec3Row inherits Rectangle {
                 x-edit := LineEdit {
                     horizontal-stretch: 1;
                     text: root.x-value;
-                    input-type: decimal;
+                    // `text` (not `decimal`) so Ctrl+V of a pasted
+                    // triple like "5, 10, 20" keeps its commas — the
+                    // Rust value-changed handler reads ≥3 comma parts
+                    // and distributes into X/Y/Z atomically. `decimal`
+                    // stripped the commas, breaking the paste flow.
+                    input-type: text;
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
@@ -573,7 +688,7 @@ component Vec3Row inherits Rectangle {
                 y-edit := LineEdit {
                     horizontal-stretch: 1;
                     text: root.y-value;
-                    input-type: decimal;
+                    input-type: text;
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
@@ -623,7 +738,7 @@ component Vec3Row inherits Rectangle {
                 z-edit := LineEdit {
                     horizontal-stretch: 1;
                     text: root.z-value;
-                    input-type: decimal;
+                    input-type: text;
                     enabled: root.editable;
                     edited(t) => {
                         root.focus-changed(true);
@@ -636,55 +751,6 @@ component Vec3Row inherits Rectangle {
             }
         }
 
-        // Copy / Paste icon pair. Click Copy to push the current
-        // `x, y, z` triple to the OS clipboard; click Paste to
-        // read the clipboard, parse it (accepts `x, y, z`,
-        // `x y z`, `(x, y, z)`, or `Vector3.new(x, y, z)`) and set
-        // all three fields atomically — saves the user from
-        // Ctrl+C'ing each field individually.
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: copy-touch.has-hover ? Theme.button-hover : transparent;
-            copy-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.copy-vector(x-edit.text + ", " + y-edit.text + ", " + z-edit.text);
-                }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/copy.svg");
-                image-fit: contain;
-                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-            }
-        }
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: paste-touch.has-hover ? Theme.button-hover : transparent;
-            paste-touch := TouchArea {
-                mouse-cursor: pointer;
-                enabled: root.editable;
-                clicked => { root.paste-vector(); }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/paste.svg");
-                image-fit: contain;
-                colorize: root.editable
-                    ? (paste-touch.has-hover ? Theme.text-primary : Theme.text-disabled)
-                    : Theme.text-disabled;
-            }
-        }
     }
 }
 
@@ -705,6 +771,10 @@ component RotationVec3Row inherits Rectangle {
     
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: rx-edit.has-focus || ry-edit.has-focus || rz-edit.has-focus;
+
+    // Fire focus-changed on actual focus transitions — see Vec3Row
+    // for the Delete-key-deletes-selected-part rationale.
+    changed has-focus => { root.focus-changed(self.has-focus); }
 
     callback value-changed(string);
     callback open-learn-url(string);
@@ -729,14 +799,41 @@ component RotationVec3Row inherits Rectangle {
             open-learn-url(url) => { root.open-learn-url(url); }
         }
 
-        // Label
+        // Label — 92px instead of 110 to make room for the left-
+        // anchored copy button; matches `Vec3Row`.
         Text {
-            width: 110px;
+            width: 92px;
             text: root.label;
             color: Theme.text-secondary;
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
+        }
+
+        // Copy button (LEFT-anchored). Paste doesn't need a button:
+        // Ctrl+V of a triple like "90, 0, 45" into any rx/ry/rz field
+        // then Enter is detected by the Rust value-changed handler
+        // (>=3 comma parts) and applied atomically.
+        Rectangle {
+            width: 18px;
+            height: 22px;
+            border-radius: 3px;
+            background: r-copy-touch.has-hover ? Theme.button-hover : transparent;
+            r-copy-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.copy-vector(rx-edit.text + ", " + ry-edit.text + ", " + rz-edit.text);
+                }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../../assets/icons/ui/copy.svg");
+                image-fit: contain;
+                colorize: r-copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+            }
         }
 
         // ── X ──────────────────────────────────────────────
@@ -895,50 +992,76 @@ component RotationVec3Row inherits Rectangle {
             }
         }
 
-        // Copy / Paste pair — same behaviour as `Vec3Row`, kept on
-        // its own row slot so the step buttons don't overflow.
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: r-copy-touch.has-hover ? Theme.button-hover : transparent;
-            r-copy-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.copy-vector(rx-edit.text + ", " + ry-edit.text + ", " + rz-edit.text);
-                }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/copy.svg");
-                image-fit: contain;
-                colorize: r-copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
-            }
-        }
-        Rectangle {
-            width: 18px;
-            height: 22px;
-            border-radius: 3px;
-            background: r-paste-touch.has-hover ? Theme.button-hover : transparent;
-            r-paste-touch := TouchArea {
-                mouse-cursor: pointer;
-                enabled: root.editable;
-                clicked => { root.paste-vector(); }
-            }
-            Image {
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/paste.svg");
-                image-fit: contain;
-                colorize: root.editable
-                    ? (r-paste-touch.has-hover ? Theme.text-primary : Theme.text-disabled)
-                    : Theme.text-disabled;
-            }
+    }
+}
+
+// One tile in the 127-swatch ColorPickerPopup honeycomb. The chip is
+// rendered as a real hexagon (Slint Path) so the wheel reads as a
+// proper hex tessellation rather than a circle grid; tightly-packed
+// flat-top hexes nest perfectly against one another. Hover shows a
+// floating name tag above the chip — pixel real-estate is too tight
+// for inline labels at this density.
+//
+// Cell box is 22×19 px; the hex chip occupies 18×16 of that, leaving
+// a 2-px gutter so adjacent cells read as discrete clickable targets
+// rather than a single mottled blob.
+component ColorSwatchCell inherits Rectangle {
+    in property <string> swatch-name: "";
+    in property <int> r: 128;
+    in property <int> g: 128;
+    in property <int> b: 128;
+    callback swatch-clicked();
+
+    width: 22px;
+    height: 19px;
+
+    // Flat-top regular hexagon. For a hex of width 18 px and height
+    // 16 px, the six vertices are at:
+    //   left mid, top-left, top-right, right mid, bottom-right, bottom-left
+    // Stroke + fill driven by hover state so the active swatch reads
+    // visibly against its neighbours.
+    chip := Path {
+        x: 2px;
+        y: 1.5px;
+        width: 18px;
+        height: 16px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 18;
+        viewbox-height: 16;
+        fill: rgb(root.r, root.g, root.b);
+        stroke: touch.has-hover ? Theme.accent-blue : #20202080;
+        stroke-width: touch.has-hover ? 1.5px : 0.5px;
+        commands: "M 0 8 L 4.5 0 L 13.5 0 L 18 8 L 13.5 16 L 4.5 16 Z";
+        animate stroke-width { duration: 80ms; }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.swatch-clicked(); }
+    }
+
+    // Hover-only floating name. Sits ABOVE the chip so it doesn't
+    // collide with the hex packing of neighbouring cells.
+    if touch.has-hover: Rectangle {
+        x: -40px;
+        y: -22px;
+        width: 100px;
+        height: 18px;
+        background: #1a1a22;
+        border-radius: 4px;
+        border-width: 1px;
+        border-color: #3a3a3a;
+        drop-shadow-blur: 6px;
+        drop-shadow-color: #000000a0;
+        Text {
+            text: root.swatch-name;
+            color: Theme.text-primary;
+            font-size: 10px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
         }
     }
 }
@@ -947,21 +1070,187 @@ component RotationVec3Row inherits Rectangle {
 component ColorRow inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "#808080";
+    // Live preview color, populated by Rust from the same RGB the
+    // `value` string represents. Used for the swatch chip — Slint can't
+    // parse the "r, g, b" string into a typed color at runtime so the
+    // parsing has to happen Rust-side.
+    in property <color> preview-color: #808080;
     in property <bool> editable: true;
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
-    
+
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: color-edit.has-focus;
-    
+
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
-    
+
+    // 127-swatch honeycomb palette. Rows pack 7-8-9-10-11-12-13-12-
+    // 11-10-9-8-7 so the aggregate outline traces a regular hexagon
+    // (the "112 or more" colours requirement landed exactly on
+    // `3·N²-3·N+1` at side N=7 = 127). Each entry carries its
+    // precomputed (`x`, `y`) pixel offset inside the grid; cell pitch
+    // is 22 px horizontal × 19 px vertical, snug enough to display
+    // 127 chips in a 286×246 box without losing click targets.
+    //
+    // Natural palette — every swatch is sourced from real-world
+    // materials and environments: forest canopy, river stone, fired
+    // clay, weathered wood, coastal fog, harvest grain, dried flowers.
+    // Deep cools at the top, warm earth tones in the middle, wood and
+    // bark below, stone and night at the bottom. Names evoke the
+    // material or scene each color comes from — botanical (Hemlock,
+    // Elderberry, Foxglove), terrestrial (Basalt, Sandstone, Peat
+    // Soil), craft (Saddle Leather, Beeswax, Linen Cloth), weather
+    // (Morning Fog, Overcast, Fresh Snow) — so the user can pick by
+    // mental association rather than by parsing RGB.
+    property <[{name: string, r: int, g: int, b: int, x: float, y: float}]> palette: [
+        // ── Row 0 (7 cells, x=66, y=0) — deep forest canopy ──
+        { name: "Old Growth",        r:  22, g:  56, b:  34, x:  66, y:   0 },
+        { name: "Fern Hollow",       r:  42, g:  75, b:  48, x:  88, y:   0 },
+        { name: "Hemlock",           r:  30, g:  68, b:  58, x: 110, y:   0 },
+        { name: "Deep Spruce",       r:  18, g:  72, b:  65, x: 132, y:   0 },
+        { name: "Fjord Water",       r:  24, g:  78, b:  88, x: 154, y:   0 },
+        { name: "Storm Petrel",      r:  36, g:  60, b:  98, x: 176, y:   0 },
+        { name: "Winter Night",      r:  20, g:  32, b:  58, x: 198, y:   0 },
+        // ── Row 1 (8, x=55, y=19) — living greens & deep waters ──
+        { name: "Meadow Grass",      r:  68, g: 120, b:  56, x:  55, y:  19 },
+        { name: "Clover Field",      r:  50, g: 130, b:  68, x:  77, y:  19 },
+        { name: "River Moss",        r:  78, g: 140, b:  95, x:  99, y:  19 },
+        { name: "Tidal Pool",        r:  38, g: 112, b: 110, x: 121, y:  19 },
+        { name: "Lake Depth",        r:  40, g:  82, b: 128, x: 143, y:  19 },
+        { name: "Deep Current",      r:  32, g:  68, b: 120, x: 165, y:  19 },
+        { name: "Ocean Trench",      r:  28, g:  56, b: 105, x: 187, y:  19 },
+        { name: "Dusk Horizon",      r:  58, g:  62, b:  98, x: 209, y:  19 },
+        // ── Row 2 (9, x=44, y=38) — foliage, sky, twilight ──
+        { name: "Sage Brush",        r: 142, g: 152, b: 125, x:  44, y:  38 },
+        { name: "Spring Canopy",     r: 118, g: 165, b:  72, x:  66, y:  38 },
+        { name: "Lichen",            r: 130, g: 175, b: 128, x:  88, y:  38 },
+        { name: "Glacier Melt",      r:  98, g: 185, b: 172, x: 110, y:  38 },
+        { name: "Clear Sky",         r: 120, g: 180, b: 210, x: 132, y:  38 },
+        { name: "Forget-Me-Not",     r:  98, g: 140, b: 195, x: 154, y:  38 },
+        { name: "Wisteria Bloom",    r: 135, g: 130, b: 185, x: 176, y:  38 },
+        { name: "Wild Heather",      r: 135, g:  92, b: 145, x: 198, y:  38 },
+        { name: "Elderberry",        r: 110, g:  62, b:  95, x: 220, y:  38 },
+        // ── Row 3 (10, x=33, y=57) — garden pastels ──
+        { name: "Olive Grove",       r: 108, g: 130, b:  62, x:  33, y:  57 },
+        { name: "New Leaf",          r: 148, g: 190, b:  70, x:  55, y:  57 },
+        { name: "Pistachio Shell",   r: 140, g: 176, b: 110, x:  77, y:  57 },
+        { name: "Seafoam",           r: 110, g: 195, b: 162, x:  99, y:  57 },
+        { name: "Shallow Lagoon",    r:  72, g: 178, b: 176, x: 121, y:  57 },
+        { name: "Raindrop",          r: 160, g: 200, b: 215, x: 143, y:  57 },
+        { name: "Lavender Sprig",    r: 158, g: 130, b: 185, x: 165, y:  57 },
+        { name: "Thistle",           r: 180, g: 150, b: 178, x: 187, y:  57 },
+        { name: "Plum Blossom",      r: 185, g: 115, b: 170, x: 209, y:  57 },
+        { name: "Dried Rose",        r: 190, g: 145, b: 160, x: 231, y:  57 },
+        // ── Row 4 (11, x=22, y=76) — mid-tones: earth to dusk ──
+        { name: "Moss Stone",        r: 110, g: 112, b:  52, x:  22, y:  76 },
+        { name: "Golden Fern",       r: 168, g: 185, b:  62, x:  44, y:  76 },
+        { name: "Morning Dew",       r: 185, g: 215, b: 180, x:  66, y:  76 },
+        { name: "Creek Water",       r:  82, g: 178, b: 174, x:  88, y:  76 },
+        { name: "Glacier Blue",      r:  95, g: 195, b: 210, x: 110, y:  76 },
+        { name: "Mountain Iris",     r:  96, g:  88, b: 160, x: 132, y:  76 },
+        { name: "Harbor Blue",       r:  72, g: 118, b: 155, x: 154, y:  76 },
+        { name: "Twilight Violet",   r: 108, g:  68, b: 155, x: 176, y:  76 },
+        { name: "Dried Lavender",    r: 165, g: 155, b: 175, x: 198, y:  76 },
+        { name: "Fig Skin",          r: 162, g: 120, b: 148, x: 220, y:  76 },
+        { name: "Mulberry",          r: 108, g:  48, b:  58, x: 242, y:  76 },
+        // ── Row 5 (12, x=11, y=95) — warm pastels: grain fields to blossoms ──
+        { name: "Hay Field",         r: 210, g: 210, b: 130, x:  11, y:  95 },
+        { name: "Wheat Stalk",       r: 225, g: 205, b: 160, x:  33, y:  95 },
+        { name: "Beeswax",           r: 235, g: 210, b: 100, x:  55, y:  95 },
+        { name: "Buttercream",       r: 245, g: 238, b: 200, x:  77, y:  95 },
+        { name: "Lamb's Wool",       r: 242, g: 240, b: 232, x:  99, y:  95 },
+        { name: "Fresh Snow",        r: 248, g: 246, b: 242, x: 121, y:  95 },
+        { name: "Raw Silk",          r: 238, g: 225, b: 202, x: 143, y:  95 },
+        { name: "Petal Pink",        r: 240, g: 210, b: 215, x: 165, y:  95 },
+        { name: "Cherry Blossom",    r: 235, g: 180, b: 190, x: 187, y:  95 },
+        { name: "Wild Rose",         r: 218, g: 132, b: 145, x: 209, y:  95 },
+        { name: "Peony",             r: 225, g: 158, b: 178, x: 231, y:  95 },
+        { name: "Foxglove",          r: 210, g: 115, b: 155, x: 253, y:  95 },
+        // ── Row 6 (13, x=0, y=114) — widest row: warm neutrals, yellows, reds ──
+        { name: "Dijon",             r: 195, g: 165, b:  55, x:   0, y: 114 },
+        { name: "Marigold",          r: 228, g: 190, b:  42, x:  22, y: 114 },
+        { name: "Dandelion",         r: 240, g: 220, b:  60, x:  44, y: 114 },
+        { name: "Warm Butter",       r: 242, g: 232, b: 162, x:  66, y: 114 },
+        { name: "Parchment",         r: 235, g: 222, b: 178, x:  88, y: 114 },
+        { name: "Bone White",        r: 245, g: 242, b: 232, x: 110, y: 114 },
+        { name: "Linen Cloth",       r: 240, g: 232, b: 220, x: 132, y: 114 },
+        { name: "Sandstone",         r: 228, g: 218, b: 198, x: 154, y: 114 },
+        { name: "Desert Blush",      r: 210, g: 178, b: 165, x: 176, y: 114 },
+        { name: "Coral Reef",        r: 218, g: 138, b: 120, x: 198, y: 114 },
+        { name: "Pomegranate",       r: 190, g:  52, b:  68, x: 220, y: 114 },
+        { name: "Cranberry",         r: 168, g:  34, b:  62, x: 242, y: 114 },
+        { name: "Garnet",            r: 148, g:  28, b:  48, x: 264, y: 114 },
+        // ── Row 7 (12, x=11, y=133) — warm harvest: amber through clay ──
+        { name: "Raw Honey",         r: 218, g: 172, b:  42, x:  11, y: 133 },
+        { name: "Autumn Gold",       r: 195, g: 160, b:  55, x:  33, y: 133 },
+        { name: "Persimmon",         r: 210, g: 120, b:  38, x:  55, y: 133 },
+        { name: "Apricot Flesh",     r: 228, g: 190, b: 155, x:  77, y: 133 },
+        { name: "Ripe Peach",        r: 235, g: 188, b: 152, x:  99, y: 133 },
+        { name: "Terra Rosa",        r: 210, g: 120, b:  82, x: 121, y: 133 },
+        { name: "Sunburnt Clay",     r: 195, g: 105, b:  78, x: 143, y: 133 },
+        { name: "Dried Poppy",       r: 185, g:  78, b:  72, x: 165, y: 133 },
+        { name: "Barn Red",          r: 155, g:  42, b:  38, x: 187, y: 133 },
+        { name: "Brick Dust",        r: 165, g:  55, b:  45, x: 209, y: 133 },
+        { name: "Paprika",           r: 180, g:  52, b:  28, x: 231, y: 133 },
+        { name: "Salmon Run",        r: 210, g: 128, b: 108, x: 253, y: 133 },
+        // ── Row 8 (11, x=22, y=152) — fired earth & deep warm ──
+        { name: "Burnt Sienna",      r: 175, g:  82, b:  36, x:  22, y: 152 },
+        { name: "Pumpkin Rind",      r: 195, g:  98, b:  38, x:  44, y: 152 },
+        { name: "Cinnamon Bark",     r: 180, g: 110, b:  50, x:  66, y: 152 },
+        { name: "Adobe Wall",        r: 200, g: 145, b: 108, x:  88, y: 152 },
+        { name: "Weathered Cedar",   r: 168, g: 128, b: 108, x: 110, y: 152 },
+        { name: "Clay Pot",          r: 185, g: 125, b:  95, x: 132, y: 152 },
+        { name: "Red Sandstone",     r: 148, g:  68, b:  48, x: 154, y: 152 },
+        { name: "Madder Root",       r: 155, g:  35, b:  52, x: 176, y: 152 },
+        { name: "Dried Blood",       r: 112, g:  32, b:  40, x: 198, y: 152 },
+        { name: "Oxblood",           r:  98, g:  22, b:  22, x: 220, y: 152 },
+        { name: "Black Cherry",      r:  82, g:  18, b:  28, x: 242, y: 152 },
+        // ── Row 9 (10, x=33, y=171) — wood, leather, earth ──
+        { name: "Toffee",            r: 160, g: 105, b:  32, x:  33, y: 171 },
+        { name: "Buckskin",          r: 195, g: 168, b: 128, x:  55, y: 171 },
+        { name: "Saddle Leather",    r: 168, g: 130, b:  88, x:  77, y: 171 },
+        { name: "Raw Sienna",        r: 150, g:  90, b:  48, x:  99, y: 171 },
+        { name: "Dry Sand",          r: 215, g: 192, b: 148, x: 121, y: 171 },
+        { name: "River Stone",       r: 198, g: 190, b: 170, x: 143, y: 171 },
+        { name: "Driftwood",         r: 175, g: 158, b: 132, x: 165, y: 171 },
+        { name: "Antique Bronze",    r: 175, g: 115, b:  52, x: 187, y: 171 },
+        { name: "Tarnished Copper",  r: 158, g: 105, b:  58, x: 209, y: 171 },
+        { name: "Dark Mahogany",     r:  88, g:  38, b:  18, x: 231, y: 171 },
+        // ── Row 10 (9, x=44, y=190) — deep wood & bark ──
+        { name: "Wet Earth",         r: 115, g:  82, b:  55, x:  44, y: 190 },
+        { name: "Roasted Bean",      r:  95, g:  68, b:  48, x:  66, y: 190 },
+        { name: "Hazelnut Shell",    r: 155, g: 128, b:  98, x:  88, y: 190 },
+        { name: "Fallen Chestnut",   r: 130, g:  72, b:  48, x: 110, y: 190 },
+        { name: "Black Walnut",      r:  72, g:  48, b:  32, x: 132, y: 190 },
+        { name: "Peat Soil",         r:  52, g:  38, b:  25, x: 154, y: 190 },
+        { name: "Dark Bark",         r:  85, g:  55, b:  28, x: 176, y: 190 },
+        { name: "Pine Cone",         r: 110, g:  72, b:  38, x: 198, y: 190 },
+        { name: "Acorn Cap",         r: 145, g:  98, b:  58, x: 220, y: 190 },
+        // ── Row 11 (8, x=55, y=209) — stone, fog, overcast ──
+        { name: "Fieldstone",        r: 128, g: 125, b: 118, x:  55, y: 209 },
+        { name: "Morning Fog",       r: 178, g: 182, b: 175, x:  77, y: 209 },
+        { name: "Dry Clay",          r: 148, g: 135, b: 120, x:  99, y: 209 },
+        { name: "Overcast",          r: 118, g: 118, b: 115, x: 121, y: 209 },
+        { name: "Dove Feather",      r: 155, g: 152, b: 148, x: 143, y: 209 },
+        { name: "Slate Cliff",       r: 105, g: 115, b: 125, x: 165, y: 209 },
+        { name: "Birch Bark",        r: 198, g: 195, b: 188, x: 187, y: 209 },
+        { name: "Wet Shale",         r:  62, g:  68, b:  72, x: 209, y: 209 },
+        // ── Row 12 (7, x=66, y=228) — deepest darks: night, coal, basalt ──
+        { name: "Basalt",            r:  52, g:  52, b:  48, x:  66, y: 228 },
+        { name: "Starless Night",    r:  15, g:  14, b:  18, x:  88, y: 228 },
+        { name: "Soot",              r:  28, g:  26, b:  24, x: 110, y: 228 },
+        { name: "Deep Slate",        r:  48, g:  55, b:  62, x: 132, y: 228 },
+        { name: "Anthracite",        r:  58, g:  58, b:  55, x: 154, y: 228 },
+        { name: "Cast Iron",         r:  68, g:  68, b:  65, x: 176, y: 228 },
+        { name: "Volcanic Ash",      r:  45, g:  48, b:  48, x: 198, y: 228 },
+    ];
+
     height: 28px;
     border-radius: 2px;
-    
+
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 10px;
@@ -973,7 +1262,7 @@ component ColorRow inherits Rectangle {
             show-help-icons: root.show-help-icons;
             open-learn-url(url) => { root.open-learn-url(url); }
         }
-        
+
         // Label
         Text {
             width: 110px;
@@ -983,26 +1272,29 @@ component ColorRow inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        
-        // Color swatch with shadow effect
+
+        // Color swatch — live preview of the row's RGB value, opens
+        // the named-palette picker on click.
         Rectangle {
             width: 28px;
             height: 20px;
-            background: #808080;
+            background: root.preview-color;
             border-radius: 4px;
             border-width: 1px;
-            border-color: #444444;
+            border-color: swatch-touch.has-hover ? Theme.accent-blue : #444444;
             drop-shadow-blur: 2px;
             drop-shadow-color: #00000040;
-            
-            TouchArea {
-                mouse-cursor: pointer;
+
+            swatch-touch := TouchArea {
+                mouse-cursor: root.editable ? pointer : default;
                 clicked => {
-                    // TODO: Open color picker
+                    if root.editable {
+                        color-picker-popup.show();
+                    }
                 }
             }
         }
-        
+
         // Hex input with refined styling — always present but visibility controlled
         Rectangle {
             horizontal-stretch: 1;
@@ -1036,6 +1328,98 @@ component ColorRow inherits Rectangle {
             color: Theme.text-primary;
             font-size: 11px;
             vertical-alignment: center;
+        }
+    }
+
+    // Named-palette popup. Sibling of the HorizontalLayout so the
+    // popup isn't treated as a layout child (Slint's PopupWindow
+    // wants root-level placement). Clicking a swatch writes its
+    // "r, g, b" string through the normal value-changed callback so
+    // the Rust property pipeline handles it identically to manual
+    // hex entry.
+    color-picker-popup := PopupWindow {
+        x: 140px;
+        y: parent.height;
+        width: 312px;
+        height: 340px;
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: #1a1a22;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #3a3a3a;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #000000a0;
+
+            // Swallow clicks so they don't bubble to the viewport.
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+
+                Text {
+                    text: "Pick a Color";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 700;
+                }
+
+                // 13-row honeycomb (7-8-9-10-11-12-13-12-11-10-9-8-7)
+                // = 127 swatches. Each `ColorSwatchCell` reads its
+                // (x, y) from the precomputed `palette` entry — the
+                // layout lives in the data, not in the Slint
+                // expression, because Slint can't index nested
+                // arrays from inside a `for` body.
+                //
+                // Bounds: max row width 13×22 = 286 px; height = 13
+                // rows × 19 px + chip overflow ≈ 263 px.
+                Rectangle {
+                    width: 286px;
+                    height: 264px;
+                    background: transparent;
+
+                    for sw[idx] in root.palette: ColorSwatchCell {
+                        x: sw.x * 1px;
+                        y: sw.y * 1px;
+                        swatch-name: sw.name;
+                        r: sw.r;
+                        g: sw.g;
+                        b: sw.b;
+                        swatch-clicked => {
+                            // Write the 0-255 "r, g, b" form the
+                            // Properties Rust side already parses;
+                            // hex normalization happens there.
+                            root.value-changed(sw.r + ", " + sw.g + ", " + sw.b);
+                            color-picker-popup.close();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 26px;
+                    width: 70px;
+                    background: close-touch.has-hover ? #3a3a3a : #252530;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #4a4a4a;
+
+                    Text {
+                        text: "Close";
+                        color: Theme.text-primary;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    close-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { color-picker-popup.close(); }
+                    }
+                }
+            }
         }
     }
 }
@@ -1146,6 +1530,10 @@ export component PropertiesPanel inherits Rectangle {
     callback on-open-learn-url(string);
     // Fired when any input field gains or loses focus — Rust uses this to pause property sync
     callback on-input-focus-changed(bool);
+    // Type-ahead callback for material dropdown keyboard navigation.
+    // Rust scans material options and returns the index of the first match.
+    // Arguments: (pressed-key, current-highlight-index) -> new-highlight-index
+    callback on-find-material-by-key(string, int) -> int;
     // Fired when the copy icon on a Vec3 / Rotation row is clicked —
     // Rust pushes the `"x, y, z"` triple to the OS clipboard.
     callback on-copy-property-vector(string, string);
@@ -1357,6 +1745,7 @@ export component PropertiesPanel inherits Rectangle {
                     if !prop.is-header && !prop.section-collapsed && prop.property-type == "color": ColorRow {
                         label: prop.name;
                         value: prop.value;
+                        preview-color: prop.color-value;
                         editable: prop.editable;
                         description: prop.description;
                         learn-url: prop.learn-url;
@@ -1390,6 +1779,7 @@ export component PropertiesPanel inherits Rectangle {
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                         focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        find-material-by-key(key, current-idx) => { root.on-find-material-by-key(key, current-idx) }
                     }
 
                     // String / float / int / enum — generic row

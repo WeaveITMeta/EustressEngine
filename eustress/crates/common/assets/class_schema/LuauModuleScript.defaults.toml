@@ -1,0 +1,11 @@
+# LuauModuleScript — Reusable Luau module (Roblox-compatible)
+# mLuau VM: Imported by other scripts via require()
+
+[script]
+source = ""
+enabled = true
+run_context = "Module"
+
+[metadata]
+class_name = "LuauModuleScript"
+archivable = true

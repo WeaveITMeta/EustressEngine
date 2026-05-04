@@ -28,6 +28,11 @@ export component OutputConsole inherits Rectangle {
     in-out property <string> source-filter: "all";
     // Pre-rendered text for the full output (set by Rust, enables multi-line select + copy)
     in-out property <string> all-text: "";
+
+    // Bottom-panel mode — "output" or "timeline". The tab buttons
+    // live inside this toolbar so there is no separate chrome row.
+    in-out property <string> panel-mode: "output";
+    callback set-panel-mode(string);
     
     // Callbacks
     callback on-clear();
@@ -50,30 +55,56 @@ export component OutputConsole inherits Rectangle {
             background: Theme.header-background;
             
             HorizontalLayout {
-                padding-left: 8px;
+                padding-left: 2px;
                 padding-right: 4px;
-                spacing: 0px;
+                padding-top: 2px;
+                spacing: 1px;
                 alignment: stretch;
                 
-                // "Output" label with SVG icon
+                // Output / Timeline tab buttons — styled to match
+                // Explorer/Assets/Universes/Toolbox panel tabs.
                 Rectangle {
-                    width: 70px;
-                    
-                    Image {
-                        x: 0px;
-                        y: 7px;
-                        width: 16px;
-                        height: 16px;
-                        source: @image-url("../../assets/icons/ui/output.svg");
-                        image-fit: contain;
+                    width: 72px;
+                    background: root.panel-mode == "output" ? Theme.panel-background : Theme.tab-inactive;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+
+                    output-mode-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.panel-mode = "output";
+                            root.set-panel-mode("output");
+                        }
                     }
-                    
+
                     Text {
-                        x: 20px;
                         text: "Output";
-                        color: Theme.text-primary;
+                        color: root.panel-mode == "output" ? Theme.text-primary : Theme.text-secondary;
                         font-size: 12px;
-                        font-weight: 500;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    width: 80px;
+                    background: root.panel-mode == "timeline" ? Theme.panel-background : Theme.tab-inactive;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+
+                    timeline-mode-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.panel-mode = "timeline";
+                            root.set-panel-mode("timeline");
+                        }
+                    }
+
+                    Text {
+                        text: "Timeline";
+                        color: root.panel-mode == "timeline" ? Theme.text-primary : Theme.text-secondary;
+                        font-size: 12px;
+                        horizontal-alignment: center;
                         vertical-alignment: center;
                     }
                 }

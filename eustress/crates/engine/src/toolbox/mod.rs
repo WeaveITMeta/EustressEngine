@@ -80,11 +80,32 @@ pub fn get_mesh_catalog() -> Vec<ToolboxMesh> {
 
 /// Insert a mesh instance by creating a .glb.toml file in a specific target directory.
 /// Use this when you already know the directory (e.g. selected folder's path).
+///
+/// Forwards to [`insert_mesh_instance_with_class`] with `class_name = "Part"` so
+/// existing callers that just want a plain mesh part keep working unchanged.
 pub fn insert_mesh_instance_at(
     target_dir: &PathBuf,
     mesh_id: &str,
     position: [f32; 3],
     instance_name: Option<String>,
+) -> Result<PathBuf, String> {
+    insert_mesh_instance_with_class(target_dir, mesh_id, position, instance_name, "Part")
+}
+
+/// Same as [`insert_mesh_instance_at`] but with a caller-supplied
+/// `class_name` written into the generated `_instance.toml`.
+///
+/// Needed so the Toolbox / Insert-menu can spawn mesh-backed subclasses
+/// of `Part` (`Seat`, `VehicleSeat`, `SpawnLocation`, `UnionOperation`, …)
+/// as their real class without forking a parallel file-writer. Every
+/// path still produces the same folder + `_instance.toml` layout; only
+/// the `[metadata] class_name` differs.
+pub fn insert_mesh_instance_with_class(
+    target_dir: &PathBuf,
+    mesh_id: &str,
+    position: [f32; 3],
+    instance_name: Option<String>,
+    class_name: &str,
 ) -> Result<PathBuf, String> {
     let catalog = get_mesh_catalog();
     let mesh = catalog.iter()
@@ -121,7 +142,7 @@ pub fn insert_mesh_instance_at(
         },
         properties: crate::space::instance_loader::InstanceProperties::default(),
         metadata: crate::space::instance_loader::InstanceMetadata {
-            class_name: "Part".to_string(),
+            class_name: class_name.to_string(),
             archivable: true,
             name: if folder_name != instance_name { Some(instance_name.clone()) } else { None },
             created: now.clone(),

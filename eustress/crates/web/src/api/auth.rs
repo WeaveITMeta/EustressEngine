@@ -31,10 +31,18 @@ pub struct RegisterRequest {
 }
 
 /// Auth response with token and user.
+///
+/// `backup_emailed` is populated only by `/api/auth/register` when the
+/// caller supplied `email` + `toml_content` and the Worker successfully
+/// relayed the welcome email. Other endpoints (login, verify-challenge)
+/// don't set it; serde defaults to `None` so existing call sites stay
+/// compatible.
 #[derive(Debug, Deserialize)]
 pub struct AuthResponse {
     pub token: String,
     pub user: User,
+    #[serde(default)]
+    pub backup_emailed: Option<bool>,
 }
 
 /// Token refresh response.
@@ -149,6 +157,16 @@ pub async fn verify_challenge(
 }
 
 /// Register a new Eustress Identity with the node.
+///
+/// `email` + `toml_content` are optional. When BOTH are supplied, the
+/// Cloudflare Worker auto-relays the identity-registration welcome
+/// email (with the TOML as a `.toml` attachment) before returning,
+/// and stamps `backup_emailed: true` on the response. Callers
+/// supplying only one of the two get treated as if neither were
+/// present — the Worker won't half-send.
+///
+/// Skipping `serialize_if = None` so the JSON payload stays compact
+/// and the Worker's `&& email && toml_content` check is simple.
 #[derive(Debug, Serialize)]
 pub struct IdentityRegisterRequest {
     pub username: String,
@@ -157,6 +175,14 @@ pub struct IdentityRegisterRequest {
     pub id_type: Option<String>,
     pub id_hash: Option<String>,
     pub kyc_session_id: Option<String>,
+    /// Email address to send the identity backup to. None = no email.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Full identity.toml body (with private key) — built CLIENT-SIDE
+    /// only; never round-trips back to the Worker after this single
+    /// signup call. None = no email.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toml_content: Option<String>,
 }
 
 pub async fn register_identity(
@@ -167,6 +193,8 @@ pub async fn register_identity(
     id_type: Option<&str>,
     id_hash: Option<&str>,
     kyc_session_id: Option<&str>,
+    email: Option<&str>,
+    toml_content: Option<&str>,
 ) -> Result<AuthResponse, ApiError> {
     let request = IdentityRegisterRequest {
         username: username.to_string(),
@@ -175,6 +203,8 @@ pub async fn register_identity(
         id_type: id_type.map(|s| s.to_string()),
         id_hash: id_hash.map(|s| s.to_string()),
         kyc_session_id: kyc_session_id.map(|s| s.to_string()),
+        email: email.map(|s| s.to_string()),
+        toml_content: toml_content.map(|s| s.to_string()),
     };
 
     let response: AuthResponse = client.post("/api/auth/register", &request).await?;

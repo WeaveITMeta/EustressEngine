@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::modes::WorkshopMode;
 
@@ -85,9 +86,48 @@ pub trait ToolHandler: Send + Sync + 'static {
 // Tool Context
 // ---------------------------------------------------------------------------
 
+/// An entity created by a Luau script via `Instance.new("Part")`.
+/// Returned by the `LuauExecutor` callback so `execute_luau` can
+/// materialize the instances as on-disk entity folders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LuauCreatedEntity {
+    pub class_name: String,
+    pub name: String,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub size: [f32; 3],
+    pub color: [f32; 4],
+    pub material: String,
+    /// Part shape — "Block", "Ball", "Cylinder", "Wedge", "CornerWedge", "Cone".
+    #[serde(default = "default_shape")]
+    pub shape: String,
+    pub transparency: f32,
+    pub anchored: bool,
+    pub can_collide: bool,
+}
+
+fn default_shape() -> String { "Block".to_string() }
+
+/// Result of running a Luau script via the executor callback.
+#[derive(Debug, Clone)]
+pub struct LuauExecutionResult {
+    /// Whether the script ran without errors.
+    pub success: bool,
+    /// Human-readable output or error message.
+    pub message: String,
+    /// Entities created during execution via Instance.new().
+    pub created_entities: Vec<LuauCreatedEntity>,
+}
+
+/// Callback type for inline Luau execution. The engine provides this;
+/// the MCP server leaves it `None`. Takes (source_code, chunk_name)
+/// and returns the execution result with any created instances.
+pub type LuauExecutor = Arc<dyn Fn(&str, &str) -> LuauExecutionResult + Send + Sync>;
+
 /// Context passed to handlers during execution. Carries paths + auth
 /// identity; all fields are `Send + Sync + 'static` so the context
 /// can cross the tokio/Bevy boundary without issue.
+#[derive(Clone)]
 pub struct ToolContext {
     /// Current Space root path (Universe-locked).
     pub space_root: PathBuf,
@@ -97,6 +137,12 @@ pub struct ToolContext {
     pub user_id: Option<String>,
     /// Current username.
     pub username: Option<String>,
+    /// Optional Luau VM executor — populated by the engine when the
+    /// `luau` feature is enabled. When present, `execute_luau` runs
+    /// the script inline and materializes created instances as entity
+    /// folders. When `None`, the tool only writes the script file for
+    /// later hot-reload.
+    pub luau_executor: Option<LuauExecutor>,
 }
 
 // ---------------------------------------------------------------------------

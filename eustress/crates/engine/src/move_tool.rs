@@ -175,7 +175,19 @@ fn draw_move_gizmos(
     studio_state: Res<crate::ui::StudioState>,
     query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
+    // `Without<bevy::ui::Node>` excludes 2D UI children whose
+    // `GlobalTransform` stays at the origin (Bevy's UI layout
+    // doesn't propagate 3D parent transforms into UI nodes). Without
+    // the filter, a BillboardGui with a child TextLabel would drag
+    // the gizmo AABB midpoint toward world-origin — manifesting as
+    // the move gizmo appearing far-left of the actual billboard
+    // quad. Same reasoning applies to `Without<crate::ui::gui_components::GuiElementDisplay>`
+    // entities loaded via `gui_loader` that have `Node { display: None }`
+    // but no 3D transform semantics.
+    child_transforms: Query<
+        (&GlobalTransform, Option<&crate::classes::BasePart>),
+        (Without<Selected>, Without<bevy::ui::Node>),
+    >,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
     // Draw Move gizmos when Move tool is active OR Select tool is active (Roblox UX:
@@ -318,7 +330,14 @@ fn handle_move_interaction(
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_global_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
+    // See `draw_move_gizmos` — `Without<bevy::ui::Node>` keeps UI
+    // children (2D TextLabel, Frame, etc. living inside a
+    // BillboardGui / ScreenGui) out of the drag AABB so the gizmo
+    // doesn't follow their origin-defaulted GlobalTransform.
+    child_global_transforms: Query<
+        (&GlobalTransform, Option<&crate::classes::BasePart>),
+        (Without<Selected>, Without<bevy::ui::Node>),
+    >,
     unselected_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&crate::rendering::PartEntity>, Option<&crate::classes::Instance>, Option<&crate::classes::BasePart>), Without<Selected>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
@@ -570,7 +589,10 @@ fn handle_move_interaction(
                 for (entity, _, mut transform, base_part_opt) in query.iter_mut() {
                     if is_descendant(entity, &selected_set, &parent_query) { continue; }
                     if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                        let new_pos = *initial_pos + snapped_delta;
+                        let raw_pos = *initial_pos + snapped_delta;
+                        let new_pos = crate::space::instance_loader::safe_translation(
+                            raw_pos, *initial_pos,
+                        );
                         transform.translation = new_pos;
                         if let Some(mut bp) = base_part_opt {
                             bp.cframe.translation = new_pos;
@@ -603,7 +625,10 @@ fn handle_move_interaction(
                 for (entity, _, mut transform, base_part_opt) in query.iter_mut() {
                     if is_descendant(entity, &selected_set, &parent_query) { continue; }
                     if let Some(initial_pos) = state.initial_positions.get(&entity) {
-                        let new_pos = *initial_pos + axis_vec * snapped_delta;
+                        let raw_pos = *initial_pos + axis_vec * snapped_delta;
+                        let new_pos = crate::space::instance_loader::safe_translation(
+                            raw_pos, *initial_pos,
+                        );
                         transform.translation = new_pos;
                         if let Some(mut bp) = base_part_opt {
                             bp.cframe.translation = new_pos;
@@ -781,11 +806,14 @@ fn handle_move_interaction(
                 if let Some(initial_pos) = state.initial_positions.get(&entity) {
                     let initial_rot = state.initial_rotations.get(&entity).copied().unwrap_or(Quat::IDENTITY);
                     let rel = *initial_pos - pivot;
-                    let (new_pos, new_rot) = if let Some(q) = align_rotation {
+                    let (raw_pos, new_rot) = if let Some(q) = align_rotation {
                         (final_target + q * rel, q * initial_rot)
                     } else {
                         (final_target + rel, initial_rot)
                     };
+                    let new_pos = crate::space::instance_loader::safe_translation(
+                        raw_pos, *initial_pos,
+                    );
                     transform.translation = new_pos;
                     if align_rotation.is_some() {
                         transform.rotation = new_rot;
@@ -890,7 +918,10 @@ fn finalize_numeric_input_on_move(
         for (entity, mut transform, base_part_opt) in query.iter_mut() {
             let Some(initial_pos) = state.initial_positions.get(&entity).copied() else { continue };
             let Some(initial_rot) = state.initial_rotations.get(&entity).copied() else { continue };
-            let new_pos = initial_pos + axis_vec * value;
+            let raw_pos = initial_pos + axis_vec * value;
+            let new_pos = crate::space::instance_loader::safe_translation(
+                raw_pos, initial_pos,
+            );
 
             if (initial_pos - new_pos).length() > 0.001 {
                 old_transforms.push((entity.to_bits(), initial_pos.to_array(), initial_rot.to_array()));

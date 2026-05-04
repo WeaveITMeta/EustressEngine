@@ -109,17 +109,36 @@ impl BevyWindowAdapter {
     }
 }
 
-// Thread-local storage for window adapters created by the platform
+// Thread-local storage for window adapters created by the platform.
+//
+// Stored as STRONG `Rc` (not `Weak`) because Slint does not durably retain
+// the `Rc<dyn WindowAdapter>` that `create_window_adapter` returns past the
+// initial component-init plumbing — empirically, the strong count drops to
+// zero before our caller can grab the adapter. The `slint_window` inside
+// the adapter only holds a `Weak<BevyWindowAdapter>`, so without an
+// external strong owner the whole adapter would die between `Component::new()`
+// and any later render call.
+//
+// Lifecycle: each `create_window_adapter` push appends a strong Rc; each
+// `take_latest_window_adapter` pops it and transfers ownership to the
+// caller, who is then expected to retain the Rc as long as they want the
+// component to keep rendering. Empty / not-yet-taken state is fine — the
+// Vec just holds the most recent adapter pending hand-off.
 thread_local! {
-    static SLINT_WINDOWS: RefCell<Vec<Weak<BevyWindowAdapter>>> = RefCell::new(Vec::new());
+    static SLINT_WINDOWS: RefCell<Vec<Rc<BevyWindowAdapter>>> = RefCell::new(Vec::new());
 }
 
-/// Return the most recently created `BevyWindowAdapter` (the one bound to the
-/// Slint component that was just `::new()`'d). Callers instantiate a Slint
-/// component and immediately call this to get the adapter that drives it, so
-/// they can resize it + render its surface into their own pixel buffer.
-pub(crate) fn take_latest_window_adapter() -> Option<Weak<BevyWindowAdapter>> {
-    SLINT_WINDOWS.with(|w| w.borrow().last().cloned())
+/// Pop the most recently created `BevyWindowAdapter` and transfer the
+/// strong `Rc` to the caller. Callers instantiate a Slint component
+/// (which causes the platform to create+push an adapter) and immediately
+/// call this to take ownership of the adapter driving that component.
+///
+/// The returned `Rc` MUST be retained — Slint's component holds a `Weak`
+/// to the adapter via `slint_window`, so dropping the returned `Rc`
+/// would let the adapter (and its software renderer state) be freed,
+/// breaking subsequent renders.
+pub(crate) fn take_latest_window_adapter() -> Option<Rc<BevyWindowAdapter>> {
+    SLINT_WINDOWS.with(|w| w.borrow_mut().pop())
 }
 
 /// Custom Slint platform for Bevy integration
@@ -137,8 +156,10 @@ impl slint::platform::Platform for SlintBevyPlatform {
         adapter
             .slint_window
             .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor });
+        // Push a STRONG clone so the adapter survives until the engine
+        // explicitly takes it — Slint itself doesn't keep this alive.
         SLINT_WINDOWS.with(|windows| {
-            windows.borrow_mut().push(Rc::downgrade(&adapter));
+            windows.borrow_mut().push(adapter.clone());
         });
         Ok(adapter)
     }
@@ -219,6 +240,10 @@ pub enum SlintAction {
     OpenScene,
     SaveScene,
     SaveSceneAs,
+    /// File → Import. Slint signal carries no path; the Rust side opens
+    /// the OS file picker (rfd) and forwards the chosen path through
+    /// `FileEvent::ImportAsset` for `do_import_asset` to consume.
+    ImportAsset,
     PublishUniverse,
     PublishSpace,
     Publish(PublishRequest),
@@ -310,6 +335,9 @@ pub enum SlintAction {
     ExecuteScript(String, String),
     ClearScriptOutput,
     
+    // Bottom panel mode (Output / Timeline tab switch)
+    SetBottomPanel(String),
+    
     // Context menu
     InsertPart(String),
     ContextAction(String),
@@ -386,6 +414,10 @@ pub enum SlintAction {
     ScriptContentChanged(String),
     ReorderCenterTab(i32, i32), // (from_index, to_index)
     ToggleTabMode(i32),         // Toggle summary/code for tab at StudioState index (1-based)
+    /// Right-click on a script-editor tab → "Copy Path". Copies the tab's
+    /// filesystem path (folder for entity-backed tabs, file for plain
+    /// files) to the OS clipboard. Tab index is 1-based per StudioState.
+    CopyTabPath(i32),
     
     // Web browser
     OpenWebTab(String),         // URL
@@ -484,6 +516,9 @@ pub enum SlintAction {
     ApiCategorySelected(String),
     ApiLanguageFilterChanged(String),
     ApiCopyExample(String),
+
+    // Services Browser panel
+    ServicesBrowserOpenUrl(String),
 
     // Universe browser
     OpenSpacePath(String),
@@ -722,6 +757,18 @@ pub struct UnifiedExplorerState {
     /// `DOUBLE_CLICK_MS` → treat as `OpenNode`.
     pub last_click_node_id: Option<i32>,
     pub last_click_at: Option<std::time::Instant>,
+    /// Set by 3D-viewport selection (`part_selection_system`) when a
+    /// part is clicked in the scene. The Explorer sync system reads
+    /// this on the next sync tick, finds the entity's node in the
+    /// visible tree, computes the scroll offset to put that row at
+    /// the top, increments `scroll_pulse`, and clears the field.
+    /// Explorer-originated clicks deliberately do NOT set this — the
+    /// row was already on screen if the user clicked it.
+    pub pending_scroll_target_entity: Option<bevy::prelude::Entity>,
+    /// Monotonic counter forwarded to Slint's `explorer-scroll-pulse`.
+    /// Slint's `changed scroll-pulse` handler fires once per increment
+    /// and snaps the ScrollView's viewport to `scroll-target-y`.
+    pub scroll_pulse: u32,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -751,6 +798,8 @@ impl Default for UnifiedExplorerState {
             visible_node_order: Vec::new(),
             last_click_node_id: None,
             last_click_at: None,
+            pending_scroll_target_entity: None,
+            scroll_pulse: 0,
         }
     }
 }
@@ -1016,6 +1065,8 @@ impl Plugin for SlintUiPlugin {
             // API Reference: build catalog once at startup, init filter state
             .insert_resource(crate::workshop::api_reference::ApiCatalog::build())
             .init_resource::<ApiFilterState>()
+            // Services Browser: one-shot init pushed to Slint on first frame
+            .init_resource::<ServicesBrowserInitialized>()
             // Events
             .add_message::<FileEvent>()
             .add_message::<MenuActionEvent>()
@@ -1088,6 +1139,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_analyzer_to_slint.after(SlintSystems::Drain))
             // API Reference Panel sync: ApiCatalog + ApiFilterState → Slint
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
+            // Services Browser: one-shot push of static catalog to Slint
+            .add_systems(Update, init_services_browser_to_slint.after(SlintSystems::Drain))
             // Center tab sync: drain_slint_actions → CenterTabManager → StudioState → Slint
             .add_systems(Update, sync_tab_manager_to_studio_state
                 .after(SlintSystems::Drain)
@@ -1167,10 +1220,21 @@ fn setup_slint_overlay(world: &mut World) {
     };
     
     ui.window().show().expect("Failed to show Slint window");
-    
-    // Retrieve the adapter from thread-local storage
-    let adapter = SLINT_WINDOWS
-        .with(|windows| windows.borrow().first().and_then(|w| w.upgrade()))
+
+    // Grab the FIRST adapter that the platform pushed during
+    // `StudioWindow::new()`. Slint may create more than one window
+    // adapter for a top-level component (e.g. for embedded
+    // PopupWindows / dialogs), so we cannot use `pop()` here — that
+    // returns the LAST pushed adapter, which can be a popup's
+    // miniature adapter instead of the main window's. Rendering
+    // against the wrong adapter overflows euclid's i32 point math
+    // inside `software_renderer.render()` because the staging
+    // buffer's logical size doesn't match the popup's geometry.
+    //
+    // We `clone()` rather than `remove()` so the adapter stays in
+    // SLINT_WINDOWS — billboard `take_latest_window_adapter()` calls
+    // pop from the END so they don't collide with this entry.
+    let adapter = SLINT_WINDOWS.with(|w| w.borrow().first().cloned())
         .expect("Slint window adapter should be created when StudioWindow is initialized");
     
     // Notify Slint the window is active
@@ -1206,6 +1270,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_save_scene(move || q.push(SlintAction::SaveScene));
     let q = queue.clone();
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
+    let q = queue.clone();
+    ui.on_import_asset(move || q.push(SlintAction::ImportAsset));
     let q = queue.clone();
     ui.on_publish_universe(move || q.push(SlintAction::PublishUniverse));
     let q = queue.clone();
@@ -1348,6 +1414,35 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_paste_property_vector(move |name| q.push(SlintAction::PastePropertyVector(name.to_string())));
 
+    // Material dropdown type-ahead: find the first option starting with the
+    // pressed key character (case-insensitive), searching forward from the
+    // current highlight index and wrapping around. Returns the matching
+    // index or the current index unchanged if no match.
+    ui.on_find_material_by_key(move |key, current_idx| {
+        let key_lower = key.to_string().to_lowercase();
+        if key_lower.is_empty() { return current_idx; }
+        // Access the material options from the properties model
+        // by scanning the built-in + custom material names.
+        let all_materials: Vec<String> = vec![
+            "Plastic", "SmoothPlastic", "Wood", "WoodPlanks",
+            "Metal", "CorrodedMetal", "DiamondPlate", "Foil",
+            "Grass", "Concrete", "Brick", "Granite",
+            "Marble", "Slate", "Sand", "Fabric",
+            "Glass", "Neon", "Ice",
+            "Gold", "Silver", "Bronze",
+        ].into_iter().map(String::from).collect();
+        let count = all_materials.len() as i32;
+        if count == 0 { return current_idx; }
+        // Search forward from current_idx+1, wrapping around
+        for offset in 1..=count {
+            let idx = ((current_idx + offset) % count) as usize;
+            if all_materials[idx].to_lowercase().starts_with(&key_lower) {
+                return idx as i32;
+            }
+        }
+        current_idx
+    });
+
     // Help icon — open /learn URL (tabbed viewer or system browser per settings)
     let q = queue.clone();
     ui.on_open_learn_url(move |url| q.push(SlintAction::OpenLearnUrl(url.to_string())));
@@ -1365,6 +1460,10 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_execute_script(move |lang, script| q.push(SlintAction::ExecuteScript(lang.to_string(), script.to_string())));
     let q = queue.clone();
     ui.on_clear_script_output(move || q.push(SlintAction::ClearScriptOutput));
+    
+    // Bottom panel mode (Output ↔ Timeline tab switch)
+    let q = queue.clone();
+    ui.on_set_bottom_panel(move |mode| q.push(SlintAction::SetBottomPanel(mode.to_string())));
     
     // Toolbox part insertion
     let q = queue.clone();
@@ -1524,6 +1623,8 @@ fn setup_slint_overlay(world: &mut World) {
     // Center tab management
     let q = queue.clone();
     ui.on_close_center_tab(move |idx| q.push(SlintAction::CloseCenterTab(idx)));
+    let q = queue.clone();
+    ui.on_copy_tab_path(move |idx| q.push(SlintAction::CopyTabPath(idx)));
     let q = queue.clone();
     ui.on_reopen_closed_tab(move || q.push(SlintAction::ReopenClosedTab));
     let q = queue.clone();
@@ -2986,6 +3087,28 @@ fn drain_slint_actions(
             SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
+            SlintAction::ImportAsset => {
+                // Open the OS file picker for image / video formats.
+                // Picker call is synchronous — fine here because this
+                // arm fires from the user's deliberate ribbon click,
+                // not from a hot path. If the user cancels, log and
+                // move on without writing a FileEvent.
+                let picked = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
+                    .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
+                    .add_filter("Images & Videos", &[
+                        "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga",
+                        "mp4", "webm", "mov", "mkv",
+                    ])
+                    .set_title("Import Image or Video")
+                    .pick_file();
+                match picked {
+                    Some(path) => {
+                        events.file_events.write(FileEvent::ImportAsset(path));
+                    }
+                    None => info!("📥 Import asset cancelled by user"),
+                }
+            }
             SlintAction::PublishUniverse => {
                 if let Some(ui) = ui {
                     let current_space_root = res.space_root.as_ref().map(|root| root.0.as_path());
@@ -3746,6 +3869,50 @@ fn drain_slint_actions(
                     s.pending_close_tab = Some(idx);
                 }
             }
+            SlintAction::CopyTabPath(idx) => {
+                // Slint sends 0-based index into the non-scene tabs list.
+                // CenterTabManager uses Scene at index 0, so mgr_idx = idx + 1.
+                let payload: Option<String> = res.tab_manager.as_ref().and_then(|mgr| {
+                    let mgr_idx = (idx as usize) + 1;
+                    let tab = mgr.tabs.get(mgr_idx)?;
+                    // Entity-backed tabs (SoulScript, ParametersEditor) — copy
+                    // the entity's folder path. Falls through to `file_path`
+                    // when the entity has no `InstanceFile` backing.
+                    let from_entity = tab.entity.and_then(|ent| {
+                        queries.instance_files.get(ent).ok().and_then(|inst| {
+                            let toml = &inst.toml_path;
+                            let is_folder_instance = toml
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                == Some("_instance.toml");
+                            let resolved = if is_folder_instance {
+                                toml.parent().map(|p| p.to_path_buf())
+                            } else {
+                                Some(toml.clone())
+                            };
+                            resolved.map(|p| p.to_string_lossy().to_string())
+                        })
+                    });
+                    from_entity.or_else(|| {
+                        tab.file_path.as_ref().map(|p| p.to_string_lossy().to_string())
+                    })
+                });
+
+                if let Some(text) = payload {
+                    #[cfg(feature = "clipboard")]
+                    {
+                        use arboard::Clipboard;
+                        if let Ok(mut clipboard) = Clipboard::new() {
+                            let _ = clipboard.set_text(text.clone());
+                            info!("Copied tab path to clipboard: {}", text);
+                        }
+                    }
+                    #[cfg(not(feature = "clipboard"))]
+                    info!("Clipboard feature not enabled; would copy tab path: {}", text);
+                } else {
+                    warn!("Copy Path: tab {} has no resolvable filesystem path", idx);
+                }
+            }
             SlintAction::ReopenClosedTab => {
                 if let Some(ref mut mgr) = res.tab_manager {
                     if mgr.reopen_last_closed() {
@@ -4174,7 +4341,20 @@ fn drain_slint_actions(
                 }
 
                 if let Some(ref mut es) = res.explorer_state {
-                    // ── Shift+Click: range select ──
+                    // ── Shift+Click: ADDITIVE range select ──
+                    // The new range is added to the CURRENT selection rather
+                    // than replacing it, so a prior shift-range (with any
+                    // Ctrl-deselects) survives across a follow-up shift-click.
+                    // The anchor still tracks the most recent normal/Ctrl
+                    // click — Shift never moves it — so each shift-click
+                    // extends from that anchor to the clicked item.
+                    //
+                    // Workflow this enables:
+                    //   1. Shift-click A → B   (range A..B selected)
+                    //   2. Ctrl-click some items in A..B   (deselect a few)
+                    //   3. Shift-click C       (range A..C added; the
+                    //      Ctrl-deselects from step 2 are preserved
+                    //      outside the new range)
                     if shift {
                         if let (Some(anchor_id), Some(ref sel_mgr)) = (es.last_selected_node_id, &res.selection_manager) {
                             let order = &es.visible_node_order;
@@ -4183,13 +4363,13 @@ fn drain_slint_actions(
                             if let (Some(a), Some(b)) = (anchor_pos, target_pos) {
                                 let (start, end) = if a <= b { (a, b) } else { (b, a) };
                                 let sel = sel_mgr.0.write();
-                                sel.clear();
-                                // Always include the anchor node first
+                                // No clear here — preserve existing selection.
+                                // Always include the anchor node first.
                                 if let Some(entity) = es.entity_id_cache.get(&anchor_id).copied() {
                                     let id_str = format!("{}v{}", entity.index(), entity.generation());
                                     sel.add_to_selection(id_str);
                                 }
-                                // Then add the full range (anchor through target, inclusive)
+                                // Then add the full range (anchor through target, inclusive).
                                 for &range_id in &order[start..=end] {
                                     if range_id > 0 {
                                         if let Some(entity) = es.entity_id_cache.get(&range_id).copied() {
@@ -4209,8 +4389,31 @@ fn drain_slint_actions(
                     }
                     // ── Ctrl+Click: toggle selection ──
                     else if ctrl {
-                        if node_type == "entity" && id > 0 {
-                            if let Some(entity) = es.entity_id_cache.get(&id).copied() {
+                        if node_type == "entity" {
+                            if id < 0 {
+                                // Service header node — toggle via service name
+                                let service_name = queries.service_components.iter()
+                                    .find_map(|sc| {
+                                        if service_name_to_id(&sc.class_name) == id {
+                                            Some(sc.class_name.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .or_else(|| {
+                                        let known = ["Workspace","Lighting","Players","StarterGui","StarterPack",
+                                            "StarterPlayer","ReplicatedStorage","ServerStorage",
+                                            "ServerScriptService","SoulService","SoundService","Teams","Chat",
+                                            "MaterialService","AdornmentService"];
+                                        known.iter().find(|n| service_name_to_id(n) == id).map(|n| n.to_string())
+                                    });
+                                if let Some(name) = service_name {
+                                    if let Some(ref sel_mgr) = res.selection_manager {
+                                        sel_mgr.0.write().toggle_selection(format!("service:{}", name));
+                                    }
+                                    es.selected = SelectedItem::Service(name);
+                                }
+                            } else if let Some(entity) = es.entity_id_cache.get(&id).copied() {
                                 let is_valid = queries.instances.get(entity).is_ok()
                                     || queries.terrain_roots.get(entity).is_ok()
                                     || queries.terrain_chunks.get(entity).is_ok();
@@ -4533,58 +4736,98 @@ fn drain_slint_actions(
             }
             
             SlintAction::ReparentNode(source_id, target_id) => {
-                // Drag-and-drop reparent: move source entity into target entity
+                // Drag-and-drop reparent: move source entity folder into target entity folder.
+                //
+                // LoadedFromFile.path can be either the folder itself (initial scan)
+                // or the _instance.toml inside it (file watcher). Normalize both to
+                // the containing folder so we always move entire entity folders.
                 let source_entity = res.explorer_state.as_ref()
                     .and_then(|es| es.entity_id_cache.get(&source_id).copied());
                 let target_entity = res.explorer_state.as_ref()
                     .and_then(|es| es.entity_id_cache.get(&target_id).copied());
 
                 if let (Some(source), Some(target)) = (source_entity, target_entity) {
-                    // 1. Update ECS hierarchy
-                    commands.entity(source).insert(ChildOf(target));
+                    // Resolve both paths to folder paths (not TOML paths).
+                    let normalize_to_folder = |p: &std::path::Path| -> std::path::PathBuf {
+                        if p.is_dir() {
+                            p.to_path_buf()
+                        } else {
+                            // _instance.toml or .part.toml → parent folder
+                            p.parent().unwrap_or(p).to_path_buf()
+                        }
+                    };
 
-                    // 2. Move on disk: source folder → inside target folder
                     let source_path = queries.loaded_from_file.get(source).ok()
-                        .map(|(_, lff)| lff.path.clone());
+                        .map(|(_, lff)| normalize_to_folder(&lff.path));
                     let target_path = queries.loaded_from_file.get(target).ok()
-                        .map(|(_, lff)| lff.path.clone());
+                        .map(|(_, lff)| normalize_to_folder(&lff.path));
 
-                    if let (Some(src), Some(tgt)) = (source_path, target_path) {
-                        let tgt_dir = if tgt.is_dir() { tgt.clone() }
-                            else { tgt.parent().unwrap_or(&tgt).to_path_buf() };
-                        let src_name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
-                        let dest = tgt_dir.join(&src_name);
-
-                        if src != dest && !dest.exists() {
-                            // Suppress file watcher for the source path
-                            if let Some(ref mut registry) = res.file_registry {
-                                registry.rename_in_progress.insert(src.clone());
+                    if let (Some(src_folder), Some(tgt_folder)) = (source_path, target_path) {
+                        // Prevent dropping a folder into itself or a descendant
+                        if tgt_folder.starts_with(&src_folder) {
+                            if let Some(ref mut out) = res.output {
+                                out.warn("Cannot move a folder into itself or a descendant".to_string());
                             }
-                            match std::fs::rename(&src, &dest) {
-                                Ok(_) => {
-                                    info!("📂 Reparented '{}' → '{}'", src.display(), dest.display());
-                                    if let Some(ref mut out) = res.output {
-                                        out.info(format!("Moved {} into {}", src_name,
-                                            tgt_dir.file_name().unwrap_or_default().to_string_lossy()));
-                                    }
-                                    // Update LoadedFromFile path
-                                    if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
-                                        lff.path = dest.clone();
-                                    }
-                                    // Update InstanceFile path if present
-                                    if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
-                                        if inst_file.toml_path.starts_with(&src) {
-                                            let relative = inst_file.toml_path.strip_prefix(&src).unwrap_or(std::path::Path::new("_instance.toml"));
-                                            inst_file.toml_path = dest.join(relative);
+                        } else {
+                            let src_name = src_folder.file_name()
+                                .unwrap_or_default().to_string_lossy().to_string();
+                            let dest = tgt_folder.join(&src_name);
+
+                            if src_folder != dest && !dest.exists() {
+                                // Suppress file watcher for both the folder and the TOML
+                                if let Some(ref mut registry) = res.file_registry {
+                                    registry.rename_in_progress.insert(src_folder.clone());
+                                    let src_toml = src_folder.join("_instance.toml");
+                                    registry.rename_in_progress.insert(src_toml);
+                                }
+                                match std::fs::rename(&src_folder, &dest) {
+                                    Ok(_) => {
+                                        // 1. Update ECS hierarchy (only after successful disk move)
+                                        commands.entity(source).insert(ChildOf(target));
+
+                                        info!("📂 Reparented '{}' → '{}'", src_folder.display(), dest.display());
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Moved {} into {}", src_name,
+                                                tgt_folder.file_name().unwrap_or_default().to_string_lossy()));
+                                        }
+                                        // Update LoadedFromFile path to the new folder location
+                                        if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
+                                            // If it was storing the folder, update to new folder.
+                                            // If it was storing the TOML, update to new TOML path.
+                                            if lff.path.is_dir() || lff.path == src_folder {
+                                                lff.path = dest.clone();
+                                            } else {
+                                                // Was storing _instance.toml — rebase into dest
+                                                let relative = lff.path.strip_prefix(&src_folder)
+                                                    .unwrap_or(std::path::Path::new("_instance.toml"));
+                                                lff.path = dest.join(relative);
+                                            }
+                                        }
+                                        // Update InstanceFile.toml_path if present
+                                        if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
+                                            if inst_file.toml_path.starts_with(&src_folder) {
+                                                let relative = inst_file.toml_path.strip_prefix(&src_folder)
+                                                    .unwrap_or(std::path::Path::new("_instance.toml"));
+                                                inst_file.toml_path = dest.join(relative);
+                                            }
+                                        }
+                                        // Also update file registry mapping so the file
+                                        // watcher resolves the entity at its new path.
+                                        if let Some(ref mut registry) = res.file_registry {
+                                            let old_toml = src_folder.join("_instance.toml");
+                                            let new_toml = dest.join("_instance.toml");
+                                            let _ = registry.rename_file(&old_toml, new_toml);
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    if let Some(ref mut registry) = res.file_registry {
-                                        registry.rename_in_progress.remove(&src);
-                                    }
-                                    if let Some(ref mut out) = res.output {
-                                        out.error(format!("Move failed: {}", e));
+                                    Err(e) => {
+                                        if let Some(ref mut registry) = res.file_registry {
+                                            registry.rename_in_progress.remove(&src_folder);
+                                            let src_toml = src_folder.join("_instance.toml");
+                                            registry.rename_in_progress.remove(&src_toml);
+                                        }
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!("Move failed: {}", e));
+                                        }
                                     }
                                 }
                             }
@@ -4593,6 +4836,7 @@ fn drain_slint_actions(
 
                     if let Some(ref mut es) = res.explorer_state {
                         es.dirty = true;
+                        es.needs_immediate_sync = true;
                     }
                 } else {
                     if let Some(ref mut out) = res.output {
@@ -4860,56 +5104,103 @@ fn drain_slint_actions(
                             }
                             commands.entity(entity).insert(Name::new(val.clone()));
 
-                            // Rename the TOML file on disk safely
+                            // Rename on disk. Modern instances live in
+                            // `Folder/_instance.toml` — rename the FOLDER,
+                            // not the inner file. Legacy flat files
+                            // (`Name.glb.toml`, `Name.part.toml`) still
+                            // get filename rename. The old code treated
+                            // every `_instance.toml` as a flat file and
+                            // renamed the inner file to `NewName.toml`,
+                            // leaving the parent folder at its hex-
+                            // suffixed insert-time name.
                             if let Ok(mut inst_file) = queries.instance_files.get_mut(entity) {
                                 let old_path = inst_file.toml_path.clone();
-                                // Build new filename: keep the extension chain (e.g. ".glb.toml")
-                                let old_name = old_path.file_name().unwrap_or_default().to_string_lossy();
-                                let ext = old_name.splitn(2, '.').nth(1).unwrap_or("glb.toml");
-                                let new_filename = format!("{}.{}", val, ext);
-                                let new_path = old_path.parent()
-                                    .unwrap_or(old_path.as_path())
-                                    .join(&new_filename);
+                                let is_folder_instance = old_path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy() == "_instance.toml")
+                                    .unwrap_or(false);
 
-                                if old_path == new_path {
-                                    // Name unchanged, just update display
-                                    inst_file.name = val.clone();
-                                } else if new_path.exists() {
-                                    // Destination already exists — don't overwrite
-                                    if let Some(ref mut out) = res.output {
-                                        out.warning(format!("Cannot rename: '{}' already exists", new_filename));
+                                let (old_fs_path, new_fs_path, new_toml_path) = if is_folder_instance {
+                                    // Folder-based: rename the folder + keep _instance.toml inside it.
+                                    let old_folder = old_path.parent().map(|p| p.to_path_buf());
+                                    let new_folder = old_folder
+                                        .as_ref()
+                                        .and_then(|f| f.parent())
+                                        .map(|gp| gp.join(&val));
+                                    match (old_folder, new_folder) {
+                                        (Some(of), Some(nf)) => {
+                                            let new_toml = nf.join("_instance.toml");
+                                            (of, nf, new_toml)
+                                        }
+                                        _ => {
+                                            // Can't resolve parent — fall back to no-op.
+                                            inst_file.name = val.clone();
+                                            continue;
+                                        }
                                     }
                                 } else {
-                                    // 1. Tell file watcher to ignore the delete event for the old path
+                                    // Legacy flat file: rename the file itself, preserving extension chain.
+                                    let old_name = old_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                    let ext = old_name.splitn(2, '.').nth(1).unwrap_or("glb.toml").to_string();
+                                    let new_filename = format!("{}.{}", val, ext);
+                                    let new_path = old_path.parent()
+                                        .unwrap_or(old_path.as_path())
+                                        .join(&new_filename);
+                                    (old_path.clone(), new_path.clone(), new_path)
+                                };
+
+                                if old_fs_path == new_fs_path {
+                                    // Name unchanged, just update display
+                                    inst_file.name = val.clone();
+                                } else if new_fs_path.exists() {
+                                    // Destination already exists — don't overwrite
+                                    if let Some(ref mut out) = res.output {
+                                        out.warning(format!(
+                                            "Cannot rename: '{}' already exists",
+                                            new_fs_path.file_name().unwrap_or_default().to_string_lossy()
+                                        ));
+                                    }
+                                } else {
+                                    // 1. Tell file watcher to ignore the rename's delete+create
+                                    //    events on both the old and new paths so it doesn't
+                                    //    respawn duplicates or despawn the live entity.
                                     if let Some(ref mut registry) = res.file_registry {
                                         registry.rename_in_progress.insert(old_path.clone());
+                                        registry.rename_in_progress.insert(old_fs_path.clone());
+                                        registry.rename_in_progress.insert(new_fs_path.clone());
                                     }
 
-                                    // 2. Rename the file on disk
-                                    match std::fs::rename(&old_path, &new_path) {
+                                    // 2. Rename the folder (or file) on disk
+                                    match std::fs::rename(&old_fs_path, &new_fs_path) {
                                         Ok(()) => {
-                                            // 3. Update InstanceFile component
-                                            inst_file.toml_path = new_path.clone();
+                                            // 3. Update InstanceFile component to point at the
+                                            //    new `_instance.toml` inside the renamed folder
+                                            //    (or the renamed flat file).
+                                            inst_file.toml_path = new_toml_path.clone();
                                             inst_file.name = val.clone();
 
-                                            // 4. Update LoadedFromFile component if present
+                                            // 4. Update LoadedFromFile component if present —
+                                            //    this one tracks the containing folder (or
+                                            //    flat file path), not the TOML.
                                             if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(entity) {
-                                                lff.path = new_path.clone();
+                                                lff.path = new_fs_path.clone();
                                             }
 
                                             // 5. Update the file registry mapping
                                             if let Some(ref mut registry) = res.file_registry {
-                                                let _ = registry.rename_file(&old_path, new_path.clone());
+                                                let _ = registry.rename_file(&old_path, new_toml_path.clone());
                                             }
 
-                                            info!("📝 Renamed {:?} → {:?}", old_path, new_path);
+                                            info!("📝 Renamed {:?} → {:?}", old_fs_path, new_fs_path);
                                         }
                                         Err(e) => {
-                                            // Rename failed — clear the suppress flag
+                                            // Rename failed — clear the suppress flags
                                             if let Some(ref mut registry) = res.file_registry {
                                                 registry.rename_in_progress.remove(&old_path);
+                                                registry.rename_in_progress.remove(&old_fs_path);
+                                                registry.rename_in_progress.remove(&new_fs_path);
                                             }
-                                            warn!("Failed to rename {:?} → {:?}: {}", old_path, new_path, e);
+                                            warn!("Failed to rename {:?} → {:?}: {}", old_fs_path, new_fs_path, e);
                                         }
                                     }
                                 }
@@ -5105,11 +5396,18 @@ fn drain_slint_actions(
                         // these branches, Transform edits only landed on
                         // disk and required a space reload to take effect.
                         "Position" => {
+                            // `>= 3` (not `== 3`) so a paste of a full
+                            // vector into any single X/Y/Z LineEdit
+                            // commits atomically: the Slint accepted
+                            // handler concatenates pasted-text + the
+                            // other two fields, producing 5+ parts.
+                            // Taking first three lets the paste win
+                            // without rejecting normal 3-part edits.
                             if let Ok(mut tf) = queries.transforms.get_mut(entity) {
                                 let parts: Vec<f32> = val.split(',')
                                     .filter_map(|s| parse_finite(s.trim()))
                                     .collect();
-                                if parts.len() == 3 {
+                                if parts.len() >= 3 {
                                     tf.translation.x = parts[0];
                                     tf.translation.y = parts[1];
                                     tf.translation.z = parts[2];
@@ -5120,11 +5418,12 @@ fn drain_slint_actions(
                             // Properties panel feeds Euler degrees XYZ —
                             // convert to quaternion the same way the
                             // rotate gizmo does so the two stay in sync.
+                            // `>= 3` — see Position branch rationale.
                             if let Ok(mut tf) = queries.transforms.get_mut(entity) {
                                 let parts: Vec<f32> = val.split(',')
                                     .filter_map(|s| parse_finite(s.trim()))
                                     .collect();
-                                if parts.len() == 3 {
+                                if parts.len() >= 3 {
                                     tf.rotation = Quat::from_euler(
                                         EulerRot::XYZ,
                                         parts[0].to_radians(),
@@ -5135,19 +5434,44 @@ fn drain_slint_actions(
                             }
                         }
                         "Scale" => {
-                            if let Ok(mut tf) = queries.transforms.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',')
-                                    .filter_map(|s| parse_finite(s.trim()))
-                                    .collect();
-                                if parts.len() == 3 {
-                                    // Clamp against 0 / negatives — Bevy
-                                    // meshes render flipped with negative
-                                    // scale and degenerate at 0, which is
-                                    // rarely what the user intends when
-                                    // they type in a field.
-                                    tf.scale.x = parts[0].max(1e-4);
-                                    tf.scale.y = parts[1].max(1e-4);
-                                    tf.scale.z = parts[2].max(1e-4);
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            // `>= 3` — see Position branch rationale.
+                            if parts.len() >= 3 {
+                                // Clamp against 0 / negatives — Bevy meshes
+                                // render flipped with negative scale and
+                                // degenerate at 0.
+                                let new_size = Vec3::new(
+                                    parts[0].max(1e-4),
+                                    parts[1].max(1e-4),
+                                    parts[2].max(1e-4),
+                                );
+                                // For Parts (anything with `BasePart`),
+                                // Scale is the SAME concept as Size —
+                                // `Transform.scale` alone doesn't update
+                                // the Avian collider, which stays at its
+                                // spawn dimensions. Route through the
+                                // shared `ResizePartEvent` so
+                                // `scale_tool::apply_size_to_entity`
+                                // keeps `BasePart.size`, `Transform.scale`,
+                                // mesh regen, and `cframe.translation`
+                                // in lockstep; the collider-rebuild
+                                // system then picks up the
+                                // `Changed<BasePart>` and rebuilds the
+                                // Avian shape in the same frame. For
+                                // non-Part entities (Models, Cameras)
+                                // there's nothing to resize — just
+                                // update the local Transform.
+                                if queries.base_parts.get(entity).is_ok() {
+                                    events.resize_part_events.write(
+                                        crate::scale_tool::ResizePartEvent {
+                                            entity,
+                                            new_size,
+                                        },
+                                    );
+                                } else if let Ok(mut tf) = queries.transforms.get_mut(entity) {
+                                    tf.scale = new_size;
                                 }
                             }
                         }
@@ -5169,7 +5493,8 @@ fn drain_slint_actions(
                             let parts: Vec<f32> = val.split(',')
                                 .filter_map(|s| parse_finite(s.trim()))
                                 .collect();
-                            if parts.len() == 3 {
+                            // `>= 3` — see Position branch rationale.
+                            if parts.len() >= 3 {
                                 events.resize_part_events.write(
                                     crate::scale_tool::ResizePartEvent {
                                         entity,
@@ -5238,7 +5563,15 @@ fn drain_slint_actions(
                                         }
                                     } else {
                                         if let Some(ref mut out) = res.output {
-                                            out.info(format!("💾 Saved {} to {:?}", key, instance_file.toml_path.file_name().unwrap_or_default()));
+                                            // Use the instance's display name (folder name for
+                                            // folder-based entities, file stem for flat ones) so
+                                            // the Output panel reads "Saved Color to VCell_Housing"
+                                            // instead of the generic "_instance.toml".
+                                            let display_name = instance_name_for_log(
+                                                &instance_file.name,
+                                                &instance_file.toml_path,
+                                            );
+                                            out.info(format!("💾 Saved {} to {}", key, display_name));
                                         }
                                     }
                                 }
@@ -5361,7 +5694,14 @@ fn drain_slint_actions(
                                     out.error(format!("Failed to save service: {}", e));
                                 }
                             } else if let Some(ref mut out) = res.output {
-                                out.info(format!("💾 Saved {} to {:?}", key, service.toml_path.file_name().unwrap_or_default()));
+                                // Use the service's class name (Lighting, Workspace, ...) so
+                                // the log line reads as a real identifier instead of the
+                                // generic "_service.toml".
+                                let display_name = service_name_for_log(
+                                    &service.class_name,
+                                    &service.toml_path,
+                                );
+                                out.info(format!("💾 Saved {} to {}", key, display_name));
                             }
                         }
 
@@ -5616,7 +5956,13 @@ fn drain_slint_actions(
                             }),
                             transform: crate::space::instance_loader::TransformData {
                                 position: inst.position,
-                                rotation: [0.0, 0.0, 0.0, 1.0],
+                                // Quaternion populated by the language drain
+                                // (Luau / Rune) from the `Orientation` Vector3
+                                // property. Was hardcoded identity before —
+                                // which is why every command-bar procgen
+                                // scene came out axis-aligned regardless of
+                                // script intent.
+                                rotation: inst.rotation,
                                 scale: inst.size,
                             },
                             properties: crate::space::instance_loader::InstanceProperties {
@@ -5688,6 +6034,15 @@ fn drain_slint_actions(
                 if let Some(ref mut out) = res.output {
                     out.clear();
                 }
+            }
+
+            SlintAction::SetBottomPanel(mode) => {
+                use crate::timeline_panel::BottomPanelMode;
+                let target = match mode.as_str() {
+                    "timeline" => BottomPanelMode::Timeline,
+                    _          => BottomPanelMode::Output,
+                };
+                commands.insert_resource(target);
             }
 
             // Help icons — open /learn documentation URL
@@ -6156,6 +6511,30 @@ fn drain_slint_actions(
                 info!("API Reference: Example copied — {}", example);
             }
 
+            // Services Browser — open documentation URL in system browser
+            SlintAction::ServicesBrowserOpenUrl(url) => {
+                let full_url = if url.starts_with("http") {
+                    url.clone()
+                } else {
+                    format!("https://eustress.dev{}", url)
+                };
+                #[cfg(target_os = "windows")]
+                let result = std::process::Command::new("cmd")
+                    .args(["/c", "start", "", &full_url])
+                    .spawn();
+                #[cfg(target_os = "macos")]
+                let result = std::process::Command::new("open").arg(&full_url).spawn();
+                #[cfg(target_os = "linux")]
+                let result = std::process::Command::new("xdg-open").arg(&full_url).spawn();
+                #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+                let result: Result<_, std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
+                if let Err(e) = result {
+                    if let Some(ref mut out) = res.output {
+                        out.error(format!("Failed to open browser: {}", e));
+                    }
+                }
+            }
+
             // Toolbox insertion - file-system-first: create .glb.toml → spawn inline
             SlintAction::InsertPart(part_type_str) => {
                 // ── Model / Folder: create directory with _instance.toml ──
@@ -6168,12 +6547,24 @@ fn drain_slint_actions(
                     // so flat `.toml` siblings count as taken too.
                     let dir_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &part_type_str);
                     let dir_path = workspace_dir.join(&dir_name);
+                    // Display name stays as the bare class ("Folder", "Model")
+                    // even for hex-suffixed siblings — the folder-on-disk is
+                    // `Folder-a3f2/` but the Explorer shows "Folder" so the
+                    // hex suffix never leaks to the UI. Write the override
+                    // only when the names diverge to keep the common case
+                    // (first instance) terse.
+                    let display_name = part_type_str.to_string();
                     if let Err(e) = std::fs::create_dir_all(&dir_path) {
                         error!("Failed to create {} directory: {}", part_type_str, e);
                     } else {
+                        let name_override = if dir_name != display_name {
+                            format!("name = \"{}\"\n", display_name)
+                        } else {
+                            String::new()
+                        };
                         let instance_toml = format!(
-                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n",
-                            part_type_str
+                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}",
+                            part_type_str, name_override
                         );
                         if let Err(e) = std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
                             error!("Failed to write _instance.toml: {}", e);
@@ -6185,7 +6576,7 @@ fn drain_slint_actions(
                             };
                             let entity = commands.spawn((
                                 eustress_common::classes::Instance {
-                                    name: dir_name.clone(),
+                                    name: display_name.clone(),
                                     class_name: class_enum,
                                     archivable: true,
                                     id: 0,
@@ -6225,16 +6616,112 @@ fn drain_slint_actions(
                     continue;
                 }
 
-                // ── Mesh primitives: create .glb.toml file ──
-                let mesh_id = match part_type_str.as_str() {
-                    "Part" | "Block" => "block",
-                    "SpherePart" | "Ball" => "ball",
-                    "CylinderPart" | "Cylinder" => "cylinder",
-                    "WedgePart" | "Wedge" => "wedge",
-                    "CornerWedgePart" | "CornerWedge" => "corner_wedge",
-                    "Cone" => "cone",
-                    _ => "block",
+                // ── Mesh primitives: create folder + _instance.toml via
+                //    the shared toolbox helper. Anything not in this
+                //    list is NOT a mesh primitive and needs the
+                //    stub-class path below — falling through to
+                //    `_ => "block"` here is what caused Toolbox
+                //    inserts of PointLight/Sound/Seat/etc. to land on
+                //    disk as Block parts with a block `.glb`. The
+                //    Insert menu already routes them through a
+                //    stub-class writer; unifying both code paths onto
+                //    the same folder + `_instance.toml` convention
+                //    closes the Toolbox/Insert-menu sync gap.
+                let mesh_id: Option<&str> = match part_type_str.as_str() {
+                    "Part" | "Block" => Some("block"),
+                    "SpherePart" | "Ball" => Some("ball"),
+                    "CylinderPart" | "Cylinder" => Some("cylinder"),
+                    "WedgePart" | "Wedge" => Some("wedge"),
+                    "CornerWedgePart" | "CornerWedge" => Some("corner_wedge"),
+                    "Cone" => Some("cone"),
+                    _ => None,
                 };
+
+                // Non-primitive, non-container class → write a class
+                // stub the same way the Insert menu does. Service
+                // mapping mirrors the Roblox/Eustress convention so
+                // `PointLight` lands under `Lighting/`, `Sound` under
+                // `SoundService/`, GUI elements under `StarterGui/`,
+                // and anything else stays in the user's currently-
+                // selected folder (or `Workspace/` as fallback).
+                if mesh_id.is_none() {
+                    let space_root = crate::space::default_space_root();
+                    let canonical_service = match part_type_str.as_str() {
+                        "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight" => "Lighting",
+                        "Sound"                       => "SoundService",
+                        "BillboardGui"                => "StarterGui",
+                        "SoulScript"                  => "SoulService",
+                        "LocalizationTable"           => "LocalizationService",
+                        "Tool"                        => "StarterPack",
+                        _ => "Workspace",
+                    };
+
+                    // Selected Folder/Model takes precedence over the
+                    // canonical service — matches the menu path's
+                    // "drop into selected container if available" rule.
+                    let selected_entity: Option<Entity> = res.explorer_state
+                        .as_ref()
+                        .and_then(|es| match &es.selected {
+                            SelectedItem::Entity(e) => Some(*e),
+                            _ => None,
+                        });
+                    let fallback_dir = space_root.join(canonical_service);
+                    let _ = std::fs::create_dir_all(&fallback_dir);
+                    let write_dir = selected_entity
+                        .and_then(|pe| queries.loaded_from_file.get(pe).ok())
+                        .map(|(_, lff)| {
+                            if lff.path.is_dir() { lff.path.clone() }
+                            else { lff.path.parent().unwrap_or(&fallback_dir).to_path_buf() }
+                        })
+                        .unwrap_or_else(|| fallback_dir.clone());
+
+                    let dir_name = crate::space::instance_loader::unique_entity_name(
+                        &write_dir, &part_type_str,
+                    );
+                    let dir_path = write_dir.join(&dir_name);
+                    match std::fs::create_dir_all(&dir_path) {
+                        Ok(_) => {
+                            let name_override = if dir_name != part_type_str {
+                                format!("name = \"{}\"\n", part_type_str)
+                            } else {
+                                String::new()
+                            };
+                            let instance_toml = format!(
+                                "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}",
+                                part_type_str, name_override,
+                            );
+                            match std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
+                                Ok(_) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!(
+                                            "Inserted {} '{}' in {}",
+                                            part_type_str, dir_name, write_dir.display(),
+                                        ));
+                                    }
+                                    info!("📦 Toolbox class-stub: created {} '{}' at {:?}", part_type_str, dir_name, dir_path);
+                                }
+                                Err(e) => {
+                                    error!("Toolbox insert: failed to write _instance.toml: {}", e);
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Failed to write _instance.toml: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Toolbox insert: failed to create {} folder: {}", part_type_str, e);
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Failed to create {} folder: {}", part_type_str, e));
+                            }
+                        }
+                    }
+                    // File-watcher picks up the new folder and spawns the
+                    // entity — same pattern the Insert menu uses. Skip
+                    // the mesh-primitive path below.
+                    continue;
+                }
+
+                let mesh_id = mesh_id.expect("checked above");
 
                 // Compute spawn position: 10 units in front of the camera, min Y = 0.5
                 let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
@@ -6426,11 +6913,14 @@ fn drain_slint_actions(
                         // the script entity-index in `context-menu-target-id`;
                         // everything else falls back to the Explorer selection.
                         //
-                        // Payload shapes:
-                        // * File:        absolute filesystem path
-                        // * Entity:      `@entity:Space/.../Name`   (from MentionIndex)
-                        // * Service:     `@service:Space/Name`
-                        // * Soul script: `@script:Space/.../Name`   (from MentionIndex)
+                        // Payload preference (most useful first):
+                        // * File:    absolute filesystem path of the file
+                        // * Entity:  absolute filesystem path of the entity's
+                        //            folder (parent of `_instance.toml`) so it
+                        //            pastes cleanly into OS dialogs / terminals;
+                        //            falls back to mention canonical when the
+                        //            entity has no on-disk backing
+                        // * Service: `@service:Space/Name`
                         let soul_entity_idx: Option<u32> = ui.and_then(|u| {
                             if u.get_context_menu_target_type().as_str() == "soul-script" {
                                 let id = u.get_context_menu_target_id();
@@ -6440,12 +6930,44 @@ fn drain_slint_actions(
                             }
                         });
 
+                        // Resolve an entity to its on-disk folder path:
+                        //   * folder-based entity (`Foo/_instance.toml`) →
+                        //     parent folder
+                        //   * flat-file entity → the file path itself
+                        // Returns `None` when the entity has no `InstanceFile`
+                        // (e.g. procedurally spawned, never persisted).
+                        let entity_fs_path = |ent: Entity| -> Option<String> {
+                            queries.instance_files.get(ent).ok().and_then(|inst| {
+                                let toml = &inst.toml_path;
+                                let is_folder_instance = toml
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    == Some("_instance.toml");
+                                let resolved = if is_folder_instance {
+                                    toml.parent().map(|p| p.to_path_buf())
+                                } else {
+                                    Some(toml.clone())
+                                };
+                                resolved.map(|p| p.to_string_lossy().to_string())
+                            })
+                        };
+
                         let payload: Option<String> = if let Some(idx) = soul_entity_idx {
-                            // Soul Panel right-click → script canonical from MentionIndex.
-                            res.mention_index.as_ref().and_then(|index| {
+                            // Soul Panel right-click → script's filesystem
+                            // path (folder containing `_instance.toml`).
+                            // Fall back to mention canonical when the entity
+                            // can't be resolved (cross-Space mentions etc.).
+                            let ent_opt = res.mention_index.as_ref().and_then(|index| {
                                 index.entries().values()
-                                    .find(|e| e.entity.map(|ent| ent.index().index()) == Some(idx))
-                                    .map(|e| format!("@{}", e.canonical_path))
+                                    .find(|e| e.entity.map(|en| en.index().index()) == Some(idx))
+                                    .and_then(|e| e.entity)
+                            });
+                            ent_opt.and_then(entity_fs_path).or_else(|| {
+                                res.mention_index.as_ref().and_then(|index| {
+                                    index.entries().values()
+                                        .find(|e| e.entity.map(|en| en.index().index()) == Some(idx))
+                                        .map(|e| format!("@{}", e.canonical_path))
+                                })
                             })
                         } else if let Some(ref es) = res.explorer_state {
                             match &es.selected {
@@ -6453,17 +6975,22 @@ fn drain_slint_actions(
                                     Some(path.to_string_lossy().to_string())
                                 }
                                 SelectedItem::Entity(ent) => {
-                                    let from_index = res.mention_index.as_ref()
-                                        .and_then(|idx| {
-                                            idx.entries().values()
-                                                .find(|e| e.entity == Some(*ent))
-                                                .map(|e| format!("@{}", e.canonical_path))
-                                        });
-                                    from_index.or_else(|| {
-                                        let space = res.space_root.as_ref()
-                                            .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
-                                            .unwrap_or_default();
-                                        Some(format!("@entity:{}/@ecs/{}", space, ent.index().index()))
+                                    entity_fs_path(*ent).or_else(|| {
+                                        // No on-disk backing — fall back to the
+                                        // mention canonical for portability,
+                                        // then to the raw ECS handle.
+                                        let from_index = res.mention_index.as_ref()
+                                            .and_then(|idx| {
+                                                idx.entries().values()
+                                                    .find(|e| e.entity == Some(*ent))
+                                                    .map(|e| format!("@{}", e.canonical_path))
+                                            });
+                                        from_index.or_else(|| {
+                                            let space = res.space_root.as_ref()
+                                                .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
+                                                .unwrap_or_default();
+                                            Some(format!("@entity:{}/@ecs/{}", space, ent.index().index()))
+                                        })
                                     })
                                 }
                                 SelectedItem::Service(name) => {
@@ -6669,11 +7196,51 @@ fn drain_slint_actions(
                         events.distribute_events.write(DistributeEntitiesEvent { axis });
                         continue;
                     }
+                    // Lock / Unlock paint modes — switch tool. The
+                    // `lock_tool::handle_lock_unlock_clicks` system
+                    // handles clicks while either tool is active.
+                    "edit:lock" => {
+                        if let Some(ref mut s) = res.state {
+                            s.current_tool = super::Tool::Lock;
+                        }
+                        continue;
+                    }
+                    "edit:unlock" => {
+                        if let Some(ref mut s) = res.state {
+                            s.current_tool = super::Tool::Unlock;
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
 
                 // Script insert → create folder with _instance.toml + empty .rune source
                 if action == "insert:script" || action == "insert:localscript" || action == "insert:modulescript" {
+                    // Map ribbon action → canonical class name (matches
+                    // `ClassName` enum + `assets/class_schema/*.defaults.toml`
+                    // template stems). Previously this handler baked
+                    // `class_name = "Script"` into the TOML for ALL three
+                    // actions, which (a) mismatched the enum variant the
+                    // entity was spawned with (`ClassName::SoulScript`) and
+                    // (b) had no template in the class-schema registry so
+                    // the self-heal merge silently skipped it.
+                    //
+                    // `is_soul` gates the Rune-specific ECS attachments
+                    // (source = `.rune`, `SoulScriptData` with Rune VM
+                    // state). Luau variants write their TOML + `.luau`
+                    // source and let the file-watcher pick them up on
+                    // the next scan — the Luau VM attaches its own
+                    // runtime data when it spots them.
+                    let (class_name, source_ext, starter_src): (&'static str, &'static str, &'static str) = match action {
+                        "insert:localscript"  => ("LuauLocalScript",  "luau",
+                            "-- Runs on the client\nprint(\"Hello from LuauLocalScript!\")\n"),
+                        "insert:modulescript" => ("LuauModuleScript", "luau",
+                            "local module = {}\n\nfunction module.hello()\n    print(\"Hello from LuauModuleScript!\")\nend\n\nreturn module\n"),
+                        _                      => ("SoulScript",       "rune",
+                            "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n"),
+                    };
+                    let is_soul = class_name == "SoulScript";
+
                     // Determine parent directory from selected Explorer item
                     let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
                         match &es.selected {
@@ -6691,46 +7258,66 @@ fn drain_slint_actions(
                         })
                         .unwrap_or_else(|| space_root.join("SoulService"));
 
-                    // Shared helper — catches `Script.rune` / `Script.luau`
-                    // flat files that would otherwise collide with a new
-                    // `Script/` folder on reload.
-                    let script_name = crate::space::instance_loader::unique_entity_name(&write_dir, "Script");
+                    // Folder name uses the class's canonical label so the
+                    // Explorer default matches the ribbon button. Sibling
+                    // conflicts get a hex suffix via `unique_entity_name`.
+                    let script_name = crate::space::instance_loader::unique_entity_name(&write_dir, class_name);
+                    // Display name stays as the bare class — hex suffix
+                    // never leaks to the Explorer. Same pattern used by
+                    // the Block/Model/Folder inserts.
+                    let display_name = class_name;
 
                     let script_dir = write_dir.join(&script_name);
                     let _ = std::fs::create_dir_all(&script_dir);
 
-                    // Canonical file names track the folder — rename-follows-rename
-                    // without needing a separate cascade for newly-created scripts.
-                    let source_file = format!("{}.rune", script_name);
+                    // Canonical file names track the FOLDER name (hex-
+                    // suffixed when needed) so two sibling scripts don't
+                    // stomp each other's source/summary files on disk.
+                    // The Explorer still renders the display override, so
+                    // the filename is purely an implementation detail.
+                    let source_file = format!("{}.{}", script_name, source_ext);
                     let summary_file = format!("{}.md", script_name);
 
-                    // Write _instance.toml
+                    // Write _instance.toml with the correct class_name
+                    // (SoulScript / LuauLocalScript / LuauModuleScript).
+                    // The `name` override lands only when the folder got
+                    // a hex suffix, matching the Block/Model/Folder
+                    // inserts.
+                    let name_override = if script_name != display_name {
+                        format!("name = \"{}\"\n", display_name)
+                    } else {
+                        String::new()
+                    };
                     let instance_toml = format!(
-                        "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"{}\"\n",
-                        source_file,
+                        "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}\n[script]\nsource = \"{}\"\n",
+                        class_name, name_override, source_file,
                     );
                     let _ = std::fs::write(script_dir.join("_instance.toml"), instance_toml);
 
-                    // Write source file
-                    let _ = std::fs::write(script_dir.join(&source_file),
-                        "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n");
+                    // Write source file with a class-appropriate stub.
+                    let _ = std::fs::write(script_dir.join(&source_file), starter_src);
 
                     // Write summary
                     let _ = std::fs::write(script_dir.join(&summary_file),
-                        format!("# {}\n\nNew script.\n", script_name));
+                        format!("# {}\n\nNew script.\n", display_name));
 
-                    // Spawn ECS entity
-                    let entity = commands.spawn((
+                    // Spawn ECS entity. SoulScript gets the Rune runtime
+                    // component attached directly; Luau variants only get
+                    // the Instance + LoadedFromFile (the Luau VM plugin
+                    // picks them up from the file-watcher's next scan and
+                    // attaches its own runtime data). This keeps the
+                    // Rune code path from accidentally trying to compile
+                    // Luau source.
+                    let instance_class = match class_name {
+                        "LuauLocalScript"  => eustress_common::classes::ClassName::LuauLocalScript,
+                        "LuauModuleScript" => eustress_common::classes::ClassName::LuauModuleScript,
+                        _                   => eustress_common::classes::ClassName::SoulScript,
+                    };
+                    let mut entity_cmd = commands.spawn((
                         eustress_common::classes::Instance {
-                            name: script_name.clone(),
-                            class_name: eustress_common::classes::ClassName::SoulScript,
+                            name: display_name.to_string(),
+                            class_name: instance_class,
                             archivable: true, id: 0, ai: false, uuid: String::new(),
-                        },
-                        crate::soul::SoulScriptData {
-                            source: "pub fn main() {\n    println(\"Hello from Rune!\");\n}\n".to_string(),
-                            dirty: false, ast: None, generated_code: None,
-                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
-                            errors: Vec::new(), run_context: Default::default(),
                         },
                         crate::space::file_loader::LoadedFromFile {
                             path: script_dir.clone(),
@@ -6738,7 +7325,16 @@ fn drain_slint_actions(
                             service: "SoulService".to_string(),
                         },
                         Name::new(script_name.clone()),
-                    )).id();
+                    ));
+                    if is_soul {
+                        entity_cmd.insert(crate::soul::SoulScriptData {
+                            source: starter_src.to_string(),
+                            dirty: false, ast: None, generated_code: None,
+                            build_status: crate::soul::SoulBuildStatus::NotBuilt,
+                            errors: Vec::new(), run_context: Default::default(),
+                        });
+                    }
+                    let entity = entity_cmd.id();
 
                     // Parent to selected entity
                     if let Some(parent) = selected_entity {
@@ -6788,14 +7384,24 @@ fn drain_slint_actions(
                     // new `Block/` folder can't shadow an existing
                     // `Block.toml`.
                     let dir_name = crate::space::instance_loader::unique_entity_name(&write_dir, part_type_str);
+                    let display_name = part_type_str.to_string();
 
                     let dir_path = write_dir.join(&dir_name);
                     if let Err(e) = std::fs::create_dir_all(&dir_path) {
                         error!("Failed to create {} directory: {}", part_type_str, e);
                     } else {
+                        // Write `name = "<base>"` override whenever the
+                        // hex-suffixed folder diverges from the display
+                        // name, so the Explorer never surfaces
+                        // `Folder-a3f2` where the user expects `Folder`.
+                        let name_override = if dir_name != display_name {
+                            format!("name = \"{}\"\n", display_name)
+                        } else {
+                            String::new()
+                        };
                         let instance_toml = format!(
-                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n",
-                            part_type_str
+                            "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}",
+                            part_type_str, name_override
                         );
                         if let Err(e) = std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
                             error!("Failed to write _instance.toml: {}", e);
@@ -6807,7 +7413,7 @@ fn drain_slint_actions(
                             };
                             let entity = commands.spawn((
                                 eustress_common::classes::Instance {
-                                    name: dir_name.clone(),
+                                    name: display_name.clone(),
                                     class_name: class_enum,
                                     archivable: true, id: 0, ai: false, uuid: String::new(),
                                 },
@@ -6856,22 +7462,28 @@ fn drain_slint_actions(
                     continue;
                 }
 
-                // Primitive / structure inserts → reuse the full InsertPart pipeline
-                let mesh_id: Option<&str> = match action {
-                    "insert:part"            => Some("block"),
-                    "insert:sphere"          => Some("ball"),
-                    "insert:cylinder"        => Some("cylinder"),
-                    "insert:wedge"           => Some("wedge"),
-                    "insert:cone"            => Some("cone"),
-                    "insert:corner_wedge"    => Some("corner_wedge"),
-                    "insert:spawnlocation"   => Some("block"),
-                    "insert:seat"            => Some("block"),
-                    "insert:vehicleseat"     => Some("block"),
-                    "insert:unionoperation"  => Some("block"),
+                // Primitive / structure inserts → reuse the full InsertPart pipeline.
+                // Each tuple is `(mesh_id, class_name)` so Part-subclass
+                // inserts (Seat, SpawnLocation, VehicleSeat, UnionOperation)
+                // spawn with their actual class in the TOML, not as a
+                // generic `Part` with a block mesh — matches the Insert
+                // menu's class-stub path and the Toolbox's class-stub
+                // branch above.
+                let mesh_and_class: Option<(&str, &str)> = match action {
+                    "insert:part"            => Some(("block",        "Part")),
+                    "insert:sphere"          => Some(("ball",         "Part")),
+                    "insert:cylinder"        => Some(("cylinder",     "Part")),
+                    "insert:wedge"           => Some(("wedge",        "Part")),
+                    "insert:cone"            => Some(("cone",         "Part")),
+                    "insert:corner_wedge"    => Some(("corner_wedge", "Part")),
+                    "insert:spawnlocation"   => Some(("block",        "SpawnLocation")),
+                    "insert:seat"            => Some(("block",        "Seat")),
+                    "insert:vehicleseat"     => Some(("block",        "VehicleSeat")),
+                    "insert:unionoperation"  => Some(("block",        "UnionOperation")),
                     _ => None,
                 };
 
-                if let Some(mid) = mesh_id {
+                if let Some((mid, class_name_override)) = mesh_and_class {
                     // Camera-forward spawn position (same logic as InsertPart)
                     let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
                         let forward = cam_transform.forward();
@@ -6913,7 +7525,7 @@ fn drain_slint_actions(
                         })
                         .unwrap_or_else(|| space_root.join("Workspace"));
 
-                    match crate::toolbox::insert_mesh_instance_at(&write_dir, mid, spawn_pos, None) {
+                    match crate::toolbox::insert_mesh_instance_with_class(&write_dir, mid, spawn_pos, Some(class_name_override.to_string()), class_name_override) {
                         Ok(toml_path) => {
                             match crate::space::load_instance_definition(&toml_path) {
                                 Ok(instance) => {
@@ -7060,10 +7672,14 @@ fn drain_slint_actions(
                         let _ = std::fs::create_dir_all(&dir);
                         let toml_path = dir.join("_instance.toml");
 
-                        // Create GUI TOML with proper [instance]/[gui]/[text] format
+                        // Create GUI TOML with proper [instance]/[gui]/[text] format.
+                        // Display name stays as the bare class (`TextLabel`) even
+                        // when `instance_name` is the hex-suffixed sibling
+                        // (`TextLabel-a3f2/`), so the UI card + Explorer render
+                        // the class not the on-disk suffix.
                         let gui_def = crate::space::gui_loader::create_default_gui_toml(
                             class_name_str,
-                            &instance_name,
+                            class_name_str,
                         );
 
                         // Write GUI TOML to disk, then load + spawn with Bevy UI components
@@ -7166,6 +7782,12 @@ fn drain_slint_actions(
                             filter.dirty = true;
                         }
                         info!("Help: Opened API Browser center tab");
+                    } else if action == "help:services-browser" {
+                        // Open Services Browser as a center tab via CenterTabManager
+                        if let Some(ref mut mgr) = res.tab_manager {
+                            mgr.open_services_browser();
+                        }
+                        info!("Help: Opened Services Browser center tab");
                     } else if action == "help:constitution" {
                         // Open the Eustress Constitution PDF in the OS default viewer.
                         // The document lives in the repo at docs/documents/ so every
@@ -7263,9 +7885,20 @@ fn drain_slint_actions(
 
                             match std::fs::create_dir_all(&dir_path) {
                                 Ok(_) => {
+                                    // Display name stays as the bare class
+                                    // ("Attachment") regardless of the
+                                    // hex-suffixed folder ("Attachment-a3f2"),
+                                    // so the Explorer shows the class not
+                                    // the disk suffix. Only emit the
+                                    // override when the folder diverges.
+                                    let name_override = if dir_name != class_name {
+                                        format!("name = \"{}\"\n", class_name)
+                                    } else {
+                                        String::new()
+                                    };
                                     let instance_toml = format!(
-                                        "[metadata]\nclass_name = \"{}\"\nname = \"{}\"\narchivable = true\n",
-                                        class_name, dir_name,
+                                        "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}",
+                                        class_name, name_override,
                                     );
                                     match std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
                                         Ok(_) => {
@@ -7785,6 +8418,11 @@ fn sync_bevy_to_slint(
             Tool::Rotate => "rotate",
             Tool::Scale => "scale",
             Tool::Terrain => "terrain",
+            // Lock/Unlock paint modes — UI-side just shows them as
+            // their own indicators so the cursor / ribbon highlight
+            // reflects which mode is active.
+            Tool::Lock => "lock",
+            Tool::Unlock => "unlock",
         };
         let current_tool: String = ui.get_current_tool().into();
         if current_tool != tool_str {
@@ -8182,10 +8820,10 @@ fn sync_workshop_to_slint(
             content: styled_content.into(),
             timestamp: msg.timestamp.clone().into(),
             mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
-            mcp_method: slint::SharedString::default(),
-            mcp_status: slint::SharedString::default(),
-            artifact_path: slint::SharedString::default(),
-            artifact_type: slint::SharedString::default(),
+            mcp_method: msg.mcp_method.as_deref().unwrap_or("").into(),
+            mcp_status: msg.mcp_status.as_ref().map(|s| s.to_slint_string()).unwrap_or("").into(),
+            artifact_path: msg.artifact_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default().into(),
+            artifact_type: msg.artifact_type.as_ref().map(|t| t.to_slint_string()).unwrap_or("").into(),
             entity_class: entity_class.into(),
             entity_name: entity_name.into(),
             entity_icon,
@@ -8359,7 +8997,7 @@ pub struct WorkshopTabOrder {
 /// Tracks which session ids have an in-flight Haiku title call and the
 /// last time the generator ran, so we don't re-fire on every poll tick
 /// or hit Anthropic's rate limit with a burst on first scan.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct WorkshopTitleGenState {
     /// Session ids we've already dispatched a Haiku call for in this
     /// process. Prevents retrying on every ~500ms rescan.
@@ -8367,6 +9005,24 @@ struct WorkshopTitleGenState {
     /// Last wall-clock frame time we kicked off a call. At most one
     /// call per second system-wide to stay well under rate limits.
     last_dispatch: f64,
+    /// Renames completed by background Haiku threads: (old_uuid, new_slug).
+    /// Drained each frame to update the live IdeationPipeline.session_id
+    /// so subsequent saves write to the renamed folder instead of
+    /// recreating a UUID-named duplicate.
+    rename_rx: crossbeam_channel::Receiver<(String, String)>,
+    rename_tx: crossbeam_channel::Sender<(String, String)>,
+}
+
+impl Default for WorkshopTitleGenState {
+    fn default() -> Self {
+        let (rename_tx, rename_rx) = crossbeam_channel::unbounded();
+        Self {
+            in_flight: std::collections::HashSet::new(),
+            last_dispatch: 0.0,
+            rename_rx,
+            rename_tx,
+        }
+    }
 }
 
 /// Scan sessions pushed by `sync_workshop_sessions_to_slint` for any
@@ -8387,14 +9043,27 @@ struct WorkshopTitleGenState {
 ///   one at a time in-flight per session. A fresh install with a big
 ///   SoulService/Workshop/ folder fills titles over a minute or so.
 fn generate_workshop_titles(
-    pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
+    mut pipeline: Option<ResMut<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     time: Res<bevy::time::Time>,
     mut state: ResMut<WorkshopTitleGenState>,
 ) {
-    let _ = pipeline; // reserved for future "skip if current is active"
+    // Drain any renames completed by background Haiku threads.
+    // Updates the live pipeline's session_id so subsequent saves
+    // write to the renamed slug folder instead of recreating a
+    // UUID-named duplicate.
+    while let Ok((old_id, new_id)) = state.rename_rx.try_recv() {
+        state.in_flight.remove(&old_id);
+        state.in_flight.insert(new_id.clone());
+        if let Some(ref mut p) = pipeline {
+            if p.session_id == old_id {
+                tracing::info!("Workshop: updated live pipeline session_id {} → {}", old_id, new_id);
+                p.session_id = new_id;
+            }
+        }
+    }
     let Some(space_root) = space_root else { return };
 
     let api_key = match (&global_settings, &space_settings) {
@@ -8441,6 +9110,7 @@ fn generate_workshop_titles(
     let session_id = target.session_id.clone();
     let prompt = target.first_message.clone();
     let space_root_buf = space_root.0.clone();
+    let rename_tx = state.rename_tx.clone();
 
     std::thread::spawn(move || {
         let client = crate::soul::claude_client::ClaudeClient::new(
@@ -8474,6 +9144,10 @@ fn generate_workshop_titles(
                                 title,
                                 new_id,
                             );
+                            // Notify the main thread so it can update
+                            // IdeationPipeline.session_id to the new
+                            // slug folder name.
+                            let _ = rename_tx.send((session_id.clone(), new_id));
                         } else {
                             tracing::info!("Workshop: Haiku titled session {} → {:?}",
                                 &session_id[..8.min(session_id.len())], title);
@@ -8565,6 +9239,300 @@ fn sync_api_reference_to_slint(
 
     ui.set_api_total_count(total);
     ui.set_api_filtered_count(filtered_count);
+}
+
+// ============================================================================
+// Services Browser — static catalog of all default Space services
+// ============================================================================
+
+/// Whether the services browser data has been pushed to Slint yet.
+/// We only need to do this once since the catalog is static.
+#[derive(Resource, Default)]
+struct ServicesBrowserInitialized(bool);
+
+/// One-shot system: build the full services catalog and push it to Slint.
+/// Runs every frame but exits immediately after the first successful push.
+fn init_services_browser_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut initialized: ResMut<ServicesBrowserInitialized>,
+) {
+    if initialized.0 { return; }
+    let Some(ref ctx) = slint_context else { return };
+    initialized.0 = true;
+
+    // Helper to build a ServicePropertySummary
+    fn prop(name: &str, typ: &str, default: &str, desc: &str) -> ServicePropertySummary {
+        ServicePropertySummary {
+            name: name.into(),
+            property_type: typ.into(),
+            default_value: default.into(),
+            description: desc.into(),
+        }
+    }
+
+    // Helper to build a color from RGB hex
+    fn hex(r: u8, g: u8, b: u8) -> slint::Color {
+        slint::Color::from_rgb_u8(r, g, b)
+    }
+
+    let services: Vec<ServiceBrowserEntry> = vec![
+        // ── Core ──
+        ServiceBrowserEntry {
+            name: "Workspace".into(),
+            icon_text: "🌐".into(),
+            icon_color: hex(0x33, 0x66, 0x99),
+            class_name: "Workspace".into(),
+            category: "Core".into(),
+            summary: "The root container for all 3D objects, physics, and world settings.".into(),
+            description: "Workspace is the top-level service that holds every Part, Model, and script in the 3D world. It controls global physics (gravity, air density, wind), the fallen-parts destroy height, streaming behavior, and collision groups. Every Space has exactly one Workspace.\n\nKey responsibilities:\n• Gravity and physics simulation parameters\n• GlobalWind for environmental effects\n• FallenPartsDestroyHeight — automatic cleanup threshold\n• AllowThirdPartySales — marketplace permission\n• SignalBehavior — how RemoteEvents queue\n• TouchesUseCollisionGroups — advanced collision filtering".into(),
+            learn_url: "/learn/services/workspace".into(),
+            property_count: 7,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("Gravity", "float", "196.2", "Acceleration due to gravity in studs/s². Earth-like default."),
+                prop("FallenPartsDestroyHeight", "float", "-500", "Y coordinate below which parts are automatically destroyed."),
+                prop("AirDensity", "float", "0.0012", "Air density for aerodynamic drag calculations."),
+                prop("GlobalWind", "color", "0, 0, 0", "Wind vector (X, Y, Z) affecting particles and cloth."),
+                prop("AllowThirdPartySales", "bool", "false", "Whether third-party marketplace sales are permitted."),
+                prop("SignalBehavior", "enum", "Default", "How RemoteEvent signals are queued and delivered."),
+                prop("TouchesUseCollisionGroups", "bool", "false", "Whether .Touched events respect collision group filters."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "Lighting".into(),
+            icon_text: "☀️".into(),
+            icon_color: hex(0xCC, 0x99, 0x33),
+            class_name: "Lighting".into(),
+            category: "Core".into(),
+            summary: "Controls the sun, sky, shadows, fog, and ambient illumination.".into(),
+            description: "Lighting is the global illumination service. It drives the sun position (via ClockTime + GeographicLatitude), ambient color, shadow quality, exposure, fog, and atmosphere effects. It also hosts child objects like Atmosphere, Sky, and post-processing effects.\n\nKey responsibilities:\n• Time-of-day sun cycle (ClockTime 0–24)\n• GlobalShadows toggle and ShadowSoftness\n• Ambient and OutdoorAmbient color\n• Brightness and ExposureCompensation\n• FogColor, FogStart, FogEnd\n• ColorShift_Top / ColorShift_Bottom for skybox gradient\n• Technology selector (ShadowMap, Future, Compatibility)".into(),
+            learn_url: "/learn/services/lighting".into(),
+            property_count: 14,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("Ambient", "color", "0, 0, 0", "Ambient light color applied everywhere regardless of sun."),
+                prop("Brightness", "float", "2", "Overall scene brightness multiplier."),
+                prop("ClockTime", "float", "14.0", "Time of day (0–24). Controls sun position and sky color."),
+                prop("ColorShift_Bottom", "color", "0, 0, 0", "Color tint applied to surfaces facing downward."),
+                prop("ColorShift_Top", "color", "0, 0, 0", "Color tint applied to surfaces facing upward."),
+                prop("EnvironmentDiffuseScale", "float", "1", "Multiplier for environment map diffuse contribution."),
+                prop("EnvironmentSpecularScale", "float", "1", "Multiplier for environment map specular reflections."),
+                prop("ExposureCompensation", "float", "0", "EV bias for HDR tone mapping. Positive = brighter."),
+                prop("FogColor", "color", "0.75, 0.75, 0.75", "Color of distance fog."),
+                prop("FogEnd", "float", "100000", "Distance at which fog reaches full opacity."),
+                prop("FogStart", "float", "0", "Distance at which fog begins to appear."),
+                prop("GeographicLatitude", "float", "41.7", "Latitude for sun angle calculation. Affects shadow length."),
+                prop("GlobalShadows", "bool", "true", "Whether shadow maps are computed for directional light."),
+                prop("ShadowSoftness", "float", "0.2", "Blur radius for shadow edges. 0 = sharp, 1 = very soft."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "Chat".into(),
+            icon_text: "💬".into(),
+            icon_color: hex(0x33, 0x99, 0x66),
+            class_name: "Chat".into(),
+            category: "Core".into(),
+            summary: "Manages in-game text chat, bubble chat, and message filtering.".into(),
+            description: "The Chat service provides the default text chat system with support for bubble chat (speech bubbles above characters), message filtering for safety, and customizable chat windows. It can be extended with ChatModules for custom commands and behaviors.\n\nKey responsibilities:\n• BubbleChatEnabled — speech bubbles above characters\n• LoadDefaultChat — whether the built-in chat GUI loads\n• FilteringEnabled — server-side text filtering for safety\n• Custom ChatModules for slash commands and formatting".into(),
+            learn_url: "/learn/services/chat".into(),
+            property_count: 3,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("BubbleChatEnabled", "bool", "true", "Show speech bubble above character when they chat."),
+                prop("LoadDefaultChat", "bool", "true", "Load the built-in chat GUI. Disable for custom chat UI."),
+                prop("FilteringEnabled", "bool", "true", "Enable server-side text filtering for player safety."),
+            ])).into(),
+        },
+
+        // ── Player ──
+        ServiceBrowserEntry {
+            name: "Players".into(),
+            icon_text: "👥".into(),
+            icon_color: hex(0x33, 0x99, 0x99),
+            class_name: "Players".into(),
+            category: "Player".into(),
+            summary: "Runtime service that tracks all connected players and their state.".into(),
+            description: "Players is a runtime-only service that contains a Player object for each connected client. It provides events for PlayerAdded/PlayerRemoving and methods like GetPlayers(). In Studio, it shows no players since you are in edit mode.\n\nKey responsibilities:\n• Automatic Player object creation/removal on connect/disconnect\n• MaxPlayers — server capacity limit\n• RespawnTime — seconds before automatic respawn\n• CharacterAutoLoads — whether characters spawn automatically".into(),
+            learn_url: "/learn/services/players".into(),
+            property_count: 3,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("MaxPlayers", "int", "50", "Maximum number of concurrent players in the server."),
+                prop("RespawnTime", "float", "5.0", "Seconds to wait before respawning a player after death."),
+                prop("CharacterAutoLoads", "bool", "true", "Automatically load character model when player joins."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "StarterPlayer".into(),
+            icon_text: "🍎".into(),
+            icon_color: hex(0xCC, 0x33, 0x33),
+            class_name: "StarterPlayer".into(),
+            category: "Player".into(),
+            summary: "Default camera, character, and control settings for new players.".into(),
+            description: "StarterPlayer defines the default configuration applied to every player when they join. It contains two sub-containers: StarterPlayerScripts (scripts cloned into each Player) and StarterCharacterScripts (scripts cloned into each Character).\n\nKey Camera properties:\n• CameraMaxZoomDistance / CameraMinZoomDistance\n• CameraMode (Classic, LockFirstPerson, LockThirdPerson)\n• DevCameraOcclusionMode — how the camera handles obstacles\n• DevComputerCameraMode / DevTouchCameraMode\n\nKey Character properties:\n• CharacterWalkSpeed, CharacterJumpHeight, CharacterJumpPower\n• CharacterMaxSlopeAngle — steepest climbable surface\n• AutoJumpEnabled, CharacterUseJumpPower\n• HealthDisplayDistance, NameDisplayDistance".into(),
+            learn_url: "/learn/services/starter-player".into(),
+            property_count: 14,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("CameraMaxZoomDistance", "float", "128", "Maximum camera distance from character."),
+                prop("CameraMinZoomDistance", "float", "0.5", "Minimum camera distance from character."),
+                prop("CameraMode", "enum", "Classic", "Camera behavior: Classic, LockFirstPerson, LockThirdPerson."),
+                prop("DevCameraOcclusionMode", "enum", "Zoom", "How camera handles occluding geometry."),
+                prop("DevComputerCameraMode", "enum", "UserChoice", "Camera mode override for desktop clients."),
+                prop("DevTouchCameraMode", "enum", "UserChoice", "Camera mode override for touch clients."),
+                prop("EnableMouseLockOption", "bool", "true", "Allow players to toggle mouse lock (Shift-Lock)."),
+                prop("AutoJumpEnabled", "bool", "true", "Character auto-jumps when walking into obstacles."),
+                prop("CharacterJumpHeight", "float", "7.2", "Maximum jump height in studs."),
+                prop("CharacterJumpPower", "float", "50", "Initial upward velocity when jumping."),
+                prop("CharacterMaxSlopeAngle", "float", "89", "Steepest surface angle the character can walk on (degrees)."),
+                prop("CharacterWalkSpeed", "float", "16", "Default walk speed in studs per second."),
+                prop("HealthDisplayDistance", "float", "100", "Distance at which health bars become visible."),
+                prop("NameDisplayDistance", "float", "100", "Distance at which player names become visible."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "StarterGui".into(),
+            icon_text: "🖼️".into(),
+            icon_color: hex(0x99, 0x33, 0xCC),
+            class_name: "StarterGui".into(),
+            category: "Player".into(),
+            summary: "Container for GUI objects that are cloned into each player's PlayerGui.".into(),
+            description: "StarterGui holds ScreenGui, BillboardGui, and SurfaceGui objects that are automatically copied into each player's PlayerGui when they join or respawn. This is the standard way to create HUD elements, health bars, inventory screens, and menus.\n\nKey responsibilities:\n• ScreenCompatibilityMode — legacy vs modern sizing\n• ShowDevelopmentGui — show developer-only UI elements\n• ProcessUserInput — whether GUIs in StarterGui handle input\n• ResetOnSpawn — whether GUIs reset when character respawns".into(),
+            learn_url: "/learn/services/starter-gui".into(),
+            property_count: 3,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("ScreenCompatibilityMode", "enum", "TextScaleDpi", "GUI scaling mode for different screen sizes."),
+                prop("ShowDevelopmentGui", "bool", "false", "Display developer-only GUI elements."),
+                prop("ResetOnSpawn", "bool", "true", "Reset player GUI to StarterGui contents on respawn."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "StarterPack".into(),
+            icon_text: "🎒".into(),
+            icon_color: hex(0x66, 0x99, 0x33),
+            class_name: "StarterPack".into(),
+            category: "Player".into(),
+            summary: "Tools and items automatically given to each player on spawn.".into(),
+            description: "StarterPack contains Tool objects that are cloned into every player's Backpack when they join or respawn. Use this for default weapons, building tools, or any item players should start with.\n\nKey responsibilities:\n• Place Tool objects here to give them to all players\n• Combined with StarterGear for per-spawn behavior\n• Tools are cloned fresh on each respawn when ResetOnSpawn is true".into(),
+            learn_url: "/learn/services/starter-pack".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+        ServiceBrowserEntry {
+            name: "Teams".into(),
+            icon_text: "🏁".into(),
+            icon_color: hex(0x33, 0x66, 0xCC),
+            class_name: "Teams".into(),
+            category: "Player".into(),
+            summary: "Team management for multiplayer games with colored team assignments.".into(),
+            description: "The Teams service holds Team objects that players can be assigned to. Each Team has a TeamColor and AutoAssignable flag. When teams exist, player names appear in their team color and the leaderboard shows team groupings.\n\nKey responsibilities:\n• Create Team children with distinct TeamColor values\n• AutoAssignable — whether new players auto-join this team\n• Balanced or manual team assignment via scripts\n• Team-colored nametags and leaderboard groups".into(),
+            learn_url: "/learn/services/teams".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+
+        // ── Data ──
+        ServiceBrowserEntry {
+            name: "ReplicatedStorage".into(),
+            icon_text: "📦".into(),
+            icon_color: hex(0xCC, 0x66, 0x33),
+            class_name: "ReplicatedStorage".into(),
+            category: "Data".into(),
+            summary: "Shared storage replicated to all clients — ideal for shared assets and modules.".into(),
+            description: "ReplicatedStorage is a container whose contents are visible to both server and all clients. Place ModuleScripts, models, animations, sounds, and other assets here that need to be accessible from both server scripts and local scripts.\n\nKey responsibilities:\n• Shared ModuleScripts (utility libraries, configs)\n• Shared assets (models, VFX, sounds) used by both server and client\n• RemoteEvents and RemoteFunctions for client-server communication\n• NOT for sensitive data — clients can see everything here".into(),
+            learn_url: "/learn/services/replicated-storage".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+        ServiceBrowserEntry {
+            name: "ServerStorage".into(),
+            icon_text: "🔒".into(),
+            icon_color: hex(0x99, 0x66, 0x33),
+            class_name: "ServerStorage".into(),
+            category: "Data".into(),
+            summary: "Server-only storage invisible to clients — for sensitive assets and data.".into(),
+            description: "ServerStorage is a container whose contents are only accessible to server-side scripts. Clients cannot see, access, or replicate anything stored here. Use it for server-only modules, secret configurations, and assets that should not be downloaded by clients.\n\nKey responsibilities:\n• Server-only ModuleScripts (game logic, data handlers)\n• Templates spawned by server scripts at runtime\n• Sensitive configuration data\n• Assets that should not be accessible to exploiters".into(),
+            learn_url: "/learn/services/server-storage".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+        ServiceBrowserEntry {
+            name: "ServerScriptService".into(),
+            icon_text: "⚙️".into(),
+            icon_color: hex(0x66, 0x66, 0x99),
+            class_name: "ServerScriptService".into(),
+            category: "Scripting".into(),
+            summary: "Container for server-side scripts that run automatically on startup.".into(),
+            description: "ServerScriptService holds Script objects that run on the server when the experience starts. Scripts here have full server authority — they can access ServerStorage, manage datastores, handle physics, and control game state. LocalScripts placed here will NOT run.\n\nKey responsibilities:\n• Game initialization and setup scripts\n• DataStore managers and save systems\n• Physics authority and anti-cheat validation\n• Server-side event handlers\n• Runs only Script (not LocalScript or ModuleScript directly)".into(),
+            learn_url: "/learn/services/server-script-service".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+
+        // ── Scripting ──
+        ServiceBrowserEntry {
+            name: "SoulService".into(),
+            icon_text: "◆".into(),
+            icon_color: hex(0x33, 0x99, 0xCC),
+            class_name: "SoulService".into(),
+            category: "Scripting".into(),
+            summary: "Manages Rune VM script execution, AI integration, and security sandboxing.".into(),
+            description: "SoulService is the Eustress-native scripting service that manages the Rune virtual machine. It controls script execution permissions, AI-assisted code generation, and security sandboxing for scripts.\n\nKey responsibilities:\n• EnableAI — toggle AI-assisted scripting features\n• AllowFileSystemAccess — script permission to read/write files\n• AllowNetworkAccess — script permission for HTTP requests\n• SandboxEnabled — isolate scripts in a secure sandbox\n• Workshop AI conversation integration".into(),
+            learn_url: "/learn/services/soul-service".into(),
+            property_count: 4,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("EnableAI", "bool", "true", "Enable AI-assisted code generation and suggestions."),
+                prop("AllowFileSystemAccess", "bool", "false", "Allow scripts to read/write the local file system."),
+                prop("AllowNetworkAccess", "bool", "false", "Allow scripts to make HTTP requests and open sockets."),
+                prop("SandboxEnabled", "bool", "true", "Run scripts in an isolated sandbox for security."),
+            ])).into(),
+        },
+
+        // ── Rendering ──
+        ServiceBrowserEntry {
+            name: "MaterialService".into(),
+            icon_text: "🎨".into(),
+            icon_color: hex(0xCC, 0x33, 0x99),
+            class_name: "MaterialService".into(),
+            category: "Rendering".into(),
+            summary: "Manages PBR material presets, custom materials, and texture overrides.".into(),
+            description: "MaterialService loads and manages all material definitions used by parts. It reads .mat.toml preset files from the assets directory and provides a MaterialRegistry of named materials with base color textures, normal maps, roughness, and metallic values.\n\nKey responsibilities:\n• Built-in PBR presets (Plastic, Metal, Wood, Brick, etc.)\n• Custom .mat.toml material definitions\n• Texture loading and UV mapping\n• MaterialVariant overrides for themed environments\n• Real-time material property editing via Properties panel".into(),
+            learn_url: "/learn/services/material-service".into(),
+            property_count: 2,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("Use2022Materials", "bool", "true", "Use modern PBR material textures instead of legacy flat colors."),
+                prop("AssetPath", "string", "materials/", "Directory path for material texture assets."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "SoundService".into(),
+            icon_text: "🔊".into(),
+            icon_color: hex(0x99, 0x33, 0x66),
+            class_name: "SoundService".into(),
+            category: "Rendering".into(),
+            summary: "Global audio settings including volume, distance model, and Doppler effect.".into(),
+            description: "SoundService controls the global audio environment. It manages the distance attenuation model, Doppler effect, and rolloff settings. Sound objects in the world reference these global settings for spatialized 3D audio.\n\nKey responsibilities:\n• AmbientReverb — environment reverb preset\n• DistanceFactor — scale factor for distance attenuation\n• DopplerScale — intensity of the Doppler pitch shift\n• RolloffScale — rate at which sounds attenuate with distance\n• VolumetricAudio — enable spatial audio processing".into(),
+            learn_url: "/learn/services/sound-service".into(),
+            property_count: 5,
+            properties: std::rc::Rc::new(slint::VecModel::from(vec![
+                prop("AmbientReverb", "enum", "NoReverb", "Environment reverb preset (Cave, Hall, Room, etc.)."),
+                prop("DistanceFactor", "float", "3.33", "Scale factor mapping studs to audio distance units."),
+                prop("DopplerScale", "float", "1.0", "Doppler effect intensity. 0 = disabled."),
+                prop("RolloffScale", "float", "1.0", "How quickly sounds fade with distance. Higher = faster."),
+                prop("VolumetricAudio", "bool", "true", "Enable spatial 3D audio processing."),
+            ])).into(),
+        },
+        ServiceBrowserEntry {
+            name: "AdornmentService".into(),
+            icon_text: "✨".into(),
+            icon_color: hex(0xCC, 0xCC, 0x33),
+            class_name: "AdornmentService".into(),
+            category: "Rendering".into(),
+            summary: "Manages visual adornments like selection boxes, highlights, and billboards.".into(),
+            description: "AdornmentService provides visual decoration objects that overlay or surround parts. These include SelectionBox (wireframe outline), Highlight (glow/outline effect), BillboardGui (world-space UI), SurfaceGui (texture-space UI), and Beam (particle trail between attachments).\n\nKey responsibilities:\n• SelectionBox, SelectionSphere for editor-like outlines\n• Highlight for glow and silhouette effects\n• BillboardGui for nametags and health bars\n• SurfaceGui for in-world screens and signs\n• Beam for trails, lasers, and connections".into(),
+            learn_url: "/learn/services/adornment-service".into(),
+            property_count: 0,
+            properties: slint::ModelRc::default(),
+        },
+    ];
+
+    let model = std::rc::Rc::new(slint::VecModel::from(services));
+    ctx.window.set_services_browser_entries(slint::ModelRc::from(model));
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -9183,12 +10151,21 @@ fn sync_unified_explorer_to_slint(
             // Use ServiceComponent icon if available, otherwise fall back to class icon.
             // Special-case: Folder named "Logs" uses the log-stack icon (Claude
             // audit trail per constitutional KL-10).
+            // Special-case: Folder named "Workshop" under SoulService uses the
+            // wrench icon — matches the filesystem-side icon logic.
             let icon = if let Ok(service) = service_components.get(entity) {
                 load_service_icon(&service.icon)
             } else if instance.class_name == eustress_common::classes::ClassName::Folder
                 && instance.name == "Logs"
             {
                 load_service_icon("log")
+            } else if instance.class_name == eustress_common::classes::ClassName::Folder
+                && instance.name.eq_ignore_ascii_case("Workshop")
+                && loaded_from_file.get(entity)
+                    .map(|lff| lff.service == "SoulService")
+                    .unwrap_or(false)
+            {
+                load_service_icon("wrench")
             } else {
                 load_class_icon(&instance.class_name)
             };
@@ -9266,7 +10243,7 @@ fn sync_unified_explorer_to_slint(
         }
     });
 
-    tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state));
+    tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Workspace") {
         tree_nodes.extend(build_entity_nodes(&workspace_roots, 1, &mut entity_id_cache, &mut next_id));
         
@@ -9532,35 +10509,35 @@ fn sync_unified_explorer_to_slint(
 
     // Service: Lighting (depth 0) + children (depth 1+)
     let lt_has = !lighting_roots.is_empty();
-    tree_nodes.push(make_service_node("Lighting", "lighting", 0, lt_has, svc_expanded("Lighting"), &explorer_state));
+    tree_nodes.push(make_service_node("Lighting", "lighting", 0, lt_has, svc_expanded("Lighting"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Lighting") {
         tree_nodes.extend(build_entity_nodes(&lighting_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
     // Service: Players (depth 0) - runtime only, no children in editor
-    tree_nodes.push(make_service_node("Players", "players", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("Players", "players", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: StarterGui (depth 0) + UI children (depth 1+)
     let sg_has = !starter_gui_roots.is_empty();
-    tree_nodes.push(make_service_node("StarterGui", "startergui", 0, sg_has, svc_expanded("StarterGui"), &explorer_state));
+    tree_nodes.push(make_service_node("StarterGui", "startergui", 0, sg_has, svc_expanded("StarterGui"), &explorer_state, &selected_entity_ids));
     if svc_expanded("StarterGui") {
         tree_nodes.extend(build_entity_nodes(&starter_gui_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
     // Service: StarterPack (depth 0) - no editor children
-    tree_nodes.push(make_service_node("StarterPack", "starterpack", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("StarterPack", "starterpack", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: StarterPlayer (depth 0) - no editor children
-    tree_nodes.push(make_service_node("StarterPlayer", "starterplayer", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("StarterPlayer", "starterplayer", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: ReplicatedStorage (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ReplicatedStorage", "replicatedstorage", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("ReplicatedStorage", "replicatedstorage", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: ServerStorage (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ServerStorage", "serverstorage", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("ServerStorage", "serverstorage", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: ServerScriptService (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ServerScriptService", "serverscriptservice", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("ServerScriptService", "serverscriptservice", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: SoulService (depth 0) + script children (depth 1+).
     // Sort the immediate children so the Workshop folder (chat
@@ -9569,45 +10546,67 @@ fn sync_unified_explorer_to_slint(
     // authored scripts keep their stable ordering. Matches how
     // Workspace floats the Camera above all other parts above.
     let ss_has = !soul_service_roots.is_empty();
-    tree_nodes.push(make_service_node("SoulService", "soulservice", 0, ss_has, svc_expanded("SoulService"), &explorer_state));
+    tree_nodes.push(make_service_node("SoulService", "soulservice", 0, ss_has, svc_expanded("SoulService"), &explorer_state, &selected_entity_ids));
     if svc_expanded("SoulService") {
+        // Pin the Workshop folder to the top of SoulService. Historically
+        // this sort used `eq_ignore_ascii_case("Workshop")` against the
+        // entity's display name — which worked for freshly-authored
+        // folders but missed the legacy snake_case name (`workshop`) and
+        // any entity whose first-char uppercase transform in
+        // `file_loader` left behind a mismatched casing. Widening the
+        // match to also accept the trimmed-lowercase form keeps the sort
+        // stable no matter what shape the name takes on disk.
         soul_service_roots.sort_by(|a, b| {
             let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
             let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-            let a_workshop = a_name.eq_ignore_ascii_case("Workshop");
-            let b_workshop = b_name.eq_ignore_ascii_case("Workshop");
-            match (a_workshop, b_workshop) {
+            let is_workshop = |n: &str| {
+                let t = n.trim();
+                t.eq_ignore_ascii_case("Workshop") || t.eq_ignore_ascii_case("workshop")
+            };
+            match (is_workshop(a_name), is_workshop(b_name)) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => a_name.cmp(b_name)
                     .then_with(|| a.index().cmp(&b.index())),
             }
         });
+        // One-shot log so we can see from engine stdout whether the
+        // Workshop pin actually found the folder in the current scan.
+        // Remove after the user confirms it's sticking.
+        if let Some(first) = soul_service_roots.first() {
+            if let Ok((_, inst)) = instances.get(*first) {
+                tracing::debug!(
+                    "SoulService tree: {} child(ren), first = '{}'",
+                    soul_service_roots.len(),
+                    inst.name
+                );
+            }
+        }
         tree_nodes.extend(build_entity_nodes(&soul_service_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
     // Service: MaterialService (depth 0) + material children (depth 1+)
     let ms_has = !material_service_roots.is_empty();
-    tree_nodes.push(make_service_node("MaterialService", "materialservice", 0, ms_has, svc_expanded("MaterialService"), &explorer_state));
+    tree_nodes.push(make_service_node("MaterialService", "materialservice", 0, ms_has, svc_expanded("MaterialService"), &explorer_state, &selected_entity_ids));
     if svc_expanded("MaterialService") {
         tree_nodes.extend(build_entity_nodes(&material_service_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
     // Service: AdornmentService (depth 0) + adornment children (depth 1+)
     let as_has = !adornment_service_roots.is_empty();
-    tree_nodes.push(make_service_node("AdornmentService", "adornment", 0, as_has, svc_expanded("AdornmentService"), &explorer_state));
+    tree_nodes.push(make_service_node("AdornmentService", "adornment", 0, as_has, svc_expanded("AdornmentService"), &explorer_state, &selected_entity_ids));
     if svc_expanded("AdornmentService") {
         tree_nodes.extend(build_entity_nodes(&adornment_service_roots, 1, &mut entity_id_cache, &mut next_id));
     }
 
     // Service: SoundService (depth 0) - no editor children
-    tree_nodes.push(make_service_node("SoundService", "soundservice", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("SoundService", "soundservice", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: Teams (depth 0) - no editor children
-    tree_nodes.push(make_service_node("Teams", "teams", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("Teams", "teams", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // Service: Chat (depth 0) - no editor children
-    tree_nodes.push(make_service_node("Chat", "chat", 0, false, false, &explorer_state));
+    tree_nodes.push(make_service_node("Chat", "chat", 0, false, false, &explorer_state, &selected_entity_ids));
 
     // ================================================================
     // Dynamic services: discovered from _service.toml files on disk.
@@ -9643,7 +10642,7 @@ fn sync_unified_explorer_to_slint(
         for (svc_name, icon_name) in &explorer_state.cached_dynamic_services.clone() {
             let children = dynamic_service_roots.get(svc_name.as_str()).cloned().unwrap_or_default();
             let has = !children.is_empty();
-            tree_nodes.push(make_service_node(svc_name, icon_name, 0, has, svc_expanded(svc_name), &explorer_state));
+            tree_nodes.push(make_service_node(svc_name, icon_name, 0, has, svc_expanded(svc_name), &explorer_state, &selected_entity_ids));
             if svc_expanded(svc_name) && has {
                 tree_nodes.extend(build_entity_nodes(&children, 1, &mut entity_id_cache, &mut next_id));
             }
@@ -9698,6 +10697,31 @@ fn sync_unified_explorer_to_slint(
         explorer_state.last_tree_hash = new_hash;
         let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
         ui.set_tree_nodes(slint::ModelRc::from(model));
+    }
+
+    // Process pending scroll-to-selection — driven by 3D viewport
+    // clicks via `pending_scroll_target_entity`. We resolve the target
+    // entity to its tree-node id, find that id's index in
+    // `visible_node_order`, push the scroll offset + pulse to Slint,
+    // and clear the request.
+    if let Some(target_entity) = explorer_state.pending_scroll_target_entity.take() {
+        // Reverse-lookup: entity_id_cache is `id -> entity`; we want
+        // the id given the entity.
+        let target_id_opt = explorer_state.entity_id_cache.iter()
+            .find(|(_, &e)| e == target_entity)
+            .map(|(&id, _)| id);
+        if let Some(target_id) = target_id_opt {
+            if let Some(idx) = explorer_state.visible_node_order.iter().position(|&id| id == target_id) {
+                // TreeItem height — kept in sync with `theme.slint`'s
+                // `TreeItem.height: 22px`. If that changes, this offset
+                // needs to follow or rows won't land precisely at top.
+                const TREE_ROW_HEIGHT_PX: f32 = 22.0;
+                let scroll_y_px = idx as f32 * TREE_ROW_HEIGHT_PX;
+                ui.set_explorer_scroll_target_y(scroll_y_px);
+                explorer_state.scroll_pulse = explorer_state.scroll_pulse.wrapping_add(1);
+                ui.set_explorer_scroll_pulse(explorer_state.scroll_pulse as i32);
+            }
+        }
     }
 }
 
@@ -9766,8 +10790,10 @@ fn make_service_node(
     has_children: bool,
     is_expanded: bool,
     state: &UnifiedExplorerState,
+    selected_ids: &std::collections::HashSet<String>,
 ) -> TreeNode {
-    let is_selected = matches!(&state.selected, SelectedItem::Service(s) if s == name);
+    let is_selected = matches!(&state.selected, SelectedItem::Service(s) if s == name)
+        || selected_ids.contains(&format!("service:{}", name));
     TreeNode {
         id: service_name_to_id(name), // Stable negative hash ID for services
         name: name.into(),
@@ -10188,7 +11214,72 @@ fn sync_properties_to_slint(
     // This ensures Properties panel shows exactly what's in the TOML
     // ══════════════════════════════════════════════════════════════════════════
     if let Ok(instance_file) = instance_files.get(selected_entity) {
-        if let Ok(toml_def) = crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
+        // UI classes (TextLabel/TextButton/Frame/ImageLabel/ImageButton/
+        // ScrollingFrame/BillboardGui/ScreenGui/SurfaceGui) have their
+        // full property set on the live ECS component via
+        // `PropertyAccess`. Emit those independent of the TOML load —
+        // when MindSpace creates a BillboardGui there's a brief window
+        // where the file-watcher's TOML read can race the TOML write,
+        // and the previous code short-circuited the whole panel to
+        // "Failed to load TOML file" for that entity until next sync.
+        // The TOML still feeds the non-UI sections (Appearance, Physics,
+        // Material, Thermodynamic, Electrochemical) for non-UI classes.
+        use eustress_common::classes::ClassName;
+        let is_ui_class_outer = matches!(instance.class_name,
+            ClassName::TextLabel | ClassName::TextButton | ClassName::TextBox |
+            ClassName::Frame     | ClassName::ImageLabel | ClassName::ImageButton |
+            ClassName::ScrollingFrame |
+            ClassName::BillboardGui | ClassName::ScreenGui | ClassName::SurfaceGui
+        );
+        // Try the TOML load once — hold onto BOTH the success Ok and
+        // any failure String so we can either use the parsed def or
+        // surface the exact parse error to the Properties panel.
+        let (toml_load_result, toml_fallback_error) =
+            match crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
+                Ok(d) => (Some(d), None),
+                Err(e) => (None, Some(e)),
+            };
+
+        if let Some(toml_def) = toml_load_result.or_else(|| {
+            // UI classes use the ECS component as source of truth, so
+            // a missing/invalid TOML is recoverable — fabricate a stub
+            // InstanceDefinition with just the metadata we already
+            // know from the Instance component.
+            if !is_ui_class_outer { return None; }
+            Some(crate::space::instance_loader::InstanceDefinition {
+                asset: None,
+                transform: crate::space::instance_loader::TransformData::default(),
+                properties: crate::space::instance_loader::InstanceProperties::default(),
+                metadata: crate::space::instance_loader::InstanceMetadata {
+                    class_name: format!("{:?}", instance.class_name)
+                        .trim_start_matches("ClassName::")
+                        .to_string(),
+                    archivable: instance.archivable,
+                    name: Some(instance_file.name.clone()),
+                    created: String::new(),
+                    last_modified: String::new(),
+                    created_by: None,
+                    modifications: Vec::new(),
+                },
+                material: None,
+                thermodynamic: None,
+                electrochemical: None,
+                ui: None,
+                attributes: None,
+                tags: None,
+                parameters: None,
+                extra: std::collections::HashMap::new(),
+            })
+        }) {
+            // Surface the actual TOML error (when present) for non-UI
+            // classes, so Output/diagnostics aren't the only place this
+            // lands. UI classes already render correctly from the ECS
+            // component, so we keep their panel clean.
+            if let Some(err) = toml_fallback_error.as_ref() {
+                if !is_ui_class_outer {
+                    add_prop("Metadata", "TomlError", err.clone(), "string", false);
+                }
+            }
             // -- Metadata section --
             add_prop("Metadata", "ClassName", toml_def.metadata.class_name.clone(), "string", false);
             add_prop("Metadata", "Name", instance_file.name.clone(), "string", true);
@@ -10207,20 +11298,53 @@ fn sync_properties_to_slint(
             }
             
             // -- Transform section --
-            add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}", 
-                toml_def.transform.position[0], toml_def.transform.position[1], toml_def.transform.position[2]), "vec3", true);
-            // Convert stored quaternion [x, y, z, w] → Euler degrees for display
-            let rot_quat = bevy::math::Quat::from_xyzw(
-                toml_def.transform.rotation[0],
-                toml_def.transform.rotation[1],
-                toml_def.transform.rotation[2],
-                toml_def.transform.rotation[3],
-            );
-            let (rx, ry, rz) = rot_quat.to_euler(bevy::math::EulerRot::XYZ);
+            //
+            // Read from the LIVE ECS Transform / BasePart, not the
+            // on-disk TOML. The TOML only updates after
+            // `write_instance_changes_system` flushes — which can be a
+            // tick or two behind a gizmo drag — and the user reported
+            // a visible "Properties panel waits for TOML save" lag
+            // mid-scale. ECS is the source of truth in-flight; TOML
+            // is the durable mirror.
+            //
+            // Falls back to the TOML values when the queries don't
+            // resolve (e.g. just-loaded entity before Transform is
+            // attached) so the panel never shows blank.
+            let live_translation = transforms
+                .get(selected_entity)
+                .map(|t| t.translation)
+                .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.position));
+            let live_rotation = transforms
+                .get(selected_entity)
+                .map(|t| t.rotation)
+                .unwrap_or_else(|_| {
+                    bevy::math::Quat::from_xyzw(
+                        toml_def.transform.rotation[0],
+                        toml_def.transform.rotation[1],
+                        toml_def.transform.rotation[2],
+                        toml_def.transform.rotation[3],
+                    )
+                });
+            // For "Scale" prefer `BasePart.size` (the dimension every
+            // tool reads — gizmos, colliders, save_space). It stays
+            // correct whether the part is file-system-first
+            // (`Transform.scale = size`) or legacy
+            // (`Transform.scale = ONE`, mesh baked at size). Falling
+            // back to `Transform.scale` for non-Part entities (Models,
+            // Cameras) keeps those rows working too.
+            let live_size = base_parts
+                .get(selected_entity)
+                .map(|bp| bp.size)
+                .or_else(|_| transforms.get(selected_entity).map(|t| t.scale))
+                .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.scale));
+            add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}",
+                live_translation.x, live_translation.y, live_translation.z), "vec3", true);
+            // Convert quaternion → Euler degrees for display
+            let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
             add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
                 rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
-            add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}", 
-                toml_def.transform.scale[0], toml_def.transform.scale[1], toml_def.transform.scale[2]), "vec3", true);
+            add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
+                live_size.x, live_size.y, live_size.z), "vec3", true);
             
             // ── UI class properties (TextLabel, TextButton, Frame, etc.) ────────
             // If the entity carries a UI ECS component, emit all its properties
@@ -10388,11 +11512,18 @@ fn sync_properties_to_slint(
                 add_prop("Electrochemical", "DendriteRisk", format!("{:.4}", echem.dendrite_risk), "float", true);
             }
         } else {
-            // Fallback: show basic instance info if TOML load fails
+            // Fallback — only reachable for NON-UI classes whose TOML
+            // failed to parse. UI classes take the ECS-backed stub
+            // branch above and always render. Include the actual parse
+            // error so the user can see what's wrong instead of the
+            // old opaque "Failed to load TOML file".
             add_prop("Data", "Name", instance.name.clone(), "string", true);
             add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
             add_prop("Data", "Archivable", instance.archivable.to_string(), "bool", true);
-            add_prop("Data", "Error", "Failed to load TOML file".to_string(), "string", false);
+            let err_msg = toml_fallback_error
+                .clone()
+                .unwrap_or_else(|| "Failed to load TOML file".to_string());
+            add_prop("Data", "Error", err_msg, "string", false);
         }
     } else if let Ok(service) = service_components.get(selected_entity) {
         // ══════════════════════════════════════════════════════════════════════════
@@ -10528,12 +11659,72 @@ fn sync_properties_to_slint(
         }
     }
     
-    // Build flat list with category headers interleaved
-    // Sort categories alphabetically (A-Z)
+    // Build flat list with category headers interleaved.
+    //
+    // Category order mirrors Roblox Studio's Properties panel — the
+    // canonical order long-time Roblox users expect. Roblox puts
+    // `Appearance` at the top (visual properties are what authors tweak
+    // most), `Behavior` next (anchored / collide / locked), then `Data`
+    // (class / name / archivable), then class-specific sections. The
+    // engine's `Metadata` maps to Roblox `Data` (we keep the name for
+    // backwards compat); `Physics` maps to `Behavior`; `Transform` maps
+    // to `Part`.
+    //
+    // Unknown categories (plugin-added sections, realism extensions
+    // like `Thermodynamic` / `Electrochemical`) are slotted into the
+    // priority map by Eustress convention — state-y simulation data
+    // after Part/Transform, custom plugin tables near the end. Anything
+    // NOT in the list falls to the tail in alphabetical order, so a
+    // new plugin section is predictable without being required to
+    // edit this list.
+    const ROBLOX_CATEGORY_ORDER: &[&str] = &[
+        "Appearance",       // Color, Material, Reflectance, Transparency, CastShadow
+        "Attachments",      // Attachment-specific
+        "Attributes",       // custom key-value
+        "Behavior",         // Roblox name — synonym of our "Physics"
+        "Physics",          // Anchored, CanCollide, Locked (Eustress legacy name)
+        "Camera",           // camera-specific
+        "Data",             // Roblox name — synonym of our "Metadata"
+        "Metadata",         // ClassName, Name, Archivable (Eustress legacy name)
+        "Derived",          // computed / read-only props
+        "Shape",            // Part shape (Block / Ball / Cylinder / …)
+        "Part",             // Roblox-style Position/Rotation/Size container
+        "Transform",        // Eustress name — Position, Rotation, Scale
+        "Asset",            // mesh reference
+        "Surface",          // BasePart surface types (Smooth / Weld / …)
+        "Goals",            // AI goal hierarchy
+        "Gui",              // UI class layout
+        "Text",             // Text-class specific
+        "Image",            // Image-class specific
+        "Light",            // PointLight / SpotLight / SurfaceLight
+        "Lighting",         // global lighting container
+        "Sound",            // Sound playback
+        "Motion",           // velocity / impulse
+        "Motor",            // Motor6D joint
+        "Particles",        // ParticleEmitter
+        "Orbital",          // orbital hierarchy
+        "Material",         // realism-extended material (after Appearance's quick Material)
+        "Thermodynamic",    // simulation state
+        "Electrochemical",  // simulation state
+        "State",            // generic state container
+        "Script",           // script-class specific
+        "Tags",             // CollectionService tags
+        "Parameters",       // instance parameters
+    ];
+    fn category_rank(cat: &str) -> usize {
+        ROBLOX_CATEGORY_ORDER
+            .iter()
+            .position(|c| *c == cat)
+            .unwrap_or(usize::MAX)
+    }
     let mut ordered_categories: Vec<String> = categorized.keys().cloned().collect();
-    ordered_categories.sort();
+    ordered_categories.sort_by(|a, b| {
+        let (ra, rb) = (category_rank(a), category_rank(b));
+        ra.cmp(&rb).then_with(|| a.cmp(b))   // tie-break alphabetically for unknown cats
+    });
     
     let mut flat_props: Vec<PropertyData> = Vec::new();
+    let placeholder_color = slint::Color::from_rgb_u8(0x80, 0x80, 0x80);
     for cat in &ordered_categories {
         // Insert category header
         let is_collapsed = studio_state.collapsed_sections.contains(cat);
@@ -10549,15 +11740,16 @@ fn sync_properties_to_slint(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            color_value: placeholder_color,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
         });
-        
+
         // Insert properties in this category (sorted A-Z by name)
         if let Some(entries) = categorized.get(cat.as_str()) {
             let mut sorted_entries = entries.clone();
             sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
-            
+
             for (name, value, prop_type, editable) in sorted_entries {
                 // Parse Vec3/rotation values into x, y, z components
                 let (x_val, y_val, z_val) = if prop_type == "vec3" || prop_type == "rotation" {
@@ -10565,7 +11757,16 @@ fn sync_properties_to_slint(
                 } else {
                     (String::new(), String::new(), String::new())
                 };
-                
+
+                // Parse the "r, g, b" value string for color rows so the
+                // Properties panel's swatch reflects the actual chosen
+                // RGB. Falls back to the gray placeholder if parsing fails.
+                let color_value = if prop_type == "color" {
+                    parse_color_rgb_string(&value).unwrap_or(placeholder_color)
+                } else {
+                    placeholder_color
+                };
+
                 flat_props.push(PropertyData {
                     name: name.as_str().into(),
                     value: value.as_str().into(),
@@ -10578,6 +11779,7 @@ fn sync_properties_to_slint(
                     x_value: x_val.into(),
                     y_value: y_val.into(),
                     z_value: z_val.into(),
+                    color_value,
                     description: slint::SharedString::default(),
                     learn_url: slint::SharedString::default(),
                 });
@@ -10967,10 +12169,14 @@ fn update_ui_property(
     }
 }
 
-/// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back
+/// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back.
+/// Accepts any comma-separated string with ≥ 3 numeric parts; extras are
+/// ignored. That lets a pasted triple into a single X/Y/Z LineEdit win
+/// (Slint concatenates the paste with the other two fields, producing
+/// 5 parts) while still accepting a plain 3-part edit.
 fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
     let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
-    if parts.len() == 3 {
+    if parts.len() >= 3 {
         let x = parts[0].parse::<f32>().ok()?;
         let y = parts[1].parse::<f32>().ok()?;
         let z = parts[2].parse::<f32>().ok()?;
@@ -11011,6 +12217,68 @@ fn parse_vec3_string(value: &str) -> (String, String, String) {
     }
 }
 
+/// Pick the user-facing identifier for an instance to display in the
+/// Output panel's "Saved <prop> to <name>" line. Folder-based entities
+/// expose their folder name via `InstanceFile.name`; flat-file entities
+/// fall back to the file stem. The TOML path's `_instance.toml` filename
+/// itself is never useful because every entity shares it.
+fn instance_name_for_log(instance_file_name: &str, toml_path: &std::path::Path) -> String {
+    if !instance_file_name.is_empty() {
+        return instance_file_name.to_string();
+    }
+    // Folder-based instance with no captured name → use the parent
+    // folder name. Flat-file instance → use the file stem.
+    let is_folder_instance = toml_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        == Some("_instance.toml");
+    let candidate = if is_folder_instance {
+        toml_path.parent().and_then(|p| p.file_name())
+    } else {
+        toml_path.file_stem()
+    };
+    candidate
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| toml_path.to_string_lossy().to_string())
+}
+
+/// Mirror of `instance_name_for_log` for service rows. Falls back to the
+/// service folder name when the class name is empty (shouldn't happen
+/// today, but the defence keeps the log line stable if a malformed
+/// service slips through).
+fn service_name_for_log(class_name: &str, toml_path: &std::path::Path) -> String {
+    if !class_name.is_empty() {
+        return class_name.to_string();
+    }
+    toml_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| toml_path.to_string_lossy().to_string())
+}
+
+/// Parse a Properties-panel color string into a typed Slint color so the
+/// preview swatch can render the actual chosen RGB. Accepts the same
+/// "r, g, b" 0-255 form the Properties panel emits, plus stray `()`
+/// wrappers that creep in from Vec3-style copy/paste flows. Returns
+/// `None` when the string isn't a recognisable triple — the caller
+/// falls back to a neutral gray placeholder.
+fn parse_color_rgb_string(value: &str) -> Option<slint::Color> {
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !matches!(c, '(' | ')' | '[' | ']'))
+        .collect();
+    let parts: Vec<&str> = cleaned.split(',').map(|s| s.trim()).collect();
+    if parts.len() < 3 { return None; }
+    let r = parts[0].parse::<i32>().ok()?;
+    let g = parts[1].parse::<i32>().ok()?;
+    let b = parts[2].parse::<i32>().ok()?;
+    let clamp = |v: i32| v.clamp(0, 255) as u8;
+    Some(slint::Color::from_rgb_u8(clamp(r), clamp(g), clamp(b)))
+}
+
 /// Builds filesystem properties for a selected file and pushes them to the Slint Properties panel.
 /// Shows: Name, Path, Extension, Size, Type, Modified, Created, Read-Only.
 fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
@@ -11044,6 +12312,7 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
         }
@@ -11134,6 +12403,12 @@ fn build_service_properties(
     ui.set_selected_icon(load_service_icon(&icon_name));
     
     let make_prop = |name: &str, value: &str, prop_type: &str, category: &str, is_hdr: bool| -> PropertyData {
+        let color_value = if prop_type == "color" {
+            parse_color_rgb_string(value)
+                .unwrap_or_else(|| slint::Color::from_rgb_u8(0x80, 0x80, 0x80))
+        } else {
+            slint::Color::from_rgb_u8(0x80, 0x80, 0x80)
+        };
         PropertyData {
             name: name.into(),
             value: value.into(),
@@ -11146,13 +12421,14 @@ fn build_service_properties(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            color_value,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
         }
     };
-    
+
     let mut props: Vec<PropertyData> = Vec::new();
-    
+
     // Try to load properties from TOML definition file first (Roblox-style)
     if let Some(toml_data) = load_service_properties_from_toml(service_name) {
         // Parse TOML sections and build properties
@@ -11837,6 +13113,13 @@ pub struct AssetManagerState {
     pub cached_universe_files: Vec<(String, std::path::PathBuf, u64)>,
     pub cached_mesh_files: Vec<(String, std::path::PathBuf, u64)>,
     pub cached_space_files: Vec<(String, std::path::PathBuf, u64)>,
+    /// User-imported images under `<Universe>/assets/images/`. Populated
+    /// by the same `scan_asset_dir` walker used for parts/meshes; the
+    /// Asset panel renders these under a new "User Assets → Images"
+    /// subsection so imports are immediately discoverable.
+    pub cached_image_files: Vec<(String, std::path::PathBuf, u64)>,
+    /// User-imported videos under `<Universe>/assets/videos/`.
+    pub cached_video_files: Vec<(String, std::path::PathBuf, u64)>,
     /// Whether cache needs rebuilding (set by file watcher, cleared after scan)
     pub cache_stale: bool,
 }
@@ -11846,6 +13129,8 @@ fn asset_category_for_extension(ext: &str) -> &'static str {
     match ext {
         "glb" | "gltf" | "obj" | "fbx" | "stl" => "Meshes",
         "png" | "jpg" | "jpeg" | "bmp" | "tga" | "tiff" | "webp" | "hdr" | "exr" => "Textures",
+        "gif" => "Images",
+        "mp4" | "webm" | "mov" | "mkv" | "avi" => "Videos",
         "ogg" | "mp3" | "wav" | "flac" => "Audio",
         "mat.toml" => "Materials",
         "soul" | "rune" | "lua" | "luau" | "wasm" => "Scripts",
@@ -11951,6 +13236,8 @@ fn sync_asset_manager_to_slint(
     let universe_section_id: i32 = -1;
     let engine_parts_id: i32 = -2;
     let custom_meshes_id: i32 = -3;
+    let user_images_id: i32 = -4;
+    let user_videos_id: i32 = -5;
     let space_section_id: i32 = -4;
 
     // Auto-expand Space Assets on first load
@@ -11962,6 +13249,10 @@ fn sync_asset_manager_to_slint(
     let universe_expanded = state.expanded.contains(&universe_section_id);
     let engine_parts_expanded = state.expanded.contains(&engine_parts_id);
     let custom_meshes_expanded = state.expanded.contains(&custom_meshes_id);
+    // User-imported images / videos default-expanded so freshly imported
+    // files are visible without an extra click.
+    let user_images_expanded = state.expanded.contains(&user_images_id);
+    let user_videos_expanded = state.expanded.contains(&user_videos_id);
     let space_expanded = state.expanded.contains(&space_section_id);
     let selected = state.selected;
 
@@ -11975,15 +13266,24 @@ fn sync_asset_manager_to_slint(
     if let Some(ref uni_root) = universe_root {
         let parts_dir = uni_root.join(".eustress").join("assets").join("parts");
         let meshes_dir = uni_root.join(".eustress").join("assets").join("meshes");
+        // User-imported media — populated by File → Import (see
+        // `do_import_asset` in `file_event_handler.rs`).
+        let images_dir = uni_root.join("assets").join("images");
+        let videos_dir = uni_root.join("assets").join("videos");
 
         // Only rescan filesystem when file watcher signals a change
         if needs_rescan || state.cached_universe_files.is_empty() {
             state.cached_universe_files = scan_asset_dir(&parts_dir, &parts_dir);
             state.cached_mesh_files = scan_asset_dir(&meshes_dir, &meshes_dir);
+            state.cached_image_files = scan_asset_dir(&images_dir, &images_dir);
+            state.cached_video_files = scan_asset_dir(&videos_dir, &videos_dir);
         }
         let parts_files = &state.cached_universe_files;
         let mesh_files = &state.cached_mesh_files;
-        let uni_total = parts_files.len() + mesh_files.len();
+        let uni_total = parts_files.len()
+            + mesh_files.len()
+            + state.cached_image_files.len()
+            + state.cached_video_files.len();
         universe_count = uni_total as i32;
 
         push_node(universe_section_id, &format!("Universe Assets ({})", uni_total),
@@ -12022,6 +13322,47 @@ fn sync_asset_manager_to_slint(
                     let cat = asset_category_for_extension(&ext);
                     let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
                     if category != "All" && cat != category.as_str() { continue; }
+                    if !search.is_empty() && !fname.to_lowercase().contains(&search) { continue; }
+
+                    let id = next_id; next_id += 1;
+                    push_node(id, &fname, asset_icon(cat), cat, 2, false, false,
+                        &format_file_size(*size), &full_path.to_string_lossy());
+                }
+            }
+
+            // ── User Imports: Images ──────────────────────────────────
+            // Walk `<Universe>/assets/images/` — populated by File →
+            // Import. Each entry is a real on-disk file the user can
+            // drag into a scene as an `Image` instance.
+            let images_files = state.cached_image_files.clone();
+            let has_images = !images_files.is_empty();
+            push_node(user_images_id, &format!("User Images ({})", images_files.len()),
+                asset_icon("folder"), "folder", 1, has_images, user_images_expanded, "", "");
+            if user_images_expanded {
+                for (_rel, full_path, size) in images_files.iter() {
+                    let ext = compound_ext(full_path);
+                    let cat = asset_category_for_extension(&ext);
+                    let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if category != "All" && cat != category.as_str() && cat != "Images" && cat != "Textures" { continue; }
+                    if !search.is_empty() && !fname.to_lowercase().contains(&search) { continue; }
+
+                    let id = next_id; next_id += 1;
+                    push_node(id, &fname, asset_icon(cat), cat, 2, false, false,
+                        &format_file_size(*size), &full_path.to_string_lossy());
+                }
+            }
+
+            // ── User Imports: Videos ──────────────────────────────────
+            let videos_files = state.cached_video_files.clone();
+            let has_videos = !videos_files.is_empty();
+            push_node(user_videos_id, &format!("User Videos ({})", videos_files.len()),
+                asset_icon("folder"), "folder", 1, has_videos, user_videos_expanded, "", "");
+            if user_videos_expanded {
+                for (_rel, full_path, size) in videos_files.iter() {
+                    let ext = compound_ext(full_path);
+                    let cat = asset_category_for_extension(&ext);
+                    let fname = full_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if category != "All" && cat != category.as_str() && cat != "Videos" { continue; }
                     if !search.is_empty() && !fname.to_lowercase().contains(&search) { continue; }
 
                     let id = next_id; next_id += 1;

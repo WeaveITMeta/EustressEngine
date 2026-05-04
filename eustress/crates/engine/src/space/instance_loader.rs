@@ -14,7 +14,16 @@ use avian3d::prelude::{Collider, RigidBody};
 use crate::rendering::PartEntity;
 use eustress_common::{Attributes, Tags};
 
-/// Instance definition loaded from .glb.toml or .instance.toml file
+/// Instance definition loaded from .glb.toml or .instance.toml file.
+///
+/// Field names on the wire are snake_case — the engine's historic
+/// convention, shared with `GuiTomlFile` + every other TOML parser.
+/// The common-crate `class_schema::load_and_heal_instance` pass
+/// normalises any-case incoming keys to snake_case before
+/// deserialization, so TOMLs rewritten to PascalCase during the
+/// aborted migration still load without change. A fresh PascalCase
+/// migration (if we ever want one) needs every consumer — not just
+/// this struct — migrated in lockstep.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceDefinition {
     /// Mesh reference — optional for non-visual instances (lighting, sky, atmosphere)
@@ -68,6 +77,102 @@ fn default_scene() -> String {
     "Scene0".to_string()
 }
 
+/// Clamp a TOML-loaded size vector to strictly positive, finite values.
+///
+/// A part saved with a zero, negative, or NaN dimension would panic
+/// Avian's collider builder during space load:
+/// `collision/collider/mod.rs:512: assertion failed: b.min.cmple(b.max).all()`
+/// — a `Collider::cuboid(hx, hy, hz)` with a negative half-extent flips
+/// the resulting AABB's min and max. This helper keeps a single floor
+/// (0.1 studs) so the physics world + save round-trip stay sane.
+fn sanitize_size(v: Vec3) -> Vec3 {
+    const MIN: f32 = 0.1;
+    Vec3::new(
+        if v.x.is_finite() { v.x.abs().max(MIN) } else { MIN },
+        if v.y.is_finite() { v.y.abs().max(MIN) } else { MIN },
+        if v.z.is_finite() { v.z.abs().max(MIN) } else { MIN },
+    )
+}
+
+/// Sanitize TOML-loaded position — non-finite components drop to zero.
+/// Avian's world-space AABB routine propagates NaN from any transform
+/// component into the AABB min/max, tripping the same collider
+/// assertion as a bad size.
+fn sanitize_pos(v: Vec3) -> Vec3 {
+    Vec3::new(
+        if v.x.is_finite() { v.x } else { 0.0 },
+        if v.y.is_finite() { v.y } else { 0.0 },
+        if v.z.is_finite() { v.z } else { 0.0 },
+    )
+}
+
+/// Sanitize TOML-loaded rotation quaternion. Non-finite components or
+/// zero-length quaternions fall back to identity. A valid-but-not-unit
+/// quaternion gets normalized.
+fn sanitize_rot(q: Quat) -> Quat {
+    let arr = [q.x, q.y, q.z, q.w];
+    if !arr.iter().all(|c| c.is_finite()) {
+        return Quat::IDENTITY;
+    }
+    let len_sq = q.length_squared();
+    if !len_sq.is_finite() || len_sq < 1e-8 {
+        return Quat::IDENTITY;
+    }
+    q.normalize()
+}
+
+/// Build an Avian collider from `scale` + `part_shape`, refusing to call
+/// the Avian constructor with any value Avian would assertion-panic on.
+///
+/// Avian's `ColliderAabb::grow` tree-update path `debug_assert!`s
+/// `min <= max` on the world-space AABB. A non-finite Transform
+/// component OR a non-positive half-extent propagates NaN/inverted
+/// bounds through that path and crashes the engine on space load.
+/// Returns `None` when inputs are unsafe so the caller can skip the
+/// collider insertion (part still spawns, just as a decorative
+/// visual without physics).
+///
+/// `transform` is also validated because Avian's `Add<Collider>`
+/// observer reads `Position` + `Rotation` (both synced from Transform)
+/// and passes them into `grow()`, which panics on any non-finite input.
+fn safe_collider_from(
+    part_shape: eustress_common::classes::PartType,
+    scale: Vec3,
+    transform: &Transform,
+) -> Option<Collider> {
+    const MIN_HALF: f32 = 0.05;
+    // Transform translation/rotation must be finite — Avian's on-add
+    // observer projects these into the world-space AABB.
+    let t = transform.translation;
+    if !t.x.is_finite() || !t.y.is_finite() || !t.z.is_finite() {
+        return None;
+    }
+    let r = transform.rotation;
+    if !r.x.is_finite() || !r.y.is_finite() || !r.z.is_finite() || !r.w.is_finite() {
+        return None;
+    }
+    // Reject zero-length / non-unit quaternions — Avian's AABB math
+    // assumes a proper rotation; a `[0,0,0,0]` quat collapses the
+    // rotated bounds to a point which technically passes min<=max,
+    // but more pathological inputs can produce NaN through the
+    // multiplication chain.
+    let r_len_sq = r.length_squared();
+    if !r_len_sq.is_finite() || r_len_sq < 1e-8 {
+        return None;
+    }
+    // Every half-extent component must be finite AND strictly positive.
+    let hx = if scale.x.is_finite() { (scale.x * 0.5).abs().max(MIN_HALF) } else { return None; };
+    let hy = if scale.y.is_finite() { (scale.y * 0.5).abs().max(MIN_HALF) } else { return None; };
+    let hz = if scale.z.is_finite() { (scale.z * 0.5).abs().max(MIN_HALF) } else { return None; };
+    Some(match part_shape {
+        eustress_common::classes::PartType::Ball => Collider::sphere(hx),
+        eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
+            Collider::cylinder(hx, hy)
+        }
+        _ => Collider::cuboid(hx, hy, hz),
+    })
+}
+
 /// Transform data (position, rotation, scale)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformData {
@@ -97,6 +202,122 @@ impl From<TransformData> for Transform {
                 data.rotation[3],
             ),
             scale: Vec3::from_array(data.scale),
+        }
+    }
+}
+
+/// Apply the same sanity clamps `spawn_instance` uses to a `Transform`
+/// loaded from disk: zero NaN/Inf positions, replace a non-normalisable
+/// quaternion with identity, and clamp scale to a positive finite floor.
+/// Hot-reload + any other path that re-applies disk state to a live
+/// entity should call this so a transient mid-write partial parse can't
+/// inject a non-finite component that panics Avian's
+/// `assert_components_finite` check.
+pub fn sanitize_transform(t: Transform) -> Transform {
+    Transform {
+        translation: sanitize_pos(t.translation),
+        rotation: sanitize_rot(t.rotation),
+        scale: sanitize_size(t.scale),
+    }
+}
+
+/// Hard upper bound on a part's world-space coordinates. The drag-to-
+/// move + drag-to-rotate tools clamp their target positions to
+/// `[-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT]` on every axis so dragging a
+/// part "into the sky" can't produce an unbounded translation. Beyond
+/// this limit Avian's broadphase sweeps start losing precision and
+/// the camera's far-plane clipping makes the part invisible anyway —
+/// no user benefit to allowing further travel, and infinity-large
+/// numbers bleed back into other math as NaN through subtraction.
+pub const MAX_WORLD_EXTENT: f32 = 5000.0;
+
+/// Take a candidate world position and return a value safe to write
+/// onto `Transform.translation`:
+///
+/// * If `candidate` has any NaN/Inf component, return `fallback`
+///   (typically the entity's initial position before the drag started)
+///   so a degenerate frame of math doesn't teleport the part.
+/// * Clamp every axis to `[-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT]` so
+///   "dragged into the sky" produces a bounded translation rather
+///   than letting the value accumulate into territory where Avian's
+///   AABB math hits float-precision walls.
+///
+/// Use this at every drag-tool write site (move / scale / rotate /
+/// align-distribute / mirror) — the catch-all
+/// [`sanitize_part_transforms_safety_net`] still runs as a backstop,
+/// but rejecting bad values at the source means the user sees the
+/// drag clamp visibly instead of the safety net resetting the part
+/// next frame.
+pub fn safe_translation(candidate: Vec3, fallback: Vec3) -> Vec3 {
+    let v = if candidate.is_finite() { candidate } else { fallback };
+    let fb = if fallback.is_finite() { fallback } else { Vec3::ZERO };
+    Vec3::new(
+        v.x.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)
+            .as_finite_or(fb.x.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)),
+        v.y.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)
+            .as_finite_or(fb.y.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)),
+        v.z.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)
+            .as_finite_or(fb.z.clamp(-MAX_WORLD_EXTENT, MAX_WORLD_EXTENT)),
+    )
+}
+
+/// Internal helper for `safe_translation`'s per-axis clamp. `clamp` on
+/// `f32` returns NaN when `self` is NaN, so we need a follow-up
+/// "if NaN, use fallback" step.
+trait FiniteOr {
+    fn as_finite_or(self, fallback: Self) -> Self;
+}
+impl FiniteOr for f32 {
+    fn as_finite_or(self, fallback: f32) -> f32 {
+        if self.is_finite() { self } else { fallback }
+    }
+}
+
+/// Per-frame safety-net: walk every entity that has a `RigidBody`
+/// (i.e. is being tracked by Avian) and sanitize its `Transform` so
+/// no NaN/Inf component slips into Avian's `Position` /
+/// `Rotation` / `Collider` AABB math. Catches drag-handler bugs we
+/// haven't identified yet, plus any third-party plugin that writes
+/// a degenerate Transform.
+///
+/// Runs in `Update` — Avian's `assert_components_finite` runs in its
+/// physics schedule which kicks AFTER `Update`, so cleaning up here
+/// reaches the assertion with finite values. Costs ≪1 ms even for
+/// tens of thousands of static parts because the body is just a
+/// finite-check + maybe-clamp; no allocations, no transcendentals.
+pub fn sanitize_part_transforms_safety_net(
+    mut q: Query<&mut Transform, With<avian3d::prelude::RigidBody>>,
+) {
+    for mut t in &mut q {
+        let pos = t.translation;
+        let pos_bad = !pos.is_finite()
+            || pos.x.abs() > MAX_WORLD_EXTENT
+            || pos.y.abs() > MAX_WORLD_EXTENT
+            || pos.z.abs() > MAX_WORLD_EXTENT;
+        if pos_bad {
+            let clamped = safe_translation(pos, Vec3::ZERO);
+            tracing::warn!(
+                "🛡️ Sanitized part Transform.translation: {:?} → {:?}",
+                pos, clamped
+            );
+            t.translation = clamped;
+        }
+
+        let rot = t.rotation;
+        let rot_bad = !(rot.x.is_finite()
+            && rot.y.is_finite()
+            && rot.z.is_finite()
+            && rot.w.is_finite())
+            || rot.length_squared() < 1e-8;
+        if rot_bad {
+            tracing::warn!("🛡️ Sanitized part Transform.rotation (was {:?})", rot);
+            t.rotation = Quat::IDENTITY;
+        }
+
+        let scale = t.scale;
+        if !scale.is_finite() {
+            tracing::warn!("🛡️ Sanitized part Transform.scale (was {:?})", scale);
+            t.scale = Vec3::ONE;
         }
     }
 }
@@ -689,57 +910,67 @@ pub struct InstanceFile {
 #[derive(Component, Debug)]
 pub struct NeedsMeshSize;
 
-/// Load instance definition from .glb.toml file
+/// Load an instance definition from a `_instance.toml` / `.glb.toml` /
+/// `.part.toml` file on disk, routed through the common-crate schema pipeline:
+///
+/// 1. Read the file.
+/// 2. Parse to `toml::Value` and normalise every key to PascalCase
+///    (legacy snake_case files are transparently accepted).
+/// 3. Merge missing sections/fields from the `ClassName`'s template.
+/// 4. Rewrite the on-disk TOML when the canonical form differs (self-heal).
+/// 5. Deserialize the merged value into `InstanceDefinition`.
+///
+/// Returns a typed `InstanceDefinition` ready for spawn. Callers that need
+/// the extras list (for `ExtraSectionRegistry` dispatch) should use
+/// [`load_instance_definition_with_extras`] below.
 pub fn load_instance_definition(toml_path: &Path) -> Result<InstanceDefinition, String> {
-    load_instance_definition_with_defaults(toml_path, None)
+    load_instance_definition_with_extras(toml_path).map(|(def, _extras)| def)
 }
 
-/// Load instance definition from .glb.toml file, merging class defaults for any missing fields.
-///
-/// When a ClassDefaultsRegistry is provided, the loader:
-/// 1. Parses the raw TOML into a generic toml::Value
-/// 2. Reads `metadata.class_name` to determine which class defaults to apply
-/// 3. Deep-merges missing keys from the class defaults
-/// 4. Deserializes the merged TOML into InstanceDefinition
-///
-/// This ensures that TOML files on disk only need to specify the properties that
-/// differ from the class defaults — everything else is filled in automatically.
+/// Load an instance + return the list of `[Section]` names that the class
+/// template did NOT declare. These are candidates for
+/// `ExtraSectionRegistry::dispatch` so simulation plugins can attach their
+/// own components (Thermodynamic, Electrochemical, Material, …) off the
+/// same TOML without needing base-class support.
+pub fn load_instance_definition_with_extras(
+    toml_path: &Path,
+) -> Result<(InstanceDefinition, Vec<String>), String> {
+    // Shared registry — cheap to construct (`Default::default()` builds it
+    // from the embedded `include_str!` templates on first call per thread).
+    // A long-lived version will be injected as a Bevy Resource once the
+    // migration lands; using a local default keeps every legacy caller
+    // working without a plumbing change.
+    let registry = eustress_common::class_schema::ClassSchemaRegistry::from_builtin();
+    let healed = eustress_common::class_schema::load_and_heal_instance(toml_path, &registry)
+        .map_err(|e| format!("schema heal {}: {}", toml_path.display(), e))?;
+
+    let instance: InstanceDefinition = healed
+        .value
+        .try_into()
+        .map_err(|e: toml::de::Error| {
+            format!(
+                "deserialize merged {} ({}): {}",
+                toml_path.display(),
+                e.message(),
+                e
+            )
+        })?;
+    Ok((instance, healed.extras))
+}
+
+/// Legacy signature kept for one release so `file_loader` + `slint_ui`
+/// callers don't all have to change at the same commit. The `_registry`
+/// parameter is ignored — the embedded common-crate schema is the source
+/// of truth now. Delete once every call site has migrated.
+#[deprecated(
+    note = "use `load_instance_definition` — the common-crate class schema \
+            is the source of truth and is loaded automatically."
+)]
 pub fn load_instance_definition_with_defaults(
     toml_path: &Path,
-    registry: Option<&super::class_defaults::ClassDefaultsRegistry>,
+    _registry: Option<&super::class_defaults::ClassDefaultsRegistry>,
 ) -> Result<InstanceDefinition, String> {
-    let toml_str = std::fs::read_to_string(toml_path)
-        .map_err(|e| format!("Failed to read {}: {}", toml_path.display(), e))?;
-
-    // If no registry, skip the merge step and deserialize directly
-    let Some(registry) = registry else {
-        let instance: InstanceDefinition = toml::from_str(&toml_str)
-            .map_err(|e| format!("Failed to parse {}: {}", toml_path.display(), e))?;
-        return Ok(instance);
-    };
-
-    // Parse into generic TOML value for merge
-    let mut toml_value: toml::Value = toml_str.parse()
-        .map_err(|e: toml::de::Error| format!("Failed to parse {}: {}", toml_path.display(), e))?;
-
-    // Extract class_name to look up defaults
-    let class_name = toml_value
-        .get("metadata")
-        .and_then(|m| m.get("class_name"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("Part")
-        .to_string();
-
-    // Merge class defaults for missing fields
-    if let Some(defaults) = registry.get(&class_name) {
-        super::class_defaults::merge_defaults(&mut toml_value, defaults);
-    }
-
-    // Deserialize the merged TOML
-    let instance: InstanceDefinition = toml_value.try_into()
-        .map_err(|e: toml::de::Error| format!("Failed to deserialize merged {}: {}", toml_path.display(), e))?;
-
-    Ok(instance)
+    load_instance_definition(toml_path)
 }
 
 /// Write instance definition to .glb.toml file
@@ -769,8 +1000,15 @@ pub fn write_instance_definition(
 ///
 /// This helper rejects the name if ANY entry in `dir` would resolve to it:
 /// a folder named `BASE`, a file `BASE.toml`, or any `BASE.<anything>.toml`.
+/// Also rejects EEP-reserved filenames (`_instance.toml`, `_service.toml`)
+/// — creating a folder with one of those names produces the
+/// `Part-XXXX/_instance.toml/_instance.toml` corruption the user hit
+/// 2026-04-25, where every part-folder loader tried to read a directory
+/// as a file. The guard lives on the availability check so EVERY caller
+/// inherits the protection, not just `unique_entity_name`.
 pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
     if name.is_empty() { return false; }
+    if is_eep_reserved_name(name) { return false; }
     // Folder with this exact name — the common path.
     if dir.join(name).exists() { return false; }
     // Any flat file whose first path segment (before the first `.`) matches.
@@ -791,6 +1029,28 @@ pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
     true
 }
 
+/// Names that EEP uses internally as folder markers. A user-facing
+/// entity must never claim one of these as its folder name — doing so
+/// creates a directory at the path the loader expects to be a file,
+/// which leaves the loader either silently skipping the entity or
+/// surfacing it as a phantom Folder in the Explorer (the regression
+/// hit on 2026-04-25 with `Part-7ed7/_instance.toml/`).
+///
+/// Case-insensitive on Windows + macOS — case folding catches users
+/// who type `_Instance.toml` thinking it's distinct.
+pub fn is_eep_reserved_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "_instance.toml"
+            | "_service.toml"
+            | "_universe.toml"
+            | "_space.toml"
+            | "_eustress"
+            | ".eustress"
+    )
+}
+
 /// Pick a unique entity name in `dir`, falling back to `BASE`, `BASE1`, …
 /// the flat-file-aware behavior from [`entity_name_is_available`].
 ///
@@ -804,6 +1064,21 @@ pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
 /// number of sibling "Block" entities render identically in the UI
 /// while staying uniquely addressable on disk.
 pub fn unique_entity_name(dir: &Path, base: &str) -> String {
+    // Coerce reserved-name input to a safe placeholder so a buggy
+    // caller that hands us `_instance.toml` (etc.) can't bypass the
+    // EEP filename invariant. `entity_name_is_available` also rejects
+    // the reserved set, but doing the swap up-front means the rest of
+    // this function operates on a sane stem instead of churning
+    // through 10 000 retries that all fail the reserved check.
+    let base = if is_eep_reserved_name(base) {
+        tracing::warn!(
+            "unique_entity_name: caller passed reserved name {:?} — substituting 'Entity'",
+            base
+        );
+        "Entity"
+    } else {
+        base
+    };
     if entity_name_is_available(dir, base) {
         return base.to_string();
     }
@@ -1035,6 +1310,18 @@ pub fn spawn_instance(
         _ => Tags::new(),
     };
 
+    // ── Part-class fallback: default to block primitive when no [asset] section ──
+    // MCP tools and external IDEs create _instance.toml files with [transform]
+    // + [properties] but no [asset]. Without this, Part entities hit the
+    // non-visual branch and are invisible.
+    let mut instance = instance;
+    if instance.asset.is_none() && matches!(class_name, eustress_common::classes::ClassName::Part) {
+        instance.asset = Some(AssetReference {
+            mesh: "parts/block.glb".to_string(),
+            scene: default_scene(),
+        });
+    }
+
     // ── No mesh: spawn a non-visual Instance entity (Atmosphere, Sky, Moon, Star, etc.) ──
     if instance.asset.is_none() {
         // Parse rich-schema sections: each entry in `extra` is either a flat value
@@ -1146,8 +1433,31 @@ pub fn spawn_instance(
         instance.properties.reflectance,
     );
     
-    let scale = Vec3::from_array(instance.transform.scale);
-    
+    // Sanitize everything on the Transform from TOML — a part saved
+    // with a zero/negative/NaN dimension, a NaN translation, or a
+    // non-normalized/NaN rotation would panic Avian's collider builder
+    // on load (`assertion failed: b.min.cmple(b.max).all()` in avian3d's
+    // `collision/collider/mod.rs:512`). Avian propagates NaN from any
+    // transform field into the world-space AABB, so we have to clean
+    // all three components — not just size.
+    let raw_pos = Vec3::from_array(instance.transform.position);
+    let raw_rot = {
+        let r = instance.transform.rotation;
+        Quat::from_xyzw(r[0], r[1], r[2], r[3])
+    };
+    let raw_scale = Vec3::from_array(instance.transform.scale);
+    let pos = sanitize_pos(raw_pos);
+    let rot = sanitize_rot(raw_rot);
+    let scale = sanitize_size(raw_scale);
+
+    // Overwrite the TOML-derived transform with sanitized values so
+    // downstream consumers (cframe, transform, collider) all see the
+    // same clean data.
+    let mut safe_instance_transform = instance.transform.clone();
+    safe_instance_transform.position = pos.to_array();
+    safe_instance_transform.rotation = [rot.x, rot.y, rot.z, rot.w];
+    safe_instance_transform.scale = scale.to_array();
+
     // Build BasePart so the Properties panel can read/display part properties
     let base_part = eustress_common::classes::BasePart {
         size: scale,
@@ -1159,11 +1469,11 @@ pub fn spawn_instance(
         locked: instance.properties.locked,
         material: eustress_common::classes::Material::from_string(&instance.properties.material),
         material_name: instance.properties.material.clone(),
-        cframe: Transform::from(instance.transform.clone()),
+        cframe: Transform::from(safe_instance_transform.clone()),
         ..default()
     };
-    
-    let transform = Transform::from(instance.transform);
+
+    let transform = Transform::from(safe_instance_transform);
     
     if is_custom_mesh && absolute_mesh_path.exists() {
         // Check for Draco compression before loading
@@ -1237,15 +1547,12 @@ pub fn spawn_instance(
         // GLB meshes are unit meshes ([-0.5, 0.5]), so Transform.scale = part size in studs.
         // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
         if instance.properties.can_collide {
-            let half = scale * 0.5;
-            let collider = match part_shape {
-                eustress_common::classes::PartType::Ball => Collider::sphere(half.x),
-                eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-                    Collider::cylinder(half.x, half.y)
-                }
-                _ => Collider::cuboid(half.x, half.y, half.z),
-            };
-            ec.insert((collider, RigidBody::Static));
+            if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
+                ec.insert((collider, RigidBody::Static));
+            } else {
+                warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
+                    name, scale, transform.translation, transform.rotation);
+            }
         }
 
         // Attach realism components if present in TOML
@@ -1263,6 +1570,18 @@ pub fn spawn_instance(
         }
         // Attach UI ECS component if this is a UI class
         attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+        // Extra sections — anything present in the TOML that
+        // neither the base template nor `InstanceDefinition` typed
+        // fields consumed. Landed as `PendingExtraSections` so the
+        // common-crate `dispatch_pending_extras` system can hand
+        // each section to whichever plugin registered a claim on
+        // it. Unclaimed sections are preserved on disk via the
+        // `extra` flatten field for future plugin pickup.
+        if !instance.extra.is_empty() {
+            ec.insert(eustress_common::class_schema::PendingExtraSections {
+                sections: instance.extra.clone(),
+            });
+        }
         debug!("Spawned custom mesh '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
         }
@@ -1318,15 +1637,12 @@ pub fn spawn_instance(
     // overhead for thousands of static decorative parts.
     // Avian3D colliders take HALF-extents for cuboid and HALF-height for cylinder.
     if instance.properties.can_collide {
-        let half = scale * 0.5;
-        let collider = match part_shape {
-            eustress_common::classes::PartType::Ball => Collider::sphere(half.x),
-            eustress_common::classes::PartType::Cylinder | eustress_common::classes::PartType::Cone => {
-                Collider::cylinder(half.x, half.y)
-            }
-            _ => Collider::cuboid(half.x, half.y, half.z),
-        };
-        ec.insert((collider, RigidBody::Static));
+        if let Some(collider) = safe_collider_from(part_shape, scale, &transform) {
+            ec.insert((collider, RigidBody::Static));
+        } else {
+            warn!("Skipping collider for '{}' — non-finite transform/scale (scale={:?} pos={:?} rot={:?})",
+                name, scale, transform.translation, transform.rotation);
+        }
     }
 
     // Material Flip loader roundtrip — if the instance's `attributes`
@@ -1362,6 +1678,14 @@ pub fn spawn_instance(
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+    // Extra sections — see the custom-mesh branch above for
+    // rationale. Third-party plugins claim these via
+    // `ExtraSectionRegistry`.
+    if !instance.extra.is_empty() {
+        ec.insert(eustress_common::class_schema::PendingExtraSections {
+            sections: instance.extra.clone(),
+        });
+    }
     debug!("Spawned primitive '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
     entity
 }
@@ -1555,7 +1879,12 @@ pub fn attach_ui_component(
 /// Only entities whose Transform was **modified** (gizmo, properties panel)
 /// after initial spawn will be written back.
 pub fn write_instance_changes_system(
-    instances: Query<(Entity, &Transform, &InstanceFile), Changed<Transform>>,
+    instances: Query<(
+        Entity,
+        &Transform,
+        &InstanceFile,
+        Option<&eustress_common::classes::BasePart>,
+    ), Or<(Changed<Transform>, Changed<eustress_common::classes::BasePart>)>>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
@@ -1565,9 +1894,23 @@ pub fn write_instance_changes_system(
     let just_added: std::collections::HashSet<Entity> = added_instances.iter().collect();
 
     // Collect all write jobs this frame, then dispatch to background thread.
-    let mut jobs: Vec<(std::path::PathBuf, TransformData)> = Vec::new();
+    // Each job carries the TOML path, transform data, and optional BasePart
+    // properties (material, color, transparency, reflectance, etc.) so the
+    // background thread can persist all visual properties — not just position.
+    struct WriteJob {
+        path: std::path::PathBuf,
+        transform: TransformData,
+        material: Option<String>,
+        color: Option<[f32; 4]>,
+        transparency: Option<f32>,
+        reflectance: Option<f32>,
+        anchored: Option<bool>,
+        can_collide: Option<bool>,
+        locked: Option<bool>,
+    }
+    let mut jobs: Vec<WriteJob> = Vec::new();
 
-    for (entity, transform, instance_file) in instances.iter() {
+    for (entity, transform, instance_file, base_part) in instances.iter() {
         if just_added.contains(&entity) {
             continue;
         }
@@ -1575,8 +1918,60 @@ pub fn write_instance_changes_system(
             continue;
         }
 
+        // Auto-write must use BasePart.size for `scale`, matching save_space.
+        //
+        // Mid-drag the scale tool temporarily sets `Transform.scale = size /
+        // mesh_baked_size` to defer primitive mesh regen (perf). Writing
+        // that transient ratio to disk corrupts the TOML because reload
+        // treats `scale` as the part's size. Reading BasePart.size (the
+        // authoritative dimension) keeps the round-trip honest whether
+        // the part is file-system-first (scale==size) or legacy
+        // (scale==ONE, mesh baked at size). This was the "neat door came
+        // back as a mess" regression the user hit 2026-04-23.
+        //
+        // Sanitize before serialising — if a NaN/Inf snuck into Transform
+        // (e.g. a degenerate gizmo math edge case), persisting it to disk
+        // poisons every future reload AND panics Avian's
+        // `assert_components_finite` check on the next physics tick. The
+        // clamp loses sub-pixel precision in the failure case but keeps
+        // the engine alive.
+        let safe_transform = sanitize_transform(*transform);
+        let mut td = TransformData::from(safe_transform);
+        let mut job = WriteJob {
+            path: instance_file.toml_path.clone(),
+            transform: td.clone(),
+            material: None,
+            color: None,
+            transparency: None,
+            reflectance: None,
+            anchored: None,
+            can_collide: None,
+            locked: None,
+        };
+        if let Some(bp) = base_part {
+            // Same guard for `BasePart.size` — sanitize_size clamps each
+            // axis to [0.1, +∞) and replaces NaN with the floor.
+            let safe_size = sanitize_size(bp.size);
+            job.transform.scale = [safe_size.x, safe_size.y, safe_size.z];
+            // Persist all BasePart visual properties so material changes,
+            // color edits, transparency tweaks, etc. survive reload.
+            let mat_name = if bp.material_name.is_empty() {
+                bp.material.as_str().to_string()
+            } else {
+                bp.material_name.clone()
+            };
+            job.material = Some(mat_name);
+            let srgba = bp.color.to_srgba();
+            job.color = Some([srgba.red, srgba.green, srgba.blue, srgba.alpha]);
+            job.transparency = Some(bp.transparency);
+            job.reflectance = Some(bp.reflectance);
+            job.anchored = Some(bp.anchored);
+            job.can_collide = Some(bp.can_collide);
+            job.locked = Some(bp.locked);
+        }
+
         recently_written.mark_written(instance_file.toml_path.clone());
-        jobs.push((instance_file.toml_path.clone(), TransformData::from(*transform)));
+        jobs.push(job);
     }
 
     if jobs.is_empty() {
@@ -1587,17 +1982,39 @@ pub fn write_instance_changes_system(
     let job_count = jobs.len();
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        for (path, transform_data) in &jobs {
-            match load_instance_definition(path) {
+        for job in &jobs {
+            match load_instance_definition(&job.path) {
                 Ok(mut instance) => {
-                    instance.transform = transform_data.clone();
+                    instance.transform = job.transform.clone();
+                    // Persist BasePart visual properties alongside transform
+                    if let Some(ref mat) = job.material {
+                        instance.properties.material = mat.clone();
+                    }
+                    if let Some(color) = job.color {
+                        instance.properties.color = color;
+                    }
+                    if let Some(t) = job.transparency {
+                        instance.properties.transparency = t;
+                    }
+                    if let Some(r) = job.reflectance {
+                        instance.properties.reflectance = r;
+                    }
+                    if let Some(a) = job.anchored {
+                        instance.properties.anchored = a;
+                    }
+                    if let Some(c) = job.can_collide {
+                        instance.properties.can_collide = c;
+                    }
+                    if let Some(l) = job.locked {
+                        instance.properties.locked = l;
+                    }
                     instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-                    if let Err(e) = write_instance_definition(path, &instance) {
-                        tracing::error!("Failed to write instance {:?}: {}", path, e);
+                    if let Err(e) = write_instance_definition(&job.path, &instance) {
+                        tracing::error!("Failed to write instance {:?}: {}", job.path, e);
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to load instance for write-back {:?}: {}", path, e);
+                    tracing::error!("Failed to load instance for write-back {:?}: {}", job.path, e);
                 }
             }
         }

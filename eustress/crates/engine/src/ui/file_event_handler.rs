@@ -65,6 +65,10 @@ pub enum FileAction {
     SaveSpaceAs,
     /// Publish stub
     Publish(PublishRequest),
+    /// Import a media asset (image / video / model). Source is the
+    /// user-picked absolute path. Handler dispatches by extension to
+    /// `do_import_image` / `do_import_video` / etc.
+    ImportAsset(PathBuf),
 }
 
 // ============================================================================
@@ -86,6 +90,7 @@ pub fn drain_file_events(
             FileEvent::SaveSceneAs     => FileAction::SaveSpaceAs,
             FileEvent::OpenRecent(p)   => FileAction::OpenSpacePath(p.clone()),
             FileEvent::Publish(request) => FileAction::Publish(request.clone()),
+            FileEvent::ImportAsset(path) => FileAction::ImportAsset(path.clone()),
         };
         pending.actions.push(action);
     }
@@ -117,6 +122,7 @@ pub fn execute_file_actions(world: &mut World) {
             FileAction::SaveSpace        => do_save_space(world),
             FileAction::SaveSpaceAs      => do_save_space_as(world),
             FileAction::Publish(request) => do_publish(world, &request),
+            FileAction::ImportAsset(path) => do_import_asset(world, path),
         }
     }
 }
@@ -195,9 +201,21 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
 // 6. Save Space
 // ============================================================================
 
-/// Write all ECS entities back to their TOML files in the current SpaceRoot.
+/// Write all ECS entities back to their TOML files in the current SpaceRoot,
+/// then create a git commit so every manual save is a recoverable save point.
+///
+/// The git commit reuses the same machinery as the autosave timer
+/// (`git_autosave_commit`) — initialises the repo on first save, stages
+/// every change with `git add -A`, and commits with a `manual save
+/// <timestamp>` message authored under the logged-in user when present.
+/// The commit runs on a background thread so the editor doesn't hitch
+/// while git touches the disk.
 fn do_save_space(world: &mut World) {
-    if let Some(sr) = world.get_resource::<crate::space::SpaceRoot>().map(|r| r.0.clone()) {
+    let space_path = world
+        .get_resource::<crate::space::SpaceRoot>()
+        .map(|r| r.0.clone());
+
+    if let Some(ref sr) = space_path {
         let sim_toml = sr.join("simulation.toml");
         if !sim_toml.exists() {
             if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
@@ -207,6 +225,34 @@ fn do_save_space(world: &mut World) {
     }
 
     space_ops::save_space(world);
+
+    // Snapshot the identity on the main thread so the background commit
+    // attributes to the logged-in user even if a logout races with the
+    // commit.
+    let identity = world
+        .get_resource::<crate::auth::AuthState>()
+        .and_then(|auth| crate::editor_settings::git_identity_from_auth(auth));
+
+    // Kick the git commit off-thread — the same pattern autosave uses.
+    // Skip silently when there's no SpaceRoot (e.g. brand-new session
+    // before a Space is loaded).
+    if let Some(space_path) = space_path {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let message = format!("manual save {}", timestamp);
+        std::thread::spawn(move || {
+            match crate::editor_settings::git_autosave_commit(&space_path, &message, identity.as_ref()) {
+                Ok(crate::editor_settings::GitAutosave::Committed(sha)) => {
+                    info!("✅ Manual save committed to git @ {} ({})", sha, space_path.display());
+                }
+                Ok(crate::editor_settings::GitAutosave::NoChanges) => {
+                    info!("Manual save: nothing changed since last commit");
+                }
+                Err(e) => {
+                    warn!("Manual save: git commit failed at {:?}: {}", space_path, e);
+                }
+            }
+        });
+    }
 
     // Provide feedback
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
@@ -865,4 +911,211 @@ where
 {
     save_toml_file(value, path)
         .map_err(|e| format!("Failed to write {:?}: {}", path, e))
+}
+
+// ============================================================================
+// 9. Import asset — image / video → assets/ + instance.toml
+// ============================================================================
+
+/// Copy a user-picked image or video into the Universe-level assets/
+/// folder, then write a folder + `_instance.toml` under the active
+/// Space's `StarterGui` so the file watcher spawns the entity. The
+/// imported file lives at `<Universe>/assets/<kind>/<name>.<ext>` and
+/// the instance.toml's `[asset].path` field holds that universe-relative
+/// path so saved scenes stay portable across machines.
+fn do_import_asset(world: &mut World, source: PathBuf) {
+    let Some(ext) = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    else {
+        notify_err(world, format!("Cannot import: file has no extension ({})", source.display()));
+        return;
+    };
+
+    let kind = match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tga" => AssetKind::Image,
+        "mp4" | "webm" | "mov" | "mkv"                          => AssetKind::Video,
+        other => {
+            notify_err(world, format!("Unsupported asset extension: .{} (image/video only)", other));
+            return;
+        }
+    };
+
+    let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+        Some(sr) => sr.0.clone(),
+        None => {
+            notify_err(world, "Cannot import: no Space loaded".to_string());
+            return;
+        }
+    };
+    // Universe root is the Space root's grandparent: `<Universe>/Spaces/<SpaceN>`.
+    // Falls back to the Space root itself if the layout is unusual so
+    // imports don't silently land outside the project tree.
+    let universe_root = space_root
+        .ancestors()
+        .nth(2)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| space_root.clone());
+
+    // 1. Copy the source file into <Universe>/assets/<kind>/.
+    let assets_dir = universe_root.join("assets").join(kind.assets_subdir());
+    if let Err(e) = std::fs::create_dir_all(&assets_dir) {
+        notify_err(world, format!("Could not create assets dir {:?}: {}", assets_dir, e));
+        return;
+    }
+    let file_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("imported")
+        .to_string();
+    let safe_file_name = sanitize_file_name(&file_name);
+    let dest = unique_dest_path(&assets_dir, &safe_file_name);
+    if let Err(e) = std::fs::copy(&source, &dest) {
+        notify_err(world, format!("Failed to copy asset to {:?}: {}", dest, e));
+        return;
+    }
+
+    let universe_rel_asset = format!(
+        "assets/{}/{}",
+        kind.assets_subdir(),
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+    );
+
+    // 2. Pick an entity-folder name from the file stem.
+    let stem = dest
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Imported")
+        .to_string();
+    let entity_name = sanitize_entity_name(&stem);
+
+    // 3. Write the entity folder + _instance.toml under StarterGui so
+    //    the file watcher spawns the entity. StarterGui is conventionally
+    //    where 2D/3D media surface entities live; users can drag them
+    //    into Workspace afterward via the Explorer.
+    let starter_gui = space_root.join("StarterGui");
+    if !starter_gui.exists() {
+        if let Err(e) = std::fs::create_dir_all(&starter_gui) {
+            notify_err(world, format!("Could not create StarterGui: {}", e));
+            return;
+        }
+        let _ = std::fs::write(
+            starter_gui.join("_service.toml"),
+            "[service]\nclass_name = \"StarterGui\"\nicon = \"startergui\"\n",
+        );
+    }
+    let entity_dir = unique_entity_dir(&starter_gui, &entity_name);
+    if let Err(e) = std::fs::create_dir_all(&entity_dir) {
+        notify_err(world, format!("Could not create entity dir {:?}: {}", entity_dir, e));
+        return;
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let instance_toml = build_instance_toml(kind, &now, &universe_rel_asset);
+    if let Err(e) = std::fs::write(entity_dir.join("_instance.toml"), instance_toml) {
+        notify_err(world, format!("Failed to write _instance.toml: {}", e));
+        return;
+    }
+
+    if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+        n.success(format!(
+            "{} imported '{}' as {}",
+            kind.icon(), file_name, entity_name,
+        ));
+    }
+    info!(
+        "📥 Imported {:?} as {} class entity '{}' (asset: {})",
+        source, kind.label(), entity_name, universe_rel_asset,
+    );
+}
+
+#[derive(Copy, Clone, Debug)]
+enum AssetKind { Image, Video }
+
+impl AssetKind {
+    fn assets_subdir(&self) -> &'static str {
+        match self { Self::Image => "images", Self::Video => "videos" }
+    }
+    fn label(&self) -> &'static str {
+        match self { Self::Image => "Image", Self::Video => "Video" }
+    }
+    fn icon(&self) -> &'static str {
+        match self { Self::Image => "[img]", Self::Video => "[vid]" }
+    }
+}
+
+fn build_instance_toml(kind: AssetKind, now: &str, universe_rel_asset: &str) -> String {
+    match kind {
+        AssetKind::Image => format!(
+            "[metadata]\nclass_name = \"Image\"\narchivable = true\ncreated = \"{now}\"\nlast_modified = \"{now}\"\n\n[transform]\nposition = [0.0, 2.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 4.0, 1.0]\n\n[asset]\npath = \"{path}\"\n\n[image]\nsize = [4.0, 4.0]\ncolor = [1.0, 1.0, 1.0, 1.0]\ntransparency = 0.0\n",
+            now = now, path = universe_rel_asset,
+        ),
+        AssetKind::Video => format!(
+            "[metadata]\nclass_name = \"Video\"\narchivable = true\ncreated = \"{now}\"\nlast_modified = \"{now}\"\n\n[transform]\nposition = [0.0, 3.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [6.0, 3.375, 1.0]\n\n[asset]\npath = \"{path}\"\n\n[video]\nsize = [6.0, 3.375]\ncolor = [1.0, 1.0, 1.0, 1.0]\ntransparency = 0.0\nautoplay = true\nlooped = true\nvolume = 0.5\n",
+            now = now, path = universe_rel_asset,
+        ),
+    }
+}
+
+fn notify_err(world: &mut World, msg: String) {
+    error!("import failed: {}", msg);
+    if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+        n.error(msg);
+    }
+}
+
+/// Strip path separators / control characters from a filename so the
+/// copy lands in the intended directory rather than escaping it.
+fn sanitize_file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            { '_' } else { c }
+        })
+        .collect()
+}
+
+/// Sanitize an entity folder name. Reserved EEP markers (`_instance.toml`,
+/// `_service.toml`) are rejected to mirror `instance_loader`'s guard.
+fn sanitize_entity_name(stem: &str) -> String {
+    let cleaned: String = stem
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let cleaned = cleaned.trim_matches('_').to_string();
+    if cleaned.is_empty()
+        || cleaned.starts_with('_')
+        || cleaned.eq_ignore_ascii_case("_instance.toml")
+        || cleaned.eq_ignore_ascii_case("_service.toml")
+    {
+        format!("Imported_{}", chrono::Utc::now().timestamp())
+    } else {
+        cleaned
+    }
+}
+
+fn unique_dest_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() { return candidate; }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{}", e)),
+        None => (name.to_string(), String::new()),
+    };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    dir.join(format!("{}-{:x}{}", stem, ts, ext))
+}
+
+fn unique_entity_dir(parent: &Path, name: &str) -> PathBuf {
+    let candidate = parent.join(name);
+    if !candidate.exists() { return candidate; }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    parent.join(format!("{}-{:x}", name, ts))
 }

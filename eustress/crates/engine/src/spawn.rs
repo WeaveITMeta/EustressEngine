@@ -96,6 +96,11 @@ pub fn spawn_part_glb(
     let is_glass = matches!(base_part.material, crate::classes::Material::Glass);
     let transparency = base_part.transparency;
     
+    // Compute UV tiling from part size at spawn time so the first frame
+    // renders with correct texture density. The material_sync system
+    // will keep this in sync on subsequent BasePart / Transform changes.
+    let uv_transform = crate::material_sync::compute_uv_transform_from_size(size);
+
     let material = materials.add(StandardMaterial {
         base_color: base_part.color,
         perceptual_roughness: roughness,
@@ -110,6 +115,7 @@ pub fn spawn_part_glb(
         diffuse_transmission: if is_glass { 0.3 } else { 0.0 },
         thickness: if is_glass { 0.5 } else { 0.0 },
         ior: if is_glass { 1.5 } else { 1.5 },
+        uv_transform,
         ..default()
     });
     

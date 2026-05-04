@@ -232,8 +232,19 @@ pub fn write_gui_toml(path: &Path, gui_def: &GuiTomlFile) -> Result<(), String> 
 pub fn load_gui_definition(path: &Path) -> Result<GuiTomlFile, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read GUI file {:?}: {}", path, e))?;
-    let parsed: GuiTomlFile = toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse GUI TOML {:?}: {}", path, e))?;
+    // Parse to a generic `toml::Value` first and run the shared key
+    // normalisation pass. Any TOML left over from the aborted PascalCase
+    // migration (`[Gui]`, `[Metadata]`, `[Text]`) gets flipped back to
+    // snake_case before the strict `GuiTomlFile` deserialize, so ScreenGui /
+    // Frame / TextLabel / etc. all keep loading regardless of which
+    // direction the file on disk currently uses.
+    let mut value: toml::Value = content
+        .parse()
+        .map_err(|e: toml::de::Error| format!("Failed to parse GUI TOML {:?}: {}", path, e))?;
+    eustress_common::class_schema::normalise_keys(&mut value);
+    let parsed: GuiTomlFile = value
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("Failed to deserialize GUI TOML {:?}: {}", path, e))?;
     Ok(parsed)
 }
 
@@ -273,9 +284,8 @@ pub fn gui_class_from_extension(path: &Path) -> &'static str {
             .and_then(|s| toml::from_str::<toml::Value>(&s)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
         {
-            if let Some(cn) = doc
-                .get("metadata")
-                .and_then(|m| m.get("class_name"))
+            if let Some(cn) = eustress_common::class_schema::get_section_insensitive(&doc, "metadata")
+                .and_then(|m| eustress_common::class_schema::get_section_insensitive(m, "class_name"))
                 .and_then(|c| c.as_str())
             {
                 return match cn {

@@ -90,6 +90,8 @@ pub mod accessibility;
 pub mod tools_smart;
 pub mod part_selection;
 pub mod material_sync;
+pub mod lock_tool;
+pub mod video;
 pub mod transform_space;
 pub mod default_scene;
 pub mod startup;

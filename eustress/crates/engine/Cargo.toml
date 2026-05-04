@@ -127,6 +127,31 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 eustress-forge-sdk = { path = "../forge-sdk" }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
+
+# ── Video playback ────────────────────────────────────────────────
+# Pure-Rust H.264-in-MP4 decoder stack. We tried `bevy_video` first —
+# it's stuck at Bevy 0.9 (Jan 2023) and has had no maintenance since,
+# so it can't ride alongside our Bevy 0.18 engine. The combination
+# below is what actually compiles in 2026:
+#
+# • `mp4` (alfg/mp4-rust) parses ISO Base Media File Format containers,
+#   walks H.264 video tracks, and yields each sample's bytes in AVCC
+#   length-prefixed NAL format.
+# • `openh264` is the BSD-2-licensed Rust wrapper around Cisco's
+#   OpenH264 decoder. The default build downloads the prebuilt binary
+#   at `cargo build` time (Cisco's H.264 patent licence covers users
+#   of the binary). For offline builds, switch to `openh264 = { ...,
+#   features = ["source"] }` — compiles the C source instead, slower
+#   but reproducible.
+#
+# Constraints accepted by this choice:
+#   - H.264-in-MP4 only (95% of "user uploads a clip" cases). HEVC,
+#     AV1, VP9, WebM/Matroska are out of scope until a heavier decoder
+#     stack (ffmpeg-next / gstreamer) is wired in.
+#   - Software decode only. Hardware paths require ffmpeg-next or a
+#     wgpu-direct decoder (not yet a thing in 2026).
+mp4 = "0.14"
+openh264 = "0.9"
 csv = "1.3"
 crossbeam-channel = "0.5"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }

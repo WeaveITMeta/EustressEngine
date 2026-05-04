@@ -2,9 +2,12 @@
 // Eustress Engine Studio - Command Bar
 // Docked at the bottom of the engine window for executing Rune/Luau scripts.
 // Output goes to the existing Output panel, not rendered here.
+//
+// Multi-line: pasted scripts arrive intact. Plain Enter submits (REPL feel),
+// Shift+Enter inserts a newline.
 // ============================================================================
 
-import { HorizontalBox, LineEdit } from "std-widgets.slint";
+import { HorizontalBox, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 export struct CommandSuggestion {
@@ -25,7 +28,7 @@ export component CommandBar inherits Rectangle {
     in-out property <string> command-text: "";
     in-out property <string> language: "rune";
 
-    out property <bool> input-has-focus: input.has-focus;
+    out property <bool> input-has-focus: input-area.has-focus;
 
     callback on-execute(/* language */ string, /* script */ string);
     callback on-close();
@@ -34,7 +37,9 @@ export component CommandBar inherits Rectangle {
     callback on-clear-output();
 
     width: 100%;
-    height: 28px;
+    // Bar grows with content up to 200px, then scrolls. Single-line use
+    // collapses to the original ~28px height.
+    height: max(28px, min(200px, input-area.preferred-height + 6px));
     background: Theme.header-background;
     border-width: 1px;
     border-color: Theme.border-color;
@@ -46,88 +51,133 @@ export component CommandBar inherits Rectangle {
         padding-bottom: 3px;
         spacing: 4px;
 
-        // Language selector
-        Rectangle {
-            width: 48px;
-            height: 22px;
-            background: lang-touch.has-hover ? Theme.button-hover : Theme.input-background;
-            border-radius: 3px;
-            border-width: 1px;
-            border-color: Theme.input-border;
+        // Language selector — fixed width, top-aligned
+        VerticalLayout {
+            alignment: start;
+            Rectangle {
+                width: 48px;
+                height: 22px;
+                background: lang-touch.has-hover ? Theme.button-hover : Theme.input-background;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: Theme.input-border;
 
-            lang-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    root.language = root.language == "luau" ? "rune" : "luau";
+                lang-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.language = root.language == "luau" ? "rune" : "luau";
+                    }
+                }
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.language == "luau" ? "Luau" : "Rune";
+                    color: root.language == "luau" ? #4fc3f7 : #ffb74d;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
+        }
 
+        // Prompt chevron — fixed width, top-aligned
+        VerticalLayout {
+            alignment: start;
             Text {
-                width: 100%;
-                height: 100%;
-                text: root.language == "luau" ? "Luau" : "Rune";
+                width: 14px;
+                height: 22px;
+                text: ">";
                 color: root.language == "luau" ? #4fc3f7 : #ffb74d;
-                font-size: 11px;
-                font-weight: 600;
-                horizontal-alignment: center;
+                font-size: 14px;
+                font-weight: 700;
                 vertical-alignment: center;
+                horizontal-alignment: center;
             }
         }
 
-        // Prompt
-        Text {
-            width: 14px;
-            text: ">";
-            color: root.language == "luau" ? #4fc3f7 : #ffb74d;
-            font-size: 14px;
-            font-weight: 700;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-        }
-
-        // Input field
-        input := LineEdit {
-            horizontal-stretch: 1;
-            placeholder-text: "";
-            text <=> root.command-text;
-
-            edited(text) => { root.on-text-changed(text); }
-
-            accepted(text) => {
-                if text != "" {
-                    root.on-execute(root.language, text);
-                    root.command-text = "";
-                }
-            }
-        }
-
-        // Run button
+        // Multi-line input — stretches to fill all remaining space between
+        // the ">" prompt and the Execute button.
         Rectangle {
-            width: 22px;
-            height: 22px;
-            background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
-            border-radius: 3px;
+            horizontal-stretch: 1;
             border-width: 1px;
-            border-color: Theme.input-border;
+            border-color: input-area.has-focus ? Theme.accent-blue : Theme.input-border;
+            background: Theme.input-background;
+            border-radius: 3px;
 
-            run-touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => {
-                    if root.command-text != "" {
-                        root.on-execute(root.language, root.command-text);
-                        root.command-text = "";
+            scroll := ScrollView {
+                x: 4px;
+                y: 2px;
+                width: parent.width - 8px;
+                height: parent.height - 4px;
+                viewport-width: self.width;
+                viewport-height: max(self.height, input-area.preferred-height);
+
+                input-area := TextInput {
+                    width: parent.width;
+                    color: Theme.text-primary;
+                    font-size: 12px;
+                    text <=> root.command-text;
+                    single-line: false;
+                    wrap: word-wrap;
+
+                    edited => { root.on-text-changed(self.text); }
+
+                    key-pressed(ev) => {
+                        // Plain Enter submits (REPL convention). Shift+Enter
+                        // falls through and inserts a newline so multi-line
+                        // editing works normally. Ctrl+Enter also submits as
+                        // a power-user fallback. Pasted multi-line content
+                        // bypasses this — paste doesn't fire key-pressed.
+                        if ev.text == Key.Return {
+                            if ev.modifiers.shift {
+                                return reject;
+                            }
+                            if self.text != "" {
+                                root.on-execute(root.language, self.text);
+                                root.command-text = "";
+                            }
+                            return accept;
+                        }
+                        reject
                     }
                 }
             }
+        }
 
-            Image {
-                width: 12px;
-                height: 12px;
-                source: @image-url("../../assets/icons/ui/play.svg");
-                image-fit: contain;
-                colorize: #8bc34a;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
+        // Execute button — fixed width, right-aligned in the layout,
+        // bottom-pinned so it stays near the text baseline as the
+        // input grows taller with multi-line content.
+        VerticalLayout {
+            alignment: end;
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                background: run-touch.has-hover ? Theme.button-hover : Theme.input-background;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: Theme.input-border;
+
+                run-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if root.command-text != "" {
+                            root.on-execute(root.language, root.command-text);
+                            root.command-text = "";
+                        }
+                    }
+                }
+
+                Image {
+                    width: 12px;
+                    height: 12px;
+                    source: @image-url("../../assets/icons/ui/play.svg");
+                    image-fit: contain;
+                    colorize: #8bc34a;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
             }
         }
     }

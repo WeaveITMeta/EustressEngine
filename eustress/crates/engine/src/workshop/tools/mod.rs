@@ -21,6 +21,11 @@ pub use eustress_tools::{
     ToolContext, ToolDefinition, ToolHandler, ToolRegistry, ToolResult,
 };
 
+// Re-export Luau execution types for the Workshop agent.
+pub use eustress_tools::registry::{
+    LuauCreatedEntity, LuauExecutionResult, LuauExecutor,
+};
+
 // Re-export every tool handler module — callers continue to use
 // `tools::entity_tools::CreateEntityTool` without edits.
 pub use eustress_tools::diff_tools;

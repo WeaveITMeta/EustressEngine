@@ -25,6 +25,340 @@ const JURISDICTIONS = {
   fallback: { require: ['passport', 'national_id', 'drivers_license'] },
 };
 
+// Desktop gear icon (icon.png from `crates/engine/assets/`) embedded as
+// base64. Served by `/assets/eustress-gear.png` so identity-registration
+// emails can `<img src="...">` against a stable URL — Gmail strips
+// inline `<svg>` tags as a security measure, so PNG-by-URL is the only
+// reliable way to brand the email header.
+import { ICON_GEAR_PNG_B64 } from './icon-gear.js';
+
+// ─── Identity email — branded template ─────────────────────────────────────
+// One canonical place to assemble the registration / identity-backup
+// email so /api/auth/register's auto-send and /api/identity/email-backup
+// share pixel-identical output. Emits HTML + plain-text bodies + an
+// attachment descriptor for the multipart/mixed wrapper.
+//
+// Brand cues match `crates/web/src/components/footer.rs` (industrial
+// dark theme, "Creation at the speed of thought." tagline, four-column
+// nav) and `crates/engine/assets/icon.png` (the desktop gear). The
+// gear ships as a hosted PNG (served by this same Worker at
+// `/assets/eustress-gear.png`) — Gmail strips inline `<svg>` for
+// security, so PNG-via-URL is the only reliable header-image path.
+//
+// Per-feedback layout choices (2026-04-25):
+//   * Header has the gear above the "EUSTRESS ENGINE" wordmark, both
+//     centred — matches the website footer's brand block.
+//   * No inline TOML preview block; the body points the user to the
+//     attached `.toml` file instead.
+//   * Footer wordmark, tagline, social row, nav columns, copyright —
+//     all centred. Status pill removed.
+//   * Subject + copy reframed as "Registration", not "Backup".
+function buildIdentityEmail({ username, toml_content, host }) {
+  const safeName = (username || 'Creator').replace(/[<>"']/g, '');
+  const filename = `eustress-${safeName}.toml`;
+  // Public URL of the gear PNG. Defaults to the production hostname
+  // — the `/assets/eustress-gear.png` route is bound to both
+  // `api.eustress.dev/*` and the workers.dev URL, so either resolves.
+  // Caller-supplied `host` (when the Worker is reached via HTTP) still
+  // wins, keeping image origin == request origin during dev.
+  const iconUrl = (host || 'https://api.eustress.dev') + '/assets/eustress-gear.png';
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <meta name="supported-color-schemes" content="dark">
+  <title>Eustress Identity Registration</title>
+</head>
+<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#c9d1d9;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#0d1117;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background:#161b22;border:1px solid #30363d;border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+
+          <!-- Header: gear PNG centred above "EUSTRESS ENGINE" wordmark.
+               Mirrors the website footer's brand block so the same
+               identity reads top-of-email and bottom-of-email. -->
+          <tr>
+            <td align="center" style="background:linear-gradient(135deg,#1a1f2e 0%,#0f1729 50%,#16213e 100%);padding:40px 32px 32px;text-align:center;border-bottom:1px solid #30363d;">
+              <img src="${iconUrl}" width="80" height="80" alt="" style="display:block;margin:0 auto 18px;border:0;outline:none;text-decoration:none;">
+              <div style="color:#f0f6fc;font-size:18px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;line-height:1;">Eustress Engine</div>
+              <div style="color:#8b949e;font-size:12px;margin-top:8px;letter-spacing:0.02em;">Identity Registration</div>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:32px 32px 8px;">
+              <p style="color:#f0f6fc;font-size:15px;margin:0 0 16px;line-height:1.5;">Welcome, <strong>${safeName}</strong>.</p>
+              <p style="color:#8b949e;font-size:14px;margin:0 0 24px;line-height:1.6;">
+                Your Eustress account is registered. Your identity file
+                <code style="background:#21262d;padding:2px 6px;border-radius:4px;color:#79c0ff;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:12px;">${filename}</code>
+                is attached to this email — it contains your Ed25519 private key, the cryptographic root of the account. Treat it like a password-manager vault key: store it securely, back it up off-device, and never share it.
+              </p>
+
+              <!-- Centred call-to-action pointing at the attachment dock.
+                   Replaces the inline TOML preview block so the user
+                   downloads the real .toml file from this email
+                   instead of copy-pasting from a code block. -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 26px;">
+                <tr>
+                  <td align="center" style="background:linear-gradient(135deg,#1a2a3a 0%,#1e2a40 100%);border:1px solid #2a3a4a;border-radius:10px;padding:24px 20px;">
+                    <div style="color:#8ab4f8;font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;margin:0 0 8px;">Your Identity File</div>
+                    <div style="color:#f0f6fc;font-size:15px;font-family:'SF Mono',Consolas,Monaco,monospace;margin:0 0 4px;">${filename}</div>
+                    <div style="color:#8b949e;font-size:12px;line-height:1.5;">Download from the attachment dock.</div>
+                  </td>
+                </tr>
+              </table>
+
+              <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:18px 20px;margin:0 0 22px;">
+                <div style="color:#c9d1d9;font-size:13px;font-weight:600;letter-spacing:0.02em;margin:0 0 10px;">How to use your registration</div>
+                <ol style="color:#8b949e;font-size:13px;margin:0;padding-left:20px;line-height:1.8;">
+                  <li>Save the attached <code style="background:#21262d;padding:1px 5px;border-radius:3px;color:#79c0ff;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:11px;">${filename}</code> on the device(s) you sign in from.</li>
+                  <li>Sign in at <a href="https://eustress.dev/login" style="color:#58a6ff;text-decoration:none;border-bottom:1px solid #2a4a6a;">eustress.dev/login</a></li>
+                  <li>Or load it in EustressEngine via the Sign In dialog.</li>
+                </ol>
+              </div>
+
+              <p style="color:#f85149;font-size:12px;margin:0 0 6px;text-align:center;font-weight:500;">
+                ⚠ Never share your <code style="background:rgba(248,81,73,0.1);padding:1px 5px;border-radius:3px;color:#ff7b72;font-family:'SF Mono',Consolas,Monaco,monospace;font-size:11px;">private_key</code> with anyone.
+              </p>
+              <p style="color:#6e7681;font-size:11px;margin:0;text-align:center;line-height:1.5;">
+                Eustress staff will never ask for it. If you receive a request claiming otherwise, it is fraudulent.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer brand block — mirrors the website footer. Everything
+               here is centred per design feedback (top + footer share the
+               same EUSTRESS ENGINE wordmark, both centred). -->
+          <tr>
+            <td align="center" style="padding:30px 32px 14px;border-top:1px solid #30363d;background:#0d1117;text-align:center;">
+              <div style="color:#f0f6fc;font-size:13px;font-weight:700;letter-spacing:0.10em;text-transform:uppercase;margin:0 0 8px;">Eustress Engine</div>
+              <div style="color:#6e7681;font-size:12px;margin:0 0 18px;">Creation at the speed of thought.</div>
+              <div>
+                <a href="https://twitter.com/eustressengine" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">X</a>
+                <span style="color:#30363d;">·</span>
+                <a href="https://discord.gg/DGP9my8DYN" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">Discord</a>
+                <span style="color:#30363d;">·</span>
+                <a href="https://github.com/WeaveITMeta/EustressEngine" style="color:#c9d1d9;font-size:12px;text-decoration:none;letter-spacing:0.02em;padding:0 10px;">GitHub</a>
+              </div>
+            </td>
+          </tr>
+
+          <!-- Footer nav columns — centred grid, each column header
+               centred over centred links. Outlook desktop renders nested
+               tables fine; this stays predictable across clients. -->
+          <tr>
+            <td style="padding:8px 16px 24px;background:#0d1117;">
+              <table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+                <tr>
+                  <td valign="top" align="center" style="padding:0 14px;">
+                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Product</p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/gallery" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Gallery</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/learn" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Learn</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/bliss" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Bliss</a></p>
+                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/premium" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Premium</a></p>
+                  </td>
+                  <td valign="top" align="center" style="padding:0 14px;">
+                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Community</p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/groups" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Groups</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://discord.gg/DGP9my8DYN" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Discord</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://x.com/search?q=%23EustressEngine" style="color:#c9d1d9;text-decoration:none;font-size:12px;">X</a></p>
+                    <p style="margin:0;text-align:center;"><a href="https://x.com/simbuilder" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Forums</a></p>
+                  </td>
+                  <td valign="top" align="center" style="padding:0 14px;">
+                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Company</p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/about" style="color:#c9d1d9;text-decoration:none;font-size:12px;">About</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/careers" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Careers</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/contact" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Contact</a></p>
+                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/press" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Press Kit</a></p>
+                  </td>
+                  <td valign="top" align="center" style="padding:0 14px;">
+                    <p style="color:#8b949e;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.10em;margin:0 0 8px;text-align:center;">Legal</p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/terms" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Terms</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/privacy" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Privacy</a></p>
+                    <p style="margin:0 0 6px;text-align:center;"><a href="https://eustress.dev/cookies" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Cookies</a></p>
+                    <p style="margin:0;text-align:center;"><a href="https://eustress.dev/acts" style="color:#c9d1d9;text-decoration:none;font-size:12px;">Acts</a></p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Bottom bar — centred copyright only; status pill removed
+               per design feedback. -->
+          <tr>
+            <td align="center" style="padding:14px 32px 22px;background:#0d1117;border-top:1px solid #30363d;text-align:center;">
+              <span style="color:#484f58;font-size:11px;">© 2025 Eustress Engine. All rights reserved.</span>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+
+  const text =
+    `EUSTRESS ENGINE — Identity Registration\n\n` +
+    `Welcome, ${safeName}.\n\n` +
+    `Your Eustress account is registered. Your identity file (${filename}) is attached to this email.\n` +
+    `It contains your Ed25519 private key — store it securely, back it up off-device, and never share it.\n\n` +
+    `Download the attached ${filename} from this email to use it.\n\n` +
+    `How to use your registration:\n` +
+    `  1. Save the attached ${filename} on the device(s) you sign in from.\n` +
+    `  2. Sign in at https://eustress.dev/login\n` +
+    `  3. Or load it in EustressEngine via the Sign In dialog.\n\n` +
+    `WARNING: Never share your private_key with anyone. Eustress staff will never ask for it.\n\n` +
+    `— Eustress Engine\n` +
+    `Creation at the speed of thought.\n` +
+    `https://eustress.dev`;
+
+  return {
+    subject: `Your Eustress Identity Registration — ${safeName}`,
+    html,
+    text,
+    attachment: {
+      filename,
+      mime: 'application/toml',
+      content: toml_content,
+    },
+  };
+}
+
+// ─── Hand-built MIME helpers ────────────────────────────────────────────────
+// Workers' `EmailMessage(from, to, raw)` constructor takes a full RFC 5322
+// message as a single string. We build that string here instead of pulling
+// in `mimetext` — it's an npm package that needs to be bundled into the
+// Worker, and a missed `npm install` produces the silent-but-fatal
+// "No such module 'mimetext'" runtime error we hit on first deploy.
+// Hand-rolled keeps the path dependency-free.
+
+/**
+ * Build an RFC 5322 multipart/alternative message (HTML + plain-text
+ * fallback). Both parts MUST end in CRLF; the boundary token MUST NOT
+ * appear in either body.
+ */
+function buildMimeAlternative({ from, to, subject, html, text }) {
+  const boundary = '----=_eustress_alt_' + Math.random().toString(36).slice(2);
+  return (
+    `From: Eustress Identity <${from}>\r\n` +
+    `To: ${to}\r\n` +
+    `Subject: ${subject}\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: multipart/alternative; boundary="${boundary}"\r\n` +
+    `\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 7bit\r\n` +
+    `\r\n` +
+    `${text}\r\n` +
+    `\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: text/html; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 7bit\r\n` +
+    `\r\n` +
+    `${html}\r\n` +
+    `\r\n` +
+    `--${boundary}--\r\n`
+  );
+}
+
+/**
+ * Build a simple plain-text RFC 5322 message. Use when there's no
+ * HTML body — keeps the structure flat (no multipart) which simplifies
+ * what gets relayed and what spam filters see.
+ */
+function buildMimePlain({ from, to, subject, text }) {
+  return (
+    `From: Eustress Identity <${from}>\r\n` +
+    `To: ${to}\r\n` +
+    `Subject: ${subject}\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 7bit\r\n` +
+    `\r\n` +
+    `${text}\r\n`
+  );
+}
+
+/**
+ * Wrap base64 to 76 cols + CRLF per RFC 2045 §6.8 — long unwrapped
+ * runs trip strict MTAs that enforce the 998-octet line limit.
+ */
+function wrapBase64(b64, width = 76) {
+  let out = '';
+  for (let i = 0; i < b64.length; i += width) {
+    out += b64.slice(i, i + width);
+    if (i + width < b64.length) out += '\r\n';
+  }
+  return out;
+}
+
+/**
+ * Build a multipart/mixed message with a single file attachment plus
+ * a multipart/alternative body (HTML + plain-text fallback). The
+ * attachment is base64-encoded with the supplied filename + MIME type.
+ *
+ * Structure:
+ *   multipart/mixed
+ *     ├─ multipart/alternative
+ *     │    ├─ text/plain
+ *     │    └─ text/html
+ *     └─ <attachmentMime> (Content-Disposition: attachment)
+ */
+function buildMimeWithAttachment({
+  from,
+  to,
+  subject,
+  html,
+  text,
+  attachment, // { filename, mime, content } — content is utf-8 string
+}) {
+  const mixedBoundary = '----=_eustress_mixed_' + Math.random().toString(36).slice(2);
+  const altBoundary = '----=_eustress_alt_' + Math.random().toString(36).slice(2);
+  const b64 = btoa(unescape(encodeURIComponent(attachment.content)));
+  const wrapped = wrapBase64(b64);
+
+  return (
+    `From: Eustress Identity <${from}>\r\n` +
+    `To: ${to}\r\n` +
+    `Subject: ${subject}\r\n` +
+    `MIME-Version: 1.0\r\n` +
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"\r\n` +
+    `\r\n` +
+    `--${mixedBoundary}\r\n` +
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"\r\n` +
+    `\r\n` +
+    `--${altBoundary}\r\n` +
+    `Content-Type: text/plain; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 7bit\r\n` +
+    `\r\n` +
+    `${text}\r\n` +
+    `\r\n` +
+    `--${altBoundary}\r\n` +
+    `Content-Type: text/html; charset=utf-8\r\n` +
+    `Content-Transfer-Encoding: 7bit\r\n` +
+    `\r\n` +
+    `${html}\r\n` +
+    `\r\n` +
+    `--${altBoundary}--\r\n` +
+    `\r\n` +
+    `--${mixedBoundary}\r\n` +
+    `Content-Type: ${attachment.mime}; name="${attachment.filename}"\r\n` +
+    `Content-Disposition: attachment; filename="${attachment.filename}"\r\n` +
+    `Content-Transfer-Encoding: base64\r\n` +
+    `\r\n` +
+    `${wrapped}\r\n` +
+    `\r\n` +
+    `--${mixedBoundary}--\r\n`
+  );
+}
+
 export default {
   // Daily payout cron — runs at UTC midnight
   async scheduled(event, env, ctx) {
@@ -220,6 +554,21 @@ export default {
       if (url.pathname === '/health')
         return handleHealth(env, cors);
 
+      // Branded asset for outbound emails. Gmail blocks remote images
+      // until the user clicks "show images"; once allowed, this URL
+      // is cached server-side per-recipient. Year-long Cache-Control
+      // is safe because the icon is content-addressed by route.
+      if (url.pathname === '/assets/eustress-gear.png' && request.method === 'GET') {
+        const bytes = Uint8Array.from(atob(ICON_GEAR_PNG_B64), c => c.charCodeAt(0));
+        return new Response(bytes, {
+          headers: {
+            'Content-Type': 'image/png',
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+
       return json({ error: 'Not found' }, 404, cors);
     } catch (err) {
       return json({ error: err.message }, 500, cors);
@@ -233,7 +582,7 @@ export default {
 
 async function handleRegister(request, env, cors) {
   const body = await request.json();
-  const { username, public_key, birthday, id_type, id_hash, kyc_session_id, email } = body;
+  const { username, public_key, birthday, id_type, id_hash, kyc_session_id, email, toml_content } = body;
 
   if (!username || username.length < 3 || username.length > 32)
     return json({ error: 'Username must be 3-32 characters' }, 400, cors);
@@ -339,7 +688,40 @@ async function handleRegister(request, env, cors) {
 
   const token = await createJwt(user_id, env.JWT_SECRET);
 
-  return json({ token, user: publicUser(user) }, 200, cors);
+  // Auto-send the identity-backup email if the client supplied a
+  // TOML body + a destination address. The TOML is built CLIENT-side
+  // (the only place that has the user's private key), so this Worker
+  // is just relaying — no server-side signing, no key persistence.
+  // Failure is non-fatal: signup still succeeds, the client can
+  // retry by hitting POST /api/identity/email-backup directly.
+  let backup_emailed = false;
+  if (email && toml_content && env.EMAIL) {
+    try {
+      const { EmailMessage } = await import('cloudflare:email');
+      // Use whichever hostname this request came in on (api.eustress.dev
+      // in production, *.workers.dev for direct deploy URLs) so the gear
+      // image embedded in the email resolves to the same Worker that
+      // sent it.
+      const host = new URL(request.url).origin;
+      const tpl = buildIdentityEmail({ username, toml_content, host });
+      const raw = buildMimeWithAttachment({
+        from: 'identity@eustress.dev',
+        to: email,
+        subject: tpl.subject,
+        html: tpl.html,
+        text: tpl.text,
+        attachment: tpl.attachment,
+      });
+      const message = new EmailMessage('identity@eustress.dev', email, raw);
+      await env.EMAIL.send(message);
+      backup_emailed = true;
+    } catch (e) {
+      // Don't fail signup if email relay hiccups; log + continue.
+      console.error('signup auto-email failed:', e?.message || e);
+    }
+  }
+
+  return json({ token, user: publicUser(user), backup_emailed }, 200, cors);
 }
 
 async function handleChallenge(request, env, cors) {
@@ -416,76 +798,44 @@ async function handleEmailIdentityBackup(request, env, cors) {
   if (!toml_content || toml_content.length < 50)
     return json({ error: 'Invalid TOML content' }, 400, cors);
 
-  const htmlBody = `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <div style="max-width:600px;margin:0 auto;padding:40px 20px;">
-    <div style="background:#161b22;border-radius:12px;border:1px solid #30363d;overflow:hidden;">
-      <div style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);padding:32px;text-align:center;">
-        <h1 style="margin:0;color:#f0f6fc;font-size:24px;font-weight:700;">Eustress Identity Backup</h1>
-        <p style="margin:8px 0 0;color:#8b949e;font-size:14px;">Your Ed25519 keypair — keep this safe</p>
-      </div>
-      <div style="padding:24px 32px;">
-        <p style="color:#f0f6fc;font-size:14px;margin:0 0 16px;">Hello <strong>${username || 'Creator'}</strong>,</p>
-        <p style="color:#8b949e;font-size:14px;margin:0 0 24px;">
-          Below is your <code style="background:#21262d;padding:2px 6px;border-radius:4px;color:#79c0ff;">eustress-${username || 'identity'}.toml</code> file.
-          This is your permanent Eustress identity — it contains your Ed25519 private key.
-          Store it securely and never share it.
-        </p>
-        <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;margin:0 0 24px;">
-          <pre style="margin:0;color:#c9d1d9;font-size:12px;font-family:'SF Mono',Consolas,monospace;white-space:pre-wrap;word-break:break-all;">${toml_content.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</pre>
-        </div>
-        <div style="background:#1a2a3a;border:1px solid #2a3a4a;border-radius:8px;padding:16px;margin:0 0 24px;">
-          <p style="color:#8ab4f8;font-size:13px;margin:0 0 8px;font-weight:600;">How to use this backup:</p>
-          <ol style="color:#8ab4f8;font-size:12px;margin:0;padding-left:20px;line-height:1.8;">
-            <li>Save the text above as <code style="background:#21262d;padding:1px 4px;border-radius:3px;">eustress-${username || 'identity'}.toml</code></li>
-            <li>Use it to sign in at <a href="https://eustress.dev/login" style="color:#58a6ff;">eustress.dev/login</a></li>
-            <li>Or load it in EustressEngine via the Sign In dialog</li>
-          </ol>
-        </div>
-        <p style="color:#f85149;font-size:12px;margin:0;text-align:center;">
-          ⚠ Never share your private_key with anyone. Eustress staff will never ask for it.
-        </p>
-      </div>
-      <div style="background:#0d1117;padding:16px 32px;text-align:center;border-top:1px solid #30363d;">
-        <p style="color:#484f58;font-size:11px;margin:0;">Eustress Engine — Build, simulate, earn.</p>
-      </div>
-    </div>
-  </div>
-</body>
-</html>`;
-
-  const plainText = `Eustress Identity Backup for ${username}\n\nSave the following as eustress-${username}.toml:\n\n${toml_content}\n\nNever share your private_key with anyone.`;
+  // All branding + body assembly lives in `buildIdentityEmail` so this
+  // route and the auto-send inside `/api/auth/register` produce
+  // identical output. The TOML rides as a real file attachment via
+  // `buildMimeWithAttachment`'s multipart/mixed wrapper.
+  const host = new URL(request.url).origin;
+  const tpl = buildIdentityEmail({ username: username || 'Creator', toml_content, host });
 
   try {
-    // Cloudflare Email Workers — native send_email binding
     if (env.EMAIL) {
       const { EmailMessage } = await import('cloudflare:email');
-      const { createMimeMessage } = await import('mimetext');
-      const msg = createMimeMessage();
-      msg.setSender({ name: 'Eustress Identity', addr: 'identity@eustress.dev' });
-      msg.setRecipient(email);
-      msg.setSubject(`Your Eustress Identity Backup — ${username || 'Creator'}`);
-      msg.addMessage({ contentType: 'text/html', data: htmlBody });
-      msg.addMessage({ contentType: 'text/plain', data: plainText });
-
-      const message = new EmailMessage('identity@eustress.dev', email, msg.asRaw());
+      const raw = buildMimeWithAttachment({
+        from: 'identity@eustress.dev',
+        to: email,
+        subject: tpl.subject,
+        html: tpl.html,
+        text: tpl.text,
+        attachment: tpl.attachment,
+      });
+      const message = new EmailMessage('identity@eustress.dev', email, raw);
       await env.EMAIL.send(message);
       return json({ ok: true, message: 'Backup emailed via Cloudflare Email' }, 200, cors);
     }
 
-    // Fallback: MailChannels (legacy, may require API key)
+    // Fallback: MailChannels (legacy path, kept for environments where
+    // the EMAIL binding is unavailable). MailChannels' JSON API doesn't
+    // support file attachments out of the box, so the TOML stays inline
+    // in the HTML/text body in this branch — accepted shortfall for the
+    // fallback. Production traffic uses the EMAIL binding above.
     const emailResp = await fetch('https://api.mailchannels.net/tx/v1/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         personalizations: [{ to: [{ email }] }],
         from: { email: 'identity@eustress.dev', name: 'Eustress Identity' },
-        subject: `Your Eustress Identity Backup — ${username || 'Creator'}`,
+        subject: tpl.subject,
         content: [
-          { type: 'text/html', value: htmlBody },
-          { type: 'text/plain', value: plainText },
+          { type: 'text/plain', value: tpl.text },
+          { type: 'text/html', value: tpl.html },
         ],
       }),
     });

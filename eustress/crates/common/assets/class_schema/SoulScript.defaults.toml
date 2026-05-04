@@ -1,0 +1,11 @@
+# SoulScript — Rune scripting (primary scripting language)
+# Rune VM: Compiled and executed via rune crate
+
+[script]
+source = ""
+enabled = true
+run_context = "Rune"
+
+[metadata]
+class_name = "SoulScript"
+archivable = true

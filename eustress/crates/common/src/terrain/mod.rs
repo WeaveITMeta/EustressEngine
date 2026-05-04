@@ -78,6 +78,8 @@ impl Plugin for TerrainPlugin {
             // Water resource
             .init_resource::<WaterConfig>()
             
+            .init_resource::<ChunkSpawnThrottle>()
+            
             // Core systems
             .add_systems(Update, (
                 process_terrain_generation_queue,  // Process async terrain generation
@@ -160,12 +162,24 @@ pub fn spawn_terrain(
     info!("🏔️ Spawning terrain: {}x{} chunks, {} LOD levels (async)", 
         config.chunks_x, config.chunks_z, config.lod_levels);
     
-    // Create terrain material
+    // Create terrain material with UV tiling.
+    // Terrain chunk UVs range [0,1] per chunk. To tile the texture at a
+    // physically correct density we scale UVs by chunk_size / TILE_WORLD_SIZE.
+    // With chunk_size=64 and TILE_WORLD_SIZE=8 this gives 8× tiling — the
+    // texture repeats every 8 world-units, matching real-world grass scale.
+    // The tiling is done shader-side via uv_transform (an Affine2 on the
+    // material), which is essentially free — no mesh data bloat, no extra
+    // draw calls, and perfect mip-map coherence.
+    const TERRAIN_TILE_WORLD_SIZE: f32 = 8.0;
+    let tile_repeat = config.chunk_size / TERRAIN_TILE_WORLD_SIZE;
     let terrain_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.3, 0.5, 0.2),  // Default grass green
         perceptual_roughness: 0.9,
         metallic: 0.0,
         reflectance: 0.3,
+        uv_transform: bevy::math::Affine2::from_scale(
+            bevy::math::Vec2::new(tile_repeat, tile_repeat),
+        ),
         ..default()
     });
     
@@ -198,7 +212,7 @@ pub fn spawn_terrain(
         material: Some(terrain_material),
         config: Some(config),
         data: Some(data),
-        chunks_per_frame: 4,  // Spawn 4 chunks per frame for smooth generation
+        chunks_per_frame: 2,  // Spawn 2 chunks per frame to avoid frame spikes
         total_chunks,
         spawned_count: 0,
     });
@@ -246,10 +260,19 @@ pub fn process_terrain_generation_queue(
     for (chunk_pos, terrain_entity) in chunks_batch {
         let world_pos = chunk_world_position(chunk_pos, &config);
         
-        // Generate mesh for this chunk
+        // Choose LOD based on distance from world origin (camera isn't
+        // available here, but origin is a reasonable approximation during
+        // initial load — the LOD system will correct it once the camera
+        // moves).
+        let distance_from_origin = world_pos.length();
+        let lod = config.lod_for_distance(distance_from_origin);
+        
+        // Generate mesh at distance-appropriate LOD instead of always LOD 0.
+        // Far chunks get fewer vertices, dramatically reducing initial load
+        // cost and GPU draw complexity.
         let mesh_handle = generate_chunk_mesh(
             chunk_pos,
-            0,  // Start at LOD 0
+            lod,
             &config,
             &data,
             &mut meshes,
@@ -259,7 +282,7 @@ pub fn process_terrain_generation_queue(
         let mut chunk_commands = commands.spawn((
             Chunk {
                 position: chunk_pos,
-                lod: 0,
+                lod,
                 dirty: false,
             },
             Mesh3d(mesh_handle.clone()),

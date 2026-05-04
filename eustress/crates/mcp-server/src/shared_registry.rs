@@ -46,6 +46,7 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         universe_root: universe,
         user_id: None,
         username: None,
+        luau_executor: None,
     })
 }
 

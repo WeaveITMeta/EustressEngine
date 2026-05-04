@@ -133,13 +133,21 @@ impl Default for ServiceComponent {
     }
 }
 
-/// Load a service definition from a _service.toml file
+/// Load a service definition from a _service.toml file. Normalises
+/// any-case keys to snake_case before strict-typed deserialization so
+/// a hand-authored or migration-affected PascalCase service file still
+/// parses cleanly.
 pub fn load_service_definition(path: &Path) -> Result<ServiceDefinition, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    
-    toml::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+
+    let mut value: toml::Value = content
+        .parse()
+        .map_err(|e: toml::de::Error| format!("Failed to parse {}: {}", path.display(), e))?;
+    eustress_common::class_schema::normalise_keys(&mut value);
+    value
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("Failed to deserialize {}: {}", path.display(), e))
 }
 
 /// Convert a toml::Value to a PropertyValue

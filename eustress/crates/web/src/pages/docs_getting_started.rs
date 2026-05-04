@@ -995,9 +995,8 @@ eustress identity whoami
                         </div>
                     </section>
 
-                    // Next/Prev Navigation
+                    // Next Navigation (no "Previous" — this is the first docs page)
                     <nav class="docs-nav-footer">
-                        <div class="nav-prev"></div>
                         <a href="/docs/scripting" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>

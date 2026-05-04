@@ -74,6 +74,19 @@ pub struct RuntimeSnapshot {
     /// `get_sim_value` key → current f64. Sorted by key so diffs are
     /// readable when inspecting the file by hand.
     pub sim_values: BTreeMap<String, f64>,
+
+    /// Named entities currently in the scene. Keyed by entity name,
+    /// value is the class/archetype (e.g. "Part", "Model", "Script").
+    /// Used by LSP completion for `workspace_find_first("|")` and
+    /// `get_tagged_entities` string-literal suggestions.
+    #[serde(default)]
+    pub entity_names: BTreeMap<String, String>,
+
+    /// Registered ECS component type short names (e.g. "Transform",
+    /// "ElectrochemicalState", "ThermodynamicState"). Used by LSP
+    /// completion for component-aware scripting suggestions.
+    #[serde(default)]
+    pub component_types: Vec<String>,
 }
 
 impl RuntimeSnapshot {
@@ -209,6 +222,12 @@ mod engine_writer {
                 .as_deref()
                 .map(|r| r.0.iter().map(|(k, v)| (k.clone(), *v)).collect())
                 .unwrap_or_default(),
+            // ECS schema fields are populated by the extended writer
+            // system below; kept empty here to avoid querying the full
+            // World on every 250ms tick. A separate 2-second timer
+            // refreshes these.
+            entity_names: BTreeMap::new(),
+            component_types: Vec::new(),
         };
 
         if snap.write_to_universe(&universe).is_ok() {

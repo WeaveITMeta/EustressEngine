@@ -1,0 +1,38 @@
+# Image — Imported image asset rendered as a 3D textured quad.
+#
+# `[asset]` carries the Universe-relative path to the source file under
+# `assets/images/`. File→Import (or future drag-drop) copies the user's
+# selected image into that folder and writes a folder of this shape:
+#
+#   StarterGui/MyLogo/
+#     _instance.toml          ← this template, populated
+#
+# Spawned by `file_loader` as a 3D quad with the image as the albedo
+# texture. Position / Color tint / Transparency are edited in the
+# Properties panel; `[asset].path` is read-only there to prevent
+# accidentally rebinding to an unimported file.
+
+[metadata]
+class_name = "Image"
+archivable = true
+
+[transform]
+position = [0.0, 2.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [4.0, 4.0, 1.0]
+
+[asset]
+# Universe-relative path. Empty during initial scaffold; the import
+# pipeline rewrites this to e.g. "assets/images/MyLogo.png" before
+# the entity spawns.
+path = ""
+
+[image]
+# Quad size in meters. width × height; matches the texture aspect by
+# convention but the user can override.
+size = [4.0, 4.0]
+# Tint colour [r, g, b, a] in 0..1. White = no tint, only texture shows.
+color = [1.0, 1.0, 1.0, 1.0]
+# 0.0 = opaque, 1.0 = invisible. > 0 switches the material to
+# AlphaMode::Blend so semi-transparent PNGs composite correctly.
+transparency = 0.0

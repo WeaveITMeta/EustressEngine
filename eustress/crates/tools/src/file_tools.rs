@@ -117,7 +117,7 @@ impl ToolHandler for ListDirectoryTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path within the Universe folder. Examples: \"\", \"Space1/SoulService\", \"Space1/Workshop\". Do not use absolute paths or `..`."
+                        "description": "Relative path within the sandbox root. Use \"\" to list the root and discover the layout. Do not use absolute paths or `..`."
                     }
                 },
                 "required": ["path"]

@@ -329,11 +329,20 @@ fn despawn_hover_adornments(
 /// Since wireframe meshes now have size baked in (to support GLB parts
 /// where `transform.scale = 1,1,1`), a size change means a different mesh
 /// from the cache — not just a transform update.
+///
+/// **Skipped during an in-progress Scale drag.** Otherwise BasePart fires
+/// `Changed` every drag frame and we'd despawn+respawn the wireframe at
+/// 60+ Hz — visible as a 1-frame lag where the box trails the part. The
+/// part's own `Transform.scale` (set by the deferred-regen path in
+/// `scale_tool::apply_size_to_entity`) propagates to the wireframe child
+/// for free, so visuals stay correct. On drag release `BasePart` changes
+/// once more, the gate is open, and we rebuild at the final size.
 fn update_changed_adornments(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
+    scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
     // Intentionally NOT watching `Changed<GlobalTransform>` — a moving part
     // fires that every frame, and the wireframe is already a child of the
     // adornee so translation/rotation auto-propagate. We only need to
@@ -343,6 +352,13 @@ fn update_changed_adornments(
     adornment_query: Query<(Entity, &ChildOf), With<SelectionAdornment>>,
 ) {
     let Some(mats) = materials else { return };
+
+    // Suppress respawn churn while the user is actively scaling — the
+    // child wireframe inherits parent `Transform.scale` so the visual
+    // tracks the in-flight resize without entity churn.
+    if scale_state.as_deref().map_or(false, |s| s.dragged_axis.is_some()) {
+        return;
+    }
 
     for (part_entity, base_part, global_transform, part) in &changed_parts {
         let size = base_part.size;

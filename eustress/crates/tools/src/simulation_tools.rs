@@ -796,6 +796,472 @@ fn toggle_tag(
 }
 
 // ---------------------------------------------------------------------------
+// Tail Telemetry — stream recent telemetry from Eustress Streams
+// ---------------------------------------------------------------------------
+
+pub struct TailTelemetryTool;
+
+impl ToolHandler for TailTelemetryTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "tail_telemetry",
+            description: "Tail recent telemetry events from Eustress Streams. Returns the last N simulation watchpoint samples with timestamps. Use for monitoring simulation health, detecting anomalies, and feeding the Repairman feedback loop. Reads from the runtime snapshot history log.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "description": "Number of recent samples to return (default: 20, max: 100)", "default": 20 },
+                    "keys": { "type": "array", "items": { "type": "string" }, "description": "Filter to specific watchpoint keys (e.g. ['battery.voltage', 'battery.soc']). Empty = all keys." },
+                    "since_ms": { "type": "integer", "description": "Only return samples newer than this many milliseconds ago" }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let count = input.get("count").and_then(|v| v.as_u64()).unwrap_or(20).min(100) as usize;
+        let key_filter: Vec<String> = input.get("keys")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let since_ms = input.get("since_ms").and_then(|v| v.as_u64());
+
+        // Read the telemetry log — the engine appends one JSON line per
+        // snapshot tick to `<universe>/.eustress/telemetry.jsonl`. Each
+        // line: { "t": "<rfc3339>", "values": { "key": f64, ... } }
+        let path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                // Fall back to reading current snapshot as a single sample
+                match read_sim_snapshot(ctx) {
+                    Ok(snap) => {
+                        let filtered: std::collections::BTreeMap<String, f64> = if key_filter.is_empty() {
+                            snap.sim_values
+                        } else {
+                            snap.sim_values.into_iter()
+                                .filter(|(k, _)| key_filter.iter().any(|f| k.contains(f.as_str())))
+                                .collect()
+                        };
+                        let lines: Vec<String> = filtered.iter()
+                            .map(|(k, v)| format!("  {} = {:.4}", k, v))
+                            .collect();
+                        return ToolResult {
+                            tool_name: "tail_telemetry".to_string(),
+                            tool_use_id: String::new(),
+                            success: true,
+                            content: format!(
+                                "Live snapshot (play_state={}, {}ms old):\n{}",
+                                snap.play_state, snap.age_ms, lines.join("\n"),
+                            ),
+                            structured_data: Some(serde_json::json!({
+                                "source": "snapshot",
+                                "play_state": snap.play_state,
+                                "values": filtered,
+                                "sample_count": 1,
+                            })),
+                            stream_topic: None,
+                        };
+                    }
+                    Err(e) => return ToolResult {
+                        tool_name: "tail_telemetry".to_string(), tool_use_id: String::new(),
+                        success: false,
+                        content: format!("No telemetry log and no live snapshot: {}. Is the engine running a simulation?", e),
+                        structured_data: None, stream_topic: None,
+                    },
+                }
+            }
+        };
+
+        // Parse the last N lines from the JSONL log
+        let now = chrono::Utc::now();
+        let mut samples: Vec<serde_json::Value> = content.lines().rev()
+            .take(count * 2) // over-read then filter
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| {
+                // Apply since_ms filter
+                if let Some(max_age) = since_ms {
+                    if let Some(ts) = entry.get("t").and_then(|v| v.as_str()) {
+                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(ts) {
+                            let age = now.signed_duration_since(parsed.with_timezone(&chrono::Utc));
+                            return age.num_milliseconds() <= max_age as i64;
+                        }
+                    }
+                }
+                true
+            })
+            .filter(|entry| {
+                // Apply key filter
+                if key_filter.is_empty() { return true; }
+                entry.get("values").and_then(|v| v.as_object()).map(|obj| {
+                    key_filter.iter().any(|k| obj.contains_key(k))
+                }).unwrap_or(false)
+            })
+            .take(count)
+            .collect();
+        samples.reverse(); // Chronological order
+
+        let body = if samples.is_empty() {
+            "No telemetry samples matching filters.".to_string()
+        } else {
+            let lines: Vec<String> = samples.iter().map(|s| {
+                let ts = s.get("t").and_then(|v| v.as_str()).unwrap_or("?");
+                let vals = s.get("values").and_then(|v| v.as_object())
+                    .map(|obj| {
+                        let mut filtered = obj.clone();
+                        if !key_filter.is_empty() {
+                            filtered.retain(|k, _| key_filter.iter().any(|f| k.contains(f.as_str())));
+                        }
+                        filtered.iter()
+                            .map(|(k, v)| format!("{}={:.4}", k, v.as_f64().unwrap_or(0.0)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                format!("  [{}] {}", ts, vals)
+            }).collect();
+            format!("{} telemetry sample(s):\n{}", samples.len(), lines.join("\n"))
+        };
+
+        ToolResult {
+            tool_name: "tail_telemetry".to_string(),
+            tool_use_id: String::new(),
+            success: true,
+            content: body,
+            structured_data: Some(serde_json::json!({
+                "source": "telemetry_log",
+                "sample_count": samples.len(),
+                "samples": samples,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Query Audit Log — search Claude API call audit trail
+// ---------------------------------------------------------------------------
+
+pub struct QueryAuditLogTool;
+
+impl ToolHandler for QueryAuditLogTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "query_audit_log",
+            description: "Query the Claude API call audit trail for the current Space. Returns recent AI decisions, tool calls, token usage, and durations. Every Claude call is logged as a .log.toml file in SoulService/Logs/. Use to inspect the full chain of AI decisions, debug agent behavior, or audit costs.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "description": "Number of recent audit entries to return (default: 10, max: 50)", "default": 10 },
+                    "caller_filter": { "type": "string", "description": "Filter by caller subsystem (e.g. 'workshop', 'soul-build', 'summarize')" },
+                    "include_prompt": { "type": "boolean", "description": "Include full prompt text in results (default: false — prompts can be very large)", "default": false },
+                    "include_response": { "type": "boolean", "description": "Include full response text in results (default: false)", "default": false }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let count = input.get("count").and_then(|v| v.as_u64()).unwrap_or(10).min(50) as usize;
+        let caller_filter = input.get("caller_filter").and_then(|v| v.as_str());
+        let include_prompt = input.get("include_prompt").and_then(|v| v.as_bool()).unwrap_or(false);
+        let include_response = input.get("include_response").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let logs_dir = ctx.space_root.join("SoulService").join("Logs");
+        if !logs_dir.exists() {
+            return ToolResult {
+                tool_name: "query_audit_log".to_string(), tool_use_id: String::new(),
+                success: true,
+                content: "No audit logs found — SoulService/Logs/ does not exist yet.".to_string(),
+                structured_data: Some(serde_json::json!({ "entries": [], "count": 0 })),
+                stream_topic: None,
+            };
+        }
+
+        // Collect .log.toml files, sorted by name (which is timestamp-prefixed)
+        let mut log_files: Vec<std::path::PathBuf> = std::fs::read_dir(&logs_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".log.toml"))
+            .map(|e| e.path())
+            .collect();
+        log_files.sort();
+        log_files.reverse(); // Most recent first
+
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let mut total_tokens_in: u64 = 0;
+        let mut total_tokens_out: u64 = 0;
+        let mut total_duration_ms: u64 = 0;
+
+        for path in log_files {
+            if entries.len() >= count { break; }
+
+            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(doc) = toml::from_str::<toml::Value>(&content) else { continue };
+
+            let call = doc.get("call");
+            let caller = call.and_then(|c| c.get("caller")).and_then(|v| v.as_str()).unwrap_or("");
+
+            // Apply caller filter
+            if let Some(filter) = caller_filter {
+                if !caller.contains(filter) { continue; }
+            }
+
+            let timestamp = call.and_then(|c| c.get("timestamp")).and_then(|v| v.as_str()).unwrap_or("?");
+            let model = call.and_then(|c| c.get("model")).and_then(|v| v.as_str()).unwrap_or("?");
+            let tokens_in = call.and_then(|c| c.get("tokens_input")).and_then(|v| v.as_integer()).unwrap_or(0) as u64;
+            let tokens_out = call.and_then(|c| c.get("tokens_output")).and_then(|v| v.as_integer()).unwrap_or(0) as u64;
+            let duration = call.and_then(|c| c.get("duration_ms")).and_then(|v| v.as_integer()).unwrap_or(0) as u64;
+
+            total_tokens_in += tokens_in;
+            total_tokens_out += tokens_out;
+            total_duration_ms += duration;
+
+            let mut entry = serde_json::json!({
+                "timestamp": timestamp,
+                "model": model,
+                "caller": caller,
+                "tokens_input": tokens_in,
+                "tokens_output": tokens_out,
+                "duration_ms": duration,
+                "file": path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            });
+
+            if include_prompt {
+                let prompt = doc.get("prompt").and_then(|p| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+                let truncated = if prompt.len() > 2000 {
+                    format!("{}...[truncated, {} chars total]", &prompt[..2000], prompt.len())
+                } else {
+                    prompt.to_string()
+                };
+                entry.as_object_mut().unwrap().insert("prompt".to_string(), serde_json::json!(truncated));
+            }
+            if include_response {
+                let response = doc.get("response").and_then(|p| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+                let truncated = if response.len() > 2000 {
+                    format!("{}...[truncated, {} chars total]", &response[..2000], response.len())
+                } else {
+                    response.to_string()
+                };
+                entry.as_object_mut().unwrap().insert("response".to_string(), serde_json::json!(truncated));
+            }
+
+            entries.push(entry);
+        }
+
+        let lines: Vec<String> = entries.iter().map(|e| {
+            format!("  [{}] {} — {} (in:{} out:{} {}ms)",
+                e.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.get("caller").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.get("model").and_then(|v| v.as_str()).unwrap_or("?"),
+                e.get("tokens_input").and_then(|v| v.as_u64()).unwrap_or(0),
+                e.get("tokens_output").and_then(|v| v.as_u64()).unwrap_or(0),
+                e.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            )
+        }).collect();
+
+        let body = if entries.is_empty() {
+            format!("No audit log entries{}", caller_filter.map(|f| format!(" matching caller '{}'", f)).unwrap_or_default())
+        } else {
+            format!(
+                "{} audit log entr{}:\n{}\n\nTotals: {} tokens in, {} tokens out, {:.1}s total duration",
+                entries.len(),
+                if entries.len() == 1 { "y" } else { "ies" },
+                lines.join("\n"),
+                total_tokens_in,
+                total_tokens_out,
+                total_duration_ms as f64 / 1000.0,
+            )
+        };
+
+        ToolResult {
+            tool_name: "query_audit_log".to_string(),
+            tool_use_id: String::new(),
+            success: true,
+            content: body,
+            structured_data: Some(serde_json::json!({
+                "entries": entries,
+                "count": entries.len(),
+                "total_tokens_input": total_tokens_in,
+                "total_tokens_output": total_tokens_out,
+                "total_duration_ms": total_duration_ms,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simulation Control — run, stop, get state
+// ---------------------------------------------------------------------------
+
+pub struct RunSimulationTool;
+
+impl ToolHandler for RunSimulationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "run_simulation",
+            description: "Start or resume the simulation (enter Play mode). Equivalent to pressing the Play button in the IDE. The simulation runs the electrochemistry tick, Rune scripts, physics, and all registered systems. Use with set_sim_value to configure initial conditions before running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "time_scale": { "type": "number", "description": "Time scale multiplier (1.0 = realtime, 10.0 = 10x speed, 0.1 = slow-mo). Default: 1.0", "default": 1.0 },
+                    "duration_s": { "type": "number", "description": "Auto-stop after this many simulation-seconds. Omit for indefinite run." }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: true,
+            stream_topics: &["workshop.simulation.started"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let time_scale = input.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let duration_s = input.get("duration_s").and_then(|v| v.as_f64());
+
+        // Queue the command via sim-commands.jsonl — the engine reads this
+        // on its next frame and transitions PlayModeState accordingly.
+        let cmd = serde_json::json!({
+            "op": "run_simulation",
+            "time_scale": time_scale,
+            "duration_s": duration_s,
+            "queued_at": chrono::Utc::now().to_rfc3339(),
+        });
+        match queue_sim_command(ctx, &cmd) {
+            Ok(()) => ToolResult {
+                tool_name: "run_simulation".to_string(), tool_use_id: String::new(),
+                success: true,
+                content: format!(
+                    "Simulation start queued (time_scale={:.1}x{}).",
+                    time_scale,
+                    duration_s.map(|d| format!(", auto-stop after {:.1}s", d)).unwrap_or_default(),
+                ),
+                structured_data: Some(serde_json::json!({
+                    "action": "run", "time_scale": time_scale, "duration_s": duration_s,
+                })),
+                stream_topic: Some("workshop.simulation.started".to_string()),
+            },
+            Err(e) => ToolResult {
+                tool_name: "run_simulation".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to queue: {}", e),
+                structured_data: None, stream_topic: None,
+            },
+        }
+    }
+}
+
+pub struct StopSimulationTool;
+
+impl ToolHandler for StopSimulationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "stop_simulation",
+            description: "Stop the running simulation (return to Edit mode). Equivalent to pressing the Stop button in the IDE. Simulation state is preserved in watchpoints for post-analysis.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &["workshop.simulation.stopped"],
+        }
+    }
+
+    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let cmd = serde_json::json!({
+            "op": "stop_simulation",
+            "queued_at": chrono::Utc::now().to_rfc3339(),
+        });
+        match queue_sim_command(ctx, &cmd) {
+            Ok(()) => ToolResult {
+                tool_name: "stop_simulation".to_string(), tool_use_id: String::new(),
+                success: true,
+                content: "Simulation stop queued.".to_string(),
+                structured_data: Some(serde_json::json!({ "action": "stop" })),
+                stream_topic: Some("workshop.simulation.stopped".to_string()),
+            },
+            Err(e) => ToolResult {
+                tool_name: "stop_simulation".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to queue: {}", e),
+                structured_data: None, stream_topic: None,
+            },
+        }
+    }
+}
+
+pub struct GetSimulationStateTool;
+
+impl ToolHandler for GetSimulationStateTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "get_simulation_state",
+            description: "Get the current simulation state: play mode (editing/playing/paused), all watchpoint values, simulation time, and snapshot freshness. The single tool for understanding what the simulation is doing right now.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        match read_sim_snapshot(ctx) {
+            Ok(snap) => {
+                let lines: Vec<String> = snap.sim_values.iter()
+                    .map(|(k, v)| format!("  {} = {:.6}", k, v))
+                    .collect();
+                let body = format!(
+                    "Play state: {}\nSnapshot age: {}ms\n{} watchpoint(s):\n{}",
+                    snap.play_state, snap.age_ms, snap.sim_values.len(), lines.join("\n"),
+                );
+                ToolResult {
+                    tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
+                    success: true,
+                    content: body,
+                    structured_data: Some(serde_json::json!({
+                        "play_state": snap.play_state,
+                        "snapshot_age_ms": snap.age_ms,
+                        "watchpoint_count": snap.sim_values.len(),
+                        "sim_values": snap.sim_values,
+                    })),
+                    stream_topic: None,
+                }
+            }
+            Err(e) => ToolResult {
+                tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
+                success: false,
+                content: format!("Runtime snapshot unavailable: {}. Is the engine running?", e),
+                structured_data: None, stream_topic: None,
+            },
+        }
+    }
+}
+
+/// Shared helper — append a JSON command to `<universe>/.eustress/sim-commands.jsonl`.
+/// The engine drains this file on its next frame tick.
+fn queue_sim_command(ctx: &ToolContext, cmd: &serde_json::Value) -> Result<(), String> {
+    let path = ctx.universe_root.join(".eustress").join("sim-commands.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {}", e))?;
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&path)
+        .map_err(|e| format!("open: {}", e))?;
+    writeln!(f, "{}", cmd).map_err(|e| format!("write: {}", e))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Runtime-snapshot reader — feeds the sim-value tools
 // ---------------------------------------------------------------------------
 //

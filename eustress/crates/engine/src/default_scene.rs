@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use eustress_common::plugins::lighting_plugin::SkyboxHandle;
-use eustress_common::classes::{Instance, ClassName, Sky, Atmosphere};
+use eustress_common::classes::{Instance, ClassName};
 use crate::startup::StartupArgs;
 
 /// Plugin to set up the default scene with camera and ground
@@ -109,44 +109,13 @@ pub fn setup_default_scene(
     }
     
     // =========================================================================
-    // LIGHTING ENTITIES - Sky and Atmosphere (always spawn for Explorer)
+    // LIGHTING ENTITIES — spawned dynamically by the file loader from each
+    // Space's Lighting/*.instance.toml files (Sun, Moon, Sky, Atmosphere).
+    // The engine-side hydrate_lighting_entities system (LightingPlugin)
+    // attaches real ECS components (DirectionalLight, SunMarker, etc.)
+    // once the file loader creates the bare Instance entities.
     // =========================================================================
-    
-    // Spawn Sky entity (appears under Lighting in Explorer)
-    commands.spawn((
-        Transform::default(),
-        Visibility::default(),
-        Instance {
-            name: "Sky".to_string(),
-            class_name: ClassName::Sky,
-            archivable: true,
-            id: 0,
-            ..Default::default()
-        },
-        Sky::default(),
-        Name::new("Sky"),
-    ));
-    
-    // Spawn Atmosphere entity (appears under Lighting in Explorer)
-    commands.spawn((
-        Transform::default(),
-        Visibility::default(),
-        Instance {
-            name: "Atmosphere".to_string(),
-            class_name: ClassName::Atmosphere,
-            archivable: true,
-            id: 0,
-            ..Default::default()
-        },
-        Atmosphere::clear_day(),
-        Name::new("Atmosphere"),
-    ));
-    
-    // Note: Sun and Moon entities are spawned by SharedLightingPlugin with DirectionalLight
-    // They include both marker components and class components for full functionality
-    
-    println!("🌤️ Sky and Atmosphere entities spawned for Lighting service");
-    println!("☀️ Sun and Moon are spawned by SharedLightingPlugin with DirectionalLight");
+    println!("☀️ Lighting entities will be loaded from Space's Lighting/ folder");
 }
 
 /// Grid rendering system - 9.80665m tessellation (SI standard gravity)

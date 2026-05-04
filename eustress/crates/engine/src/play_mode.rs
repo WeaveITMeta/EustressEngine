@@ -1530,7 +1530,7 @@ fn handle_embedded_server_start(
         info!("🚀 Starting embedded server on port {}...", server.port);
         
         // Save current scene to temp file
-        let temp_dir = std::env::temp_dir().join("eustress_studio");
+        let temp_dir = std::env::temp_dir().join("eustress_engine");
         if let Err(e) = std::fs::create_dir_all(&temp_dir) {
             error!("Failed to create temp directory: {}", e);
             server.state = EmbeddedServerState::Error;

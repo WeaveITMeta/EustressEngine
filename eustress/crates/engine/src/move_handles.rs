@@ -123,12 +123,21 @@ pub struct MoveHandlesPlugin;
 
 impl Plugin for MoveHandlesPlugin {
     fn build(&self, app: &mut App) {
+        // Run BEFORE Bevy's transform propagation so the gizmo's
+        // `Transform` we write this frame gets its `GlobalTransform`
+        // computed in the same frame the parts do. Scheduling without
+        // this ordering meant the sync either read last-frame's
+        // `GlobalTransform` of selected parts (`PostUpdate` before
+        // propagate) or wrote a `Transform` that wouldn't propagate
+        // until the next frame (`PostUpdate` after propagate) — both
+        // produced the 1-frame gizmo lag the user caught.
         app.add_systems(
             PostUpdate,
             (
                 sync_move_handle_root,   // spawn/despawn + per-frame transform
                 update_handle_colors,    // hover/drag color swap
-            ),
+            )
+                .before(bevy::transform::TransformSystems::Propagate),
         );
     }
 }
@@ -151,12 +160,23 @@ impl Plugin for MoveHandlesPlugin {
 fn sync_move_handle_root(
     mut commands: Commands,
     studio_state: Option<Res<StudioState>>,
+    // Camera still reads `GlobalTransform` — the scene camera's world
+    // transform doesn't change via `Transform` on the same frame
+    // (handled separately by camera_controller), so reading the
+    // already-propagated global value is correct AND avoids needing
+    // the caller to walk the camera hierarchy here.
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
+    // Selected parts: read LOCAL `Transform` (not `GlobalTransform`)
+    // so the gizmo picks up this frame's `handle_move_interaction`
+    // write without waiting for the next propagate. Works for parts
+    // parented to identity-transform services/folders, which is every
+    // case the Move tool operates on. A non-identity ancestor would
+    // require reading the propagated global; not applicable here.
     selected: Query<
-        (Entity, &GlobalTransform, Option<&BasePart>),
+        (Entity, &Transform, Option<&BasePart>),
         With<Selected>,
     >,
-    mut root_query: Query<&mut Transform, With<MoveHandleRoot>>,
+    mut root_query: Query<&mut Transform, (With<MoveHandleRoot>, Without<Selected>)>,
     existing_root: Query<Entity, With<MoveHandleRoot>>,
 ) {
     let Some(studio_state) = studio_state else { return };
@@ -183,7 +203,7 @@ fn sync_move_handle_root(
 
     // Compute group bounds over ALL selected entities.
     let Some((center, active_rotation)) = compute_group_frame(
-        selected.iter().map(|(e, gt, bp)| (e, gt, bp)),
+        selected.iter().map(|(e, t, bp)| (e, t, bp)),
     ) else {
         return;
     };
@@ -227,15 +247,14 @@ fn sync_move_handle_root(
 /// ordering we'd need a separate "ActiveSelection" resource; deferred
 /// to Phase 1.
 fn compute_group_frame<'a>(
-    iter: impl Iterator<Item = (Entity, &'a GlobalTransform, Option<&'a BasePart>)>,
+    iter: impl Iterator<Item = (Entity, &'a Transform, Option<&'a BasePart>)>,
 ) -> Option<(Vec3, Quat)> {
     let mut bounds_min = Vec3::splat(f32::MAX);
     let mut bounds_max = Vec3::splat(f32::MIN);
     let mut count = 0;
     let mut last_rotation = Quat::IDENTITY;
 
-    for (_entity, gt, base_part) in iter {
-        let t = gt.compute_transform();
+    for (_entity, t, base_part) in iter {
         let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
         let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);

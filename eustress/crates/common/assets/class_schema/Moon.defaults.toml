@@ -1,0 +1,11 @@
+# Moon — Moon with phases and night lighting (child of Lighting service)
+# Bevy: Custom moon shader / light contribution
+
+[moon]
+brightness = 0.25
+phase = 0
+color = [255, 255, 255]
+
+[metadata]
+class_name = "Moon"
+archivable = true

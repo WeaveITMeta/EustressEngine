@@ -12,12 +12,12 @@
 use bevy::prelude::*;
 use bevy::pbr::{Atmosphere as BevyAtmosphere, ScatteringMedium, DistanceFog, FogFalloff};
 use bevy::core_pipeline::Skybox;
-use bevy::light::{GlobalAmbientLight, light_consts::lux, CascadeShadowConfigBuilder, VolumetricLight, SunDisk};
+use bevy::light::{GlobalAmbientLight, SunDisk};
 use bevy::render::render_resource::{TextureViewDescriptor, TextureViewDimension, Extent3d, TextureDimension, TextureFormat};
 use tracing::info;
 
 use crate::services::lighting::{LightingService, Sun as SunMarker, Moon as MoonMarker, FillLight, EustressAtmosphere, AtmosphereRenderingMode};
-use crate::classes::{Sky, Sun as SunClass, Moon as MoonClass, Instance, ClassName};
+use crate::classes::{Sky, Sun as SunClass, Moon as MoonClass};
 
 // ============================================================================
 // Plugin
@@ -133,80 +133,20 @@ fn setup_lighting(
     let handle = create_procedural_skybox(&mut images, &lighting);
     skybox_handle.handle = Some(handle);
 
-    // Shadow cascade configuration
-    let cascade_shadow_config = CascadeShadowConfigBuilder {
-        num_cascades: 4,
-        minimum_distance: 0.1,
-        maximum_distance: 2048.0,
-        first_cascade_far_bound: 16.0,
-        overlap_proportion: 0.3,
-        ..default()
-    }
-    .build();
-
-    // Sun — uses RAW_SUNLIGHT illuminance for physically correct atmosphere scattering
-    // SunDisk renders the visible sun disc in Bevy's Atmosphere shader
-    let sun_dir = lighting.sun_direction();
-    let sun_class = SunClass::default();
-    commands.spawn((
-        DirectionalLight {
-            color: arr_to_color(lighting.sun_color),
-            illuminance: lux::RAW_SUNLIGHT,
-            shadows_enabled: true,
-            shadow_depth_bias: 0.02,
-            shadow_normal_bias: 1.8,
-            ..default()
-        },
-        SunDisk {
-            angular_size: sun_class.angular_size.to_radians(),
-            intensity: 1.0,
-        },
-        Transform::from_translation(sun_dir * 100.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
-        Visibility::default(),
-        VolumetricLight, // God rays from sun
-        cascade_shadow_config,
-        SunMarker,
-        sun_class,
-        Instance {
-            name: "Sun".to_string(),
-            class_name: ClassName::Star,
-            archivable: true,
-            ai: false,
-            uuid: String::new(),
-            id: 0,
-        },
-        Name::new("Sun"),
-    ));
-
-    // Moon — dimmer directional light opposite sun
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.7, 0.75, 0.9),
-            illuminance: 500.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(50.0, 80.0, -30.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
-        Visibility::default(),
-        MoonMarker,
-        MoonClass::default(),
-        Instance {
-            name: "Moon".to_string(),
-            class_name: ClassName::Moon,
-            archivable: true,
-            ai: false,
-            uuid: String::new(),
-            id: 0,
-        },
-        Name::new("Moon"),
-    ));
+    // Sun and Moon entities are NOT spawned here. Each Space owns its
+    // lighting via Lighting/*.instance.toml files. The file loader spawns
+    // bare Instance entities; the engine-side hydrate_lighting_entities
+    // system attaches DirectionalLight, SunMarker, SunClass, MoonMarker,
+    // MoonClass, cascade shadows, SunDisk, etc. on the next Update frame.
+    //
+    // This avoids duplicates on Space switch (old entities are despawned,
+    // new TOMLs are loaded, hydration fires) and lets each Space carry
+    // its own lighting configuration (time of day, latitude, etc.).
 
     // No fill lights — Bevy's Atmosphere + Environment Map handles ambient
     commands.insert_resource(GlobalAmbientLight::NONE);
 
-    info!("✅ Bevy Atmosphere lighting setup complete");
+    info!("✅ Skybox + ambient setup complete (lighting entities loaded from Space)");
 }
 
 /// Update sun position and properties based on LightingService

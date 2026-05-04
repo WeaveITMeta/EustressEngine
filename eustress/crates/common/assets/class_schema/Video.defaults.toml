@@ -1,0 +1,41 @@
+# Video — Imported video asset, rendered as a 3D quad.
+#
+# Until a decoder integration lands (`ffmpeg-next` / `gstreamer` /
+# `bevy_video` — TBD), spawned Video entities render as a mid-grey
+# placeholder quad with the filename rendered on it via the same
+# Slint-on-quad pipeline that drives `BillboardGui`. The
+# `[video.autoplay]` / `looped` / `volume` knobs are persisted now so
+# imported scenes keep their intent through to the eventual decoder.
+#
+# Folder layout written by File→Import:
+#
+#   StarterGui/MyClip/
+#     _instance.toml          ← this template, populated
+#
+# Source media file is copied to `<Universe>/assets/videos/MyClip.mp4`.
+
+[metadata]
+class_name = "Video"
+archivable = true
+
+[transform]
+position = [0.0, 3.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [6.0, 3.375, 1.0]   # 16:9 default
+
+[asset]
+# Universe-relative path. Rewritten by the import pipeline.
+path = ""
+
+[video]
+size = [6.0, 3.375]
+color = [1.0, 1.0, 1.0, 1.0]
+transparency = 0.0
+# Begin playback as soon as the entity spawns. Currently a no-op —
+# placeholder rendering doesn't tick frames — but the field is
+# preserved for the decoder integration.
+autoplay = true
+# Restart from frame 0 when the clip ends.
+looped = true
+# Audio gain in [0.0, 1.0]. Placeholder ignores; decoder will honour.
+volume = 0.5

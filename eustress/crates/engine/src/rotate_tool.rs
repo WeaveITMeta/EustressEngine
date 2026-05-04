@@ -76,7 +76,14 @@ fn draw_rotate_gizmos(
     state: Res<RotateToolState>,
     query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: Query<&Children>,
-    child_transforms: Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
+    // `Without<bevy::ui::Node>` — same reasoning as the move tool:
+    // UI children (TextLabel inside a BillboardGui, etc.) have an
+    // origin-defaulted GlobalTransform and would pull the rotate
+    // ring toward world-origin if included.
+    child_transforms: Query<
+        (&GlobalTransform, Option<&crate::classes::BasePart>),
+        (Without<Selected>, Without<bevy::ui::Node>),
+    >,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
 ) {
     if !state.active || query.is_empty() { return; }
@@ -532,7 +539,10 @@ fn angle_on_ring(ray: &Ray3d, center: Vec3, axis: Axis3d, rotation: Quat) -> f32
 fn compute_group_center_and_extent(
     query: &Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
     children_query: &Query<&Children>,
-    child_transforms: &Query<(&GlobalTransform, Option<&crate::classes::BasePart>), Without<Selected>>,
+    child_transforms: &Query<
+        (&GlobalTransform, Option<&crate::classes::BasePart>),
+        (Without<Selected>, Without<bevy::ui::Node>),
+    >,
 ) -> (Vec3, Vec3) {
     let mut bmin = Vec3::splat(f32::MAX);
     let mut bmax = Vec3::splat(f32::MIN);

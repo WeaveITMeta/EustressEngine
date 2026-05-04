@@ -7,7 +7,7 @@ use bevy::render::RenderPlugin;
 use bevy::gltf::{GltfExtras, GltfSceneExtras, GltfMeshExtras, GltfMaterialExtras};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin, EntityCountDiagnosticsPlugin};
 // Window icon: embedded in exe via winres (build.rs), runtime set in setup_slint_overlay
-use eustress_common::plugins::lighting_plugin::SharedLightingPlugin;
+use crate::plugins::lighting_plugin::LightingPlugin;
 use eustress_common::services::{TeamServicePlugin, PlayerService};
 
 #[cfg(feature = "streaming")]
@@ -82,6 +82,8 @@ mod part_selection;
 mod transform_space;
 mod clipboard;
 mod material_sync;
+mod lock_tool;
+mod video;
 mod play_mode;          // Play mode with character spawning
 mod play_mode_runtime;  // Client-like runtime systems for play mode
 mod play_server;        // In-process server + client for Play Server mode
@@ -278,8 +280,12 @@ fn main() {
         })
         // Material sync
         .add_plugins(MaterialSyncPlugin)
-        // Shared lighting
-        .add_plugins(SharedLightingPlugin)
+        .add_plugins(lock_tool::LockToolPlugin)
+        .add_plugins(video::VideoPlugin)
+        // Lighting — SharedLightingPlugin (sun/ambient/skybox) + engine-side
+        // hydrate_lighting_entities (attaches DirectionalLight, markers, etc.
+        // to file-loaded Lighting/ Instance entities on each Space switch).
+        .add_plugins(LightingPlugin)
         // Analytical sun/moon disc shader (resolution-independent, replaces cubemap baking)
         .add_plugins(shaders::SunDiscPlugin)
         // Default scene

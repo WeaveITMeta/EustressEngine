@@ -1,0 +1,21 @@
+# Humanoid — Character controller (child of Model)
+# Avian 0.6: MoveAndSlide + KCC
+
+[humanoid]
+health = 100.0
+max_health = 100.0
+walk_speed = 16.0
+jump_power = 50.0
+jump_height = 7.2
+auto_jump_enabled = true
+auto_rotate = true
+max_slope_angle = 89.0
+hip_height = 2.0
+use_jump_power = true
+display_name = ""
+name_display_distance = 100.0
+health_display_distance = 100.0
+
+[metadata]
+class_name = "Humanoid"
+archivable = true

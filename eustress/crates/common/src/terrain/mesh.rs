@@ -12,6 +12,108 @@ use bevy::asset::RenderAssetUsages;
 use noise::{NoiseFn, Perlin, Fbm, MultiFractal};
 use super::{TerrainConfig, TerrainData};
 
+/// Pre-allocated noise generators for terrain height sampling.
+/// Created once per chunk instead of once per vertex.
+struct TerrainNoiseContext {
+    perlin: Perlin,
+    perlin3: Perlin,
+    base_terrain: Fbm<Perlin>,
+    ridge_perlin: Perlin,
+    height_scale: f32,
+}
+
+impl TerrainNoiseContext {
+    fn new(seed: u32, height_scale: f32) -> Self {
+        Self {
+            perlin: Perlin::new(seed),
+            perlin3: Perlin::new(seed + 2000),
+            base_terrain: Fbm::new(seed + 100)
+                .set_octaves(4)
+                .set_frequency(0.001)
+                .set_lacunarity(2.0)
+                .set_persistence(0.5),
+            ridge_perlin: Perlin::new(seed + 3000),
+            height_scale,
+        }
+    }
+
+    /// Sample height at a world position using cached noise generators
+    fn sample_height(&self, x: f32, z: f32) -> f32 {
+        // Layer 1: Continental/Biome mask (very large scale)
+        let continent_freq = 0.0003;
+        let continent = self.perlin.get([x as f64 * continent_freq, z as f64 * continent_freq]) as f32;
+        let continent = (continent + 1.0) * 0.5;
+
+        // Layer 2: Base terrain shape (medium scale)
+        let base = self.base_terrain.get([x as f64, z as f64]) as f32;
+
+        // Layer 3: Mountain ridges (using ridged multifractal)
+        let mountain_height = self.sample_mountain_ridges(x, z);
+
+        // Layer 4: Fine detail (small scale noise)
+        let detail_freq = 0.008;
+        let detail = self.perlin3.get([x as f64 * detail_freq, z as f64 * detail_freq]) as f32 * 0.1;
+
+        // Combine layers based on biome
+        let mountain_mask = (continent * 1.5 - 0.3).clamp(0.0, 1.0);
+        let mountain_mask = mountain_mask * mountain_mask;
+        let plains_mask = 1.0 - mountain_mask;
+        let hills_mask = (1.0 - (mountain_mask - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+
+        let mut height = 0.0;
+
+        // Flat plains with gentle undulation
+        let plains_height = base * 0.05 + detail * 0.5;
+        height += plains_height * plains_mask;
+
+        // Rolling hills
+        let hills_height = base * 0.15 + detail;
+        height += hills_height * hills_mask * 0.5;
+
+        // Mountains with ridges
+        let mountains_height = mountain_height * 0.8 + base * 0.2;
+        height += mountains_height * mountain_mask;
+
+        // Add subtle detail everywhere
+        height += detail * 0.3;
+
+        // Ensure some flat areas at sea level
+        if height < 0.02 && plains_mask > 0.7 {
+            height = height * 0.3;
+        }
+
+        height * self.height_scale
+    }
+
+    /// Generate realistic mountain ridges using ridged multifractal noise
+    fn sample_mountain_ridges(&self, x: f32, z: f32) -> f32 {
+        let mut height = 0.0;
+        let mut amplitude = 1.0;
+        let mut frequency = 0.0008_f32;
+        let mut weight = 1.0;
+
+        for i in 0..5 {
+            let noise = self.ridge_perlin.get([
+                x as f64 * frequency as f64 + i as f64 * 100.0,
+                z as f64 * frequency as f64 + i as f64 * 100.0
+            ]) as f32;
+
+            let mut ridge = 1.0 - noise.abs();
+            ridge = ridge * ridge;
+            ridge *= weight;
+            weight = ridge.clamp(0.0, 1.0);
+
+            height += ridge * amplitude;
+            amplitude *= 0.5;
+            frequency *= 2.2;
+        }
+
+        height = height / 2.0;
+        height = height.powf(1.3);
+        height
+    }
+}
+
 /// Generate mesh for a terrain chunk
 pub fn generate_chunk_mesh(
     chunk_pos: IVec2,
@@ -31,6 +133,12 @@ pub fn generate_chunk_mesh(
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(vertex_count);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(vertex_count);
     
+    // Create noise context once per chunk (NOT per vertex)
+    let noise_context = TerrainNoiseContext::new(seed, height_scale);
+    let use_procedural = data.height_cache.is_empty();
+    let total_chunks_x = (config.chunks_x * 2 + 1) as f32;
+    let total_chunks_z = (config.chunks_z * 2 + 1) as f32;
+
     // Height sampling
     for z in 0..=resolution {
         for x in 0..=resolution {
@@ -42,13 +150,10 @@ pub fn generate_chunk_mesh(
             let world_z = chunk_pos.y as f32 * size + v * size;
             
             // Sample height (procedural or from data)
-            let height = if data.height_cache.is_empty() {
-                // Procedural height using multi-octave Perlin noise
-                sample_perlin_height(world_x, world_z, seed, height_scale)
+            let height = if use_procedural {
+                noise_context.sample_height(world_x, world_z)
             } else {
                 // Sample from cached heightmap (world UV)
-                let total_chunks_x = (config.chunks_x * 2 + 1) as f32;
-                let total_chunks_z = (config.chunks_z * 2 + 1) as f32;
                 let world_u = ((chunk_pos.x as f32 + u + config.chunks_x as f32) / total_chunks_x).clamp(0.0, 1.0);
                 let world_v = ((chunk_pos.y as f32 + v + config.chunks_z as f32) / total_chunks_z).clamp(0.0, 1.0);
                 data.sample_height(world_u, world_v) * height_scale
@@ -107,125 +212,39 @@ pub fn generate_chunk_mesh(
     meshes.add(mesh)
 }
 
-/// Sample height using realistic terrain generation
-/// Creates varied terrain with plains, rolling hills, and mountain ranges
+/// Legacy wrapper — kept for external callers that don't have a TerrainNoiseContext.
+/// Internally creates a one-off context. For bulk mesh generation, prefer
+/// TerrainNoiseContext::sample_height() which amortises the allocation cost.
+#[allow(dead_code)]
 fn sample_perlin_height(x: f32, z: f32, seed: u32, scale: f32) -> f32 {
-    let perlin = Perlin::new(seed);
-    let perlin2 = Perlin::new(seed + 1000);
-    let perlin3 = Perlin::new(seed + 2000);
-    
-    // ==========================================================
-    // Layer 1: Continental/Biome mask (very large scale)
-    // Determines where mountains vs plains are located
-    // ==========================================================
-    let continent_freq = 0.0003;  // Very large features
-    let continent = perlin.get([x as f64 * continent_freq, z as f64 * continent_freq]) as f32;
-    let continent = (continent + 1.0) * 0.5;  // 0 to 1
-    
-    // Create distinct biome regions (reserved for future biome-based terrain)
-    let biome_freq = 0.0006;
-    let _biome = perlin2.get([x as f64 * biome_freq, z as f64 * biome_freq]) as f32;
-    let _biome = (_biome + 1.0) * 0.5;
-    
-    // ==========================================================
-    // Layer 2: Base terrain shape (medium scale)
-    // ==========================================================
-    let base_freq = 0.001;
-    let base_terrain: Fbm<Perlin> = Fbm::new(seed + 100)
-        .set_octaves(4)
-        .set_frequency(base_freq)
-        .set_lacunarity(2.0)
-        .set_persistence(0.5);
-    let base = base_terrain.get([x as f64, z as f64]) as f32;
-    
-    // ==========================================================
-    // Layer 3: Mountain ridges (using ridged multifractal)
-    // ==========================================================
-    let mountain_height = sample_mountain_ridges(x, z, seed + 3000);
-    
-    // ==========================================================
-    // Layer 4: Fine detail (small scale noise)
-    // ==========================================================
-    let detail_freq = 0.008;
-    let detail = perlin3.get([x as f64 * detail_freq, z as f64 * detail_freq]) as f32 * 0.1;
-    
-    // ==========================================================
-    // Combine layers based on biome
-    // ==========================================================
-    
-    // Mountain influence: high where continent and biome align
-    let mountain_mask = (continent * 1.5 - 0.3).clamp(0.0, 1.0);
-    let mountain_mask = mountain_mask * mountain_mask;  // Sharper falloff
-    
-    // Plains are where mountains aren't
-    let plains_mask = 1.0 - mountain_mask;
-    
-    // Rolling hills in transition zones
-    let hills_mask = (1.0 - (mountain_mask - 0.5).abs() * 2.0).clamp(0.0, 1.0);
-    
-    // Combine terrain types
-    let mut height = 0.0;
-    
-    // Flat plains with gentle undulation
-    let plains_height = base * 0.05 + detail * 0.5;
-    height += plains_height * plains_mask;
-    
-    // Rolling hills
-    let hills_height = base * 0.15 + detail;
-    height += hills_height * hills_mask * 0.5;
-    
-    // Mountains with ridges
-    let mountains_height = mountain_height * 0.8 + base * 0.2;
-    height += mountains_height * mountain_mask;
-    
-    // Add subtle detail everywhere
-    height += detail * 0.3;
-    
-    // Ensure some flat areas at sea level
-    if height < 0.02 && plains_mask > 0.7 {
-        height = height * 0.3;  // Flatten low plains
-    }
-    
-    height * scale
+    let context = TerrainNoiseContext::new(seed, scale);
+    context.sample_height(x, z)
 }
 
-/// Generate realistic mountain ridges using ridged multifractal noise
+/// Legacy wrapper for mountain ridge sampling.
+/// Prefer TerrainNoiseContext::sample_mountain_ridges() for bulk generation.
+#[allow(dead_code)]
 fn sample_mountain_ridges(x: f32, z: f32, seed: u32) -> f32 {
     let perlin = Perlin::new(seed);
-    
     let mut height = 0.0;
     let mut amplitude = 1.0;
-    let mut frequency = 0.0008;  // Start with large mountain ranges
+    let mut frequency = 0.0008_f32;
     let mut weight = 1.0;
-    
-    // Ridged multifractal - creates sharp mountain ridges
     for i in 0..5 {
         let noise = perlin.get([
             x as f64 * frequency as f64 + i as f64 * 100.0,
-            z as f64 * frequency as f64 + i as f64 * 100.0
+            z as f64 * frequency as f64 + i as f64 * 100.0,
         ]) as f32;
-        
-        // Ridged: absolute value creates valleys, invert for peaks
         let mut ridge = 1.0 - noise.abs();
-        ridge = ridge * ridge;  // Square for sharper ridges
-        
-        // Weight by previous octave for more natural look
+        ridge = ridge * ridge;
         ridge *= weight;
         weight = ridge.clamp(0.0, 1.0);
-        
         height += ridge * amplitude;
-        
         amplitude *= 0.5;
-        frequency *= 2.2;  // Slightly higher lacunarity for mountains
+        frequency *= 2.2;
     }
-    
-    // Normalize and shape
-    height = height / 2.0;  // Normalize roughly to 0-1
-    
-    // Apply power curve for more dramatic peaks
-    height = height.powf(1.3);
-    
-    height
+    height = height / 2.0;
+    height.powf(1.3)
 }
 
 /// Fast hash-based noise fallback (for no-deps mode or quick sampling)

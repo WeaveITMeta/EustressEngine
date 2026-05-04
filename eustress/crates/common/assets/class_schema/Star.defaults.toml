@@ -1,0 +1,13 @@
+# Star — Sun celestial body with day/night cycle (child of Lighting service)
+# Bevy: DirectionalLight + custom sky rotation
+
+[star]
+brightness = 1.0
+geographic_latitude = 41.733
+clock_time = 14.0
+ambient = [128, 128, 128]
+color = [255, 255, 255]
+
+[metadata]
+class_name = "Star"
+archivable = true

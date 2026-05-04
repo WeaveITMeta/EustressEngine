@@ -45,12 +45,12 @@ impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
             chunk_size: 64.0,
-            chunk_resolution: 64,
-            chunks_x: 4,
-            chunks_z: 4,
+            chunk_resolution: 32,
+            chunks_x: 3,
+            chunks_z: 3,
             lod_levels: 4,
-            lod_distances: vec![100.0, 200.0, 400.0, 800.0],
-            view_distance: 1000.0,
+            lod_distances: vec![64.0, 128.0, 256.0, 512.0],
+            view_distance: 512.0,
             height_scale: 50.0,
             seed: 42,
         }

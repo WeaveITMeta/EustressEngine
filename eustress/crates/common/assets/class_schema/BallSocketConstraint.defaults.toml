@@ -1,0 +1,13 @@
+# BallSocketConstraint — Free rotation around a point (ball-and-socket)
+# Avian 0.6: SphericalJoint
+
+[constraint]
+enabled = true
+attachment0 = ""
+attachment1 = ""
+limits_enabled = false
+upper_angle = 45.0
+
+[metadata]
+class_name = "BallSocketConstraint"
+archivable = true

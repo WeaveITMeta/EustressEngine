@@ -1,0 +1,13 @@
+# Decal — Surface texture overlay (child of BasePart)
+# Bevy: Custom decal material on face
+
+[decal]
+texture = ""
+color = [255, 255, 255]
+transparency = 0.0
+face = "Front"
+z_index = 0
+
+[metadata]
+class_name = "Decal"
+archivable = true

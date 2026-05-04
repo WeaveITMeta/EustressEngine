@@ -433,6 +433,7 @@ pub mod handlers {
             universe_root,
             user_id,
             username,
+            luau_executor: None,
         };
 
         let Some(registry) =

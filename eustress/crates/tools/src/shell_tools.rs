@@ -19,8 +19,8 @@ use std::process::{Command, Stdio};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const DEFAULT_TIMEOUT_S: u64 = 60;
-const MAX_TIMEOUT_S: u64 = 600;
+const DEFAULT_TIMEOUT_S: u64 = 300;
+const MAX_TIMEOUT_S: u64 = 3000;
 const MAX_OUTPUT_BYTES: usize = 16_384;
 
 fn err_result(msg: String) -> ToolResult {
@@ -63,7 +63,7 @@ impl ToolHandler for RunBashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "run_bash",
-            description: "Execute a bash command. The default working directory is the Universe root. Captures combined stdout+stderr and returns the exit code. REQUIRES USER APPROVAL for every call.\n\nExample — generate a 3D object via the Roblox Cube3D Hugging Face Space:\n  1. POST the prompt:\n     curl -X POST https://roblox-cube3d-interactive.hf.space/gradio_api/call/handle_text_prompt -s -H \"Content-Type: application/json\" -d '{\"data\":[\"refrigerator\", false, 0.1, 0.1, 0.1, true]}' | awk -F'\\\"' '{print $4}'\n     → returns an EVENT_ID\n  2. Stream the result:\n     curl -N https://roblox-cube3d-interactive.hf.space/gradio_api/call/handle_text_prompt/<EVENT_ID>\n     → streams SSE events; the final `data:` line contains JSON with a URL to the generated .glb\n  3. Download the .glb into the target Space:\n     curl -L -o \"Space1/Workspace/Fridge/Fridge.glb\" \"<glb_url>\"\n  4. Write an `_instance.toml` pointing at the .glb with the desired spawn position (e.g. in front of the camera — read `.eustress/runtime-snapshot.json` to get the camera transform).\n\nUse this tool whenever there's no first-class wrapper for the operation. Prefer dedicated tools (read_file, write_file, list_directory, etc.) when they fit — they don't require approval.",
+            description: "Execute a bash command. The default working directory is the Universe root. Captures combined stdout+stderr and returns the exit code. REQUIRES USER APPROVAL for every call. Default timeout is 300s (5 min), max 900s (15 min).\n\nGradio API pattern (Hugging Face Spaces, etc.) — TWO-STEP async, NEVER combine into one command:\n  Step 1 — Submit: POST to the Gradio endpoint with JSON payload. Use timeout_seconds=60.\n           Returns JSON with an event_id.\n  Step 2 — Poll: GET the event_id URL. Use timeout_seconds=600 (generation can take minutes).\n           Streams SSE; extract the result URL from the last `data:` line.\n  Step 3 — Download: curl -L -o to save the artifact. Use timeout_seconds=180.\n  RULES: Always use --connect-timeout 15 --max-time <appropriate> on every curl. Extract event_id between steps — never pipe step 1 into step 2.\n\nUse this tool whenever there's no first-class wrapper for the operation. Prefer dedicated tools (read_file, write_file, list_directory, etc.) when they fit — they don't require approval.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -73,13 +73,13 @@ impl ToolHandler for RunBashTool {
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Working directory, relative to the Universe root. Empty or omitted → Universe root itself. Must resolve inside the Universe sandbox (no `..`). Example: \"Space1/Workspace\"."
+                        "description": "Working directory, relative to the Universe root. Empty or omitted → Universe root itself. Must resolve inside the Universe sandbox (no `..`)."
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Hard kill timeout. Default 60s, capped at 600s. The process is terminated if it exceeds this.",
+                        "description": "Hard kill timeout in seconds. Default 300s (5 min), max 3000s (50 min). Set generously for long-running tasks like mesh generation polling. The process is killed if it exceeds this.",
                         "minimum": 1,
-                        "maximum": 600
+                        "maximum": 3000
                     }
                 },
                 "required": ["command"]

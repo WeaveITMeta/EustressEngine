@@ -1,0 +1,11 @@
+# WeldConstraint — Rigidly joins two BaseParts
+# Avian 0.6: FixedJoint
+
+[constraint]
+enabled = true
+part0 = ""
+part1 = ""
+
+[metadata]
+class_name = "WeldConstraint"
+archivable = true

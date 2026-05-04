@@ -364,6 +364,7 @@ export component Ribbon inherits Rectangle {
     callback on-open-scene();
     callback on-save-scene();
     callback on-save-scene-as();
+    callback on-import-asset();
     callback on-publish-universe();
     callback on-publish-space();
     callback on-exit();
@@ -997,6 +998,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownHeader { label: "DOCUMENTATION"; }
                                 DropdownItem { label: "Documentation"; clicked => { root.on-open-url("https://docs.eustress.dev"); } }
                                 DropdownItem { label: "API Browser"; clicked => { root.on-menu-action("help:api-browser"); } }
+                                DropdownItem { label: "Services Browser"; clicked => { root.on-menu-action("help:services-browser"); } }
                                 DropdownItem { label: "API Reference (Web)"; clicked => { root.on-open-url("https://docs.eustress.dev/api"); } }
                                 DropdownItem { label: "Tutorials"; clicked => { root.on-open-url("https://docs.eustress.dev/tutorials"); } }
                                 DropdownItem { label: "Soul Scripting Guide"; clicked => { root.on-open-url("https://docs.eustress.dev/soul"); } }
@@ -1723,8 +1725,8 @@ export component Ribbon inherits Rectangle {
                 
                 for tab-item in [
                     { name: "Home",      id: "home",      color: #808080 },
-                    { name: "CAD",       id: "cad",       color: #00bcd4 },  // brand cyan — CAD is the parametric/smart-edit workflow
                     { name: "Model",     id: "model",     color: #6495ed },
+                    { name: "Drafting",  id: "cad",       color: #cc3333 },  // red — Drafting is the parametric/smart-edit workflow
                     { name: "UI",        id: "ui",        color: #00A2FF },
                     { name: "Terrain",   id: "terrain",   color: #3cb371 },
                     { name: "Test",      id: "test",      color: #ff8c00 },
@@ -1790,6 +1792,7 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/new-file.svg"); label: "New"; shortcut: root.shortcut-new; tooltip: "New Space"; tint: #64b5f6; clicked => { root.on-new-scene(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; shortcut: root.shortcut-open; tooltip: "Open File"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; shortcut: root.shortcut-save; tooltip: "Save Space"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import image or video into Universe assets"; tint: #81c784; clicked => { root.on-import-asset(); } }
                 }
                 GroupDivider {}
 

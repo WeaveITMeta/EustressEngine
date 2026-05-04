@@ -31,6 +31,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<WatchPointRegistry>()
             .init_resource::<BreakPointRegistry>()
             .init_resource::<ActiveRecording>()
+            .init_resource::<TelemetryWriterState>()
             .register_type::<SimulationClock>()
             .register_type::<SimulationState>()
             // Sync simulation state with play mode transitions
@@ -38,15 +39,26 @@ impl Plugin for SimulationPlugin {
             .add_systems(OnEnter(PlayModeState::Playing), register_battery_watchpoints)
             .add_systems(OnEnter(PlayModeState::Paused), on_play_pause)
             .add_systems(OnEnter(PlayModeState::Editing), on_play_stop)
+            // Drain MCP sim-commands.jsonl every frame (any state)
+            .add_systems(PreUpdate, drain_sim_commands)
             // Advance simulation clock when playing
             .add_systems(
                 PreUpdate,
-                advance_simulation_clock.run_if(in_state(PlayModeState::Playing)),
+                advance_simulation_clock
+                    .run_if(in_state(PlayModeState::Playing))
+                    .after(drain_sim_commands),
             )
             // Record watchpoint values + publish to stream each frame
             .add_systems(
                 PostUpdate,
                 record_and_stream_watchpoints.run_if(in_state(PlayModeState::Playing)),
+            )
+            // Write telemetry.jsonl for tail_telemetry MCP tool (1 Hz)
+            .add_systems(
+                PostUpdate,
+                write_telemetry_log
+                    .run_if(in_state(PlayModeState::Playing))
+                    .after(record_and_stream_watchpoints),
             );
     }
 }
@@ -395,4 +407,164 @@ fn record_and_stream_watchpoints(
             }
         }
     }
+}
+
+// ============================================================================
+// MCP Sim-Command Drain — reads sim-commands.jsonl written by MCP tools
+// ============================================================================
+
+/// Drain `<universe>/.eustress/sim-commands.jsonl` each frame.
+///
+/// MCP tools (`run_simulation`, `stop_simulation`, `set_sim_value`)
+/// append JSON lines to this file. The engine reads and truncates it
+/// every frame, translating commands into ECS state mutations.
+///
+/// This system runs in ANY play state so `run_simulation` can be
+/// issued from Edit mode and `stop_simulation` from Playing mode.
+fn drain_sim_commands(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut sim_values_res: ResMut<SimValuesResource>,
+    mut clock: ResMut<SimulationClock>,
+    mut next_play_state: ResMut<NextState<PlayModeState>>,
+) {
+    let Some(sr) = space_root.as_deref() else { return };
+
+    // Walk up to Universe root (parent of Spaces/)
+    let universe = {
+        let mut cur = sr.0.clone();
+        let mut found = None;
+        for _ in 0..16 {
+            if cur.join("Spaces").is_dir() {
+                found = Some(cur.clone());
+                break;
+            }
+            if !cur.pop() { break; }
+        }
+        match found {
+            Some(u) => u,
+            None => return,
+        }
+    };
+
+    let path = universe.join(".eustress").join("sim-commands.jsonl");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return,
+    };
+
+    // Truncate immediately so commands aren't re-processed on next frame
+    let _ = std::fs::write(&path, "");
+
+    for line in content.lines() {
+        let Ok(cmd) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let op = cmd.get("op").and_then(|v| v.as_str()).unwrap_or("");
+
+        match op {
+            "set_sim_value" => {
+                if let (Some(key), Some(value)) = (
+                    cmd.get("key").and_then(|v| v.as_str()),
+                    cmd.get("value").and_then(|v| v.as_f64()),
+                ) {
+                    sim_values_res.0.insert(key.to_string(), value);
+                    // Also write to thread-local so Rune scripts see it
+                    crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
+                        sv.borrow_mut().insert(key.to_string(), value);
+                    });
+                    info!("MCP: set_sim_value({} = {})", key, value);
+                }
+            }
+            "run_simulation" => {
+                if let Some(scale) = cmd.get("time_scale").and_then(|v| v.as_f64()) {
+                    clock.set_time_scale(scale);
+                }
+                next_play_state.set(PlayModeState::Playing);
+                info!("MCP: run_simulation (time_scale={:.1}x)", clock.time_scale);
+            }
+            "stop_simulation" => {
+                next_play_state.set(PlayModeState::Editing);
+                info!("MCP: stop_simulation");
+            }
+            _ => {
+                warn!("MCP: unknown sim command op '{}'", op);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Telemetry Writer — appends to telemetry.jsonl for tail_telemetry MCP tool
+// ============================================================================
+
+/// Throttle state for the telemetry log writer.
+#[derive(Resource)]
+pub struct TelemetryWriterState {
+    last_write: std::time::Instant,
+    interval: std::time::Duration,
+}
+
+impl Default for TelemetryWriterState {
+    fn default() -> Self {
+        Self {
+            last_write: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            interval: std::time::Duration::from_secs(1), // 1 Hz
+        }
+    }
+}
+
+/// Write one JSONL line per second to `<universe>/.eustress/telemetry.jsonl`.
+///
+/// Each line: `{ "t": "<rfc3339>", "values": { "key": f64, ... } }`
+///
+/// The file is append-only during a simulation run. It grows unbounded
+/// (acceptable for alpha — a future rotation/compaction system will cap
+/// it at ~10 MB). The `tail_telemetry` MCP tool reads the last N lines.
+fn write_telemetry_log(
+    mut state: ResMut<TelemetryWriterState>,
+    sim_values_res: Res<SimValuesResource>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
+    if state.last_write.elapsed() < state.interval { return }
+
+    let Some(sr) = space_root.as_deref() else { return };
+    let sim_values = &sim_values_res.0;
+    if sim_values.is_empty() { return }
+
+    // Walk up to Universe root
+    let universe = {
+        let mut cur = sr.0.clone();
+        let mut found = None;
+        for _ in 0..16 {
+            if cur.join("Spaces").is_dir() {
+                found = Some(cur.clone());
+                break;
+            }
+            if !cur.pop() { break; }
+        }
+        match found {
+            Some(u) => u,
+            None => return,
+        }
+    };
+
+    let path = universe.join(".eustress").join("telemetry.jsonl");
+    let entry = serde_json::json!({
+        "t": chrono::Utc::now().to_rfc3339(),
+        "values": sim_values,
+    });
+
+    let write_result = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&path)?;
+        writeln!(f, "{}", entry)?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        warn!("Failed to write telemetry log: {}", e);
+    }
+    state.last_write = std::time::Instant::now();
 }

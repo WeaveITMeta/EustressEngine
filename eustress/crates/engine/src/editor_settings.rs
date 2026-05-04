@@ -3,13 +3,13 @@
 //! Manages persistent editor settings for Eustress Engine.
 //!
 //! ## Features
-//! - **Automatic Loading**: Settings are loaded from `~/.eustress_studio/settings.json` on startup
+//! - **Automatic Loading**: Settings are loaded from `~/.eustress_engine/settings.json` on startup
 //! - **Auto-Save**: Settings are automatically saved when modified via Bevy's change detection
 //! - **Default Fallback**: If loading fails or no file exists, default settings are used
 //! - **Pretty JSON**: Settings are saved in human-readable JSON format
 //!
 //! ## Settings Persistence
-//! - **Location**: `~/.eustress_studio/settings.json`
+//! - **Location**: `~/.eustress_engine/settings.json`
 //! - **Format**: JSON with pretty formatting
 //! - **Auto-creation**: Directory is created automatically if it doesn't exist
 //!
@@ -28,7 +28,7 @@ use bevy::log::{info, warn};
 
 /// Global editor settings resource
 /// 
-/// Automatically persisted to `~/.eustress_studio/settings.json`
+/// Automatically persisted to `~/.eustress_engine/settings.json`
 #[derive(Resource, Serialize, Deserialize, Clone)]
 pub struct EditorSettings {
     /// Grid snap size in world units
@@ -146,14 +146,26 @@ impl Default for EditorSettings {
 }
 
 impl EditorSettings {
-    /// Get the settings file path (~/.eustress_studio/settings.json)
+    /// Get the settings file path (~/.eustress_engine/settings.json).
+    ///
+    /// Performs a one-shot migration of the legacy `~/.eustress_studio/`
+    /// directory the very first time the new location is requested.
+    /// Renaming in-place is atomic on all three platforms and keeps the
+    /// user's `settings.json`, `autosave/`, and any other sidecar
+    /// artefacts together — no per-file copy needed.
     fn settings_path() -> Option<PathBuf> {
-        if let Some(home) = dirs::home_dir() {
-            let settings_dir = home.join(".eustress_studio");
-            Some(settings_dir.join("settings.json"))
-        } else {
-            None
+        let home = dirs::home_dir()?;
+        let new_dir = home.join(".eustress_engine");
+        let legacy_dir = home.join(".eustress_studio");
+        if !new_dir.exists() && legacy_dir.exists() {
+            if let Err(e) = fs::rename(&legacy_dir, &new_dir) {
+                // Rename can fail if the target volume differs or a
+                // concurrent process holds a handle — fall back silently
+                // and let the caller re-create the default settings.
+                warn!("Could not migrate {:?} → {:?}: {}", legacy_dir, new_dir, e);
+            }
         }
+        Some(new_dir.join("settings.json"))
     }
     
     /// Load settings from file or create default
@@ -365,198 +377,197 @@ fn draw_grid_overlay(
 // Auto-Save Scene System
 // ============================================================================
 
-/// System to auto-save the current scene at regular intervals
+/// System to auto-save the current scene at regular intervals.
+///
+/// The modern autosave commits the Space directory itself via git,
+/// instead of writing an opaque binary snapshot to a user-profile
+/// sidecar. This keeps every autosave recoverable with the same
+/// `git checkout` / `git reflog` tools the user (and any external
+/// editor) already knows, and piggybacks on git's delta compression
+/// so autosaves cost effectively nothing on disk past the first one.
+///
+/// The Space's live on-disk state is already authoritative (every tool
+/// edits TOML files directly via `write_instance_changes_system`) —
+/// autosave only needs to capture a commit boundary, not re-derive the
+/// scene from the ECS. That also makes autosave a no-op when nothing's
+/// changed since the last tick, which is the common case while the
+/// user is just looking around.
 fn auto_save_scene_system(
     time: Res<Time>,
     settings: Res<EditorSettings>,
     mut auto_save: ResMut<AutoSaveState>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
-    // Query for entities to save
-    parts_query: Query<(Entity, &crate::classes::Instance, Option<&crate::classes::BasePart>, Option<&crate::classes::Part>)>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    auth: Option<Res<crate::auth::AuthState>>,
 ) {
     // Skip if auto-save is disabled
     if !settings.auto_save_enabled || settings.auto_save_interval <= 0.0 {
         return;
     }
-    
+
     // Update timer
     auto_save.timer += time.delta_secs();
-    
+
     // Check if it's time to auto-save
-    if auto_save.timer >= settings.auto_save_interval {
-        auto_save.timer = 0.0;
-        
-        // Get auto-save directory
-        let auto_save_dir = if let Some(home) = dirs::home_dir() {
-            home.join(".eustress_studio").join("autosave")
-        } else {
-            return;
-        };
-        
-        // Create directory if needed
-        if let Err(e) = fs::create_dir_all(&auto_save_dir) {
-            warn!("Failed to create auto-save directory: {}", e);
-            return;
-        }
-        
-        // Generate filename with timestamp - use binary .eustress format
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        let filename = format!("autosave_{}.eustress", timestamp);
-        let save_path = auto_save_dir.join(&filename);
-        
-        // Count entities
-        let entity_count = parts_query.iter().count();
-        
-        if entity_count == 0 {
-            // Nothing to save
-            return;
-        }
-        
-        // Build scene data and save as binary .eustress format
-        let scene = build_auto_save_scene(&parts_query);
-        
-        // Save to binary format using the unified scene serialization
-        match save_auto_save_binary(&save_path, &scene) {
-            Ok(_) => {
-                auto_save.last_save = Some(std::time::Instant::now());
-                notifications.info(format!("Auto-saved ({} entities)", entity_count));
-                info!("✅ Auto-saved to {:?}", save_path);
-                
-                // Clean up old auto-saves (keep last 5)
-                cleanup_old_autosaves(&auto_save_dir, 5);
+    if auto_save.timer < settings.auto_save_interval {
+        return;
+    }
+    auto_save.timer = 0.0;
+
+    let Some(space_root) = space_root else { return };
+    let space_path = space_root.0.clone();
+    if !space_path.exists() {
+        return;
+    }
+
+    // Snapshot the current Eustress identity on the main thread so the
+    // background commit can author under the logged-in user. Offline /
+    // signed-out sessions get `None` and fall through to the anonymous
+    // repo-local fallback. Captured once per tick so a late-breaking
+    // logout during the commit doesn't change the author mid-write.
+    let identity = auth
+        .as_deref()
+        .and_then(git_identity_from_auth);
+
+    // Dispatch the git work to a background thread. `git add -A` +
+    // commit can hit the filesystem harder than we want to pay for on
+    // the main frame, and blocking the render loop for autosave would
+    // make the editor hitch every interval.
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let message = format!("autosave {}", timestamp);
+    std::thread::spawn(move || {
+        match git_autosave_commit(&space_path, &message, identity.as_ref()) {
+            Ok(GitAutosave::Committed(sha)) => {
+                info!("✅ Autosave committed to git @ {} ({})", sha, space_path.display());
+            }
+            Ok(GitAutosave::NoChanges) => {
+                // Quiet no-op — nothing changed since the last autosave.
             }
             Err(e) => {
-                warn!("Failed to write auto-save: {}", e);
+                warn!("git autosave failed at {:?}: {}", space_path, e);
             }
         }
-    }
-}
-
-/// Build a scene struct from current entities for auto-save
-fn build_auto_save_scene(
-    parts_query: &Query<(Entity, &crate::classes::Instance, Option<&crate::classes::BasePart>, Option<&crate::classes::Part>)>,
-) -> crate::serialization::Scene {
-    use crate::serialization::{Scene, SceneMetadata, EntityData};
-    use std::collections::HashMap;
-    
-    let mut entities = Vec::new();
-    
-    for (entity, instance, basepart, part) in parts_query.iter() {
-        let mut properties: HashMap<String, serde_json::Value> = HashMap::new();
-        
-        // Add Instance properties
-        properties.insert("Name".to_string(), serde_json::json!(instance.name));
-        properties.insert("Archivable".to_string(), serde_json::json!(instance.archivable));
-        
-        // Add BasePart properties if present
-        if let Some(bp) = basepart {
-            properties.insert("Position".to_string(), serde_json::json!([
-                bp.cframe.translation.x,
-                bp.cframe.translation.y,
-                bp.cframe.translation.z
-            ]));
-            properties.insert("Size".to_string(), serde_json::json!([
-                bp.size.x,
-                bp.size.y,
-                bp.size.z
-            ]));
-            let srgba = bp.color.to_srgba();
-            properties.insert("Color".to_string(), serde_json::json!([
-                srgba.red,
-                srgba.green,
-                srgba.blue
-            ]));
-            properties.insert("Transparency".to_string(), serde_json::json!(bp.transparency));
-            properties.insert("Anchored".to_string(), serde_json::json!(bp.anchored));
-            properties.insert("CanCollide".to_string(), serde_json::json!(bp.can_collide));
-        }
-        
-        // Add Part properties if present
-        if let Some(p) = part {
-            properties.insert("Shape".to_string(), serde_json::json!(format!("{:?}", p.shape)));
-        }
-        
-        entities.push(EntityData {
-            id: entity.to_bits() as u32,
-            class: format!("{:?}", instance.class_name),
-            parent: None, // TODO: Track parent relationships
-            properties,
-            children: vec![],
-            attributes: std::collections::HashMap::new(),
-            tags: vec![],
-            parameters: None,
-        });
-    }
-    
-    Scene {
-        format: "eustress_propertyaccess".to_string(),
-        metadata: SceneMetadata {
-            name: "Auto-Save".to_string(),
-            description: "Automatically saved scene".to_string(),
-            author: "Eustress Engine".to_string(),
-            created: chrono::Local::now().to_rfc3339(),
-            modified: chrono::Local::now().to_rfc3339(),
-            engine_version: "0.1.0".to_string(),
-        },
-        entities,
-        global_sources: None,
-        domain_configs: None,
-        global_variables: None,
-    }
-}
-
-/// Save auto-save scene to binary .eustress format
-fn save_auto_save_binary(path: &PathBuf, scene: &crate::serialization::Scene) -> std::io::Result<()> {
-    use std::io::{BufWriter, Write};
-    
-    let file = fs::File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    
-    // Write magic bytes for .eustress format
-    writer.write_all(b"EUST")?;
-    
-    // Write version (u32 little-endian)
-    writer.write_all(&1u32.to_le_bytes())?;
-    
-    // Serialize scene to binary using bincode
-    let scene_bytes = bincode::serialize(scene)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    
-    // Write compressed data length (u64 little-endian)
-    writer.write_all(&(scene_bytes.len() as u64).to_le_bytes())?;
-    
-    // Write scene data (could add zstd compression here later)
-    writer.write_all(&scene_bytes)?;
-    
-    writer.flush()?;
-    Ok(())
-}
-
-/// Clean up old auto-save files, keeping only the most recent N
-fn cleanup_old_autosaves(dir: &PathBuf, keep_count: usize) {
-    let mut files: Vec<_> = match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().extension()
-                    .map(|ext| ext == "eustress" || ext == "eustressengine")
-                    .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => return,
-    };
-    
-    // Sort by modification time (newest first)
-    files.sort_by(|a, b| {
-        let a_time = a.metadata().and_then(|m| m.modified()).ok();
-        let b_time = b.metadata().and_then(|m| m.modified()).ok();
-        b_time.cmp(&a_time)
     });
-    
-    // Remove old files beyond keep_count
-    for file in files.into_iter().skip(keep_count) {
-        if let Err(e) = fs::remove_file(file.path()) {
-            warn!("Failed to remove old auto-save: {}", e);
-        }
-    }
+
+    auto_save.last_save = Some(std::time::Instant::now());
+    notifications.info("Auto-saved (git)".to_string());
 }
+
+pub(crate) enum GitAutosave {
+    Committed(String),
+    NoChanges,
+}
+
+/// Per-commit git author identity. Pulled from `AuthState` when the
+/// user is logged in so autosave commits attribute to them; `None`
+/// means "use the anonymous repo-local fallback".
+pub(crate) struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+/// Map the live `AuthState` to a git identity — only when the session
+/// is actually online. The email is synthesised from the public key so
+/// the author line is provably tied to the signing identity without
+/// leaking the real user email (which Eustress doesn't store anyway).
+pub(crate) fn git_identity_from_auth(auth: &crate::auth::AuthState) -> Option<GitIdentity> {
+    if auth.status != crate::auth::AuthStatus::LoggedIn {
+        return None;
+    }
+    let user = auth.user.as_ref()?;
+    Some(GitIdentity {
+        name: user.username.clone(),
+        email: format!("{}@eustress.local", user.id),
+    })
+}
+
+/// Init the space's git repo if missing, stage every change, and commit
+/// with the supplied `message`. Returns the short SHA on commit, or
+/// `NoChanges` when the working tree matches HEAD.
+///
+/// When `identity` is `Some(_)` the commit is authored under the
+/// logged-in user via one-shot `-c user.name=… -c user.email=…` flags
+/// — the repo's own `.git/config` is never rewritten per-commit, so a
+/// logout (or a login as a different user) between ticks picks up the
+/// new author automatically without stale config lying around.
+pub(crate) fn git_autosave_commit(
+    space_path: &std::path::Path,
+    message: &str,
+    identity: Option<&GitIdentity>,
+) -> Result<GitAutosave, String> {
+    use std::process::Command;
+
+    // Wrapper so the one-off commands all share the same cwd + error
+    // shape. Output is captured so nothing leaks to the engine stdout.
+    let run = |args: &[&str]| -> Result<std::process::Output, String> {
+        Command::new("git")
+            .args(args)
+            .current_dir(space_path)
+            .output()
+            .map_err(|e| format!("git {:?}: {}", args, e))
+    };
+
+    let git_dir = space_path.join(".git");
+    if !git_dir.exists() {
+        let init = run(&["init", "--quiet"])?;
+        if !init.status.success() {
+            return Err(format!("git init failed: {}", String::from_utf8_lossy(&init.stderr)));
+        }
+        // Fallback identity so a `git commit` run WITHOUT the per-call
+        // identity override (e.g. from a terminal outside the engine)
+        // doesn't fail with "please tell me who you are". Scoped to
+        // this repo only — never touches the user's `~/.gitconfig`.
+        let _ = run(&["config", "user.email", "autosave@eustress.local"]);
+        let _ = run(&["config", "user.name", "Eustress Engine Autosave"]);
+    }
+
+    // Stage everything. `-A` picks up adds / modifies / deletes in one
+    // pass without requiring the caller to enumerate paths.
+    let add = run(&["add", "-A"])?;
+    if !add.status.success() {
+        return Err(format!("git add failed: {}", String::from_utf8_lossy(&add.stderr)));
+    }
+
+    // Fast no-op check — `git diff --cached --quiet` exits 0 when the
+    // index matches HEAD (nothing to commit). Only on exit 1 do we
+    // actually have changes to record.
+    let diff = run(&["diff", "--cached", "--quiet"])?;
+    if diff.status.success() {
+        return Ok(GitAutosave::NoChanges);
+    }
+
+    // Build the commit args, prepending `-c` identity overrides when
+    // we have a logged-in identity. The overrides are scoped to this
+    // single invocation so they never persist in the repo config.
+    let mut commit_args: Vec<String> = Vec::new();
+    let name_override;
+    let email_override;
+    if let Some(id) = identity {
+        name_override = format!("user.name={}", id.name);
+        email_override = format!("user.email={}", id.email);
+        commit_args.push("-c".into());
+        commit_args.push(name_override.clone());
+        commit_args.push("-c".into());
+        commit_args.push(email_override.clone());
+    }
+    commit_args.push("commit".into());
+    commit_args.push("-m".into());
+    commit_args.push(message.to_string());
+    commit_args.push("--quiet".into());
+    let commit_args_ref: Vec<&str> = commit_args.iter().map(|s| s.as_str()).collect();
+    let commit = run(&commit_args_ref)?;
+    if !commit.status.success() {
+        return Err(format!("git commit failed: {}", String::from_utf8_lossy(&commit.stderr)));
+    }
+
+    // Short SHA for the log line. Fall back to "HEAD" if rev-parse fails.
+    let sha = run(&["rev-parse", "--short", "HEAD"])
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "HEAD".to_string());
+
+    Ok(GitAutosave::Committed(sha))
+}
+

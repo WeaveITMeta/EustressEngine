@@ -130,13 +130,26 @@ pub fn looks_like_space_root(path: &Path) -> bool {
 pub fn universe_root_for_path(path: &Path) -> Option<PathBuf> {
     let workspace = workspace_root();
 
-    if path.parent() == Some(workspace.as_path()) && !looks_like_space_root(path) {
-        return Some(path.to_path_buf());
-    }
-
-    let parent = path.parent()?;
-    if parent.parent() == Some(workspace.as_path()) {
-        return Some(parent.to_path_buf());
+    // Walk up from the given path (typically a Space root) looking for the
+    // Universe directory — the child of the workspace root that is NOT a
+    // Space itself. The standard layout is:
+    //
+    //   {workspace}/Universe1/Spaces/Space1   (3 levels)
+    //
+    // But legacy layouts may omit the `Spaces/` tier:
+    //
+    //   {workspace}/Universe1/Space1           (2 levels)
+    //
+    // We iterate ancestors instead of hard-coding a fixed depth so both
+    // layouts (and any future nesting) resolve correctly.
+    let mut current = Some(path);
+    while let Some(p) = current {
+        if let Some(parent) = p.parent() {
+            if parent == workspace.as_path() && !looks_like_space_root(p) {
+                return Some(p.to_path_buf());
+            }
+        }
+        current = p.parent();
     }
 
     None
@@ -184,9 +197,14 @@ pub fn first_space_root_in_universe(universe_root: &Path) -> Option<PathBuf> {
 }
 
 pub fn default_space_root() -> PathBuf {
-    // Try to restore last opened space from editor settings
+    // Try to restore last opened space from editor settings.
+    // Prefer the current `.eustress_engine/` dir; fall back to the
+    // legacy `.eustress_studio/` location so users whose settings
+    // haven't been migrated yet still see their last-opened space.
     if let Some(home) = dirs::home_dir() {
-        let settings_path = home.join(".eustress_studio").join("settings.json");
+        let current = home.join(".eustress_engine").join("settings.json");
+        let legacy  = home.join(".eustress_studio").join("settings.json");
+        let settings_path = if current.exists() { current } else { legacy };
         if let Ok(contents) = std::fs::read_to_string(&settings_path) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents) {
                 if let Some(last) = settings.get("last_space_path").and_then(|v| v.as_str()) {

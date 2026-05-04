@@ -195,29 +195,140 @@ impl ToolHandler for ExecuteLuauTool {
         let script_name = input.get("name").and_then(|v| v.as_str()).unwrap_or("workshop_script");
         let summary = input.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
+        // Always write the script folder for persistence and hot-reload
         let soul_dir = ctx.space_root.join("SoulService");
         let _ = std::fs::create_dir_all(&soul_dir);
 
-        match write_soul_script_folder(&soul_dir, script_name, code, "luau", summary) {
-            Ok((folder, source)) => ToolResult {
+        let write_result = write_soul_script_folder(&soul_dir, script_name, code, "luau", summary);
+        let (folder_name, _source_path) = match &write_result {
+            Ok((folder, source)) => (
+                folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                Some(source.clone()),
+            ),
+            Err(e) => return ToolResult {
+                tool_name: "execute_luau".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to write script: {}", e), structured_data: None, stream_topic: None,
+            },
+        };
+
+        // If the engine provided a Luau executor, run the script inline
+        // and materialize any Instance.new("Part") calls as entity folders.
+        if let Some(ref executor) = ctx.luau_executor {
+            let result = executor(code, script_name);
+
+            // Materialize created instances as entity _instance.toml files.
+            // Written into Workspace/.generated/ so open_space can wipe them
+            // on Space switch — keeps generated entities Space-local and transient.
+            let workspace_dir = ctx.space_root.join("Workspace");
+            let generated_dir = workspace_dir.join(".generated");
+            let _ = std::fs::create_dir_all(&generated_dir);
+            let mut spawned = 0;
+
+            for entity in &result.created_entities {
+                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                let entity_dir = generated_dir.join(&safe_name);
+                let _ = std::fs::create_dir_all(&entity_dir);
+                let instance_path = entity_dir.join("_instance.toml");
+
+                // Select mesh based on Part shape — fixes all-Block default
+                let mesh_path = if entity.class_name == "Part" {
+                    match entity.shape.as_str() {
+                        "Ball"        => "assets/parts/ball.glb",
+                        "Cylinder"    => "assets/parts/cylinder.glb",
+                        "Wedge"       => "assets/parts/wedge.glb",
+                        "CornerWedge" => "assets/parts/corner_wedge.glb",
+                        "Cone"        => "assets/parts/cone.glb",
+                        _             => "assets/parts/block.glb",
+                    }
+                } else { "" };
+
+                let asset_section = if !mesh_path.is_empty() {
+                    format!("[asset]\nmesh = \"{}\"\nscene = \"Scene0\"\n\n", mesh_path)
+                } else {
+                    String::new()
+                };
+
+                let toml_content = format!(
+r#"[metadata]
+class_name = "{class}"
+name = "{name}"
+archivable = true
+
+{asset}[transform]
+position = [{px}, {py}, {pz}]
+rotation = [{rx}, {ry}, {rz}, {rw}]
+scale = [{sx}, {sy}, {sz}]
+
+[properties]
+material = "{material}"
+shape = "{shape}"
+color = [{cr}, {cg}, {cb}, {ca}]
+transparency = {transparency}
+anchored = {anchored}
+can_collide = {can_collide}
+cast_shadow = true
+reflectance = 0.0
+locked = false
+"#,
+                    class = entity.class_name,
+                    name = entity.name,
+                    asset = asset_section,
+                    shape = entity.shape,
+                    px = entity.position[0], py = entity.position[1], pz = entity.position[2],
+                    rx = entity.rotation[0], ry = entity.rotation[1], rz = entity.rotation[2], rw = entity.rotation[3],
+                    sx = entity.size[0], sy = entity.size[1], sz = entity.size[2],
+                    cr = entity.color[0], cg = entity.color[1], cb = entity.color[2], ca = entity.color[3],
+                    material = entity.material,
+                    transparency = entity.transparency,
+                    anchored = entity.anchored,
+                    can_collide = entity.can_collide,
+                );
+
+                if std::fs::write(&instance_path, &toml_content).is_ok() {
+                    spawned += 1;
+                }
+            }
+
+            let content = if result.success {
+                format!(
+                    "Luau script '{}' executed — {} entities created, {} written to Workspace/.generated/.",
+                    folder_name, result.created_entities.len(), spawned,
+                )
+            } else {
+                format!(
+                    "Luau script '{}' written but execution failed: {}",
+                    folder_name, result.message,
+                )
+            };
+
+            ToolResult {
+                tool_name: "execute_luau".to_string(), tool_use_id: String::new(),
+                success: result.success,
+                content,
+                structured_data: Some(serde_json::json!({
+                    "name": script_name,
+                    "executed": result.success,
+                    "entities_created": result.created_entities.len(),
+                    "entities_written": spawned,
+                    "message": result.message,
+                })),
+                stream_topic: Some("workshop.tool.execute_luau".to_string()),
+            }
+        } else {
+            // No Luau executor available — write-only mode (MCP server)
+            ToolResult {
                 tool_name: "execute_luau".to_string(), tool_use_id: String::new(),
                 success: true,
                 content: format!(
-                    "Wrote Luau script folder '{}' ({} bytes) — engine will hot-reload.",
-                    folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                    code.len(),
+                    "Wrote Luau script folder '{}' ({} bytes) — engine will hot-reload on Play.",
+                    folder_name, code.len(),
                 ),
                 structured_data: Some(serde_json::json!({
                     "name": script_name,
-                    "folder": folder.to_string_lossy(),
-                    "source": source.to_string_lossy(),
+                    "executed": false,
                 })),
                 stream_topic: Some("workshop.tool.execute_luau".to_string()),
-            },
-            Err(e) => ToolResult {
-                tool_name: "execute_luau".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Failed: {}", e), structured_data: None, stream_topic: None,
-            },
+            }
         }
     }
 }

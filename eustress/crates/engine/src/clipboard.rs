@@ -35,6 +35,15 @@ pub struct ClipboardEntityData2 {
     pub properties: HashMap<String, serde_json::Value>,
     /// Parameters (if any)
     pub parameters: Option<serde_json::Value>,
+    /// Raw TOML source — populated for non-visual service children (Sky,
+    /// Atmosphere, Star/Sun, Moon, etc.) so paste can write an exact copy
+    /// to the target Space's service folder without re-deriving properties.
+    #[serde(default)]
+    pub source_toml: Option<String>,
+    /// Service folder name this entity belongs to (e.g. "Lighting").
+    /// Empty for Workspace entities.
+    #[serde(default)]
+    pub service_folder: String,
 }
 
 // ============================================================================
@@ -510,7 +519,7 @@ pub fn handle_copy_event(
     mut clipboard: ResMut<EditorClipboard>,
     mut old_clipboard: ResMut<Clipboard>,
     selection: Option<Res<BevySelectionManager>>,
-    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>, Option<&eustress_common::classes::Part>)>,
+    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>, Option<&eustress_common::classes::Part>, Option<&crate::space::instance_loader::InstanceFile>)>,
     current_scene: Option<Res<CurrentScenePath>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
@@ -541,7 +550,7 @@ pub fn handle_copy_event(
         let mut entity_data_list = Vec::new();
         let mut old_clipboard_entities = Vec::new();
         
-        for (entity, instance, transform, basepart, part) in query.iter() {
+        for (entity, instance, transform, basepart, part, instance_file) in query.iter() {
             let entity_id = format!("{}v{}", entity.index(), entity.generation());
             
             if !selected_ids.contains(&entity_id) {
@@ -603,6 +612,26 @@ pub fn handle_copy_event(
                 Some(bp) => [bp.size.x, bp.size.y, bp.size.z],
                 None     => [transform.scale.x, transform.scale.y, transform.scale.z],
             };
+            // For non-visual service children (Sky, Atmosphere, Star, Moon,
+            // etc.) read the raw TOML off disk so paste can reproduce it
+            // exactly in any target Space's service folder.
+            let (source_toml, service_folder) = if basepart.is_none() {
+                if let Some(inst_file) = instance_file {
+                    let toml_content = std::fs::read_to_string(&inst_file.toml_path).ok();
+                    // Infer service folder from the TOML path (parent directory name)
+                    let svc = inst_file.toml_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    (toml_content, svc)
+                } else {
+                    (None, String::new())
+                }
+            } else {
+                (None, String::new())
+            };
+
             let entity_data = ClipboardEntityData2 {
                 id: instance.id,
                 name: instance.name.clone(),
@@ -613,6 +642,8 @@ pub fn handle_copy_event(
                 scale: capture_scale,
                 properties,
                 parameters: None,
+                source_toml,
+                service_folder,
             };
             
             entity_data_list.push(entity_data);
@@ -668,6 +699,8 @@ pub fn handle_paste_event(
     mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
     mut mesh_cache: Option<ResMut<crate::space::instance_loader::PrimitiveMeshCache>>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
+    instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
+    loaded_from_file_query: Query<&crate::space::file_loader::LoadedFromFile>,
 ) {
     for event in events.read() {
         if clipboard.is_empty() {
@@ -754,11 +787,76 @@ pub fn handle_paste_event(
         
         notifications.info(format!("Pasted {} object(s)", clipboard.entities.len()));
         
-        // If this was a cut, delete the original entities and clear clipboard
+        // If this was a cut, trash the original files and despawn entities.
+        // Without the file-trash step, the file watcher re-creates entities
+        // from the still-present files on the next scan.
         if clipboard.is_cut {
             for entity_id in &clipboard.copied_entity_ids {
                 if let Some(entity) = crate::entity_utils::id_string_to_entity(entity_id) {
                     if commands.get_entity(entity).is_ok() {
+                        // Trash InstanceFile-backed entities (parts, folders)
+                        if let Ok(inst_file) = instance_file_query.get(entity) {
+                            let toml_path = inst_file.toml_path.clone();
+                            let is_folder = toml_path.file_name()
+                                .map(|n| n.to_string_lossy() == "_instance.toml")
+                                .unwrap_or(false);
+                            let source = if is_folder {
+                                toml_path.parent().unwrap_or(toml_path.as_path()).to_path_buf()
+                            } else {
+                                toml_path.clone()
+                            };
+                            if source.exists() {
+                                let trash_dir = source.parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .join(".eustress").join("trash");
+                                let _ = std::fs::create_dir_all(&trash_dir);
+                                let stem = source.file_name().and_then(|n| n.to_str()).unwrap_or("entity");
+                                let trash_path = {
+                                    let base = trash_dir.join(stem);
+                                    if base.exists() {
+                                        let ts = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis()).unwrap_or(0);
+                                        trash_dir.join(format!("{}-{:x}", stem, ts))
+                                    } else { base }
+                                };
+                                if let Some(ref mut reg) = file_registry {
+                                    reg.rename_in_progress.insert(toml_path.clone());
+                                    reg.rename_in_progress.insert(source.clone());
+                                }
+                                let _ = std::fs::rename(&source, &trash_path);
+                            }
+                            if let Some(ref mut reg) = file_registry {
+                                reg.unregister_file(&toml_path);
+                            }
+                        }
+                        // Trash LoadedFromFile-backed entities (soul scripts, Rune/Luau)
+                        else if let Ok(loaded) = loaded_from_file_query.get(entity) {
+                            let source = loaded.path.clone();
+                            if source.exists() {
+                                let trash_dir = source.parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .join(".eustress").join("trash");
+                                let _ = std::fs::create_dir_all(&trash_dir);
+                                let stem = source.file_name().and_then(|n| n.to_str()).unwrap_or("entity");
+                                let trash_path = {
+                                    let base = trash_dir.join(stem);
+                                    if base.exists() {
+                                        let ts = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis()).unwrap_or(0);
+                                        trash_dir.join(format!("{}-{:x}", stem, ts))
+                                    } else { base }
+                                };
+                                if let Some(ref mut reg) = file_registry {
+                                    reg.rename_in_progress.insert(source.clone());
+                                }
+                                let _ = std::fs::rename(&source, &trash_path);
+                            }
+                            if let Some(ref mut reg) = file_registry {
+                                reg.unregister_file(&source);
+                            }
+                        }
                         commands.entity(entity).despawn();
                     }
                 }
@@ -970,6 +1068,46 @@ fn spawn_pasted_entity(
             let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
             let transform = Transform { translation: pos, rotation: rot, scale };
             Some(spawn_spot_light(commands, instance, EustressSpotLight::default(), transform))
+        }
+        _ if !data.service_folder.is_empty() && data.source_toml.is_some() => {
+            // Generic service child (Sky, Atmosphere, Star/Sun, Moon, or any
+            // future Lighting/ or other service child). Write the raw TOML
+            // into the target Space's service folder — the file watcher picks
+            // it up and the hydration system attaches the right ECS components.
+            let toml_content = data.source_toml.as_deref().unwrap_or("");
+            let service_dir = workspace_dir
+                .parent()  // Space root (workspace_dir is SpaceRoot/Workspace)
+                .unwrap_or(workspace_dir)
+                .join(&data.service_folder);
+            let _ = std::fs::create_dir_all(&service_dir);
+            // Use <Name>.instance.toml — matches what space_ops writes.
+            let file_name = format!("{}.instance.toml", data.name);
+            let target_path = service_dir.join(&file_name);
+            if let Err(e) = std::fs::write(&target_path, toml_content) {
+                warn!("Failed to write pasted service child TOML {:?}: {}", target_path, e);
+                return None;
+            }
+            // Register in file registry so Explorer shows it immediately.
+            if let Some(registry) = file_registry {
+                let dummy_entity = commands.spawn(Name::new(data.name.clone())).id();
+                registry.register(
+                    target_path.clone(),
+                    dummy_entity,
+                    crate::space::FileMetadata {
+                        path: target_path,
+                        file_type: crate::space::FileType::Toml,
+                        service: data.service_folder.clone(),
+                        name: data.name.clone(),
+                        size: toml_content.len() as u64,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    },
+                );
+                Some(dummy_entity)
+            } else {
+                // Spawn a placeholder — the file watcher will reload it properly.
+                Some(commands.spawn(Name::new(data.name.clone())).id())
+            }
         }
         _ => {
             warn!("Paste not fully implemented for {:?}", class_name);

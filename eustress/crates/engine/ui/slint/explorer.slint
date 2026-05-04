@@ -36,6 +36,19 @@ export component ExplorerPanel inherits Rectangle {
     // Properties
     in property <[TreeNode]> tree-nodes: [];
     in-out property <string> search-text: "";
+
+    // Programmatic scroll target — used by 3D-viewport selection to
+    // bring the corresponding tree row to the top of the visible area.
+    // Rust drives this by setting `scroll-target-y` to the desired
+    // viewport offset (in pixels, relative to the top of the content)
+    // and bumping `scroll-pulse` (a one-shot counter) — the `changed`
+    // handler below jumps the ScrollView once per pulse, leaving
+    // subsequent user scrolling untouched.
+    in property <int> scroll-pulse: 0;
+    in property <length> scroll-target-y: 0px;
+    changed scroll-pulse => {
+        tree-scroll.viewport-y = -root.scroll-target-y;
+    }
     
     // Callbacks — ctrl/shift booleans for multi-select
     callback on-select-node(int, string, /* ctrl */ bool, /* shift */ bool);
@@ -225,7 +238,7 @@ export component ExplorerPanel inherits Rectangle {
             vertical-stretch: 1;
             clip: true;
 
-            ScrollView {
+            tree-scroll := ScrollView {
                 horizontal-scrollbar-policy: always-off;
 
                 VerticalLayout {
@@ -245,29 +258,21 @@ export component ExplorerPanel inherits Rectangle {
                             && root.drag-mouse-y >= self.absolute-position.y
                             && root.drag-mouse-y < self.absolute-position.y + self.height
                             && node.visible;
-                        // Each TreeItem self-reports as the drop target
-                        // when its own `drop-target` prop goes true.
-                        // This is the source of truth — it uses the
-                        // row's real `absolute-position.y`, so it
-                        // naturally accounts for scroll offset +
-                        // collapsed-node visibility, neither of which
-                        // the overlay's `floor(mouse-y / 22px)`
-                        // arithmetic respected. The math was giving
-                        // wrong target ids on scrolled/collapsed trees,
-                        // which is why the drop produced no reparent.
-                        changed drop-target => {
-                            if self.drop-target {
-                                root.drag-target-id = node.id;
-                            } else if root.drag-target-id == node.id {
-                                root.drag-target-id = -1;
-                            }
-                        }
-                        // drag-target-id is also updated by the overlay TouchArea
-                        // below (abs-y → row index). A `changed drop-target`
-                        // handler that wrote back to `root.drag-target-id`
-                        // was cleaner but Slint flagged it as a property
-                        // cycle at layout time. The overlay's math-based
-                        // approach sidesteps the property graph entirely.
+                        // **Do not** add a `changed drop-target =>`
+                        // handler that writes back to
+                        // `root.drag-target-id`. Tried 2026-04-23 —
+                        // Slint flags it as a property cycle at
+                        // layout time ("Recursion detected" panic in
+                        // `render_slint_to_texture`) because
+                        // `drop-target` reads `self.absolute-position.y`
+                        // which is a layout output, and the handler's
+                        // write runs inside the same property-eval
+                        // pass. The overlay's math-based approach
+                        // below (`abs-y → row index`) sidesteps the
+                        // property graph entirely. It still has the
+                        // scroll-offset + collapsed-visibility gap
+                        // that would be nice to fix, but a cycle is
+                        // worse than a wrong-row drop target.
                         ctrl-held: explorer-keys.ctrl-held;
                         shift-held: explorer-keys.shift-held;
 
@@ -288,7 +293,22 @@ export component ExplorerPanel inherits Rectangle {
                             if node.expanded { root.on-collapse-node(node.id, node.node-type); }
                             else { root.on-expand-node(node.id, node.node-type); }
                         }
-                        context-menu(x, y) => { root.on-context-menu(x, y, node.id, node.node-type); }
+                        context-menu(x, y) => {
+                            // If the right-clicked node isn't already in
+                            // the selection, select just it first — this
+                            // matches Windows Explorer / Finder / VSCode
+                            // behaviour where right-clicking a
+                            // non-selected row selects it before showing
+                            // the menu. Right-clicking a node that IS
+                            // already part of a multi-selection leaves
+                            // the existing selection intact so group
+                            // actions (Cut/Copy/Delete, Select Children
+                            // across multiple parents) keep working.
+                            if !node.selected {
+                                root.on-select-node(node.id, node.node-type, false, false);
+                            }
+                            root.on-context-menu(x, y, node.id, node.node-type);
+                        }
 
                         drag-started(id, abs-x, abs-y) => {
                             root.drag-active = true;

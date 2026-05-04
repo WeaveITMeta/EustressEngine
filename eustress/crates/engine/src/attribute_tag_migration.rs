@@ -179,9 +179,10 @@ fn migrate_instance_file(path: &Path, dry_run: bool) -> Result<MigrationOutcome,
     // rewrite — acceptable since `_instance.toml` is engine-generated.
     let mut doc: toml::Value = raw.parse().map_err(|e: toml::de::Error| e.to_string())?;
 
-    // Service skip: read `[metadata].class_name`.
-    let class_name = doc.get("metadata")
-        .and_then(|m| m.get("class_name"))
+    // Service skip: read `[metadata].class_name`. Accepts either case
+    // on disk so TOMLs from the aborted PascalCase pilot still load.
+    let class_name = eustress_common::class_schema::get_section_insensitive(&doc, "metadata")
+        .and_then(|m| eustress_common::class_schema::get_section_insensitive(m, "class_name"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
     if is_service_class(class_name) {

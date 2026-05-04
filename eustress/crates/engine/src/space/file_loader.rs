@@ -170,8 +170,10 @@ impl FileType {
             // Workspace: Instance files (.glb.toml, .part.toml, .model.toml, .instance.toml, _instance.toml, _service.toml) and 3D models spawn as Parts
             (Self::Toml | Self::Gltf | Self::Obj | Self::Fbx, "Workspace") => true,
             
-            // Lighting: Models can be light sources
-            (Self::Gltf | Self::Obj | Self::Fbx, "Lighting") => true,
+            // Lighting: TOML instance files (Sun, Moon, Sky, Atmosphere, Skybox)
+            // spawn as non-visual Instance entities; hydrate_lighting_entities
+            // attaches the real ECS components (DirectionalLight, markers, etc.)
+            (Self::Toml | Self::Gltf | Self::Obj | Self::Fbx, "Lighting") => true,
             
             // SoulService: Scripts don't spawn visible entities, but need to be loaded
             (Self::Soul | Self::Rune | Self::Wasm | Self::Lua, "SoulService") => true,
@@ -928,35 +930,31 @@ pub fn spawn_directory_entry(
         return;
     }
 
-    // Check for _instance.toml — it may declare a richer class (e.g. ScreenGui)
+    // Check for _instance.toml — it may declare a richer class
+    // (ScreenGui, Frame, BillboardGui, TextLabel, …). Historic on-disk
+    // files are `[metadata] class_name` snake_case; files left over
+    // from the aborted PascalCase migration are `[Metadata] ClassName`.
+    // Try both so either layout keeps loading. Class-name dispatch
+    // delegates to `ClassName::from_str` — the canonical string→enum
+    // map lives on the enum itself, so adding a new class means one
+    // variant + one from_str arm in `common/classes.rs`, no changes
+    // here. Legacy `"Script"` alias routes to `SoulScript`.
     let instance_toml_path = dir_meta.path.join("_instance.toml");
     let class_name = if instance_toml_path.exists() {
         std::fs::read_to_string(&instance_toml_path)
             .ok()
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-            .and_then(|v| v.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()).map(|s| s.to_string()))
-            .map(|cn| match cn.as_str() {
-                "Part"           => eustress_common::classes::ClassName::Part,
-                "Script" | "SoulScript" => eustress_common::classes::ClassName::SoulScript,
-                "ScreenGui"      => eustress_common::classes::ClassName::ScreenGui,
-                "Frame"          => eustress_common::classes::ClassName::Frame,
-                "ScrollingFrame" => eustress_common::classes::ClassName::ScrollingFrame,
-                "BillboardGui"   => eustress_common::classes::ClassName::BillboardGui,
-                "SurfaceGui"     => eustress_common::classes::ClassName::SurfaceGui,
-                // Leaf UI classes — previously loaded only from flat
-                // compound-extension files (`Name.textlabel.toml`).
-                // Now also recognised in folder form so Insert-menu
-                // folders round-trip on reload. The spawn branch
-                // (below) routes them through the same
-                // `spawn_gui_element` path as the flat files.
-                "TextLabel"      => eustress_common::classes::ClassName::TextLabel,
-                "TextButton"     => eustress_common::classes::ClassName::TextButton,
-                "TextBox"        => eustress_common::classes::ClassName::TextBox,
-                "ImageLabel"     => eustress_common::classes::ClassName::ImageLabel,
-                "ImageButton"    => eustress_common::classes::ClassName::ImageButton,
-                "ViewportFrame"  => eustress_common::classes::ClassName::ViewportFrame,
-                "Model"          => eustress_common::classes::ClassName::Model,
-                _                => eustress_common::classes::ClassName::Folder,
+            .and_then(|v| {
+                let meta = v.get("metadata").or_else(|| v.get("Metadata"))?;
+                let cn = meta.get("class_name").or_else(|| meta.get("ClassName"))?;
+                cn.as_str().map(|s| s.to_string())
+            })
+            .map(|cn| {
+                // Legacy shim: "Script" used to mean the Rune script
+                // class before the Soul/Luau split.
+                let cn_resolved = if cn == "Script" { "SoulScript" } else { cn.as_str() };
+                eustress_common::classes::ClassName::from_str(cn_resolved)
+                    .unwrap_or(eustress_common::classes::ClassName::Folder)
             })
             .unwrap_or(eustress_common::classes::ClassName::Folder)
     } else {
@@ -1075,6 +1073,20 @@ pub fn spawn_directory_entry(
                 ([200.0f32, 100.0], 100.0, false, Vec3::new(0.0, 2.0, 0.0))
             };
 
+        // Build the BillboardGui *class component* in addition to the
+        // runtime marker. Without this, Properties-panel edits go nowhere
+        // (sync_billboard_class_to_marker queries Changed<BillboardGui>
+        // and would never see the entity), and any save_space pass that
+        // round-trips through the class component would silently drop
+        // the billboard. The class component carries the same size /
+        // max_distance / always_on_top / units_offset values the marker
+        // is initialised with, so the two stay coherent on reload.
+        let mut bb_class = eustress_common::classes::BillboardGui::default();
+        bb_class.size = bb_size;
+        bb_class.max_distance = bb_max_distance;
+        bb_class.always_on_top = bb_always_on_top;
+        bb_class.units_offset = [bb_offset.x, bb_offset.y, bb_offset.z];
+
         commands.spawn((
             eustress_common::classes::Instance {
                 name: dir_meta.name.clone(),
@@ -1084,6 +1096,7 @@ pub fn spawn_directory_entry(
                 ai: false,
                 uuid: String::new(),
             },
+            bb_class,
             eustress_common::gui::billboard_renderer::BillboardGuiMarker {
                 size: bb_size,
                 max_distance: bb_max_distance,
@@ -1100,6 +1113,174 @@ pub fn spawn_directory_entry(
             Transform::from_translation(bb_offset),
             Visibility::default(),
         )).id()
+    } else if matches!(class_name, eustress_common::classes::ClassName::Image | eustress_common::classes::ClassName::Video) {
+        // Image / Video — imported media class. Loads the asset_path
+        // referenced by `[asset].path` in _instance.toml, which lives
+        // under the Universe-level `assets/` folder. The entity is a
+        // 3D quad: for Image, the texture is the loaded image; for
+        // Video, a mid-grey placeholder material until the decoder
+        // integration lands.
+        let instance_toml = dir_meta.path.join("_instance.toml");
+        let toml_value: Option<toml::Value> = std::fs::read_to_string(&instance_toml)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok());
+
+        // Universe-relative asset path stored in `[asset].path`. The
+        // engine-runtime path is `<Universe>/<asset_path>`.
+        let asset_rel = toml_value
+            .as_ref()
+            .and_then(|v| v.get("asset"))
+            .and_then(|a| a.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Per-class section: [image] for Image, [video] for Video.
+        let section_name = match class_name {
+            eustress_common::classes::ClassName::Image => "image",
+            _                                          => "video",
+        };
+        let section = toml_value.as_ref().and_then(|v| v.get(section_name));
+        let size_xy = section
+            .and_then(|s| s.get("size"))
+            .and_then(|s| s.as_array())
+            .and_then(|arr| {
+                let x = arr.first()?.as_float().map(|f| f as f32)?;
+                let y = arr.get(1)?.as_float().map(|f| f as f32)?;
+                Some([x, y])
+            })
+            .unwrap_or(match class_name {
+                eustress_common::classes::ClassName::Image => [4.0, 4.0],
+                _                                          => [6.0, 3.375],
+            });
+        let color_rgba = section
+            .and_then(|s| s.get("color"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                Some([
+                    arr.first()?.as_float()? as f32,
+                    arr.get(1)?.as_float()? as f32,
+                    arr.get(2)?.as_float()? as f32,
+                    arr.get(3).and_then(|v| v.as_float()).unwrap_or(1.0) as f32,
+                ])
+            })
+            .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+        let transparency = section
+            .and_then(|s| s.get("transparency"))
+            .and_then(|t| t.as_float())
+            .map(|f| f as f32)
+            .unwrap_or(0.0);
+        let position = toml_value
+            .as_ref()
+            .and_then(|v| v.get("transform"))
+            .and_then(|t| t.get("position"))
+            .and_then(|p| p.as_array())
+            .and_then(|arr| {
+                Some(Vec3::new(
+                    arr.first()?.as_float()? as f32,
+                    arr.get(1)?.as_float()? as f32,
+                    arr.get(2)?.as_float()? as f32,
+                ))
+            })
+            .unwrap_or(Vec3::new(0.0, 2.0, 0.0));
+
+        // Resolve the asset on disk. Universe root = grandparent of
+        // SpaceRoot (`<Universe>/Spaces/<SpaceN>`); asset path is
+        // joined from there.
+        let universe_root = space_path
+            .ancestors()
+            .nth(2)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| space_path.to_path_buf());
+        let abs_asset_path = universe_root.join(&asset_rel);
+
+        // Build a unit quad mesh — same shape as `BillboardCard`'s
+        // quad, scaled to size via Transform.scale.
+        let mesh_handle = meshes.add(build_imported_media_quad());
+
+        // Material: Image gets the loaded texture as albedo; Video
+        // gets a mid-grey placeholder material. Both honour the part's
+        // colour tint + transparency.
+        let alpha = 1.0 - transparency.clamp(0.0, 1.0);
+        let mut mat = StandardMaterial {
+            base_color: bevy::color::Color::srgba(color_rgba[0], color_rgba[1], color_rgba[2], color_rgba[3] * alpha),
+            unlit: true,
+            alpha_mode: if alpha < 1.0 || matches!(class_name, eustress_common::classes::ClassName::Image) {
+                bevy::prelude::AlphaMode::Blend
+            } else {
+                bevy::prelude::AlphaMode::Opaque
+            },
+            cull_mode: None,
+            ..default()
+        };
+        if matches!(class_name, eustress_common::classes::ClassName::Image) {
+            // Bevy's AssetServer wants paths relative to its asset root.
+            // The simplest cross-platform approach: pass the absolute
+            // path as a string. AssetServer accepts absolute filesystem
+            // paths on the filesystem source.
+            if !asset_rel.is_empty() && abs_asset_path.exists() {
+                let texture: Handle<bevy::image::Image> = asset_server.load(abs_asset_path.clone());
+                mat.base_color_texture = Some(texture);
+            } else {
+                warn!(
+                    "🖼️ Image entity '{}' has missing asset at {:?} — rendering as flat colour quad",
+                    dir_meta.name, abs_asset_path
+                );
+            }
+        } else {
+            // Video — initial material is placeholder (replaced next
+            // frame by `attach_pending_video_players`, which binds the
+            // VideoPlayer's GPU image as base_color_texture). The
+            // placeholder colour shows for ~1 frame between spawn and
+            // pump kickoff; imperceptible.
+            mat.base_color = bevy::color::Color::srgba(0.18, 0.20, 0.22, alpha);
+            mat.emissive = bevy::color::LinearRgba::new(0.05, 0.06, 0.08, 1.0);
+        }
+        let material_handle = materials.add(mat);
+
+        // Build the entity. For Video, also attach `PendingVideoSetup`
+        // so the video plugin's deferred-attach system mints a real
+        // VideoPlayer next frame and rewrites the material's base
+        // color texture to point at the freshly-decoded frames.
+        let is_video = matches!(class_name, eustress_common::classes::ClassName::Video);
+        let entity = commands.spawn((
+            eustress_common::classes::Instance {
+                name: dir_meta.name.clone(),
+                class_name,
+                archivable: true,
+                id: 0,
+                ai: false,
+                uuid: String::new(),
+            },
+            Mesh3d(mesh_handle),
+            MeshMaterial3d(material_handle),
+            LoadedFromFile {
+                path: dir_meta.path.clone(),
+                file_type: FileType::Directory,
+                service: dir_meta.service.clone(),
+            },
+            Name::new(dir_meta.name.clone()),
+            Transform::from_translation(position).with_scale(Vec3::new(size_xy[0], size_xy[1], 1.0)),
+            Visibility::default(),
+            bevy::light::NotShadowCaster,
+        )).id();
+
+        if is_video {
+            // Texture-buffer dimensions for the video. 1280×720 gives a
+            // sensible default that handles most imported clips without
+            // being wasteful for thumbnails. Real decoder integration
+            // will set width/height from the file's video stream
+            // metadata when the asset opens.
+            let video_w: u32 = 1280;
+            let video_h: u32 = 720;
+            commands.entity(entity).insert(crate::video::PendingVideoSetup {
+                width: video_w,
+                height: video_h,
+                asset_path: abs_asset_path.clone(),
+            });
+        }
+
+        entity
     } else if matches!(class_name, eustress_common::classes::ClassName::SoulScript) {
         // Script folder — find the .rune/.luau/.soul source file inside and load it.
         let instance_toml = dir_meta.path.join("_instance.toml");
@@ -1108,7 +1289,13 @@ pub fn spawn_directory_entry(
         let source_file = std::fs::read_to_string(&instance_toml)
             .ok()
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
-            .and_then(|v| v.get("script").and_then(|s| s.get("source")).and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                use eustress_common::class_schema::get_section_insensitive as get_ci;
+                get_ci(&v, "script")
+                    .and_then(|s| get_ci(s, "source"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            })
             .map(|rel| dir_meta.path.join(rel))
             .or_else(|| {
                 // Fallback: scan folder for first script file
@@ -1184,6 +1371,10 @@ pub fn spawn_directory_entry(
     } else if matches!(class_name, eustress_common::classes::ClassName::Part) {
         // Part folder — load via spawn_instance (same path as flat .glb.toml files).
         // The _instance.toml inside contains the full InstanceDefinition with mesh, transform, etc.
+        // Realism sections (`[material]` / `[thermodynamic]` / `[electrochemical]`)
+        // are dynamic on every Part — `InstanceDefinition` consumes them as
+        // typed fields and `spawn_instance` attaches the matching ECS
+        // components when present, with no subclass required.
         let instance_toml = dir_meta.path.join("_instance.toml");
         match super::instance_loader::load_instance_definition(&instance_toml) {
             Ok(instance_def) => {
@@ -1326,15 +1517,21 @@ pub fn spawn_directory_entry(
     }
     info!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
 
-    // Script and Part folders are leaf entities — their children are internal files
-    // (source code, Summary.md, meshes), not scene entities to display in Explorer.
-    let is_leaf_folder = matches!(class_name,
-        eustress_common::classes::ClassName::SoulScript
-        | eustress_common::classes::ClassName::Part
-    );
-    if is_leaf_folder {
+    // SoulScript folders are full leaves — their children are source +
+    // build artefacts (`.rune`, `Summary.md`), never scene entities.
+    let is_full_leaf = matches!(class_name, eustress_common::classes::ClassName::SoulScript);
+    if is_full_leaf {
         return;
     }
+
+    // Part folders are *partial* leaves: their FILE children are internal
+    // assets (`.glb`, `.toml` mesh metadata) that we don't want to surface
+    // as scene entities, but their DIRECTORY children CAN be UI hangers-on
+    // (BillboardGui labels, SurfaceGui overlays) that the user attached
+    // via MindSpace and absolutely must reload across sessions. Without
+    // this descent, MindSpace-created billboards survived only one
+    // session — the TOML on disk was correct but the loader never saw it.
+    let part_subfolders_only = matches!(class_name, eustress_common::classes::ClassName::Part);
 
     // Spawn all children parented to this folder
     for child in &dir_meta.children {
@@ -1347,6 +1544,11 @@ pub fn spawn_directory_entry(
                 );
             }
             _ => {
+                if part_subfolders_only {
+                    // Skip raw files inside a Part folder (`.glb`, mesh
+                    // TOML metadata) — those aren't scene entities.
+                    continue;
+                }
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
                     material_registry, mesh_cache, space_path, child, Some(folder_entity),
@@ -1361,6 +1563,13 @@ pub fn spawn_directory_entry(
 /// Everything else is deferred to avoid blocking the first frame.
 pub const PRIORITY_SERVICES: &[&str] = &["Workspace", "Lighting"];
 
+/// Monotonically-incrementing counter bumped on every `open_space` call.
+/// DeferredServiceLoader stamps the generation it was built for; if the
+/// live counter moves on (rename, switch, or rapid re-open) the stale
+/// queue is discarded before it can load entries into the wrong Space.
+#[derive(Resource, Default)]
+pub struct SpaceLoadGeneration(pub u64);
+
 /// Resource tracking deferred service loading state
 #[derive(Resource, Default)]
 pub struct DeferredServiceLoader {
@@ -1368,10 +1577,116 @@ pub struct DeferredServiceLoader {
     pub pending: Vec<FileMetadata>,
     /// Whether the initial priority load has completed
     pub priority_done: bool,
+    /// Generation counter stamped when this queue was built.
+    /// Compared against `SpaceLoadGeneration` each frame; mismatch
+    /// means a Space switch happened mid-load and the queue is stale.
+    pub generation: u64,
 }
 
 /// Startup system: load only Workspace + Lighting immediately.
 /// Other services are queued for deferred loading (one service per frame).
+/// Walk `root` recursively and repair the `_instance.toml/_instance.toml`
+/// corruption pattern: a directory named `_instance.toml` containing a
+/// single file also named `_instance.toml` inside it. This shape arises
+/// when a buggy spawner calls `create_dir_all(parent.join("_instance.toml"))`
+/// + `fs::write(parent.join("_instance.toml/_instance.toml"), ...)`,
+/// which is exactly what happened on 2026-04-25 to `Part-7ed7/`.
+///
+/// Repair: move the inner file up one level (`<parent>/_instance.toml`)
+/// and remove the now-empty wrapper directory. If any unexpected
+/// content lives alongside the inner file, leaves it alone and logs a
+/// warning rather than risk data loss.
+///
+/// Returns the number of folders healed. Caller logs the total so a
+/// silent repair pass on a clean tree stays quiet.
+fn repair_reserved_name_corruption(root: &Path) -> u32 {
+    let mut healed = 0u32;
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else { continue };
+            if !file_type.is_dir() { continue; }
+
+            // Recurse first so nested corruption gets healed bottom-up.
+            stack.push(path.clone());
+
+            // Is this directory the corrupt-`_instance.toml` shape?
+            // (a directory whose name is the reserved marker)
+            let dir_name_is_reserved = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.eq_ignore_ascii_case("_instance.toml"))
+                .unwrap_or(false);
+            if !dir_name_is_reserved { continue; }
+
+            let parent = match path.parent() {
+                Some(p) => p,
+                None => continue,
+            };
+            let target = parent.join("_instance.toml");
+
+            // Don't overwrite a real sibling _instance.toml file.
+            if target.is_file() {
+                tracing::warn!(
+                    "🛠 Skipping repair of {:?} — sibling {:?} already exists as a file",
+                    path, target
+                );
+                continue;
+            }
+
+            // The wrapper dir should contain exactly one `_instance.toml` file.
+            let inner_file = path.join("_instance.toml");
+            if !inner_file.is_file() {
+                tracing::warn!(
+                    "🛠 Skipping repair of {:?} — inner {:?} not present as a file",
+                    path, inner_file
+                );
+                continue;
+            }
+
+            // Bail if the wrapper has unexpected siblings (we don't
+            // want to silently lose data).
+            let extra_count = std::fs::read_dir(&path)
+                .map(|d| d.flatten()
+                    .filter(|e| e.file_name() != "_instance.toml")
+                    .count())
+                .unwrap_or(0);
+            if extra_count > 0 {
+                tracing::warn!(
+                    "🛠 Skipping repair of {:?} — has {} unexpected sibling entries",
+                    path, extra_count
+                );
+                continue;
+            }
+
+            // Two-step move so we don't ever try to rename a file
+            // into the path of its own parent directory (the wrapper).
+            let temp = parent.join(".__instance_toml_repair.tmp");
+            if let Err(e) = std::fs::rename(&inner_file, &temp) {
+                tracing::warn!("🛠 repair: move-out of {:?} failed: {}", inner_file, e);
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir(&path) {
+                tracing::warn!("🛠 repair: rmdir of wrapper {:?} failed: {}", path, e);
+                // Try to put the file back so we don't leave a tmp orphan.
+                let _ = std::fs::rename(&temp, &inner_file);
+                continue;
+            }
+            if let Err(e) = std::fs::rename(&temp, &target) {
+                tracing::warn!("🛠 repair: rename to final {:?} failed: {}", target, e);
+                continue;
+            }
+            healed += 1;
+            tracing::info!("🛠 repaired _instance.toml corruption at {:?}", parent);
+        }
+    }
+
+    healed
+}
+
 pub fn load_space_files_system(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -1383,12 +1698,34 @@ pub fn load_space_files_system(
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
+    gen: Res<SpaceLoadGeneration>,
 ) {
     let space_path = &space_root.0;
 
     if !space_path.exists() {
         warn!("Space path does not exist: {:?}", space_path);
         return;
+    }
+
+    // Ensure the Space has all required service folders and lighting TOMLs.
+    // This covers the initial-startup path where SpaceRoot is inserted
+    // directly (e.g. --space flag or auto-resume) without going through
+    // open_space(), which normally calls ensure_space_integrity().
+    // Idempotent — never overwrites existing files.
+    super::space_ops::ensure_space_integrity(space_path);
+
+    // One-pass repair: walk the Space tree and fix any
+    // `<entity>/_instance.toml/_instance.toml` corruption produced by
+    // older builds (or external tools) that mistook the marker
+    // filename for a folder name. Idempotent — does nothing on a
+    // clean tree. Runs before `scan_space_directory` so the loader
+    // sees the healed structure.
+    let healed = repair_reserved_name_corruption(space_path);
+    if healed > 0 {
+        warn!(
+            "🛠 Repaired {} corrupt _instance.toml folder(s) under {:?}",
+            healed, space_path
+        );
     }
 
     let entries = scan_space_directory(space_path);
@@ -1427,6 +1764,9 @@ pub fn load_space_files_system(
     info!("📋 Deferred {} services for background loading", deferred_entries.len());
     deferred.pending = deferred_entries;
     deferred.priority_done = true;
+    // Stamp the generation so load_deferred_services can detect a
+    // mid-load Space switch and discard this queue.
+    deferred.generation = gen.0;
 }
 
 /// Update system: loads one deferred service per frame to keep the viewport responsive.
@@ -1441,8 +1781,20 @@ pub fn load_deferred_services(
     space_root: Res<super::SpaceRoot>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
+    gen: Res<SpaceLoadGeneration>,
 ) {
     if deferred.pending.is_empty() { return; }
+
+    // Generation mismatch — a Space switch (or rename) happened while this
+    // queue was draining. Discard the stale entries; open_space already
+    // set SpaceRescanNeeded so the new Space will build a fresh queue.
+    if deferred.generation != gen.0 {
+        let discarded = deferred.pending.len();
+        deferred.pending.clear();
+        info!("🗑️ Discarded {} stale deferred entries (generation {} → {})",
+              discarded, deferred.generation, gen.0);
+        return;
+    }
 
     // Load one service per frame
     let entry = deferred.pending.remove(0);
@@ -1480,13 +1832,36 @@ impl Plugin for SpaceFileLoaderPlugin {
         
         app.init_resource::<super::SpaceRoot>()
             .init_resource::<SpaceFileRegistry>()
+            .init_resource::<SpaceLoadGeneration>()
             .init_resource::<super::material_loader::MaterialRegistry>()
             .init_resource::<super::instance_loader::PrimitiveMeshCache>()
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .init_resource::<DeferredServiceLoader>()
+            // Class schema — common-crate source of truth for every
+            // `_instance.toml`. Embedded templates normalise to PascalCase,
+            // `load_and_heal_instance` fills missing fields + self-heals
+            // the file on disk. Plugins extend the schema by registering
+            // `ExtraSectionClaim` impls on `ExtraSectionRegistry`.
+            .init_resource::<eustress_common::class_schema::ClassSchemaResource>()
+            .init_resource::<eustress_common::class_schema::ExtraSectionRegistry>()
             .add_systems(Startup, (
+                // Register every first-party ExtraSectionClaim that
+                // ships with common (currently just ThermodynamicClaim).
+                // Plugins that want to add more claimants do the same
+                // dance in their own `build` after this runs.
+                |mut registry: ResMut<eustress_common::class_schema::ExtraSectionRegistry>| {
+                    registry.register_builtins();
+                },
                 super::class_defaults::startup_load_class_defaults,
+                // Template / enum / filename-stem drift check. Runs
+                // once at boot, logs warnings for any class template
+                // whose `[metadata] class_name` doesn't match its
+                // file stem, or whose stem isn't in the ClassName
+                // enum. Catches "added a template but forgot the
+                // enum variant" bugs at startup instead of at
+                // load-a-Part time.
+                eustress_common::class_schema::log_schema_validation,
                 load_space_files_system.after(crate::default_scene::setup_default_scene),
                 super::file_watcher::setup_file_watcher,
             ))
@@ -1496,6 +1871,51 @@ impl Plugin for SpaceFileLoaderPlugin {
                 super::instance_loader::write_instance_changes_system,
                 super::space_ops::apply_space_rescan,
                 super::instance_loader::update_base_part_size_from_mesh,
+                // Per-frame safety net: clamp NaN/Inf and sky-distance
+                // overflow on every Avian-tracked Transform so any
+                // drag-tool / plugin that writes a degenerate value
+                // can't reach Avian's `assert_components_finite` and
+                // panic the engine. Tools should clamp at the source
+                // via `safe_translation`, but this catches misses.
+                super::instance_loader::sanitize_part_transforms_safety_net,
+                // Hand each freshly-loaded instance's extra
+                // `[section]`s to any plugin that registered for them
+                // via `ExtraSectionRegistry`. Runs once per entity on
+                // the frame `PendingExtraSections` is inserted, then
+                // removes the component.
+                eustress_common::class_schema::dispatch_pending_extras,
             ));
     }
+}
+
+/// Unit quad mesh used by Image / Video classes. UVs are origin-top-left
+/// to match the convention the rest of the engine uses (BillboardCard,
+/// Decal). Scaled by `Transform::from_scale(Vec3::new(width, height, 1))`
+/// so the same mesh handle is shared across every imported media entity.
+fn build_imported_media_quad() -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            [-0.5, -0.5, 0.0],
+            [ 0.5, -0.5, 0.0],
+            [ 0.5,  0.5, 0.0],
+            [-0.5,  0.5, 0.0],
+        ],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4]);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![
+            [0.0, 1.0],   // bottom-left
+            [1.0, 1.0],   // bottom-right
+            [1.0, 0.0],   // top-right
+            [0.0, 0.0],   // top-left
+        ],
+    );
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    mesh
 }

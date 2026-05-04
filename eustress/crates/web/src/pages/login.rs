@@ -737,6 +737,23 @@ pub fn LoginPage() -> impl IntoView {
                                                         spawn_local(async move {
                                                             let client = ApiClient::new(&api_url);
                                                             let sess = kyc_session_id.get();
+                                                            // Pass `email` + `toml_content` into the
+                                                            // register request so the Worker auto-relays
+                                                            // the welcome email in-line. Saves a round
+                                                            // trip vs. the previous /api/identity/email-
+                                                            // backup follow-up call AND closes the
+                                                            // window where registration succeeded but
+                                                            // the email post failed silently.
+                                                            let email_for_register = if email_clone.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(email_clone.as_str())
+                                                            };
+                                                            let toml_for_register = if email_for_register.is_some() {
+                                                                Some(toml_for_email.as_str())
+                                                            } else {
+                                                                None
+                                                            };
                                                             match api::register_identity(
                                                                 &client,
                                                                 &uname_clone,
@@ -745,6 +762,8 @@ pub fn LoginPage() -> impl IntoView {
                                                                 Some(&idt_clone),
                                                                 Some(&id_hash),
                                                                 Some(&sess),
+                                                                email_for_register,
+                                                                toml_for_register,
                                                             ).await {
                                                                 Ok(response) => {
                                                                     // Registration succeeded — download both files
@@ -752,8 +771,18 @@ pub fn LoginPage() -> impl IntoView {
                                                                     download_file(&toml_filename, &toml_content);
                                                                     download_file("README - Eustress Identity.txt", &identity_readme(&uname_clone));
 
-                                                                    // Email a backup copy of identity.toml (fire-and-forget)
-                                                                    if !email_clone.is_empty() {
+                                                                    // Fallback: if the in-line auto-email
+                                                                    // didn't go through (transient relay
+                                                                    // hiccup, sender unverified mid-deploy,
+                                                                    // etc.), retry via the explicit
+                                                                    // `/api/identity/email-backup` endpoint.
+                                                                    // The user supplied email but server
+                                                                    // didn't emit it — this is the only
+                                                                    // path that recovers without re-asking.
+                                                                    let auto_emailed = response
+                                                                        .backup_emailed
+                                                                        .unwrap_or(false);
+                                                                    if !auto_emailed && !email_clone.is_empty() {
                                                                         let email_client = ApiClient::new(&api_url);
                                                                         let email_to = email_clone.clone();
                                                                         let email_toml = toml_for_email.clone();

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "eustress": {
+      "type": "stdio",
+      "command": "E:\\Workspace\\EustressEngine\\eustress\\target\\release\\eustress-mcp.exe",
+      "args": [],
+      "env": {
+        "EUSTRESS_UNIVERSE": "C:\\Users\\miksu\\Documents\\Eustress\\Universe1"
+      }
+    }
+  }
+}

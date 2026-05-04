@@ -36,7 +36,7 @@ impl ToolHandler for CreateEntityTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "create_entity",
-            description: "Create a new 3D entity in the current Space's Workspace. Writes a folder with _instance.toml so the engine's file watcher hot-spawns it with full rendering + selection components. Supported primitive classes (Part) use the shared mesh assets under `assets/parts/*.glb`; Model creates a container folder for grouped Parts.",
+            description: "Create a new 3D entity in the Space's Workspace. Writes a folder with _instance.toml so the engine's file watcher hot-spawns it. Use `parent` to place entities inside a Model folder (e.g. parent=\"V-Cell/V2\" creates at Workspace/V-Cell/V2/{name}/). Without parent, entities land at the Workspace root. ALWAYS create the parent Model first, then create child Parts with that parent path.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -51,10 +51,14 @@ impl ToolHandler for CreateEntityTool {
                         "default": "block"
                     },
                     "name":     { "type": "string",  "description": "Entity name (used as folder + Instance.name)" },
-                    "position": { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] world position in studs" },
-                    "size":     { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] size in studs (maps to Transform.scale)" },
+                    "position": { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] world position in meters (1 unit = 1 meter)" },
+                    "size":     { "type": "array",   "items": { "type": "number" }, "description": "[x, y, z] size in meters (maps to Transform.scale)" },
                     "material": { "type": "string",  "description": "Material preset: Plastic, SmoothPlastic, Wood, WoodPlanks, Metal, CorrodedMetal, DiamondPlate, Foil, Grass, Concrete, Brick, Granite, Marble, Slate, Sand, Fabric, Glass, Neon, Ice" },
                     "color":    { "type": "array",   "items": { "type": "number" }, "description": "[r, g, b] color — either 0.0-1.0 floats or 0-255 integers" },
+                    "parent": {
+                        "type": "string",
+                        "description": "Path relative to Workspace/ where this entity should be created. Use this to place Parts inside a Model folder. Example: 'MyProduct/V2' creates at Workspace/MyProduct/V2/{name}/. Omit or empty to place directly in Workspace/."
+                    },
                     "anchored":     { "type": "boolean", "description": "Prevents physics from moving the part (default true)" },
                     "can_collide":  { "type": "boolean", "description": "Whether the part participates in collisions (default true)" }
                 },
@@ -79,7 +83,30 @@ impl ToolHandler for CreateEntityTool {
 
         let safe_name = name.replace(' ', "_").replace('/', "_");
         let workspace_dir = ctx.space_root.join("Workspace");
-        let instance_dir = workspace_dir.join(&safe_name);
+
+        // Optional parent path: place entity inside a Model folder hierarchy.
+        // Reject path traversal attempts (no '..' components allowed).
+        let parent_path = input.get("parent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let base_dir = if parent_path.is_empty() {
+            workspace_dir.clone()
+        } else {
+            if parent_path.contains("..") {
+                return ToolResult {
+                    tool_name: "create_entity".to_string(),
+                    tool_use_id: String::new(),
+                    success: false,
+                    content: "Invalid parent path: '..' is not allowed.".to_string(),
+                    structured_data: None,
+                    stream_topic: None,
+                };
+            }
+            workspace_dir.join(parent_path)
+        };
+
+        let instance_dir = base_dir.join(&safe_name);
         let _ = std::fs::create_dir_all(&instance_dir);
         let filepath = instance_dir.join("_instance.toml");
 

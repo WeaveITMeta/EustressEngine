@@ -55,6 +55,7 @@ import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
 import { ApiReferencePanel, ApiEntryData } from "api_reference_panel.slint";
+import { ServicesBrowserPanel, ServiceBrowserEntry, ServicePropertySummary } from "services_browser.slint";
 import { UniverseBrowser, UniverseItem, SpaceItem } from "universe_browser.slint";
 
 // ============================================================================
@@ -283,6 +284,12 @@ export component StudioWindow inherits Window {
     callback api-language-filter-changed(string);
     callback api-copy-example(string);
 
+    // Services Browser Panel (browsable catalog of all default Space services)
+    in property <[ServiceBrowserEntry]> services-browser-entries: [];
+    in-out property <int> services-browser-selected: 0;
+    callback services-browser-open-url(string);
+    callback services-browser-selected-changed(int);
+
     // Scene name for exit confirmation
     in-out property <string> scene-name: "Untitled";
     
@@ -448,6 +455,12 @@ export component StudioWindow inherits Window {
     
     // Unified explorer tree data: ECS entities + filesystem (pushed from Bevy)
     in-out property <[TreeNode]> tree-nodes: [];
+    // Explorer auto-scroll target — driven by 3D-viewport selection so
+    // the selected entity's tree row jumps to the top. `explorer-scroll-pulse`
+    // is bumped from Rust each time a new selection occurs; the
+    // ExplorerPanel's `changed scroll-pulse` handler does the actual jump.
+    in property <int> explorer-scroll-pulse: 0;
+    in property <length> explorer-scroll-target-y: 0px;
     
     // Properties panel data (pushed from Bevy for selected entity)
     in-out property <[PropertyData]> entity-properties: [];
@@ -462,7 +475,7 @@ export component StudioWindow inherits Window {
     
     // Panel widths (resizable)
     in-out property <length> left-panel-width: 280px;
-    in-out property <length> right-panel-width: 340px;
+    in-out property <length> right-panel-width: 420px;
     in-out property <length> output-height: 150px;
     
     // ========================================================================
@@ -666,6 +679,10 @@ export component StudioWindow inherits Window {
     callback open-scene();
     callback save-scene();
     callback save-scene-as();
+    // File → Import an image or video. Slint side opens the OS file
+    // picker via Rust; the picked path flows back through
+    // `SlintAction::ImportAsset` → `FileEvent::ImportAsset`.
+    callback import-asset();
     callback publish-universe();
     callback publish-space();
     callback publish(string, string, string, bool, bool, bool, bool);
@@ -736,6 +753,8 @@ export component StudioWindow inherits Window {
     // `value` = current `"x, y, z"` triple (used only on copy).
     callback copy-property-vector(string, string);
     callback paste-property-vector(string);
+    // Material dropdown type-ahead — Rust finds matching option index
+    callback find-material-by-key(string, int) -> int;
     
     // Command bar
     callback execute-command(string);
@@ -957,6 +976,7 @@ export component StudioWindow inherits Window {
             on-open-scene => { root.open-scene(); }
             on-save-scene => { root.save-scene(); }
             on-save-scene-as => { root.save-scene-as(); }
+            on-import-asset => { root.import-asset(); }
             on-publish-universe => { root.publish-universe(); }
             on-publish-space => { root.publish-space(); }
             on-exit => { root.exit-app(); }
@@ -1220,6 +1240,8 @@ export component StudioWindow inherits Window {
                         
                         if root.left-tab-index == 0: ExplorerPanel {
                             tree-nodes: root.tree-nodes;
+                            scroll-pulse: root.explorer-scroll-pulse;
+                            scroll-target-y: root.explorer-scroll-target-y;
                             on-select-node(id, node-type, ctrl, shift) => { root.select-node(id, node-type, ctrl, shift); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
                             on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
@@ -1237,7 +1259,23 @@ export component StudioWindow inherits Window {
                                 root.context-menu-x = x;
                                 root.context-menu-y = y;
                                 root.context-menu-node-type = node-type;
-                                
+                                // Stash the right-clicked node so backend
+                                // context-menu handlers (Select Children,
+                                // Copy Path, …) know which entity to act on.
+                                // The explorer panel has already triggered
+                                // `select-node` on non-selected targets
+                                // before dispatching to us, so by the
+                                // time the user clicks a menu item the
+                                // SelectionManager + `Selected` components
+                                // reflect this entity. Without that
+                                // upstream select, the hierarchy actions
+                                // (Select Children/Descendants/Parent/
+                                // Siblings/Invert) fell through to an
+                                // empty `With<Selected>` query and did
+                                // nothing.
+                                root.context-menu-target-id = node-id;
+                                root.context-menu-target-type = node-type;
+
                                 // Populate menu items based on node type
                                 if node-type == "file" {
                                     root.context-menu-items = [
@@ -1271,7 +1309,14 @@ export component StudioWindow inherits Window {
                                         { id: "delete",    label: "Delete",     shortcut: "Del",    icon: @image-url("../../assets/icons/ui/delete.svg"),    enabled: true, separator-after: true  },
                                         { id: "group",     label: "Group",      shortcut: "Ctrl+G", icon: @image-url("../../assets/icons/folder.svg"),    enabled: true, separator-after: false },
                                         { id: "ungroup",   label: "Ungroup",    shortcut: "Ctrl+U", icon: @image-url("../../assets/icons/ui/folder-open.svg"), enabled: true, separator-after: true },
-                                        { id: "rename",    label: "Rename",     shortcut: "F2",     icon: @image-url("../../assets/icons/ui/rename.svg"),    enabled: true, separator-after: false },
+                                        { id: "rename",    label: "Rename",     shortcut: "F2",     icon: @image-url("../../assets/icons/ui/rename.svg"),    enabled: true, separator-after: true },
+                                        // Copy the on-disk path (to the
+                                        // _instance.toml or parent folder) to
+                                        // the clipboard — matches the file
+                                        // menu's item + the Soul Panel's
+                                        // "Copy Path" shortcut.
+                                        { id: "copy-path",          label: "Copy Path",          shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
+                                        { id: "copy-relative-path", label: "Copy Relative Path", shortcut: "", icon: @image-url("../../assets/icons/ui/link.svg"), enabled: true, separator-after: false },
                                     ];
                                 }
 
@@ -2260,6 +2305,14 @@ export component StudioWindow inherits Window {
                         }
                     }
 
+                    // Services Browser (shown for "services" tab type)
+                    if root.active-tab-type == "services": ServicesBrowserPanel {
+                        services: root.services-browser-entries;
+                        selected-index <=> root.services-browser-selected;
+                        open-service-url(url) => { root.services-browser-open-url(url); }
+                        service-selected(idx) => { root.services-browser-selected-changed(idx); }
+                    }
+
                     // API Reference Browser (shown for "api" tab type)
                     if root.active-tab-type == "api": ApiReferencePanel {
                         entries: root.api-entries;
@@ -2267,6 +2320,7 @@ export component StudioWindow inherits Window {
                         total-count: root.api-total-count;
                         filtered-count: root.api-filtered-count;
                         selected-category: root.api-selected-category;
+                        language-filter <=> root.api-language-filter;
 
                         search-changed(text) => { root.api-search-changed(text); }
                         category-selected(cat) => {
@@ -2549,6 +2603,7 @@ export component StudioWindow inherits Window {
                             // Vec3 row copy / paste — Rust handles clipboard I/O + re-parsing.
                             on-copy-property-vector(name, value) => { root.copy-property-vector(name, value); }
                             on-paste-property-vector(name) => { root.paste-property-vector(name); }
+                            on-find-material-by-key(key, idx) => { root.find-material-by-key(key, idx) }
                         }
                         
                         if root.right-tab-index == 1: HistoryPanel {
@@ -2723,57 +2778,14 @@ export component StudioWindow inherits Window {
                 }
             }
             
-            // Panel-mode switcher — tiny title-bar row with
-            // Output / Timeline buttons. Flipping the mode swaps
-            // which component renders in the slot below.
-            HorizontalLayout {
-                height: 22px;
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 4px;
-                alignment: start;
-
-                output-tab := Rectangle {
-                    width: 64px; height: 20px;
-                    background: root.bottom-panel-mode == "output"
-                        ? Theme.accent-blue
-                        : (output-tab-touch.has-hover ? #ffffff10 : transparent);
-                    border-radius: Theme.radius-sm;
-                    Text {
-                        text: "Output";
-                        color: root.bottom-panel-mode == "output" ? #ffffff : Theme.text-secondary;
-                        font-size: Theme.font-sm;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    output-tab-touch := TouchArea {
-                        clicked => { root.set-bottom-panel("output"); }
-                    }
-                }
-                timeline-tab := Rectangle {
-                    width: 74px; height: 20px;
-                    background: root.bottom-panel-mode == "timeline"
-                        ? Theme.accent-eustress
-                        : (timeline-tab-touch.has-hover ? #ffffff10 : transparent);
-                    border-radius: Theme.radius-sm;
-                    Text {
-                        text: "Timeline";
-                        color: root.bottom-panel-mode == "timeline" ? #ffffff : Theme.text-secondary;
-                        font-size: Theme.font-sm;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    timeline-tab-touch := TouchArea {
-                        clicked => { root.set-bottom-panel("timeline"); }
-                    }
-                }
-            }
-
-            // Output — default mode.
+            // Output — default mode. Tab switcher is now inside
+            // the OutputConsole toolbar (no separate 22px row).
             if root.bottom-panel-mode == "output": OutputConsole {
-                y: 22px;
+                y: 0px;
                 width: parent.width;
-                height: parent.height - 22px;
+                height: parent.height;
+                panel-mode <=> root.bottom-panel-mode;
+                set-panel-mode(mode) => { root.set-bottom-panel(mode); }
                 logs: root.output-logs;
                 all-text: root.output-all-text;
                 source-filter <=> root.output-source-filter;
@@ -2798,9 +2810,11 @@ export component StudioWindow inherits Window {
             // Timeline — data-agnostic marker panel fed by the
             // `timeline/*` Stream topic. Title-bar button flips here.
             if root.bottom-panel-mode == "timeline": TimelinePanel {
-                y: 22px;
+                y: 0px;
                 width: parent.width;
-                height: parent.height - 22px;
+                height: parent.height;
+                panel-mode <=> root.bottom-panel-mode;
+                set-panel-mode(mode) => { root.set-bottom-panel(mode); }
                 tracks:            root.timeline-tracks;
                 markers:           root.timeline-markers;
                 kind-chips:        root.timeline-kind-chips;

@@ -1,0 +1,13 @@
+# DistanceConstraint — Maintains a fixed distance between two Attachments
+# Avian 0.6: DistanceJoint
+
+[constraint]
+enabled = true
+attachment0 = ""
+attachment1 = ""
+min_length = 0.0
+max_length = 10.0
+
+[metadata]
+class_name = "DistanceConstraint"
+archivable = true

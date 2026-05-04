@@ -87,7 +87,7 @@ component ChatBubble inherits Rectangle {
 
     callback approve-mcp(int);
     callback skip-mcp(int);
-    callback edit-mcp(int);
+    callback edit-mcp(int, string);
     callback open-artifact(string);
     callback select-entity(string);
 
@@ -97,21 +97,26 @@ component ChatBubble inherits Rectangle {
     height: bubble.preferred-height + 8px;
 
     HorizontalLayout {
-        padding-left: root.role == "user" ? 40px : 8px;
-        padding-right: root.role == "user" ? 8px : 40px;
-        padding-top: 4px;
-        padding-bottom: 4px;
+        padding-left: 8px;
+        padding-right: 8px;
+        padding-top: 2px;
+        padding-bottom: 2px;
 
         bubble := Rectangle {
-            background: root.role == "user" ? #1a5276 :
-                        root.role == "mcp" ? #2c2c3e :
-                        root.role == "approval" ? #3e2c1a :
-                        root.role == "artifact" ? #1a3e2c :
-                        root.role == "error" ? #4a2020 :
-                        Theme.background-tertiary;
-            border-radius: 8px;
-            border-width: root.role == "mcp" ? 1px : 0px;
-            border-color: root.role == "mcp" ? #4a4a6a : transparent;
+            horizontal-stretch: 1;
+            // Windsurf-like flat theme: subtle background tints,
+            // no heavy coloured bubbles. Agent messages are nearly
+            // transparent; user messages carry a faint blue tint.
+            background: root.role == "user" ? #252538 :
+                        root.role == "mcp" ? #1e1e2a :
+                        root.role == "approval" ? #2a2418 :
+                        root.role == "artifact" ? #1a2a22 :
+                        root.role == "error" ? #2e1a1a :
+                        #1e1e24;
+            border-radius: 6px;
+            border-width: root.role == "system" ? 0px :
+                          root.role == "mcp" ? 1px : 0px;
+            border-color: root.role == "mcp" ? #3a3a52 : transparent;
 
             VerticalLayout {
                 padding: 10px;
@@ -262,12 +267,17 @@ component ChatBubble inherits Rectangle {
                     }
                 }
 
-                // Message content
-                Text {
+                // Message content — read-only TextInput so the user
+                // can click-drag to select text and Ctrl+C to copy.
+                TextInput {
                     text: root.content;
                     color: root.role == "error" ? #ff8888 : Theme.text-primary;
                     font-size: 12px;
                     wrap: word-wrap;
+                    read-only: true;
+                    single-line: false;
+                    selection-background-color: #264f78;
+                    selection-foreground-color: #ffffff;
                 }
 
                 // Artifact file path (clickable)
@@ -308,13 +318,13 @@ component ChatBubble inherits Rectangle {
 
                 // Approval buttons (for MCP commands pending approval)
                 if root.role == "mcp" && root.mcp-status == "pending": HorizontalLayout {
-                    spacing: 6px;
-                    padding-top: 4px;
+                    spacing: 4px;
+                    padding-top: 6px;
 
-                    // Approve button
+                    // Run button — centered checkmark icon
                     Rectangle {
-                        width: 70px;
-                        height: 26px;
+                        horizontal-stretch: 1;
+                        height: 30px;
                         background: approve-touch.has-hover ? #2d7d46 : #245a36;
                         border-radius: 4px;
 
@@ -323,55 +333,43 @@ component ChatBubble inherits Rectangle {
                             clicked => { root.approve-mcp(root.message-id); }
                         }
 
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 4px;
-
-                            Image {
-                                width: 12px;
-                                height: 12px;
-                                source: @image-url("../../assets/icons/ui/check.svg");
-                                image-fit: contain;
-                                colorize: white;
-                                vertical-alignment: center;
-                            }
-
-                            Text {
-                                text: "Run";
-                                color: white;
-                                font-size: 11px;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: @image-url("../../assets/icons/ui/check.svg");
+                            image-fit: contain;
+                            colorize: white;
                         }
                     }
 
-                    // Edit button (lets user modify before running)
+                    // Edit button — copies command into chat input for editing
                     Rectangle {
-                        width: 60px;
-                        height: 26px;
+                        horizontal-stretch: 1;
+                        height: 30px;
                         background: edit-touch.has-hover ? #5a5a2d : #3e3e20;
                         border-radius: 4px;
 
                         edit-touch := TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.edit-mcp(root.message-id); }
+                            clicked => { root.edit-mcp(root.message-id, root.content); }
                         }
 
                         Text {
                             text: "Edit";
                             color: #cccc88;
                             font-size: 11px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
 
-                    // Skip button
+                    // Reject button — centered X icon
                     Rectangle {
-                        width: 60px;
-                        height: 26px;
+                        horizontal-stretch: 1;
+                        height: 30px;
                         background: skip-touch.has-hover ? #5a2d2d : #3e2020;
                         border-radius: 4px;
 
@@ -380,12 +378,14 @@ component ChatBubble inherits Rectangle {
                             clicked => { root.skip-mcp(root.message-id); }
                         }
 
-                        Text {
-                            text: "Skip";
-                            color: #cc8888;
-                            font-size: 11px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                            source: @image-url("../../assets/icons/ui/close.svg");
+                            image-fit: contain;
+                            colorize: #cc8888;
                         }
                     }
                 }
@@ -422,14 +422,10 @@ component ChatBubble inherits Rectangle {
                     }
                 }
 
-                // Timestamp. On user bubbles (blue accent background)
-                // the `Theme.text-disabled` grey disappeared against the
-                // fill — use a semi-transparent white instead so it's
-                // legible on the coloured bubble and still reads as a
-                // muted caption on the assistant's darker background.
+                // Timestamp — muted caption below the message.
                 Text {
                     text: root.timestamp;
-                    color: root.role == "user" ? #ffffffb0 : Theme.text-secondary;
+                    color: Theme.text-secondary;
                     font-size: 9px;
                     horizontal-alignment: root.role == "user" ? right : left;
                 }
@@ -646,8 +642,7 @@ export component WorkshopPanel inherits Rectangle {
         // label + optional count badge, consistent with Properties /
         // History / Soul / Problems.
         SidePanelHeader {
-            title: "WORKSHOP";
-            count: root.past-conversations.length;
+            title: "Workshop";
             show-icon: true;
             icon: @image-url("../../assets/icons/wrench.svg");
         }
@@ -736,14 +731,24 @@ export component WorkshopPanel inherits Rectangle {
                 background: Theme.border-color;
             }
 
-            // Absorb scroll events so the mouse wheel scrolls the tab
-            // strip horizontally (via the inner Flickable) instead of
-            // bubbling to the Bevy viewport (camera zoom) or the chat.
+            // Translate vertical scroll wheel into horizontal tab-strip
+            // scrolling: down = scroll right, up = scroll left.
+            // Large 120px steps so a single notch moves roughly one tab.
             TouchArea {
-                scroll-event(event) => { accept }
+                scroll-event(event) => {
+                    // delta-y > 0 when scrolling up (away from user).
+                    // We want: scroll-up → shift tabs left (increase viewport-x toward 0).
+                    //          scroll-down → shift tabs right (decrease viewport-x).
+                    // Multiply delta-y by a large factor for fast movement.
+                    let new-x = tab-flick.viewport-x + event.delta-y * 4;
+                    // Clamp: viewport-x is <= 0 (leftmost), and >= -(content - visible)
+                    let min-x = min(0px, -(tab-flick.viewport-width - tab-flick.width));
+                    tab-flick.viewport-x = max(min-x, min(0px, new-x));
+                    accept
+                }
             }
 
-            Flickable {
+            tab-flick := Flickable {
                 x: 0px; y: 0px;
                 width: 100%;
                 height: 31px; // leave 1px for divider
@@ -902,6 +907,24 @@ export component WorkshopPanel inherits Rectangle {
                         }
                     }
                 }
+            }
+
+            // Thin horizontal scrollbar indicator — only visible when
+            // tabs overflow the visible width. Sits on the 1px divider line.
+            if tab-flick.viewport-width > tab-flick.width: Rectangle {
+                x: {
+                    // scroll-ratio: how far we've scrolled (0..1)
+                    let scroll-range = tab-flick.viewport-width - tab-flick.width;
+                    let ratio = scroll-range > 0px ? (-tab-flick.viewport-x / scroll-range) : 0;
+                    let track-w = parent.width;
+                    let thumb-w = max(30px, track-w * tab-flick.width / tab-flick.viewport-width);
+                    ratio * (track-w - thumb-w)
+                };
+                y: parent.height - 3px;
+                width: max(30px, parent.width * tab-flick.width / tab-flick.viewport-width);
+                height: 2px;
+                border-radius: 1px;
+                background: #ffffff30;
             }
         }
 
@@ -1173,8 +1196,51 @@ export component WorkshopPanel inherits Rectangle {
             }
         }
 
-        if root.messages.length > 0: ScrollView {
+        if root.messages.length > 0: chat-scroll := ScrollView {
             vertical-stretch: 1;
+
+            // Edge auto-scroll: when the pointer hovers within 40px of the
+            // top or bottom edge the timer nudges viewport-y each frame.
+            // `scroll-touch.has-hover` drives the running state — no
+            // PointerEventKind.exit needed.
+            property <length> pointer-y-in-scroll: 0px;
+
+            edge-scroll-timer := Timer {
+                interval: 16ms;
+                running: scroll-touch.has-hover;
+                triggered => {
+                    let edge-zone = 40px;
+                    let speed = 8px;
+                    let h = chat-scroll.height;
+                    let py = chat-scroll.pointer-y-in-scroll;
+                    let max-vp = max(0px, chat-scroll.viewport-height - h);
+                    if py < edge-zone {
+                        chat-scroll.viewport-y = max(-max-vp, chat-scroll.viewport-y + speed);
+                    } else if py > (h - edge-zone) {
+                        chat-scroll.viewport-y = min(0px, chat-scroll.viewport-y - speed);
+                    }
+                }
+            }
+
+            // Transparent overlay — tracks pointer-y for edge detection and
+            // forwards wheel events so scrolling works even when the TextInput
+            // below has keyboard focus (which normally swallows wheel events).
+            scroll-touch := TouchArea {
+                width: parent.width;
+                height: parent.height;
+                moved => {
+                    chat-scroll.pointer-y-in-scroll = self.mouse-y;
+                }
+                scroll-event(ev) => {
+                    let max-vp = max(0px, chat-scroll.viewport-height - chat-scroll.height);
+                    chat-scroll.viewport-y = clamp(
+                        chat-scroll.viewport-y + ev.delta-y,
+                        -max-vp,
+                        0px
+                    );
+                    accept
+                }
+            }
 
             VerticalLayout {
                 padding: 4px;
@@ -1196,7 +1262,7 @@ export component WorkshopPanel inherits Rectangle {
 
                     approve-mcp(id) => { root.on-approve-mcp(id); }
                     skip-mcp(id) => { root.on-skip-mcp(id); }
-                    edit-mcp(id) => { root.on-edit-mcp(id); }
+                    edit-mcp(id, cmd-text) => { root.input-text = cmd-text; }
                     open-artifact(path) => { root.on-open-artifact(path); }
                     select-entity(name) => { root.on-select-entity(name); }
                 }
@@ -1670,7 +1736,7 @@ export component WorkshopPanel inherits Rectangle {
                                     spacing: 8px;
 
                                     Text {
-                                        text: conv.product-name != "" ? conv.product-name : "New Conversation";
+                                        text: conv.title != "" ? conv.title : "New Conversation";
                                         color: Theme.text-primary;
                                         font-size: 12px;
                                         font-weight: 600;

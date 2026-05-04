@@ -11,6 +11,10 @@ pub enum Action {
     RotateTool,
     ScaleTool,
     
+    // File
+    /// Manual save — writes ECS to disk + commits to git as a save point.
+    SaveScene,
+
     // Edit
     Undo,
     Redo,
@@ -105,6 +109,7 @@ impl Action {
             Action::MoveTool => "Move Tool",
             Action::RotateTool => "Rotate Tool",
             Action::ScaleTool => "Scale Tool",
+            Action::SaveScene => "Save Scene",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
             Action::Copy => "Copy",
@@ -291,6 +296,11 @@ impl Default for KeyBindings {
         bindings.insert(Action::ScaleTool, KeyBinding::new(KeyCode::KeyC).with_alt());
         bindings.insert(Action::RotateTool, KeyBinding::new(KeyCode::KeyV).with_alt());
         
+        // File shortcuts — Ctrl+S writes ECS to disk + creates a git
+        // commit so the user has an explicit save-point boundary on
+        // top of the timer-driven autosave.
+        bindings.insert(Action::SaveScene, KeyBinding::new(KeyCode::KeyS).with_ctrl());
+
         // Edit shortcuts
         bindings.insert(Action::Undo, KeyBinding::new(KeyCode::KeyZ).with_ctrl());
         bindings.insert(Action::Redo, KeyBinding::new(KeyCode::KeyY).with_ctrl());
@@ -483,6 +493,7 @@ fn dispatch_keyboard_shortcuts(
 
     // All other actions → dispatch as MenuActionEvent
     let actions = [
+        Action::SaveScene,
         Action::Undo, Action::Redo,
         Action::Copy, Action::Cut, Action::Paste, Action::Duplicate, Action::Delete,
         Action::SelectAll,
@@ -536,12 +547,14 @@ fn handle_menu_action_events(
         MessageWriter<crate::clipboard::DuplicateEvent>,
         MessageWriter<crate::undo::UndoEvent>,
         MessageWriter<crate::undo::RedoEvent>,
+        MessageWriter<crate::ui::FileEvent>,
     ),
     selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
     entity_query: Query<(Entity, Option<&GlobalTransform>, Option<&eustress_common::classes::BasePart>),
         Or<(With<crate::rendering::PartEntity>, With<eustress_common::classes::Instance>)>>,
     instance_query: Query<&eustress_common::classes::Instance>,
     instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
+    loaded_from_file_query: Query<&crate::space::LoadedFromFile>,
     mut file_registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     mut editor_settings: Option<ResMut<crate::editor_settings::EditorSettings>>,
@@ -568,6 +581,7 @@ fn handle_menu_action_events(
         ref mut duplicate_events,
         ref mut undo_action_events,
         ref mut redo_action_events,
+        ref mut file_events,
     ) = event_writers;
     let Some(mut studio_state) = studio_state else { return };
 
@@ -578,6 +592,14 @@ fn handle_menu_action_events(
             Action::MoveTool   => { studio_state.current_tool = crate::ui::Tool::Move; }
             Action::ScaleTool  => { studio_state.current_tool = crate::ui::Tool::Scale; }
             Action::RotateTool => { studio_state.current_tool = crate::ui::Tool::Rotate; }
+
+            // Manual save (Ctrl+S) — write ECS to disk + commit to git
+            // as a recoverable save point. Routed through `FileEvent` so
+            // it goes through the same exclusive-system path as the
+            // Slint File→Save menu.
+            Action::SaveScene => {
+                file_events.write(crate::ui::FileEvent::SaveScene);
+            }
 
             // Undo/Redo — fire both event types:
             // UndoCommandEvent → CommandHistory (selection undo)
@@ -742,8 +764,33 @@ fn handle_menu_action_events(
                                     .unwrap_or(trash_anchor.unwrap_or(std::path::Path::new(".")))
                                     .join(".eustress").join("trash");
                                 let _ = std::fs::create_dir_all(&trash_dir);
-                                let trash_name = source_path.file_name().unwrap_or_default();
-                                let trash_path = trash_dir.join(trash_name);
+
+                                // De-collide the trash name. Two deletes of the
+                                // same `Block` folder would otherwise see the
+                                // second rename fail ("target exists") on
+                                // Windows, the fallback `remove_dir_all` might
+                                // also fail (open handles), the error is
+                                // swallowed via `let _`, and the on-disk
+                                // folder stays while the entity despawns —
+                                // the Explorer/file-system desync the user
+                                // hit. Appending a monotonic timestamp
+                                // guarantees a unique trash path every time.
+                                let trash_stem = source_path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("entity");
+                                let ts_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                let trash_path = {
+                                    let base = trash_dir.join(trash_stem);
+                                    if base.exists() {
+                                        trash_dir.join(format!("{}-{:x}", trash_stem, ts_ms))
+                                    } else {
+                                        base
+                                    }
+                                };
 
                                 // Tell file-watcher to ignore the impending delete
                                 // so it doesn't try to despawn an already-gone entity.
@@ -752,24 +799,156 @@ fn handle_menu_action_events(
                                     registry.rename_in_progress.insert(source_path.clone());
                                 }
 
-                                match std::fs::rename(&source_path, &trash_path) {
-                                    Ok(_) => {
-                                        trashed_paths.push((toml_path.clone(), trash_path));
-                                        info!("🗑️ Moved {:?} to trash", source_path.file_name().unwrap_or_default());
-                                    }
-                                    Err(_) => {
-                                        // Fallback: hard-delete. For folders, remove recursively.
-                                        if is_folder_instance {
-                                            let _ = std::fs::remove_dir_all(&source_path);
-                                        } else {
-                                            let _ = std::fs::remove_file(&source_path);
+                                // Rename-to-trash is the ONLY allowed path —
+                                // we deliberately do *not* fall back to
+                                // `remove_dir_all` / `remove_file`. Earlier
+                                // versions did, but Windows transiently locks
+                                // a part folder for ~50–200 ms after Bevy's
+                                // asset server drops a `.glb` handle; during
+                                // that window `rename` returns `Os { code:
+                                // 5, kind: PermissionDenied }`, the fallback
+                                // `remove_dir_all` succeeds against the
+                                // already-gone-from-Bevy handle, and the
+                                // entity vanishes WITHOUT a trash entry —
+                                // which means undo has nothing to restore.
+                                // Both user reports ("delete doesn't go to
+                                // trash" + "undo doesn't bring it back")
+                                // were the same bug: the fallback path.
+                                //
+                                // Now: retry rename a few times with a short
+                                // sleep so transient handle holds clear, and
+                                // if it still fails after the retries, log
+                                // loudly and SKIP the despawn. The file
+                                // stays on disk, the entity stays in ECS,
+                                // and the user can retry — better than
+                                // silent permanent loss.
+                                let moved = (|| {
+                                    let attempts = 5u32;
+                                    let mut last_err: Option<std::io::Error> = None;
+                                    for i in 0..attempts {
+                                        match std::fs::rename(&source_path, &trash_path) {
+                                            Ok(_) => {
+                                                // Store (source_path, trash_path) — NOT
+                                                // toml_path. The rename moved `source_path`
+                                                // (the folder) so undo must rename back to
+                                                // `source_path`, not to `_instance.toml`.
+                                                trashed_paths.push((source_path.clone(), trash_path.clone()));
+                                                info!(
+                                                    "🗑️ Moved {:?} to trash{}",
+                                                    source_path.file_name().unwrap_or_default(),
+                                                    if i > 0 { format!(" (after {} retr{})", i, if i == 1 { "y" } else { "ies" }) } else { String::new() },
+                                                );
+                                                return true;
+                                            }
+                                            Err(e) => {
+                                                last_err = Some(e);
+                                                if i + 1 < attempts {
+                                                    std::thread::sleep(std::time::Duration::from_millis(60));
+                                                }
+                                            }
                                         }
-                                        info!("🗑️ Deleted {:?}", source_path.file_name().unwrap_or_default());
                                     }
+                                    warn!(
+                                        "❌ Could not move {:?} to trash after {} attempts ({}). \
+                                         Leaving file on disk + entity in ECS — retry the delete.",
+                                        source_path,
+                                        attempts,
+                                        last_err
+                                            .map(|e| e.to_string())
+                                            .unwrap_or_else(|| "<unknown>".to_string()),
+                                    );
+                                    if let Some(ref mut registry) = file_registry {
+                                        registry.rename_in_progress.remove(&toml_path);
+                                        registry.rename_in_progress.remove(&source_path);
+                                    }
+                                    false
+                                })();
+                                if !moved {
+                                    // Skip ECS despawn so Explorer stays
+                                    // in sync with the still-present file.
+                                    continue;
                                 }
                             }
                             if let Some(ref mut registry) = file_registry {
                                 registry.unregister_file(&toml_path);
+                            }
+                        }
+                        // Fallback: entities loaded via file_loader (soul scripts,
+                        // Rune/Luau files) have LoadedFromFile but no InstanceFile.
+                        // Without this branch the ECS entity despawns but the file
+                        // stays on disk, so the file watcher re-creates the entity
+                        // on the next scan — making delete appear broken.
+                        else if let Ok(loaded) = loaded_from_file_query.get(entity) {
+                            let source_path = loaded.path.clone();
+                            if source_path.exists() {
+                                let trash_dir = source_path.parent()
+                                    .unwrap_or(std::path::Path::new("."))
+                                    .join(".eustress").join("trash");
+                                let _ = std::fs::create_dir_all(&trash_dir);
+
+                                let trash_stem = source_path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("entity");
+                                let ts_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                let trash_path = {
+                                    let base = trash_dir.join(trash_stem);
+                                    if base.exists() {
+                                        trash_dir.join(format!("{}-{:x}", trash_stem, ts_ms))
+                                    } else {
+                                        base
+                                    }
+                                };
+
+                                if let Some(ref mut registry) = file_registry {
+                                    registry.rename_in_progress.insert(source_path.clone());
+                                }
+
+                                let moved = (|| {
+                                    let attempts = 5u32;
+                                    let mut last_err: Option<std::io::Error> = None;
+                                    for i in 0..attempts {
+                                        match std::fs::rename(&source_path, &trash_path) {
+                                            Ok(_) => {
+                                                trashed_paths.push((source_path.clone(), trash_path.clone()));
+                                                info!(
+                                                    "🗑️ Moved script {:?} to trash{}",
+                                                    source_path.file_name().unwrap_or_default(),
+                                                    if i > 0 { format!(" (after {} retr{})", i, if i == 1 { "y" } else { "ies" }) } else { String::new() },
+                                                );
+                                                return true;
+                                            }
+                                            Err(e) => {
+                                                last_err = Some(e);
+                                                if i + 1 < attempts {
+                                                    std::thread::sleep(std::time::Duration::from_millis(60));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    warn!(
+                                        "❌ Could not move {:?} to trash after {} attempts ({}). \
+                                         Leaving file on disk + entity in ECS — retry the delete.",
+                                        source_path,
+                                        attempts,
+                                        last_err
+                                            .map(|e| e.to_string())
+                                            .unwrap_or_else(|| "<unknown>".to_string()),
+                                    );
+                                    if let Some(ref mut registry) = file_registry {
+                                        registry.rename_in_progress.remove(&source_path);
+                                    }
+                                    false
+                                })();
+                                if !moved {
+                                    continue;
+                                }
+                            }
+                            if let Some(ref mut registry) = file_registry {
+                                registry.unregister_file(&source_path);
                             }
                         }
                         commands.entity(entity).despawn();
@@ -1029,10 +1208,8 @@ const NUDGE_REPEAT_SECS: f32 = 0.08;
 
 /// Queries + resources needed by `handle_nudge_keys`. Bundled into a
 /// `SystemParam` so the handler itself stays under Bevy's 16-param
-/// limit — the Move-Down settle path needs the selection transforms,
-/// all-part transforms (for AABB containment), and a `SpatialQuery`
-/// for the downward raycast, which together outgrow the flat param
-/// list.
+/// limit — the move-down step needs the selection transforms plus a
+/// `SpatialQuery` for the downward raycast.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct NudgeContext<'w, 's> {
     pub selected: Query<
@@ -1044,13 +1221,6 @@ pub struct NudgeContext<'w, 's> {
             Option<&'static crate::classes::BasePart>,
         ),
         With<crate::selection_box::Selected>,
-    >,
-    /// Every other part in the scene — used to detect "selection is
-    /// inside another part's AABB" for the pop-on-top semantics.
-    pub other_parts: Query<
-        'w, 's,
-        (Entity, &'static GlobalTransform, &'static crate::classes::BasePart),
-        Without<crate::selection_box::Selected>,
     >,
     pub spatial: avian3d::prelude::SpatialQuery<'w, 's>,
 }
@@ -1069,41 +1239,64 @@ fn handle_nudge_keys(
 
     let snap = settings.as_ref().map(|s| if s.snap_enabled { s.snap_size } else { 1.0 }).unwrap_or(1.0);
 
-    // ── `-` = Move Up (simple snap-grid lift) ─────────────────────
-    if keys.pressed(KeyCode::Minus) {
-        if !timer.up_held {
-            timer.up_held = true;
-            timer.up_timer = 0.0;
-            nudge_up(&mut ctx.selected, snap);
-        } else {
-            timer.up_timer += time.delta_secs();
-            if timer.up_timer >= NUDGE_DELAY_SECS {
-                timer.up_timer -= NUDGE_REPEAT_SECS;
-                nudge_up(&mut ctx.selected, snap);
-            }
-        }
-    } else {
-        timer.up_held = false;
-        timer.up_timer = 0.0;
-    }
+    // Re-borrow through `ResMut`'s Deref *once* into a plain `&mut NudgeTimer`
+    // so the borrow checker can see `up_held` / `up_timer` (and the down pair)
+    // as disjoint field borrows. Going through `ResMut` per-arg makes each
+    // deref a separate method call and the disjointness is lost.
+    let timer = &mut *timer;
 
-    // ── `+` = Settle Down (smart raycast + pop-on-top) ───────────
-    if keys.pressed(KeyCode::Equal) {
-        if !timer.down_held {
-            timer.down_held = true;
-            timer.down_timer = 0.0;
-            settle_down(&mut ctx, snap);
-        } else {
-            timer.down_timer += time.delta_secs();
-            if timer.down_timer >= NUDGE_DELAY_SECS {
-                timer.down_timer -= NUDGE_REPEAT_SECS;
-                settle_down(&mut ctx, snap);
-            }
-        }
-    } else {
-        timer.down_held = false;
-        timer.down_timer = 0.0;
+    // Use `just_pressed` for the initial-press fire (guaranteed deterministic)
+    // and a held-duration timer for auto-repeat. Earlier revisions used
+    // `pressed` + a boolean gate which silently produced no fire on some
+    // platforms when `pressed` and `just_pressed` raced inside the same frame.
+    let up_fire = nudge_should_fire(
+        &keys, KeyCode::Minus, &time,
+        &mut timer.up_held, &mut timer.up_timer,
+    );
+    let down_fire = nudge_should_fire(
+        &keys, KeyCode::Equal, &time,
+        &mut timer.down_held, &mut timer.down_timer,
+    );
+
+    if up_fire {
+        nudge_up(&mut ctx.selected, snap);
     }
+    if down_fire {
+        nudge_down(&mut ctx, snap);
+    }
+}
+
+/// Returns `true` on the frame the key is first pressed, then again
+/// every [`NUDGE_REPEAT_SECS`] after [`NUDGE_DELAY_SECS`] of being held.
+/// Resets when the key is released.
+fn nudge_should_fire(
+    keys: &ButtonInput<KeyCode>,
+    key: KeyCode,
+    time: &Time,
+    held: &mut bool,
+    timer: &mut f32,
+) -> bool {
+    if keys.just_pressed(key) {
+        *held = true;
+        *timer = 0.0;
+        return true;
+    }
+    if !keys.pressed(key) {
+        *held = false;
+        *timer = 0.0;
+        return false;
+    }
+    if !*held {
+        // Key was already down when we started observing it (focus took
+        // control mid-press). Treat the next press as the initial.
+        return false;
+    }
+    *timer += time.delta_secs();
+    if *timer >= NUDGE_DELAY_SECS {
+        *timer -= NUDGE_REPEAT_SECS;
+        return true;
+    }
+    false
 }
 
 /// Simple lift: every selected entity moves up by `snap` on +Y.
@@ -1124,101 +1317,75 @@ fn nudge_up(
     }
 }
 
-/// Smart settle: for each selected entity, resolve its vertical
-/// position via (in priority order):
-///   1. **Pop-on-top**: if the selection's center is inside another
-///      part's world-aligned AABB AND above that part's horizontal
-///      midplane, snap the selection so its *bottom* sits flush with
-///      the container's *top* face.
-///   2. **Ground-flush raycast**: cast a ray from the selection's
-///      current center straight down; snap the selection so its
-///      bottom sits flush with the first hit point.
-///   3. **Fallback**: if neither path finds a support surface, fall
-///      back to a plain `-= snap` nudge so the key still feels
-///      responsive on parts floating in empty space.
-fn settle_down(ctx: &mut NudgeContext, snap: f32) {
+/// Per-press incremental drop with surface-snap. Each `+` press lowers
+/// every selected part by one snap unit on +Y; if a support surface
+/// sits within that snap distance directly below the part, the part
+/// flushes onto the surface instead (so it doesn't pass through).
+///
+/// This is the reverse of [`nudge_up`]: simple, predictable, one snap
+/// step per fire. The surface-flush only kicks in for the final step
+/// that would otherwise land *inside or below* a real surface — so
+/// holding `+` keeps the part stepping down through empty air, then
+/// "clicks" onto the first surface it reaches.
+fn nudge_down(ctx: &mut NudgeContext, snap: f32) {
     use bevy::math::Dir3;
-    // Snapshot other parts once per key-fire so the inner AABB-
-    // containment check doesn't re-borrow the query per selected entity.
-    let containers: Vec<(Vec3, Vec3)> = ctx
-        .other_parts
-        .iter()
-        .map(|(_, gt, bp)| {
-            let center = gt.translation();
-            let half = bp.size * 0.5;
-            (center - half, center + half) // (aabb_min, aabb_max)
-        })
-        .collect();
 
-    // Collect selected entity snapshots first — we can't hold a
-    // mutable borrow of the query across its own iter_mut body when
-    // we need to read the spatial-query resource too. Use the
-    // *world-space* center via `GlobalTransform` so the AABB
-    // containment check below compares apples-to-apples with
-    // `containers` (which are world-space AABBs).
-    let mut selected_snapshot: Vec<(Entity, Vec3, f32)> = Vec::new();
-    for (entity, _tf, gt, bp) in ctx.selected.iter() {
+    // Snapshot the selected set before mutating — we need to call
+    // `ctx.spatial` while still being able to write back to
+    // `ctx.selected`, and Bevy queries don't allow that simultaneously.
+    let mut snapshot: Vec<(Entity, Vec3, f32)> = Vec::new();
+    for (entity, _, gt, bp) in ctx.selected.iter() {
         let center = gt.translation();
         let half_height = bp.map(|b| b.size.y * 0.5).unwrap_or(0.5);
-        selected_snapshot.push((entity, center, half_height));
+        snapshot.push((entity, center, half_height));
     }
 
-    for (entity, center, half_height) in selected_snapshot {
-        let mut target_y: Option<f32> = None;
-
-        // 1. Pop-on-top — is the center inside any container's AABB
-        //    AND above that container's horizontal midplane?
-        for (min, max) in &containers {
-            let inside = center.x >= min.x && center.x <= max.x
-                && center.y >= min.y && center.y <= max.y
-                && center.z >= min.z && center.z <= max.z;
-            if !inside { continue; }
-            let mid_y = (min.y + max.y) * 0.5;
-            if center.y >= mid_y {
-                let candidate = max.y + half_height;
-                target_y = Some(
-                    target_y.map(|y| y.max(candidate)).unwrap_or(candidate)
-                );
-            }
-        }
-
-        // 2. Ground-flush raycast — cast from center straight down.
-        //    Only used when the pop-on-top path didn't fire.
-        if target_y.is_none() {
+    for (entity, center, half_height) in snapshot {
+        // Cast straight down from the part's current center so we can
+        // see how far the support surface is below the part's bottom.
+        let support_y_world = {
             let Ok(down) = Dir3::new(Vec3::NEG_Y) else { continue };
             let hits = ctx.spatial.ray_hits(
                 center,
                 down,
                 10_000.0,
-                16, // enough to skip any colliders belonging to the
-                    // selected entity itself before landing on a real
-                    // support surface below it
+                16,
                 true,
                 &avian3d::prelude::SpatialQueryFilter::default(),
             );
-            // First hit that isn't the selected entity or a child of
-            // it. `avian`'s ray_hits doesn't filter by entity directly
-            // without a filter-mask setup; a simple identity check is
-            // cheap at this scale.
-            for hit in hits {
-                if hit.entity == entity { continue; }
-                let hit_y = center.y - hit.distance;
-                target_y = Some(hit_y + half_height);
-                break;
-            }
-        }
+            // Skip the part's own collider — first non-self hit is the
+            // real support surface (or `None` if the part is hovering
+            // over empty space).
+            hits.into_iter()
+                .find(|h| h.entity != entity)
+                .map(|h| center.y - h.distance)
+        };
 
-        // 3. Apply the resolved target, or plain nudge as fallback.
-        //    Translate the world-space target into a local-Y delta so
-        //    parented entities (Model children) resolve correctly.
+        // Where the part *would* land if we just stepped down by `snap`.
+        let stepped_center_y = center.y - snap;
+
+        // If a surface is within the step distance below the bottom of
+        // the part, snap the bottom flush onto that surface; otherwise
+        // take the full snap step.
+        let new_center_y = match support_y_world {
+            Some(sy) => {
+                let surface_aligned_center_y = sy + half_height;
+                // The surface is "in range" when the proposed step would
+                // either touch it or pass through it.
+                if surface_aligned_center_y >= stepped_center_y {
+                    surface_aligned_center_y
+                } else {
+                    stepped_center_y
+                }
+            }
+            None => stepped_center_y,
+        };
+
+        // Apply via world-space delta so parented entities resolve the
+        // local-Y change correctly.
         if let Ok((_, mut tf, gt, _)) = ctx.selected.get_mut(entity) {
             let cur_world_y = gt.translation().y;
-            if let Some(new_y) = target_y {
-                let delta = new_y - cur_world_y;
-                tf.translation.y += delta;
-            } else {
-                tf.translation.y -= snap;
-            }
+            tf.translation.y += new_center_y - cur_world_y;
         }
     }
 }

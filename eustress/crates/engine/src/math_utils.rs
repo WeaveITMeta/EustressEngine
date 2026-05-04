@@ -243,8 +243,27 @@ pub fn ray_intersects_part_rotated(
     ).is_some()
 }
 
+/// Tiny clearance added to surface-snap offsets so a dragged part rests
+/// JUST above the surface it's snapping to — not coincident with it.
+///
+/// The math itself is exact: `hit_point + normal * size/2` puts the
+/// part's bottom face on the surface contact point. But the bottom of
+/// a rendered mesh isn't always at exactly `-size/2` — primitive GLB
+/// meshes carry sub-millimetre normal/UV padding, custom meshes can
+/// have authored padding, and float-precision in the world-space
+/// transform chain spreads the visual face by ~1e-5. With zero
+/// clearance the visual bottom face lands microscopically *inside*
+/// the surface and Z-fights, which is what the user reads as "the
+/// part ends up somewhat inside the baseplate". 5 mm is below the
+/// noticeability threshold at any normal viewing distance, well
+/// above any plausible mesh-padding error, and small enough that the
+/// part still reads as "resting on" the surface.
+pub const SURFACE_SNAP_CLEARANCE: f32 = 0.005;
+
 /// Calculate the offset needed to place a part's bottom face on a surface.
-/// Returns the distance from the part center to the surface contact point.
+/// Returns the distance from the part center to the surface contact point,
+/// including a tiny [`SURFACE_SNAP_CLEARANCE`] gap so the part rests just
+/// above the surface instead of intersecting it.
 pub fn calculate_surface_offset(
     part_size: &Vec3,
     part_rotation: &Quat,
@@ -256,7 +275,7 @@ pub fn calculate_surface_offset(
     let rx = (*part_rotation * Vec3::X * half.x).dot(*surface_normal).abs();
     let ry = (*part_rotation * Vec3::Y * half.y).dot(*surface_normal).abs();
     let rz = (*part_rotation * Vec3::Z * half.z).dot(*surface_normal).abs();
-    rx + ry + rz
+    rx + ry + rz + SURFACE_SNAP_CLEARANCE
 }
 
 /// Find the surface under the cursor using mesh-based raycasting (fallback when no physics).
@@ -370,4 +389,175 @@ pub fn snap_to_grid(pos: Vec3, snap_size: f32) -> Vec3 {
         (pos.y / snap_size).round() * snap_size,
         (pos.z / snap_size).round() * snap_size,
     )
+}
+
+/// Grid-snap a world-space position in the local frame of a *target*
+/// part (origin + rotation), constrained to the plane perpendicular to
+/// `surface_normal_world`. The component along the surface normal is
+/// preserved so the dragged part stays flush against the surface; the
+/// other two local axes snap to multiples of `snap_size`.
+///
+/// This is what gives "drop a part on a wall and it snaps along the
+/// wall's local grid" behaviour — the snap aligns to the *target*
+/// part's frame, not world XYZ. World-frame snapping is fine for parts
+/// resting on the global ground plane, but as soon as the user drags
+/// onto a rotated surface it produces a nonsense grid that doesn't
+/// match the surface's edges.
+pub fn snap_to_grid_in_frame(
+    world_pos: Vec3,
+    frame_origin: Vec3,
+    frame_rot: Quat,
+    surface_normal_world: Vec3,
+    snap_size: f32,
+) -> Vec3 {
+    if snap_size <= 0.0 {
+        return world_pos;
+    }
+    let inv = frame_rot.inverse();
+    let local = inv * (world_pos - frame_origin);
+    let local_n = inv * surface_normal_world;
+    let abs = local_n.abs();
+
+    // Pick the local axis the surface normal aligns with — that axis
+    // gets preserved so we don't yank the part off the surface during
+    // snap. The other two axes snap to grid.
+    let dominant = if abs.x >= abs.y && abs.x >= abs.z {
+        0u8
+    } else if abs.y >= abs.z {
+        1u8
+    } else {
+        2u8
+    };
+
+    let snap = |v: f32| (v / snap_size).round() * snap_size;
+    let local_snapped = match dominant {
+        0 => Vec3::new(local.x, snap(local.y), snap(local.z)),
+        1 => Vec3::new(snap(local.x), local.y, snap(local.z)),
+        _ => Vec3::new(snap(local.x), snap(local.y), local.z),
+    };
+    frame_origin + frame_rot * local_snapped
+}
+
+// ============================================================================
+// 8. Face Snap — automatic edge / corner alignment during drag
+// ============================================================================
+
+/// Lateral threshold (in world units) under which the dragged part's
+/// face corners snap to a target part's face corners. Picked so that
+/// at the default 1-stud grid the snap feels magnetic without making
+/// the part "leap" toward distant neighbours.
+///
+/// Match Roblox Studio's implicit half-stud feel — close enough to be
+/// satisfying, small enough that an intentional drop a stud away
+/// doesn't get hijacked. Configurable via editor settings later if
+/// the default feels off in practice.
+pub const FACE_SNAP_THRESHOLD: f32 = 0.5;
+
+/// Compute the lateral offset that snaps the dragged part's contact
+/// face to the target part's contact face when their corners align
+/// within [`FACE_SNAP_THRESHOLD`].
+///
+/// `contact_normal` is the world-space outward normal of the *target's*
+/// hit face (i.e. the surface the dragged part is resting against —
+/// `+Y` for a baseplate top, `+X` for a wall's east face, etc.).
+///
+/// The dragged part's contact face is the face whose outward normal is
+/// `-contact_normal` — the one pressed against the target. We compute
+/// the 4 corners of that face on each part (in world space, OBB-aware)
+/// and find the (dragged_corner, target_corner) pair with the smallest
+/// LATERAL distance — i.e. distance projected onto the plane
+/// perpendicular to `contact_normal`. If that pair is within threshold,
+/// return the lateral offset; the caller adds it to the dragged part's
+/// world center to slide it edge-flush with the target.
+///
+/// Returns `Vec3::ZERO` when no corner pair is within threshold, so
+/// the caller can unconditionally `target_pos += face_snap_offset(...)`
+/// without branching.
+pub fn face_snap_offset(
+    dragged_size: Vec3,
+    dragged_rot: Quat,
+    dragged_center: Vec3,
+    target_size: Vec3,
+    target_rot: Quat,
+    target_center: Vec3,
+    contact_normal: Vec3,
+    threshold: f32,
+) -> Vec3 {
+    let n = contact_normal.normalize_or_zero();
+    if n.length_squared() < 1e-6 {
+        return Vec3::ZERO;
+    }
+
+    // Dragged part's contact face has outward normal pointing INTO the
+    // target — i.e. opposite to the target's outward normal.
+    let dragged_corners = obb_face_corners(dragged_size, dragged_rot, dragged_center, -n);
+    let target_corners = obb_face_corners(target_size, target_rot, target_center, n);
+
+    // Pick the corner pair with smallest lateral (perpendicular-to-normal)
+    // distance. Lateral component = full delta minus the projection
+    // onto the normal — strips out any along-normal residue that
+    // surface_offset already handled.
+    let mut best: Option<(f32, Vec3)> = None;
+    for dc in &dragged_corners {
+        for tc in &target_corners {
+            let delta = *tc - *dc;
+            let lateral = delta - n * delta.dot(n);
+            let d = lateral.length();
+            if d <= threshold {
+                if best.map_or(true, |(bd, _)| d < bd) {
+                    best = Some((d, lateral));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, off)| off).unwrap_or(Vec3::ZERO)
+}
+
+/// Return the 4 world-space corners of an OBB's face whose outward
+/// normal (in world space) is closest to `face_normal_world`.
+///
+/// Picks the dominant axis of `face_normal_world` in the OBB's local
+/// frame: whichever of the local X/Y/Z axes the normal aligns with
+/// best identifies which of the 6 faces was struck. Sign of the
+/// dominant component determines + or - face.
+///
+/// Order of returned corners is unspecified — callers should treat
+/// the result as an unordered set (the face-snap pairing loop above
+/// is O(n²) anyway).
+fn obb_face_corners(
+    size: Vec3,
+    rot: Quat,
+    center: Vec3,
+    face_normal_world: Vec3,
+) -> [Vec3; 4] {
+    // Transform the world-space normal into the OBB's local frame so
+    // we can pick the dominant ±X / ±Y / ±Z face.
+    let local_n = rot.inverse() * face_normal_world;
+    let abs = local_n.abs();
+    let (axis, sign) = if abs.x >= abs.y && abs.x >= abs.z {
+        (0u8, local_n.x.signum())
+    } else if abs.y >= abs.z {
+        (1u8, local_n.y.signum())
+    } else {
+        (2u8, local_n.z.signum())
+    };
+    // Avoid signum(0) = 0 leaving us with a degenerate face.
+    let sign = if sign == 0.0 { 1.0 } else { sign };
+
+    let half = size * 0.5;
+    let mut corners = [Vec3::ZERO; 4];
+    let mut i = 0;
+    for u in [-1.0_f32, 1.0] {
+        for v in [-1.0_f32, 1.0] {
+            let local = match axis {
+                0 => Vec3::new(sign * half.x, u * half.y, v * half.z),
+                1 => Vec3::new(u * half.x, sign * half.y, v * half.z),
+                _ => Vec3::new(u * half.x, v * half.y, sign * half.z),
+            };
+            corners[i] = center + rot * local;
+            i += 1;
+        }
+    }
+    corners
 }

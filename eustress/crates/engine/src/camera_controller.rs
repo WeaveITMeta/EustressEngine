@@ -191,7 +191,7 @@ impl Default for EustressCamera {
             distance: 20.0,
             yaw,
             pitch,
-            base_speed: 20.0,        // Direct WASD movement speed
+            base_speed: 9.81,        // Direct WASD movement speed
             sensitivity: 0.003,      // Mouse sensitivity for rotation
             zoom_speed: 2.0,         // Faster zoom response
             pan_speed: 0.01,         // Direct pan speed
@@ -673,7 +673,9 @@ fn eustress_camera_controls(
         cam.animating = false; // Cancel any ongoing animation
     } else if panning && mouse_delta != Vec2::ZERO {
         // Pan (Middle-drag or Shift + Left-drag)
-        let pan_speed = cam.pan_speed;
+        // Shift slows down panning for precise movements
+        let pan_mod = if shift { 0.25 } else { 1.0 };
+        let pan_speed = cam.pan_speed * pan_mod;
         let distance = cam.distance;
         // Use local camera axes for intuitive panning
         cam.pivot += cam_right * mouse_delta.x * pan_speed * distance;
@@ -696,9 +698,25 @@ fn eustress_camera_controls(
     if scroll_delta != 0.0 {
         // Get cursor position for zoom-toward-cursor
         let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
-        
-        // Calculate zoom factor (exponential for consistent feel at all distances)
-        let zoom_factor = (1.0 - scroll_delta * 0.1 * cam.zoom_speed).max(0.5).min(2.0);
+
+        // Truly exponential, uncapped step. Each scroll notch
+        // multiplies `distance` by a constant factor, so scrolling
+        // feels identical whether the camera is 1 m or 10 km from the
+        // pivot, and accumulated scroll in a single frame (Windows
+        // merges bursts of wheel events) scales smoothly with the
+        // burst size.
+        //
+        // The old formula was `(1.0 - scroll * 0.1 * zoom_speed)
+        // .max(0.5).min(2.0)` — linear in `scroll`, clamped to a 2×
+        // zoom per frame. Rapid spins flat-lined at that 2× cap, which
+        // is the "0-1 track / can't zoom further" feel the user
+        // reported. `MIN_CAMERA_DISTANCE`/`MAX_CAMERA_DISTANCE` still
+        // clamp the final distance so the camera can't go through the
+        // origin or outside the world, but the per-step factor is
+        // unbounded — fast scrolls now traverse the full allowed
+        // range in a few notches.
+        const ZOOM_STEP: f32 = 0.9; // 10% per line at zoom_speed = 1.0
+        let zoom_factor = ZOOM_STEP.powf(scroll_delta * cam.zoom_speed);
         let old_distance = cam.distance;
         let new_distance = (old_distance * zoom_factor).clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
         
@@ -736,7 +754,7 @@ fn eustress_camera_controls(
     
     // Keyboard Pan (WASD/QE/Space) - DIRECT movement with NO momentum
     let base_speed = cam.base_speed;
-    let speed_mod = if shift { 0.25 } else { 1.0 }; // Shift for PRECISE movement (slower)
+    let speed_mod = if shift { 0.075 } else { 1.0 }; // Shift for PRECISE movement (slower)
     let move_speed = base_speed * speed_mod * dt;
     
     // Project forward onto horizontal plane for intuitive ground movement
@@ -756,18 +774,21 @@ fn eustress_camera_controls(
     if keys.pressed(KeyCode::KeyD) { 
         cam.pivot += right_horizontal * move_speed;
     }
-    if keys.pressed(KeyCode::KeyQ) { 
+    if keys.pressed(KeyCode::KeyQ) {
         cam.pivot.y -= move_speed; // Down
     }
-    if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Space) { 
+    if keys.pressed(KeyCode::KeyE) || keys.pressed(KeyCode::Space) {
         cam.pivot.y += move_speed; // Up
     }
-    if keys.pressed(KeyCode::Minus) {
-        cam.pivot.y -= move_speed; // Down (with - key)
-    }
-    if keys.pressed(KeyCode::Equal) {
-        cam.pivot.y += move_speed; // Up (with =/+ key)
-    }
+    // `-` / `=` are intentionally NOT bound to camera vertical here.
+    // Those keys belong to `Action::NudgeUp` / `Action::NudgeDown` —
+    // moving the selected PART up / down by one grid unit (handled in
+    // `keybindings.rs::handle_nudge_keys`). Binding the camera to the
+    // same keys ran both systems every frame: the part nudged up by
+    // `snap` while the camera pivoted down by `move_speed × dt`,
+    // visually cancelling the nudge — the user reads that as
+    // "Move Up / Move Down don't work". Q/E/Space remain the
+    // camera-vertical keys.
 
     // Touch handling for mobile empowerment
     for touch in ev_touch.read() {

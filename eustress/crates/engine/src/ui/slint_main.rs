@@ -298,6 +298,10 @@ fn wire_callbacks(ui: &StudioWindow, queue: &SlintActionBridge) {
     let q = queue.clone(); ui.on_api_category_selected(move |cat| q.push(SlintAction::ApiCategorySelected(cat.to_string())));
     let q = queue.clone(); ui.on_api_language_filter_changed(move |lang| q.push(SlintAction::ApiLanguageFilterChanged(lang.to_string())));
     let q = queue.clone(); ui.on_api_copy_example(move |ex| q.push(SlintAction::ApiCopyExample(ex.to_string())));
+
+    // Services Browser panel
+    let q = queue.clone(); ui.on_services_browser_open_url(move |url| q.push(SlintAction::ServicesBrowserOpenUrl(url.to_string())));
+    ui.on_services_browser_selected_changed(move |_idx| { /* UI-only: selected-index is two-way bound */ });
 }
 
 /// Apply a BridgeState snapshot to the StudioWindow.
@@ -401,20 +405,31 @@ fn apply_bridge_state(ui: &StudioWindow, state: BridgeState) {
 
     // Entity properties (for Properties panel)
     if let Some(props) = state.entity_properties {
-        let slint_props: Vec<PropertyData> = props.into_iter().map(|p| PropertyData {
-            name: p.name.as_str().into(),
-            value: p.value.as_str().into(),
-            property_type: p.property_type.as_str().into(),
-            category: p.category.as_str().into(),
-            editable: !p.is_readonly,
-            options: slint::ModelRc::default(),
-            is_header: p.is_header,
-            section_collapsed: p.section_collapsed,
-            x_value: p.x_value.as_str().into(),
-            y_value: p.y_value.as_str().into(),
-            z_value: p.z_value.as_str().into(),
-            description: p.description.as_str().into(),
-            learn_url: p.learn_url.as_str().into(),
+        let slint_props: Vec<PropertyData> = props.into_iter().map(|p| {
+            // Pre-parsed RGB → typed Slint color for the swatch chip.
+            // Falls back to a mid-gray placeholder when missing so non-
+            // color rows still render their (unused) color-value field
+            // with a sane default.
+            let color_value = match p.color_rgb {
+                Some((r, g, b)) => slint::Color::from_rgb_u8(r, g, b),
+                None => slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+            };
+            PropertyData {
+                name: p.name.as_str().into(),
+                value: p.value.as_str().into(),
+                property_type: p.property_type.as_str().into(),
+                category: p.category.as_str().into(),
+                editable: !p.is_readonly,
+                options: slint::ModelRc::default(),
+                is_header: p.is_header,
+                section_collapsed: p.section_collapsed,
+                x_value: p.x_value.as_str().into(),
+                y_value: p.y_value.as_str().into(),
+                z_value: p.z_value.as_str().into(),
+                color_value,
+                description: p.description.as_str().into(),
+                learn_url: p.learn_url.as_str().into(),
+            }
         }).collect();
         let model = std::rc::Rc::new(slint::VecModel::from(slint_props));
         ui.set_entity_properties(slint::ModelRc::from(model));

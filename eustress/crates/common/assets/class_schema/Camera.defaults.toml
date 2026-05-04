@@ -1,0 +1,12 @@
+# Camera — Viewport control
+# Bevy: Camera3d component
+
+[camera]
+field_of_view = 70.0
+near_plane_z = 0.1
+far_plane_z = 10000.0
+camera_type = "Custom"
+
+[metadata]
+class_name = "Camera"
+archivable = true

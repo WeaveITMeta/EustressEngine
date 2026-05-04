@@ -26,6 +26,9 @@ use crate::math_utils::{
     find_surface_under_cursor_with_normal as math_find_surface_with_normal,
     calculate_surface_offset as math_calculate_surface_offset,
     snap_to_grid as math_snap_to_grid,
+    snap_to_grid_in_frame as math_snap_to_grid_in_frame,
+    face_snap_offset as math_face_snap_offset,
+    FACE_SNAP_THRESHOLD,
 };
 
 /// Drag threshold in pixels - must move this far to start dragging
@@ -290,14 +293,14 @@ fn handle_select_drag(
                     Projection::Perspective(p) => p.fov,
                     _ => std::f32::consts::FRAC_PI_4,
                 };
-                let effective_extent = crate::scale_tool::effective_scale_extent(
-                    group_extent, group_center, camera_transform.translation(), scale_fov,
+                let screen_scale = crate::scale_tool::compute_scale_screen_scale(
+                    group_center, camera_transform.translation(), scale_fov,
                 );
                 let scale_rotation = crate::move_tool::gizmo_rotation_for(
                     studio_state.transform_mode,
                     selected_query.iter().map(|(_, _, gt, _, _, _)| gt.compute_transform().rotation),
                 );
-                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, effective_extent, scale_rotation) {
+                if crate::scale_tool::is_clicking_scale_handle_group(&ray, group_center, group_extent, screen_scale, scale_rotation) {
                     return;
                 }
             }
@@ -430,7 +433,11 @@ fn handle_select_drag(
                     .or_else(|| math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities).map(|(pt, norm)| (pt, norm, None)));
 
                 // 2. Calculate Target Position (NO rotation change - keep original orientation)
-                // This provides predictable drag behavior without auto-alignment
+                // This provides predictable drag behavior without auto-alignment.
+                // We also capture the surface frame (target rotation + center +
+                // normal) when we land on another part so the grid snap below
+                // can align to the target's *local* axes, not world XYZ.
+                let mut surface_frame: Option<(Quat, Vec3, Vec3)> = None;
                 let target_pos = if let Some((hit_point, hit_normal, hit_entity)) = surface_hit {
                     // HIT A SURFACE - position on top of it but keep original rotation
                     state.last_hit_entity = hit_entity;
@@ -440,9 +447,38 @@ fn handle_select_drag(
 
                     // Calculate offset using the ORIGINAL rotation (not aligned)
                     let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
-                    
-                    // Target position for the Leader's center - flush against surface
-                    hit_point + hit_normal * offset
+
+                    // Surface-flush position for the leader's center.
+                    let flush_pos = hit_point + hit_normal * offset;
+
+                    // Automatic face-snap + capture target frame for the
+                    // local-frame grid snap below.
+                    let snap_offset = if let Some(target_entity) = hit_entity {
+                        if let Ok((_, target_xform, _, _, _, target_basepart)) = all_parts_query.get(target_entity) {
+                            let target_size = target_basepart.map(|bp| bp.size).unwrap_or(Vec3::ONE);
+                            let target_xf = target_xform.compute_transform();
+                            surface_frame = Some((target_xf.rotation, target_xf.translation, hit_normal));
+                            math_face_snap_offset(
+                                leader_size,
+                                initial_leader_rot,
+                                flush_pos,
+                                target_size,
+                                target_xf.rotation,
+                                target_xf.translation,
+                                hit_normal,
+                                FACE_SNAP_THRESHOLD,
+                            )
+                        } else {
+                            Vec3::ZERO
+                        }
+                    } else {
+                        // Surface from OBB fallback (no entity handle): still
+                        // a real surface, but we treat it as world-aligned
+                        // since we don't have the target's full transform.
+                        Vec3::ZERO
+                    };
+
+                    flush_pos + snap_offset
                 } else {
                     // NO SURFACE HIT - Drag on Ground Plane (Y=0)
                     state.debug_hit_point = None;
@@ -471,9 +507,23 @@ fn handle_select_drag(
                 // No rotation change during drag
                 let rotation_delta = Quat::IDENTITY;
 
-                // Apply grid snapping if enabled (to position)
+                // Apply grid snapping if enabled. When dragging onto a real
+                // part's surface, snap in the TARGET's local frame so the
+                // grid lines up with that part's edges (not world XYZ) — a
+                // rotated wall snaps along its own surface, not world space.
+                // Otherwise fall back to world-frame snapping.
                 let final_target_pos = if editor_settings.snap_enabled {
-                    math_snap_to_grid(target_pos, editor_settings.snap_size)
+                    if let Some((tgt_rot, tgt_center, surf_n)) = surface_frame {
+                        math_snap_to_grid_in_frame(
+                            target_pos,
+                            tgt_center,
+                            tgt_rot,
+                            surf_n,
+                            editor_settings.snap_size,
+                        )
+                    } else {
+                        math_snap_to_grid(target_pos, editor_settings.snap_size)
+                    }
                 } else {
                     target_pos
                 };
@@ -515,13 +565,20 @@ fn handle_select_drag(
                         
                         let relative_pos = *initial_pos - pivot;
                         let rotated_relative_pos = rotation_delta * relative_pos;
-                        let new_pos = final_target_pos + rotated_relative_pos;
-                        
+                        let raw_pos = final_target_pos + rotated_relative_pos;
+                        // Clamp NaN + cap at MAX_WORLD_EXTENT (5000)
+                        // before writing — drag-into-the-sky shouldn't
+                        // be able to teleport the part to ±∞ where
+                        // Avian's AABB math overflows into NaN.
+                        let new_pos = crate::space::instance_loader::safe_translation(
+                            raw_pos, *initial_pos,
+                        );
+
                         let new_rot = rotation_delta * *initial_rot;
-                        
+
                         transform.translation = new_pos;
                         transform.rotation = new_rot;
-                        
+
                         // Update BasePart
                         if let Some(mut bp) = basepart_opt {
                             bp.cframe.translation = new_pos;
@@ -598,57 +655,89 @@ fn handle_select_drag(
         state.last_hit_entity = None;
     }
     
-    // R and T key rotation while dragging (works with or without Ctrl)
-    // IMPORTANT: After applying rotation, update initial_positions/initial_rotations
-    // so the drag loop doesn't overwrite the rotation on the next frame.
-    if state.dragging && state.dragged_entity.is_some() {
-        // Check for R key
-        let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
-        
+    // Ctrl+R / Ctrl+T rotate + tilt on the current selection. Works
+    // for single AND multi-selection; the multi-select path rotates the
+    // whole group around its averaged centroid so the cluster pivots as
+    // one rigid body instead of each part spinning in place. Previously
+    // this was gated behind `state.dragging`, which meant the user had
+    // to hold a drag to make rotation fire — painful for "select then
+    // rotate" workflows. The outer `ui_focus` check above already
+    // blocks firing when a text field has focus, so we don't have to
+    // re-guard typing here.
+    //
+    // We accept raw `R` / `T` AND Ctrl+R / Ctrl+T: the keybindings
+    // dispatcher fires `Action::RotateY90` on Ctrl+R but has no match
+    // arm, so this handler is the only responder. Matching on raw R/T
+    // in addition to the Ctrl form preserves the legacy in-drag
+    // behaviour without forcing modifier-held state.
+    let rotate_pressed = keys.just_pressed(KeyCode::KeyR);
+    let tilt_pressed = keys.just_pressed(KeyCode::KeyT);
+    if rotate_pressed || tilt_pressed {
+        // Group centroid — average of every selected part's current
+        // translation. For single-select this collapses to the part's
+        // own position, so the pivot is always sensible.
+        let mut group_center = Vec3::ZERO;
+        let mut count = 0;
+        for (_, transform, _, _, _, _) in selected_query.iter() {
+            group_center += transform.translation;
+            count += 1;
+        }
+        if count == 0 {
+            return;
+        }
+        group_center /= count as f32;
+
+        // Skip children of already-selected entities: rotating a
+        // Model's root part would double-transform its mesh children
+        // if the hierarchy is intact. The descendant filter below
+        // walks `ChildOf` until it hits a selected ancestor; if one
+        // exists the child gets skipped so only the top-of-selection
+        // entities move.
+        let selected_entities: std::collections::HashSet<Entity> =
+            selected_query.iter().map(|(e, ..)| e).collect();
+
         if rotate_pressed {
-            let mut group_center = Vec3::ZERO;
-            let mut count = 0;
-            for (_, transform, _, _, _, _) in selected_query.iter() {
-                group_center += transform.translation;
-                count += 1;
-            }
-            if count > 0 { group_center /= count as f32; }
-            
             let rotation = Quat::from_rotation_y(90.0_f32.to_radians());
-            let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
-            
             for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
                 let mut is_descendant = false;
                 let mut current = entity;
                 while let Ok(child_of) = parent_query.get(current) {
                     let parent_entity = child_of.parent();
-                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
+                    if selected_entities.contains(&parent_entity) {
+                        is_descendant = true;
+                        break;
+                    }
                     current = parent_entity;
                 }
                 if is_descendant { continue; }
                 let relative_pos = transform.translation - group_center;
                 transform.translation = group_center + rotation * relative_pos;
                 transform.rotate_y(90.0_f32.to_radians());
-                // Update cached state so drag loop doesn't revert this rotation
+                // Keep drag caches in sync so if the user IS mid-drag
+                // the next frame's drag-follow doesn't snap the
+                // rotation back.
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
             }
         }
-        
-        let tilt_pressed = keys.just_pressed(KeyCode::KeyT);
+
         if tilt_pressed {
-            let selected_entities: std::collections::HashSet<Entity> = selected_query.iter().map(|(e, ..)| e).collect();
+            let tilt = Quat::from_rotation_z(90.0_f32.to_radians());
             for (entity, mut transform, _, _, _, _) in selected_query.iter_mut() {
                 let mut is_descendant = false;
                 let mut current = entity;
                 while let Ok(child_of) = parent_query.get(current) {
                     let parent_entity = child_of.parent();
-                    if selected_entities.contains(&parent_entity) { is_descendant = true; break; }
+                    if selected_entities.contains(&parent_entity) {
+                        is_descendant = true;
+                        break;
+                    }
                     current = parent_entity;
                 }
                 if is_descendant { continue; }
+                let relative_pos = transform.translation - group_center;
+                transform.translation = group_center + tilt * relative_pos;
                 transform.rotate_z(90.0_f32.to_radians());
-                // Update cached state so drag loop doesn't revert this rotation
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
             }
@@ -683,6 +772,14 @@ fn handle_box_selection(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     selection_manager: Option<Res<BevySelectionManager>>,
+    // `ViewportBounds` holds the Slint-hosted 3D viewport's offset inside
+    // the window (physical pixels). Camera renders with a non-default
+    // `Viewport` so `camera.world_to_viewport()` returns VIEWPORT-local
+    // coords, while `window.cursor_position()` returns WINDOW-local coords.
+    // We read the bounds here to bridge the two spaces inside the box
+    // containment test — mixing them silently rejected every marquee
+    // selection on displays where the left UI panel had non-zero width.
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     // Query entities with PartEntity OR Instance (supports both legacy and modern)
     parts_query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&PartEntity>, Option<&Instance>), Or<(With<PartEntity>, With<Instance>)>>,
     selected_query: Query<Entity, With<Selected>>,
@@ -723,12 +820,13 @@ fn handle_box_selection(
         // Reset any stale state from previous interactions
         box_state.active = false;
         box_state.pending = false;
-        
+
         // Don't start box select if we're already dragging a part
         if select_state.dragging {
+            info!("📦 box-select skipped: mid-drag of a part");
             return;
         }
-        
+
         // Check if clicking on a SELECTABLE part (not locked)
         let ray = camera.viewport_to_world(camera_transform, cursor_pos).ok();
         let clicking_on_part = ray.map(|r| {
@@ -744,14 +842,22 @@ fn handle_box_selection(
                 ray_intersects_part(r.origin, *r.direction, &t, size).is_some()
             })
         }).unwrap_or(false);
-        
+
+        info!(
+            "📦 box-select press: cursor={:?} clicking_on_part={} shift={} parts_total={}",
+            cursor_pos,
+            clicking_on_part,
+            shift_held,
+            parts_query.iter().count(),
+        );
+
         if !clicking_on_part {
             // Start potential box selection - mark as pending
             box_state.pending = true;
             box_state.start_pos = cursor_pos;
             box_state.current_pos = cursor_pos;
             box_state.additive = shift_held;
-            debug!("📦 Box selection pending at {:?}", cursor_pos);
+            info!("📦 Box selection PENDING at {:?}", cursor_pos);
             
             // Store current selection for additive mode
             if shift_held {
@@ -769,21 +875,59 @@ fn handle_box_selection(
         let drag_distance = (cursor_pos - box_state.start_pos).length();
         
         if drag_distance > BOX_SELECT_THRESHOLD {
-            if !box_state.active {
-                info!("📦 Box selection ACTIVE - dragging from {:?} to {:?}", box_state.start_pos, cursor_pos);
+            let transitioned = !box_state.active;
+            if transitioned {
+                info!(
+                    "📦 Box selection ACTIVE - drag {} → {} (distance={:.1}px, threshold={})",
+                    format!("{:?}", box_state.start_pos),
+                    format!("{:?}", cursor_pos),
+                    drag_distance,
+                    BOX_SELECT_THRESHOLD,
+                );
             }
             box_state.active = true;
             box_state.current_pos = cursor_pos;
-            
-            // Calculate screen-space bounding box
-            let min_x = box_state.start_pos.x.min(cursor_pos.x);
-            let max_x = box_state.start_pos.x.max(cursor_pos.x);
-            let min_y = box_state.start_pos.y.min(cursor_pos.y);
-            let max_y = box_state.start_pos.y.max(cursor_pos.y);
-            
+
+            // Bridge the two coordinate spaces:
+            //   - `box_state.start_pos` / `cursor_pos` are WINDOW-logical
+            //     (from `window.cursor_position()`).
+            //   - `camera.world_to_viewport()` returns VIEWPORT-logical
+            //     because the Bevy `Camera` has a non-default `Viewport`
+            //     (the Slint UI hosts the 3D view in an offset rectangle).
+            // Subtracting the viewport's logical top-left from the cursor
+            // positions yields viewport-local box bounds that line up with
+            // the projected entity centers. The legacy code compared the
+            // two spaces directly, so any display with a left UI panel
+            // silently rejected every marquee selection.
+            let (vp_ox, vp_oy) = viewport_bounds
+                .as_deref()
+                .map(|vb| {
+                    let s = window.scale_factor() as f32;
+                    (vb.x / s.max(0.0001), vb.y / s.max(0.0001))
+                })
+                .unwrap_or((0.0, 0.0));
+
+            let sx = box_state.start_pos.x - vp_ox;
+            let ex = cursor_pos.x - vp_ox;
+            let sy = box_state.start_pos.y - vp_oy;
+            let ey = cursor_pos.y - vp_oy;
+            let min_x = sx.min(ex);
+            let max_x = sx.max(ex);
+            let min_y = sy.min(ey);
+            let max_y = sy.max(ey);
+
+            if transitioned {
+                info!(
+                    "📦 box-select rect (viewport-local): x=[{:.1}..{:.1}] y=[{:.1}..{:.1}] vp_offset=({:.1},{:.1})",
+                    min_x, max_x, min_y, max_y, vp_ox, vp_oy,
+                );
+            }
+
             // Find all part_ids within the box
             let mut part_ids_in_box: Vec<String> = Vec::new();
-            
+            let mut projected_count = 0;
+            let mut overlap_count = 0;
+
             for (entity, transform, basepart, part_entity, instance) in parts_query.iter() {
                 // Skip locked parts - they shouldn't be selectable via box selection
                 if let Some(bp) = basepart {
@@ -791,32 +935,85 @@ fn handle_box_selection(
                         continue;
                     }
                 }
-                
-                // Project entity position to screen space
-                let world_pos = transform.translation();
-                if let Ok(screen_pos) = camera.world_to_viewport(camera_transform, world_pos) {
-                    // Check if entity center is within the box
-                    if screen_pos.x >= min_x && screen_pos.x <= max_x &&
-                       screen_pos.y >= min_y && screen_pos.y <= max_y {
-                        // Get part_id from PartEntity or Instance
-                        let part_id = if let Some(pe) = part_entity {
-                            if !pe.part_id.is_empty() {
-                                pe.part_id.clone()
-                            } else if instance.is_some() {
-                                format!("{}v{}", entity.index(), entity.generation())
-                            } else {
-                                continue;
-                            }
+
+                // Project the entity's full OBB to screen-space and test
+                // RECTANGLE INTERSECTION rather than center containment.
+                // A long horizontal bar (5×1×1) with its center outside
+                // the marquee but most of its body inside should still
+                // select — matches Blender / Maya convention.
+                let t = transform.compute_transform();
+                let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
+                let half = size * 0.5;
+                let corners = [
+                    Vec3::new(-half.x, -half.y, -half.z),
+                    Vec3::new( half.x, -half.y, -half.z),
+                    Vec3::new(-half.x,  half.y, -half.z),
+                    Vec3::new( half.x,  half.y, -half.z),
+                    Vec3::new(-half.x, -half.y,  half.z),
+                    Vec3::new( half.x, -half.y,  half.z),
+                    Vec3::new(-half.x,  half.y,  half.z),
+                    Vec3::new( half.x,  half.y,  half.z),
+                ];
+                let mut ent_min_x = f32::MAX;
+                let mut ent_max_x = f32::MIN;
+                let mut ent_min_y = f32::MAX;
+                let mut ent_max_y = f32::MIN;
+                let mut projected_any = false;
+                for c in corners {
+                    let world_corner = t.translation + t.rotation * c;
+                    if let Ok(sp) = camera.world_to_viewport(camera_transform, world_corner) {
+                        // Bevy 0.18 `world_to_viewport` returns PHYSICAL pixels
+                        // when the camera has an explicit `Viewport` (which is
+                        // the Slint-hosted case). Scale back to LOGICAL to
+                        // match the rect (built from logical-pixel cursor +
+                        // logical-pixel viewport offset).
+                        let s = window.scale_factor() as f32;
+                        let s = if s > 0.0 { s } else { 1.0 };
+                        let sp_logical = Vec2::new(sp.x / s, sp.y / s);
+                        ent_min_x = ent_min_x.min(sp_logical.x);
+                        ent_max_x = ent_max_x.max(sp_logical.x);
+                        ent_min_y = ent_min_y.min(sp_logical.y);
+                        ent_max_y = ent_max_y.max(sp_logical.y);
+                        projected_any = true;
+                    }
+                }
+                if !projected_any { continue; }
+                projected_count += 1;
+
+                // Standard AABB-AABB overlap test in viewport space.
+                let overlaps = ent_max_x >= min_x
+                    && ent_min_x <= max_x
+                    && ent_max_y >= min_y
+                    && ent_min_y <= max_y;
+                if overlaps {
+                    overlap_count += 1;
+                    // Get part_id from PartEntity or Instance
+                    let part_id = if let Some(pe) = part_entity {
+                        if !pe.part_id.is_empty() {
+                            pe.part_id.clone()
                         } else if instance.is_some() {
                             format!("{}v{}", entity.index(), entity.generation())
                         } else {
                             continue;
-                        };
-                        part_ids_in_box.push(part_id);
-                    }
+                        }
+                    } else if instance.is_some() {
+                        format!("{}v{}", entity.index(), entity.generation())
+                    } else {
+                        continue;
+                    };
+                    part_ids_in_box.push(part_id);
                 }
             }
-            
+
+            if transitioned {
+                info!(
+                    "📦 box-select scan: projected={} overlaps={} selected_ids={}",
+                    projected_count,
+                    overlap_count,
+                    part_ids_in_box.len(),
+                );
+            }
+
             // Update selection using part_ids
             let sm = selection_manager.0.write();
             

@@ -1,0 +1,19 @@
+# BillboardGui — 3D-attached billboard facing camera
+# Bevy: Billboard component + UI overlay
+
+[gui]
+enabled = true
+active = true
+always_on_top = false
+adornee = ""
+max_distance = 1000000.0
+size_offset = [200.0, 50.0]
+size_scale = [0.0, 0.0]
+studs_offset = [0.0, 0.0, 0.0]
+light_influence = 0.0
+clips_descendants = false
+z_index_behavior = "Sibling"
+
+[metadata]
+class_name = "BillboardGui"
+archivable = true

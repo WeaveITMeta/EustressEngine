@@ -665,10 +665,18 @@ pub fn handle_artifact_completion(
                 workspace_product_dir.clone()
             }
             ArtifactStep::SimScripts => {
-                // Rune simulation scripts → Space/SoulService/{product}/
-                let soul_product_dir = space_path.join("SoulService").join(&safe_name);
-                write_split_files(&soul_product_dir, &event.content, ".rune");
-                soul_product_dir
+                // Rune simulation scripts → Space/SoulService/{name}/
+                //
+                // Each `# --- FILE: name ---` block lands as a folder
+                // with `_instance.toml` + `{name}.rune` + `{name}.md`,
+                // matching the MCP `eustress_create_script` tool's
+                // output and the hand-authored `cycle_life_test`
+                // reference. Previously these were flat `.rune` files
+                // under a single product folder, which orphaned them
+                // from the SoulService Explorer + rename/delete UI.
+                let soul_dir = space_path.join("SoulService");
+                write_split_rune_script_folders(&soul_dir, &event.content);
+                soul_dir
             }
             ArtifactStep::UiGeneration => {
                 // UI TOML + UI scripts → Space/StarterGui/{product}/
@@ -821,6 +829,148 @@ fn write_split_files(output_dir: &PathBuf, content: &str, default_extension: &st
         let path = resolve_split_file_path(output_dir, filename, default_extension);
         write_artifact_file(&path, current_content.trim());
     }
+}
+
+/// Write split Rune scripts as folder-based instances, matching the
+/// convention used by the MCP `eustress_create_script` tool and the
+/// hand-authored `cycle_life_test` reference folder:
+///
+/// ```text
+/// {output_dir}/{name}/
+///   ├─ _instance.toml      # class_name = "Script", source = "{name}.rune"
+///   ├─ {name}.rune         # Rune source code
+///   └─ {name}.md           # Summary (placeholder if Claude didn't emit one)
+/// ```
+///
+/// Previously this path called `write_split_files(…, ".rune")` which
+/// flattened each block into a bare `{name}.rune` file — no
+/// `_instance.toml`, no summary, no folder. That produced scripts the
+/// SoulService loader saw as orphan files and the Explorer couldn't
+/// route through the normal script-folder UI (rename / delete / tab
+/// open all assumed the folder shape). Matches
+/// [`crate::ui::center_tabs::script_source_path_canonical`] +
+/// `script_summary_path_canonical` so subsequent reads round-trip.
+///
+/// Each `# --- FILE: name ---` block becomes one script folder. If a
+/// companion `# --- FILE: name.md ---` block exists it becomes the
+/// `.md` summary; otherwise a minimal "# {name}\n\n(no summary)\n"
+/// placeholder is written so the file exists and the UI doesn't hit
+/// the "missing file" branch.
+fn write_split_rune_script_folders(output_dir: &PathBuf, content: &str) {
+    let _ = std::fs::create_dir_all(output_dir);
+
+    // First pass: collect every (filename, body) pair from the stream,
+    // so we can pair `foo` with its companion `foo.md` regardless of
+    // emit order.
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_content = String::new();
+    for line in content.lines() {
+        if line.starts_with("# --- FILE:") && line.ends_with("---") {
+            if let Some(name) = current_name.take() {
+                blocks.push((name, current_content.trim().to_string()));
+            }
+            let raw = line
+                .trim_start_matches("# --- FILE:")
+                .trim_end_matches("---")
+                .trim();
+            current_name = Some(raw.to_string());
+            current_content.clear();
+        } else {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+    if let Some(name) = current_name.take() {
+        blocks.push((name, current_content.trim().to_string()));
+    }
+
+    // Bucket by script stem. Markdown blocks land on `.md`; everything
+    // else (bare name or explicit `.rune`) is the source body. First
+    // writer wins for each bucket — Claude has been known to repeat a
+    // header, and we don't want a later empty block to clobber good
+    // content.
+    use std::collections::BTreeMap;
+    let mut sources: BTreeMap<String, String> = BTreeMap::new();
+    let mut summaries: BTreeMap<String, String> = BTreeMap::new();
+    for (raw_name, body) in blocks {
+        let n = raw_name.trim().trim_start_matches('/').to_string();
+        let n = n.trim_start_matches("scripts/").to_string();
+        if let Some(stem) = n.strip_suffix(".md") {
+            summaries
+                .entry(stem.to_string())
+                .or_insert_with(|| body);
+        } else {
+            let stem = n
+                .strip_suffix(".rune")
+                .map(|s| s.to_string())
+                .unwrap_or(n);
+            sources.entry(stem).or_insert_with(|| body);
+        }
+    }
+
+    for (stem, body) in sources {
+        let Some(safe) = sanitize_script_folder_name(&stem) else {
+            warn!(
+                "Workshop: skipping unsafe rune script name {:?}",
+                stem
+            );
+            continue;
+        };
+        let folder = output_dir.join(&safe);
+        let _ = std::fs::create_dir_all(&folder);
+
+        let rune_path = folder.join(format!("{safe}.rune"));
+        let md_path = folder.join(format!("{safe}.md"));
+        let instance_path = folder.join("_instance.toml");
+
+        write_artifact_file(&rune_path, &body);
+
+        let summary = summaries
+            .get(&stem)
+            .cloned()
+            .unwrap_or_else(|| format!("# {safe}\n\n(no summary)\n"));
+        write_artifact_file(&md_path, &summary);
+
+        let instance_toml = format!(
+            "[metadata]\nclass_name = \"Script\"\narchivable = true\n\n[script]\nsource = \"{safe}.rune\"\n"
+        );
+        write_artifact_file(&instance_path, &instance_toml);
+    }
+}
+
+/// Accept-list sanitizer for Rune script folder names. Mirrors the
+/// MCP tool's check (`create_script_handler` rejects names with
+/// non-[A-Za-z0-9_-] bytes) so Workshop-generated folders match the
+/// shape an MCP-authored one would produce.
+fn sanitize_script_folder_name(raw: &str) -> Option<String> {
+    let stem = raw.trim().trim_matches(|c: char| c == '/' || c == '\\');
+    if stem.is_empty() {
+        return None;
+    }
+    // Strip any trailing extension that snuck through.
+    let stem = stem
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(stem);
+    let cleaned: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    let cleaned = cleaned.trim_matches('_').to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Must start with letter or underscore, matching the MCP rule.
+    if !cleaned
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphabetic() || c == '_')
+        .unwrap_or(false)
+    {
+        return Some(format!("_{cleaned}"));
+    }
+    Some(cleaned)
 }
 
 /// Write split Part files as folder-based instances.

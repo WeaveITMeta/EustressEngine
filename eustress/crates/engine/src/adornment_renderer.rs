@@ -196,22 +196,27 @@ fn create_adornment_assets(
 
     // Ghost preview: translucent green, pulses alpha, always-on-top.
     // accent-green #3cba54 at 40% base alpha (pulsed by pulse_ghost_preview_alpha).
+    // `depth_bias` values flipped to positive 2026-04-23 — Bevy 0.18
+    // uses reverse-Z so "always on top" requires a LARGE POSITIVE
+    // bias (near = 1.0, far = 0.0, compare = Greater). The prior
+    // negative values were shoving these fragments toward far.
     let ghost_preview = materials.add(StandardMaterial {
         base_color: Color::srgba(0.235, 0.729, 0.329, 0.40),
         emissive: LinearRgba::from(Color::srgb(0.235, 0.729, 0.329)) * 2.5,
         unlit: true,
-        depth_bias: -1000.0,
+        depth_bias: 1.0e6,
         alpha_mode: AlphaMode::Blend,
         cull_mode: None,
         ..default()
     });
-    // Outline pass: thin cyan silhouette for legibility on any background.
-    // accent-cyan #00bcd4.
+    // Outline pass: thin cyan silhouette for legibility on any
+    // background. accent-cyan #00bcd4. Bias higher than ghost_preview
+    // so the outline always stacks above the translucent fill.
     let ghost_preview_outline = materials.add(StandardMaterial {
         base_color: Color::srgba(0.0, 0.737, 0.831, 0.85),
         emissive: LinearRgba::from(Color::srgb(0.0, 0.737, 0.831)) * 3.0,
         unlit: true,
-        depth_bias: -2000.0,  // above the fill so it never gets occluded
+        depth_bias: 2.0e6,
         alpha_mode: AlphaMode::Blend,
         cull_mode: None,
         ..default()
@@ -221,7 +226,7 @@ fn create_adornment_assets(
         base_color: Color::srgba(0.0, 0.902, 0.463, 0.70),
         emissive: LinearRgba::from(Color::srgb(0.0, 0.902, 0.463)) * 4.0,
         unlit: true,
-        depth_bias: -1000.0,
+        depth_bias: 1.0e6,
         alpha_mode: AlphaMode::Blend,
         cull_mode: None,
         ..default()
@@ -256,19 +261,26 @@ fn axis_material(
         base_color: color,
         emissive: LinearRgba::from(color) * 2.5,
         unlit: true,
-        // Always-on-top so tool handles stay visible when the camera gets
-        // close to or inside the adornee. `depth_bias` is in Bevy's
-        // clip-space depth units — a large negative value pushes the
-        // fragment toward the near plane so opaque geometry in front of
-        // the handle loses the depth test. `AlphaMode::Blend` routes
-        // through the transparent-3d render pass, which doesn't write
-        // depth (so handles never occlude each other's siblings or the
-        // real scene) and respects the bias.
-        depth_bias: -1000.0,
+        // Always-on-top so tool handles stay visible when the camera
+        // is on the far side of or inside the adornee. **Bevy 0.18
+        // uses reverse-Z** (near = 1.0, far = 0.0, depth compare =
+        // Greater) so a fragment "wins" the depth test by carrying a
+        // HIGHER depth value. A large POSITIVE `depth_bias` pushes
+        // the gizmo fragment toward near, so opaque geometry in
+        // front of it loses the test. The previous code used
+        // `-1000.0`, which is the correct sign for forward-Z but
+        // pushes reverse-Z fragments toward far — the exact
+        // symptom the user caught 2026-04-23 ("gizmo gets
+        // occluded by the solid block behind it").
+        depth_bias: 1.0e6,
+        // Keep `AlphaMode::Blend` so handles don't write depth and
+        // therefore never occlude each other's siblings or the real
+        // scene — just beat the test against whatever is already
+        // there.
         alpha_mode: AlphaMode::Blend,
-        // Don't drop back-faces — with heavy bias the viewing angle can
-        // put us "inside" the cone, and we want the user to still see
-        // the handle.
+        // Don't drop back-faces — with the heavy bias the viewing
+        // angle can put us "inside" the cone, and we want the user
+        // to still see the handle.
         cull_mode: None,
         ..default()
     })
