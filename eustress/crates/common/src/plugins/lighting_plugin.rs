@@ -169,6 +169,16 @@ fn update_sun_position(
         lighting.bypass_change_detection();
     }
 
+    // Only update the Sun entity when LightingService actually changed (or the
+    // cycle is running). Without this guard every frame mutably borrows
+    // `sun_transform`, which marks `Changed<Transform>` on the Sun entity and
+    // causes `write_instance_changes_system` to flush `Sun.instance.toml` to
+    // disk every frame → file-watcher loop → class_schema self-heal every ~2 s
+    // → visible FPS stutter.
+    if !lighting.is_changed() && !lighting.cycle_enabled {
+        return;
+    }
+
     if let Ok((mut sun_light, mut sun_transform)) = sun_query.single_mut() {
         // Use SunClass direction if available (proper solar math with latitude),
         // otherwise fall back to LightingService's simple formula.

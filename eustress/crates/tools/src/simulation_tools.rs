@@ -178,10 +178,12 @@ impl ToolHandler for ListSimValuesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_sim_values",
-            description: "List all active simulation watchpoints with their current, min, max, and average values. Returns every watchpoint registered in the WatchPointRegistry.",
+            description: "List simulation watchpoints compactly (key=val at 3 dp). Use prefix to filter by namespace (e.g. 'battery.' shows only battery watchpoints, reducing token cost when you only care about one subsystem).",
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "prefix": { "type": "string", "description": "Only return keys starting with this prefix. E.g. 'battery.' or 'vcell.'. Default: all keys." }
+                }
             }),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
@@ -189,19 +191,21 @@ impl ToolHandler for ListSimValuesTool {
         }
     }
 
-    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let prefix_filter = input.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
         match read_sim_snapshot(ctx) {
             Ok(snap) => {
-                let body = if snap.sim_values.is_empty() {
-                    format!("No watchpoints in current snapshot (play_state={}).", snap.play_state)
+                let filtered: std::collections::BTreeMap<_, _> = snap.sim_values.iter()
+                    .filter(|(k, _)| prefix_filter.is_empty() || k.starts_with(prefix_filter))
+                    .collect();
+                let body = if filtered.is_empty() {
+                    format!("No watchpoints (play_state={}).", snap.play_state)
                 } else {
-                    let lines: Vec<String> = snap.sim_values.iter()
-                        .map(|(k, v)| format!("  - {} = {}", k, v))
+                    // Compact: key=val pairs, 3 dp
+                    let pairs: Vec<String> = filtered.iter()
+                        .map(|(k, v)| format!("{}={:.3}", k, v))
                         .collect();
-                    format!(
-                        "{} watchpoint(s) (play_state={}, snapshot {}ms old):\n{}",
-                        snap.sim_values.len(), snap.play_state, snap.age_ms, lines.join("\n"),
-                    )
+                    format!("[{}] {}ms old — {}", snap.play_state, snap.age_ms, pairs.join("  "))
                 };
                 ToolResult {
                     tool_name: "list_sim_values".to_string(),
@@ -1202,10 +1206,16 @@ impl ToolHandler for GetSimulationStateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_simulation_state",
-            description: "Get the current simulation state: play mode (editing/playing/paused), all watchpoint values, simulation time, and snapshot freshness. The single tool for understanding what the simulation is doing right now.",
+            description: "Get the current simulation state: play mode, watchpoint values, snapshot age. compact=true (default) returns one token-efficient line per watchpoint at 3 decimal places. Set compact=false for full precision. Use skip_keys to omit watchpoints you don't care about.",
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "compact": { "type": "boolean", "description": "One line per watchpoint, 3 decimal places. Default: true.", "default": true },
+                    "skip_keys": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Watchpoint keys to omit from the response (e.g. static values you don't need to re-read)."
+                    }
+                }
             }),
             modes: &[WorkshopMode::General, WorkshopMode::Simulation],
             requires_approval: false,
@@ -1213,16 +1223,35 @@ impl ToolHandler for GetSimulationStateTool {
         }
     }
 
-    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let compact = input.get("compact").and_then(|v| v.as_bool()).unwrap_or(true);
+        let skip_keys: std::collections::HashSet<String> = input
+            .get("skip_keys").and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
         match read_sim_snapshot(ctx) {
             Ok(snap) => {
-                let lines: Vec<String> = snap.sim_values.iter()
-                    .map(|(k, v)| format!("  {} = {:.6}", k, v))
+                let filtered: std::collections::BTreeMap<_, _> = snap.sim_values.iter()
+                    .filter(|(k, _)| !skip_keys.contains(*k))
                     .collect();
-                let body = format!(
-                    "Play state: {}\nSnapshot age: {}ms\n{} watchpoint(s):\n{}",
-                    snap.play_state, snap.age_ms, snap.sim_values.len(), lines.join("\n"),
-                );
+
+                let body = if compact {
+                    // Token-efficient: "state=Playing age=250ms | key=1.234 key2=5.678 ..."
+                    let pairs: Vec<String> = filtered.iter()
+                        .map(|(k, v)| format!("{}={:.3}", k, v))
+                        .collect();
+                    format!("state={} age={}ms | {}", snap.play_state, snap.age_ms, pairs.join(" "))
+                } else {
+                    let lines: Vec<String> = filtered.iter()
+                        .map(|(k, v)| format!("  {} = {:.6}", k, v))
+                        .collect();
+                    format!(
+                        "Play state: {}\nSnapshot age: {}ms\n{} watchpoint(s):\n{}",
+                        snap.play_state, snap.age_ms, filtered.len(), lines.join("\n"),
+                    )
+                };
+
                 ToolResult {
                     tool_name: "get_simulation_state".to_string(), tool_use_id: String::new(),
                     success: true,
@@ -1230,7 +1259,7 @@ impl ToolHandler for GetSimulationStateTool {
                     structured_data: Some(serde_json::json!({
                         "play_state": snap.play_state,
                         "snapshot_age_ms": snap.age_ms,
-                        "watchpoint_count": snap.sim_values.len(),
+                        "watchpoint_count": filtered.len(),
                         "sim_values": snap.sim_values,
                     })),
                     stream_topic: None,
@@ -1313,4 +1342,648 @@ fn read_sim_snapshot(ctx: &ToolContext) -> Result<SnapshotReading, String> {
         .unwrap_or(0);
 
     Ok(SnapshotReading { sim_values, play_state, age_ms })
+}
+
+// ---------------------------------------------------------------------------
+// PauseSimulationTool
+// ---------------------------------------------------------------------------
+
+pub struct PauseSimulationTool;
+
+impl ToolHandler for PauseSimulationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "pause_simulation",
+            description: "Pause the running simulation (enter Paused state). The simulation clock stops but all watchpoint values and simulation state are preserved. Resume with run_simulation.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &["workshop.simulation.paused"],
+        }
+    }
+
+    fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let cmd = serde_json::json!({
+            "op": "pause_simulation",
+            "queued_at": chrono::Utc::now().to_rfc3339(),
+        });
+        match queue_sim_command(ctx, &cmd) {
+            Ok(()) => ToolResult {
+                tool_name: "pause_simulation".to_string(), tool_use_id: String::new(),
+                success: true,
+                content: "Simulation pause queued.".to_string(),
+                structured_data: Some(serde_json::json!({ "action": "pause" })),
+                stream_topic: Some("workshop.simulation.paused".to_string()),
+            },
+            Err(e) => ToolResult {
+                tool_name: "pause_simulation".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to queue: {}", e),
+                structured_data: None, stream_topic: None,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AwaitSimulationTool — block until sim stops, return final state + telemetry summary
+// ---------------------------------------------------------------------------
+
+pub struct AwaitSimulationTool;
+
+impl ToolHandler for AwaitSimulationTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "await_simulation",
+            description: "Wait for the simulation to finish (transition from Playing to Editing/Paused) and return the final watchpoint values plus a telemetry summary. Use after run_simulation(duration_s=N) to collect results synchronously. Polls every 500ms; times out after timeout_s (default 300).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "timeout_s": { "type": "number", "description": "Max wall-clock seconds to wait. Default: 300.", "default": 300.0 },
+                    "run_label": { "type": "string", "description": "Optional label for this run, included in the result." }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let timeout_s = input.get("timeout_s").and_then(|v| v.as_f64()).unwrap_or(300.0);
+        let run_label = input.get("run_label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        let start_wall = std::time::Instant::now();
+        let start_ts = chrono::Utc::now();
+        let poll = std::time::Duration::from_millis(500);
+
+        // Poll until not Playing or timeout
+        let final_snap = loop {
+            if start_wall.elapsed().as_secs_f64() >= timeout_s {
+                return ToolResult {
+                    tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
+                    success: false,
+                    content: format!("Timeout after {:.1}s — simulation still running.", timeout_s),
+                    structured_data: None, stream_topic: None,
+                };
+            }
+
+            match read_sim_snapshot(ctx) {
+                Ok(snap) if snap.play_state != "Playing" => break snap,
+                Ok(_) => std::thread::sleep(poll),
+                Err(_) => std::thread::sleep(poll),
+            }
+        };
+
+        let wall_s = start_wall.elapsed().as_secs_f64();
+
+        // Read telemetry lines since this run started
+        let tele_path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
+        let tele_lines = read_telemetry_since(&tele_path, &start_ts);
+
+        // Compute per-key stats from telemetry
+        let stats = compute_telemetry_stats(&tele_lines);
+
+        let content = format_await_result(&final_snap, &stats, wall_s, tele_lines.len(), &run_label);
+
+        ToolResult {
+            tool_name: "await_simulation".to_string(), tool_use_id: String::new(),
+            success: true,
+            content,
+            structured_data: Some(serde_json::json!({
+                "run_label": run_label,
+                "final_play_state": final_snap.play_state,
+                "wall_time_s": wall_s,
+                "telemetry_samples": tele_lines.len(),
+                "final_values": final_snap.sim_values,
+                "stats": stats,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RunExperimentTool — full experiment loop: branch → patch → run → await → save
+// ---------------------------------------------------------------------------
+
+pub struct RunExperimentTool;
+
+impl ToolHandler for RunExperimentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "run_experiment",
+            description: "Run a complete simulation experiment: optionally create a git branch, apply sim-value overrides, run the simulation for duration_s, wait for completion, collect telemetry, compute stats, and save a structured result to .eustress/experiments/. Returns the full result so you can compare experiments and pick the best configuration. This is the primary tool for AI-driven optimization loops.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["name", "duration_s"],
+                "properties": {
+                    "name": { "type": "string", "description": "Experiment name (used as file name and branch suffix). E.g. 'high_voltage_4v3'." },
+                    "description": { "type": "string", "description": "What hypothesis this experiment tests." },
+                    "sim_values": {
+                        "type": "object",
+                        "description": "Key-value overrides to set before running. E.g. {\"cell_voltage\": 4.3, \"temperature_c\": 25}.",
+                        "additionalProperties": { "type": "number" }
+                    },
+                    "duration_s": { "type": "number", "description": "Simulation seconds to run. E.g. 60 for 60s of simulated time." },
+                    "time_scale": { "type": "number", "description": "Time compression (1.0 = realtime, 100.0 = 100× faster). Default: 1.0.", "default": 1.0 },
+                    "create_branch": { "type": "boolean", "description": "Create a git branch exp/<name>-<timestamp> for this experiment. Default: false.", "default": false },
+                    "timeout_s": { "type": "number", "description": "Max wall-clock wait time. Default: 300.", "default": 300.0 }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: true,
+            stream_topics: &["workshop.simulation.experiment"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("experiment").to_string();
+        let description = input.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let duration_s = match input.get("duration_s").and_then(|v| v.as_f64()) {
+            Some(d) => d,
+            None => return ToolResult {
+                tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+                success: false, content: "Missing required parameter: duration_s".to_string(),
+                structured_data: None, stream_topic: None,
+            },
+        };
+        let time_scale = input.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let create_branch = input.get("create_branch").and_then(|v| v.as_bool()).unwrap_or(false);
+        let timeout_s = input.get("timeout_s").and_then(|v| v.as_f64()).unwrap_or(300.0);
+        let sim_values: std::collections::HashMap<String, f64> = input
+            .get("sim_values").and_then(|v| v.as_object())
+            .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|n| (k.clone(), n))).collect())
+            .unwrap_or_default();
+
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let branch_name = format!("exp/{}-{}", name.replace(' ', "_"), timestamp);
+
+        // Step 1 — optionally create a git branch
+        let branch_created = if create_branch {
+            match run_git_in_universe(&ctx.universe_root, &["checkout", "-b", &branch_name]) {
+                Ok(_) => Some(branch_name.clone()),
+                Err(e) => {
+                    return ToolResult {
+                        tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+                        success: false,
+                        content: format!("Failed to create branch '{}': {}", branch_name, e),
+                        structured_data: None, stream_topic: None,
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        // Step 2 — apply sim-value overrides
+        for (key, value) in &sim_values {
+            let cmd = serde_json::json!({
+                "op": "set_sim_value",
+                "key": key,
+                "value": value,
+                "queued_at": chrono::Utc::now().to_rfc3339(),
+            });
+            let _ = queue_sim_command(ctx, &cmd);
+        }
+
+        // Step 3 — start simulation with auto-stop
+        let start_ts = chrono::Utc::now();
+        let start_wall = std::time::Instant::now();
+        let run_cmd = serde_json::json!({
+            "op": "run_simulation",
+            "time_scale": time_scale,
+            "duration_s": duration_s,
+            "queued_at": start_ts.to_rfc3339(),
+        });
+        if let Err(e) = queue_sim_command(ctx, &run_cmd) {
+            return ToolResult {
+                tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to start simulation: {}", e),
+                structured_data: None, stream_topic: None,
+            };
+        }
+
+        // Step 4 — poll until done
+        let poll = std::time::Duration::from_millis(500);
+        // Give the engine a moment to transition state before polling
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let final_snap = loop {
+            if start_wall.elapsed().as_secs_f64() >= timeout_s {
+                return ToolResult {
+                    tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+                    success: false,
+                    content: format!("Experiment '{}' timed out after {:.0}s.", name, timeout_s),
+                    structured_data: None, stream_topic: None,
+                };
+            }
+            match read_sim_snapshot(ctx) {
+                Ok(snap) if snap.play_state != "Playing" => break snap,
+                Ok(_) => std::thread::sleep(poll),
+                Err(_) => std::thread::sleep(poll),
+            }
+        };
+
+        let wall_s = start_wall.elapsed().as_secs_f64();
+
+        // Step 5 — read telemetry and compute stats
+        let tele_path = ctx.universe_root.join(".eustress").join("telemetry.jsonl");
+        let tele_lines = read_telemetry_since(&tele_path, &start_ts);
+        let stats = compute_telemetry_stats(&tele_lines);
+
+        // Step 6 — save experiment result
+        let exp_dir = ctx.universe_root.join(".eustress").join("experiments");
+        let _ = std::fs::create_dir_all(&exp_dir);
+        let exp_filename = format!("{}-{}.json", name.replace(' ', "_"), timestamp);
+        let exp_path = exp_dir.join(&exp_filename);
+
+        let experiment = serde_json::json!({
+            "name": name,
+            "description": description,
+            "branch": branch_created,
+            "timestamp": start_ts.to_rfc3339(),
+            "config": sim_values,
+            "duration_s": duration_s,
+            "time_scale": time_scale,
+            "wall_time_s": wall_s,
+            "telemetry_samples": tele_lines.len(),
+            "final_values": final_snap.sim_values,
+            "stats": stats,
+        });
+
+        let saved_path = if let Ok(json) = serde_json::to_string_pretty(&experiment) {
+            match std::fs::write(&exp_path, &json) {
+                Ok(_) => Some(exp_filename.clone()),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        // Step 7 — format report
+        let report = format_experiment_report(&name, &description, &sim_values, duration_s, time_scale,
+            wall_s, tele_lines.len(), &final_snap, &stats, &branch_created, &saved_path);
+
+        ToolResult {
+            tool_name: "run_experiment".to_string(), tool_use_id: String::new(),
+            success: true,
+            content: report,
+            structured_data: Some(experiment),
+            stream_topic: Some("workshop.simulation.experiment".to_string()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CompareRunsTool — diff two saved experiment JSONs
+// ---------------------------------------------------------------------------
+
+pub struct CompareRunsTool;
+
+impl ToolHandler for CompareRunsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "compare_runs",
+            description: "Compare two saved simulation experiment results from .eustress/experiments/. Shows deltas for every metric — positive is improvement if the metric increases (e.g. capacity), negative if the metric degrades. Use 'latest' or 'latest-1' as shortcuts.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["run_a", "run_b"],
+                "properties": {
+                    "run_a": { "type": "string", "description": "Experiment file name or 'latest', 'latest-1'. Baseline." },
+                    "run_b": { "type": "string", "description": "Experiment file name or 'latest', 'latest-1'. Candidate." },
+                    "higher_is_better": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Keys where higher values are better (e.g. [\"capacity_wh\", \"efficiency\"]). Default: []."
+                    }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let run_a = input.get("run_a").and_then(|v| v.as_str()).unwrap_or("latest-1");
+        let run_b = input.get("run_b").and_then(|v| v.as_str()).unwrap_or("latest");
+        let higher_is_better: std::collections::HashSet<String> = input
+            .get("higher_is_better").and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        let exp_dir = ctx.universe_root.join(".eustress").join("experiments");
+
+        let load = |name: &str| -> Result<(String, serde_json::Value), String> {
+            let path = resolve_experiment_path(&exp_dir, name)?;
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|e| format!("read {}: {}", path.display(), e))?;
+            let val: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| format!("parse: {}", e))?;
+            Ok((path.file_name().unwrap_or_default().to_string_lossy().to_string(), val))
+        };
+
+        let (name_a, data_a) = match load(run_a) {
+            Ok(d) => d,
+            Err(e) => return ToolResult {
+                tool_name: "compare_runs".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to load run_a '{}': {}", run_a, e),
+                structured_data: None, stream_topic: None,
+            },
+        };
+        let (name_b, data_b) = match load(run_b) {
+            Ok(d) => d,
+            Err(e) => return ToolResult {
+                tool_name: "compare_runs".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Failed to load run_b '{}': {}", run_b, e),
+                structured_data: None, stream_topic: None,
+            },
+        };
+
+        let finals_a = data_a.get("final_values").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        let finals_b = data_b.get("final_values").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+
+        let config_a = data_a.get("config").cloned().unwrap_or(serde_json::json!({}));
+        let config_b = data_b.get("config").cloned().unwrap_or(serde_json::json!({}));
+
+        let mut all_keys: Vec<String> = finals_a.keys().chain(finals_b.keys())
+            .cloned().collect::<std::collections::HashSet<_>>().into_iter().collect();
+        all_keys.sort();
+
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let mut lines = vec![
+            format!("## Experiment Comparison"),
+            format!("Baseline : {}", name_a),
+            format!("Candidate: {}", name_b),
+            String::new(),
+            format!("{:<30} {:>12} {:>12} {:>10}", "Metric", "Baseline", "Candidate", "Delta"),
+            format!("{}", "-".repeat(68)),
+        ];
+
+        for key in &all_keys {
+            let va = finals_a.get(key).and_then(|v| v.as_f64());
+            let vb = finals_b.get(key).and_then(|v| v.as_f64());
+            let delta = match (va, vb) {
+                (Some(a), Some(b)) => Some(b - a),
+                _ => None,
+            };
+            let arrow = match delta {
+                Some(d) if d.abs() < 1e-9 => "=",
+                Some(d) if higher_is_better.contains(key) => if d > 0.0 { "▲" } else { "▼" },
+                Some(d) => if d < 0.0 { "▲" } else { "▼" },
+                None => "?",
+            };
+            lines.push(format!("{:<30} {:>12} {:>12} {:>10}",
+                key,
+                va.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "-".to_string()),
+                vb.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "-".to_string()),
+                delta.map(|d| format!("{} {:.4}", arrow, d)).unwrap_or_else(|| "-".to_string()),
+            ));
+            rows.push(serde_json::json!({
+                "key": key, "baseline": va, "candidate": vb, "delta": delta,
+            }));
+        }
+
+        ToolResult {
+            tool_name: "compare_runs".to_string(), tool_use_id: String::new(),
+            success: true,
+            content: lines.join("\n"),
+            structured_data: Some(serde_json::json!({
+                "baseline": name_a, "candidate": name_b,
+                "config_a": config_a, "config_b": config_b,
+                "metrics": rows,
+            })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ListExperimentsTool — enumerate saved experiment results
+// ---------------------------------------------------------------------------
+
+pub struct ListExperimentsTool;
+
+impl ToolHandler for ListExperimentsTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_experiments",
+            description: "List all saved simulation experiment results in .eustress/experiments/, newest first. Shows name, timestamp, duration, time_scale, and final metric values.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max experiments to return. Default: 20.", "default": 20 }
+                }
+            }),
+            modes: &[WorkshopMode::General, WorkshopMode::Simulation],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let exp_dir = ctx.universe_root.join(".eustress").join("experiments");
+
+        let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = match std::fs::read_dir(&exp_dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+                .collect(),
+            Err(_) => {
+                return ToolResult {
+                    tool_name: "list_experiments".to_string(), tool_use_id: String::new(),
+                    success: true, content: "No experiments yet. Run run_experiment to create one.".to_string(),
+                    structured_data: Some(serde_json::json!({ "experiments": [] })), stream_topic: None,
+                };
+            }
+        };
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.truncate(limit);
+
+        let mut summaries: Vec<serde_json::Value> = Vec::new();
+        let mut lines = vec![format!("{} experiment(s):\n", entries.len())];
+
+        for (_, path) in &entries {
+            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let data: serde_json::Value = std::fs::read_to_string(path)
+                .ok().and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+
+            let exp_name = data.get("name").and_then(|v| v.as_str()).unwrap_or(&filename);
+            let ts = data.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?");
+            let dur = data.get("duration_s").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let scale = data.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+            let samples = data.get("telemetry_samples").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            lines.push(format!("• {} [{}]", exp_name, ts));
+            lines.push(format!("  duration={:.0}s  time_scale={:.0}x  samples={}  file={}", dur, scale, samples, filename));
+
+            if let Some(finals) = data.get("final_values").and_then(|v| v.as_object()) {
+                let vals: Vec<String> = finals.iter()
+                    .map(|(k, v)| format!("{}={:.4}", k, v.as_f64().unwrap_or(0.0)))
+                    .collect();
+                lines.push(format!("  final: {}", vals.join(", ")));
+            }
+            lines.push(String::new());
+
+            summaries.push(serde_json::json!({
+                "file": filename, "name": exp_name, "timestamp": ts,
+                "duration_s": dur, "time_scale": scale, "samples": samples,
+                "final_values": data.get("final_values"),
+            }));
+        }
+
+        ToolResult {
+            tool_name: "list_experiments".to_string(), tool_use_id: String::new(),
+            success: true,
+            content: lines.join("\n"),
+            structured_data: Some(serde_json::json!({ "experiments": summaries })),
+            stream_topic: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for experiment tools
+// ---------------------------------------------------------------------------
+
+fn run_git_in_universe(universe_root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut cur = universe_root.to_path_buf();
+    let cwd = loop {
+        if cur.join(".git").exists() { break cur.clone(); }
+        if !cur.pop() { break universe_root.to_path_buf(); }
+    };
+    let out = std::process::Command::new("git").args(args).current_dir(&cwd)
+        .output().map_err(|e| format!("git: {}", e))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
+}
+
+fn read_telemetry_since(path: &std::path::Path, since: &chrono::DateTime<chrono::Utc>)
+    -> Vec<serde_json::Value>
+{
+    let raw = match std::fs::read_to_string(path) { Ok(r) => r, Err(_) => return vec![] };
+    raw.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| {
+            entry.get("t").and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc) >= *since)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn compute_telemetry_stats(lines: &[serde_json::Value])
+    -> std::collections::BTreeMap<String, serde_json::Value>
+{
+    let mut accum: std::collections::BTreeMap<String, (f64, f64, f64, u64, f64)> = Default::default();
+    // (sum, min, max, count, last)
+    for entry in lines {
+        if let Some(vals) = entry.get("values").and_then(|v| v.as_object()) {
+            for (k, v) in vals {
+                if let Some(n) = v.as_f64() {
+                    let e = accum.entry(k.clone()).or_insert((0.0, f64::MAX, f64::MIN, 0, 0.0));
+                    e.0 += n; e.1 = e.1.min(n); e.2 = e.2.max(n); e.3 += 1; e.4 = n;
+                }
+            }
+        }
+    }
+    accum.into_iter().map(|(k, (sum, min, max, count, last))| {
+        let mean = if count > 0 { sum / count as f64 } else { 0.0 };
+        (k, serde_json::json!({ "min": min, "max": max, "mean": mean, "last": last, "samples": count }))
+    }).collect()
+}
+
+fn format_await_result(
+    snap: &SnapshotReading,
+    stats: &std::collections::BTreeMap<String, serde_json::Value>,
+    wall_s: f64,
+    samples: usize,
+    label: &str,
+) -> String {
+    let mut lines = vec![
+        format!("Simulation finished in {:.2}s wall-time ({} telemetry samples){}.",
+            wall_s, samples, if label.is_empty() { String::new() } else { format!(" [{}]", label) }),
+        format!("Final state: {}", snap.play_state),
+        String::new(),
+        "Final watchpoint values:".to_string(),
+    ];
+    for (k, v) in &snap.sim_values {
+        lines.push(format!("  {} = {:.6}", k, v));
+    }
+    if !stats.is_empty() {
+        lines.push(String::new());
+        lines.push("Telemetry stats (min / mean / max):".to_string());
+        for (k, s) in stats {
+            let min = s.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let mean = s.get("mean").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let max = s.get("max").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            lines.push(format!("  {}: {:.4} / {:.4} / {:.4}", k, min, mean, max));
+        }
+    }
+    lines.join("\n")
+}
+
+fn format_experiment_report(
+    name: &str, description: &str, config: &std::collections::HashMap<String, f64>,
+    duration_s: f64, time_scale: f64, wall_s: f64, samples: usize,
+    snap: &SnapshotReading,
+    stats: &std::collections::BTreeMap<String, serde_json::Value>,
+    branch: &Option<String>, saved: &Option<String>,
+) -> String {
+    let mut lines = vec![
+        format!("# Experiment: {}", name),
+    ];
+    if !description.is_empty() { lines.push(format!("_{}_", description)); }
+    lines.push(String::new());
+    if let Some(b) = branch { lines.push(format!("Branch: {}", b)); }
+    lines.push(format!("Duration: {:.1}s simulated at {:.0}× ({:.2}s wall)", duration_s, time_scale, wall_s));
+    lines.push(format!("Telemetry: {} samples", samples));
+    if let Some(s) = saved { lines.push(format!("Saved: .eustress/experiments/{}", s)); }
+    if !config.is_empty() {
+        lines.push(String::new());
+        lines.push("Config overrides:".to_string());
+        let mut cfg_keys: Vec<_> = config.keys().collect();
+        cfg_keys.sort();
+        for k in cfg_keys { lines.push(format!("  {} = {:.4}", k, config[k])); }
+    }
+    lines.push(String::new());
+    lines.push("Final watchpoint values:".to_string());
+    for (k, v) in &snap.sim_values { lines.push(format!("  {} = {:.6}", k, v)); }
+    if !stats.is_empty() {
+        lines.push(String::new());
+        lines.push("Telemetry stats (min / mean / max):".to_string());
+        for (k, s) in stats {
+            let min = s.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let mean = s.get("mean").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let max = s.get("max").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            lines.push(format!("  {}: {:.4} / {:.4} / {:.4}", k, min, mean, max));
+        }
+    }
+    lines.join("\n")
+}
+
+fn resolve_experiment_path(exp_dir: &std::path::Path, name: &str)
+    -> Result<std::path::PathBuf, String>
+{
+    if name == "latest" || name == "latest-1" {
+        let offset = if name == "latest-1" { 1usize } else { 0 };
+        let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+            std::fs::read_dir(exp_dir)
+                .map_err(|e| format!("read dir: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
+                .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, e.path())))
+                .collect();
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.get(offset).map(|(_, p)| p.clone())
+            .ok_or_else(|| format!("No experiment at offset {}", offset))
+    } else {
+        let p = if name.ends_with(".json") { exp_dir.join(name) } else { exp_dir.join(format!("{}.json", name)) };
+        if p.exists() { Ok(p) } else { Err(format!("Experiment file not found: {}", p.display())) }
+    }
 }

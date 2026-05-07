@@ -45,6 +45,8 @@ import { StressTestDialog } from "stress_test.slint";
 import { DataSourcesDialog } from "data_sources.slint";
 import { KeybindingsDialog } from "keybindings.slint";
 import { AboutDialog } from "about_dialog.slint";
+import { NewUniverseDialog } from "new_universe_dialog.slint";
+import { NewSpaceDialog } from "new_space_dialog.slint";
 // BillboardCard is instantiated per-entity by the engine's billboard_gui
 // systems, not nested inside StudioWindow. Re-export the combined form so
 // slint-build emits the generated Rust bindings into the module that
@@ -191,7 +193,11 @@ export component StudioWindow inherits Window {
     in-out property <bool> show-settings-dialog: false;
     in-out property <int> settings-active-tab: 0;
     in-out property <bool> show-find-dialog: false;
-    
+    in-out property <bool> show-new-universe-dialog: false;
+    in-out property <string> new-universe-name: "";
+    in-out property <bool> show-new-space-dialog: false;
+    in-out property <string> new-space-name: "";
+
     // New panels for egui parity
     in-out property <bool> show-terrain-editor: false;
     in-out property <bool> show-network-panel: false;
@@ -253,6 +259,9 @@ export component StudioWindow inherits Window {
     in-out property <string> workshop-active-modes-text: "⚡ General";
     in-out property <int> workshop-tool-count: 0;
     in-out property <string> workshop-active-tool: "";
+    in-out property <string> workshop-active-mode-name: "General";
+    in-out property <image>  workshop-attached-image;
+    in-out property <bool>   workshop-has-attached-image: false;
 
     // Session tab strip — live list of Workshop sessions under
     // SoulService/Workshop/. Host sync system refreshes this each
@@ -461,6 +470,10 @@ export component StudioWindow inherits Window {
     // ExplorerPanel's `changed scroll-pulse` handler does the actual jump.
     in property <int> explorer-scroll-pulse: 0;
     in property <length> explorer-scroll-target-y: 0px;
+    /// Node currently being inline-renamed in the explorer. Set from Rust
+    /// (context menu Rename) or from Slint (F2 key → on-start-rename).
+    /// Reset to -1 when Enter/Escape is pressed inside the TreeItem.
+    in-out property <int> explorer-renaming-node-id: -1;
     
     // Properties panel data (pushed from Bevy for selected entity)
     in-out property <[PropertyData]> entity-properties: [];
@@ -675,6 +688,8 @@ export component StudioWindow inherits Window {
     
     // File operations
     callback new-universe();
+    callback new-universe-confirmed(/* universe-name */ string);
+    callback new-space-confirmed(/* space-name */ string);
     callback new-scene();
     callback open-scene();
     callback save-scene();
@@ -863,6 +878,9 @@ export component StudioWindow inherits Window {
     callback workshop-optimize-and-build();
     callback workshop-load-conversation(string);
     callback workshop-new-conversation();
+    callback workshop-attach-image();       // Ctrl+V or attach button — Rust reads clipboard
+    callback workshop-clear-image();        // × on preview strip
+    callback workshop-mode-changed(string); // user picked a different mode
     /// Close a session tab in the Workshop panel. Host removes the
     /// session from the in-memory list and optionally deletes the
     /// folder under SoulService/Workshop/ (policy TBD — for now
@@ -971,7 +989,7 @@ export component StudioWindow inherits Window {
             on-bliss-toggle-enabled => { root.bliss-toggle-enabled(); }
             
             // File
-            on-new-universe => { root.new-universe(); }
+            on-new-universe => { root.show-new-universe-dialog = true; root.new-universe-name = ""; }
             on-new-scene => { root.new-scene(); }
             on-open-scene => { root.open-scene(); }
             on-save-scene => { root.save-scene(); }
@@ -1242,10 +1260,14 @@ export component StudioWindow inherits Window {
                             tree-nodes: root.tree-nodes;
                             scroll-pulse: root.explorer-scroll-pulse;
                             scroll-target-y: root.explorer-scroll-target-y;
+                            renaming-node-id: root.explorer-renaming-node-id;
                             on-select-node(id, node-type, ctrl, shift) => { root.select-node(id, node-type, ctrl, shift); }
                             on-expand-node(id, node-type) => { root.expand-node(id, node-type); }
                             on-collapse-node(id, node-type) => { root.collapse-node(id, node-type); }
                             on-open-node(id, node-type) => { root.open-node(id, node-type); }
+                            on-rename-node(id, new-name, node-type) => { root.rename-node(id, new-name, node-type); }
+                            on-start-rename(id) => { root.explorer-renaming-node-id = id; }
+                            on-cancel-rename() => { root.explorer-renaming-node-id = -1; }
                             on-reparent-node(source, target) => { root.reparent-node(source, target); }
                             on-add-service() => { root.add-service(); }
                             on-expand-all() => { root.expand-all(); }
@@ -1906,7 +1928,8 @@ export component StudioWindow inherits Window {
                 
                 // Keyboard shortcut handler (Ctrl+W to close active tab, Ctrl+T for new web tab)
                 tab-keys := FocusScope {
-                    
+                    width: 100%; height: 100%;
+
                     key-pressed(event) => {
                         // Ctrl+W: close active tab (not Space1)
                         if event.modifiers.control && event.text == "w" {
@@ -2731,6 +2754,16 @@ export component StudioWindow inherits Window {
                             on-mention-query-changed(text) => { root.workshop-mention-query-changed(text); }
                             on-mention-commit(index) => { root.workshop-mention-commit(index); }
                             on-mention-cancel() => { root.workshop-mention-cancel(); }
+
+                            // Image attachment
+                            attached-image <=> root.workshop-attached-image;
+                            has-attached-image <=> root.workshop-has-attached-image;
+                            on-attach-image() => { root.workshop-attach-image(); }
+                            on-clear-image() => { root.workshop-clear-image(); }
+
+                            // Mode selector
+                            active-mode-name <=> root.workshop-active-mode-name;
+                            on-mode-changed(m) => { root.workshop-mode-changed(m); }
                         }
 
                         if root.right-tab-index == 4: ProblemsPanel {
@@ -3182,6 +3215,35 @@ export component StudioWindow inherits Window {
         build-date: root.about-build-date;
         open-url(u) => { root.open-url(u); }
         on-close => { root.show-about-dialog = false; }
+    }
+
+    // New Universe dialog — Step 1: get universe name
+    if root.show-new-universe-dialog: NewUniverseDialog {
+        universe-name <=> root.new-universe-name;
+        on-create(name) => {
+            root.show-new-universe-dialog = false;
+            root.show-new-space-dialog = true;  // Immediately show space dialog
+            root.new-space-name = "";           // Reset space name
+            root.new-universe-confirmed(name);  // Create universe in background
+        }
+        on-cancel => {
+            root.show-new-universe-dialog = false;
+            root.new-universe-name = "";
+        }
+    }
+
+    // New Space dialog — Step 2: get space name (after universe is created)
+    if root.show-new-space-dialog: NewSpaceDialog {
+        universe-name: root.new-universe-name;
+        space-name <=> root.new-space-name;
+        on-create(name) => {
+            root.show-new-space-dialog = false;
+            root.new-space-confirmed(name);
+        }
+        on-cancel => {
+            root.show-new-space-dialog = false;
+            root.new-space-name = "";
+        }
     }
 
     // Simulation settings dialog

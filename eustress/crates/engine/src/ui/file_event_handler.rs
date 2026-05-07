@@ -48,11 +48,20 @@ pub struct PendingFileActions {
     pub actions: Vec<FileAction>,
 }
 
+/// Stores the path of a newly created Universe during two-step creation.
+/// Used to bridge between NewUniverseConfirmed and NewSpaceConfirmed actions.
+#[derive(Resource, Default)]
+pub struct PendingUniversePath(pub Option<PathBuf>);
+
 /// Owned action variants (matches `FileEvent` 1-to-1 plus legacy path variant).
 #[derive(Clone, Debug)]
 pub enum FileAction {
     /// New Universe: create a Universe folder at the workspace root
     NewUniverse,
+    /// New Universe with confirmed name from UI dialog
+    NewUniverseConfirmed(String),
+    /// New Space with confirmed name from UI dialog
+    NewSpaceConfirmed(String),
     /// New Space: scaffold EEP folder + switch engine to it
     NewSpace,
     /// Open Space: folder picker → switch engine to chosen Space folder
@@ -84,6 +93,8 @@ pub fn drain_file_events(
     for event in events.read() {
         let action = match event {
             FileEvent::NewUniverse     => FileAction::NewUniverse,
+            FileEvent::NewUniverseConfirmed(name) => FileAction::NewUniverseConfirmed(name.clone()),
+            FileEvent::NewSpaceConfirmed(name) => FileAction::NewSpaceConfirmed(name.clone()),
             FileEvent::NewScene        => FileAction::NewSpace,
             FileEvent::OpenScene       => FileAction::OpenSpace,
             FileEvent::SaveScene       => FileAction::SaveSpace,
@@ -116,6 +127,8 @@ pub fn execute_file_actions(world: &mut World) {
     for action in actions {
         match action {
             FileAction::NewUniverse      => do_new_universe(world),
+            FileAction::NewUniverseConfirmed(name) => do_new_universe_confirmed(world, name),
+            FileAction::NewSpaceConfirmed(name) => do_new_space_confirmed(world, name),
             FileAction::NewSpace         => do_new_space(world),
             FileAction::OpenSpace        => do_open_space(world),
             FileAction::OpenSpacePath(p) => do_open_space_path(world, p),
@@ -145,6 +158,64 @@ pub fn execute_file_actions(world: &mut World) {
 fn do_new_universe(world: &mut World) {
     info!("🪐 New Universe requested");
     space_ops::new_universe(world);
+}
+
+fn do_new_universe_confirmed(world: &mut World, universe_name: String) {
+    info!("🪐 New Universe confirmed: {}", universe_name);
+    match space_ops::create_universe_folder(world, &universe_name) {
+        Ok(universe_path) => {
+            info!("✓ Universe folder created: {}", universe_path.display());
+            // Store the universe path for the next step
+            let mut pending = world.get_resource_mut::<PendingUniversePath>().unwrap();
+            pending.0 = Some(universe_path);
+            // Signal UI to show the space naming dialog
+            if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                notifs.success(format!("Universe '{}' created", universe_name));
+            }
+            // Trigger the space dialog to show via a dummy message
+            // The UI property show-new-space-dialog should be set by the Slint binding
+        }
+        Err(e) => {
+            error!("❌ Failed to create universe: {}", e);
+            if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                notifs.error(format!("Failed to create Universe: {}", e));
+            }
+        }
+    }
+}
+
+fn do_new_space_confirmed(world: &mut World, space_name: String) {
+    info!("🆕 New Space confirmed: {}", space_name);
+    let pending_path = {
+        let mut pending = world.get_resource_mut::<PendingUniversePath>().unwrap();
+        pending.0.take()
+    };
+
+    if let Some(universe_path) = pending_path {
+        match space_ops::create_space_in_universe(world, &universe_path, &space_name) {
+            Ok(space_path) => {
+                info!("✓ Space folder created: {}", space_path.display());
+                if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                    notifs.success(format!("Space '{}' created and opened", space_name));
+                }
+                // Force rescan of universe registry
+                if let Some(mut registry) = world.get_resource_mut::<crate::space::UniverseRegistry>() {
+                    registry.rescan_requested = true;
+                }
+            }
+            Err(e) => {
+                error!("❌ Failed to create space: {}", e);
+                if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+                    notifs.error(format!("Failed to create Space: {}", e));
+                }
+            }
+        }
+    } else {
+        error!("❌ No pending universe path for space creation");
+        if let Some(mut notifs) = world.get_resource_mut::<NotificationManager>() {
+            notifs.error("No universe selected for space creation");
+        }
+    }
 }
 
 fn do_new_space(world: &mut World) {

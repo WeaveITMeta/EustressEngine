@@ -267,9 +267,10 @@ component ChatBubble inherits Rectangle {
                     }
                 }
 
-                // Message content — read-only TextInput so the user
-                // can click-drag to select text and Ctrl+C to copy.
-                TextInput {
+                // Message content — hidden for pure MCP tool-call cards
+                // (the badge + status indicator already convey what ran;
+                // the raw argument JSON is noisy and unreadable).
+                if root.role != "mcp": TextInput {
                     text: root.content;
                     color: root.role == "error" ? #ff8888 : Theme.text-primary;
                     font-size: 12px;
@@ -588,6 +589,23 @@ export component WorkshopPanel inherits Rectangle {
     callback on-mention-query-changed(string);  // emit when prefix changes
     callback on-mention-commit(int);            // item index committed (also fires record_usage)
     callback on-mention-cancel();               // popup dismissed without commit
+
+    // ── Image attachment ─────────────────────────────────────────────────
+    // Set by Rust when the user pastes an image (Ctrl+V) or clicks the
+    // attach button. Clear by clicking the × on the preview strip.
+    in-out property <image> attached-image;
+    in-out property <bool> has-attached-image: false;
+    callback on-attach-image();      // user clicked the attach / paste button
+    callback on-clear-image();       // user clicked × on preview
+
+    // ── Mode selector ────────────────────────────────────────────────────
+    // The active mode name shown in the dropdown (e.g. "General").
+    // Rust keeps this in sync with the engine's ActiveModes.
+    in-out property <string> active-mode-name: "General";
+    // Fires when the user picks a different mode from the dropdown.
+    callback on-mode-changed(string);
+    // Available mode names (populated once at startup).
+    in property <[string]> available-modes: ["General", "Simulation", "Manufacturing", "Fabrication", "Finance", "Shopping", "Travel", "Supply Chain", "Warehousing", "Universe"];
 
     /// Scan `input-text` for a trailing `@prefix` token; if found, open
     /// the popup and emit a query. Called from the input field's `edited`
@@ -1330,20 +1348,94 @@ export component WorkshopPanel inherits Rectangle {
                 padding: 8px;
                 spacing: 6px;
 
-                // ── Mode bar + tool count — vertically centered row ──
+                // ── Mode dropdown + tool status row ──
                 HorizontalLayout {
-                    height: 20px;
+                    height: 24px;
                     spacing: 6px;
                     alignment: start;
 
-                    Text {
-                        text: root.active-modes-text;
-                        color: Theme.text-secondary;
-                        font-size: 10px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
+                    // Mode dropdown pill
+                    Rectangle {
+                        width: mode-label.preferred-width + 28px;
+                        height: 24px;
+                        background: mode-touch.has-hover ? Theme.background-tertiary : transparent;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Theme.border-color;
+
+                        mode-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { mode-popup.show(); }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            padding-right: 4px;
+                            spacing: 4px;
+                            alignment: center;
+
+                            mode-label := Text {
+                                text: root.active-mode-name;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: "▾";
+                                color: Theme.text-secondary;
+                                font-size: 9px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        mode-popup := PopupWindow {
+                            x: 0px;
+                            y: -min(root.available-modes.length * 24px, 200px) - 4px;
+                            width: 160px;
+                            height: min(root.available-modes.length * 24px + 8px, 208px);
+
+                            Rectangle {
+                                background: Theme.background-secondary;
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: Theme.border-color;
+                                drop-shadow-blur: 8px;
+                                drop-shadow-color: #00000066;
+
+                                VerticalLayout {
+                                    padding: 4px;
+                                    spacing: 0px;
+
+                                    for m in root.available-modes: Rectangle {
+                                        height: 24px;
+                                        border-radius: 4px;
+                                        background: m-touch.has-hover ? #0078d422 : transparent;
+
+                                        m-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.active-mode-name = m;
+                                                root.on-mode-changed(m);
+                                                mode-popup.close();
+                                            }
+                                        }
+
+                                        Text {
+                                            x: 8px;
+                                            text: m;
+                                            color: m == root.active-mode-name ? Theme.accent-blue : Theme.text-primary;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
+
+                    // Spacer
+                    Rectangle { horizontal-stretch: 1; }
 
                     if root.active-tool != "": Text {
                         text: "⟳ " + root.active-tool;
@@ -1357,6 +1449,71 @@ export component WorkshopPanel inherits Rectangle {
                         color: Theme.text-secondary;
                         font-size: 9px;
                         vertical-alignment: center;
+                    }
+                }
+
+                // ── Attached image preview strip ──
+                if root.has-attached-image: Rectangle {
+                    height: 72px;
+                    background: Theme.background-tertiary;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+                    clip: true;
+
+                    HorizontalLayout {
+                        padding: 4px;
+                        spacing: 6px;
+                        alignment: start;
+
+                        // Thumbnail
+                        Rectangle {
+                            width: 64px;
+                            height: 64px;
+                            border-radius: 4px;
+                            clip: true;
+                            background: #000;
+
+                            Image {
+                                width: parent.width;
+                                height: parent.height;
+                                source: root.attached-image;
+                                image-fit: contain;
+                            }
+                        }
+
+                        // Label
+                        Text {
+                            vertical-alignment: center;
+                            text: "Image attached";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            horizontal-stretch: 1;
+                        }
+
+                        // × clear button
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 10px;
+                            background: clear-touch.has-hover ? #c0392b : Theme.button-background;
+
+                            clear-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.on-clear-image(); }
+                            }
+
+                            Image {
+                                width: 10px;
+                                height: 10px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                source: @image-url("../../assets/icons/ui/close.svg");
+                                image-fit: contain;
+                                colorize: white;
+                            }
+                        }
                     }
                 }
 
@@ -1451,6 +1608,17 @@ export component WorkshopPanel inherits Rectangle {
                                         root.input-text = "";
                                     }
                                     return accept;
+                                }
+                                // Ctrl+V — if clipboard contains an image,
+                                // Rust intercepts via on-attach-image and
+                                // sets has-attached-image + attached-image.
+                                // We fire the callback and let Rust decide
+                                // whether it's text (handled natively by
+                                // TextInput) or an image (handled by Rust).
+                                if ev.text == "v" && ev.modifiers.control {
+                                    root.on-attach-image();
+                                    // Don't return accept — text paste still
+                                    // works via TextInput's built-in handling.
                                 }
                                 // Intercept nav keys only when popup is open.
                                 if root.mention-popup-visible {

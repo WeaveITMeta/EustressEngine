@@ -124,7 +124,7 @@ impl WorkshopMode {
             Self::Shopping => &["shop", "catalog", "pricing", "checkout", "marketplace", "e-commerce", "product listing"],
             Self::Travel => &["route", "fleet", "customs", "shipping", "freight", "transport", "delivery"],
             Self::Finance => &["tax", "finance", "budget", "cost analysis", "compliance", "revenue", "P&L", "accounting"],
-            Self::Simulation => &["simulate", "script", "Rune", "Luau", "watchpoint", "breakpoint", "record", "playback", "physics"],
+            Self::Simulation => &["simulate", "script", "Rune", "Luau", "watchpoint", "breakpoint", "record", "playback", "physics", "experiment", "optimize", "sweep", "iteration", "baseline", "telemetry"],
             Self::UniverseBrowsing => &["universe", "space", "browse", "list scripts", "find entity"],
         }
     }
@@ -162,7 +162,7 @@ impl WorkshopMode {
             Self::Shopping => "Shopping mode active. I can help build product catalogs, pricing strategies, checkout flows, and marketplace listings.",
             Self::Travel => "Travel mode active. I can help with route planning, fleet management, customs documentation, and logistics optimization.",
             Self::Finance => "Finance mode active. I can help with tax calculations, compliance checks, financial reporting, and cost analysis.",
-            Self::Simulation => "Simulation mode active. I have deep awareness of the running simulation via Eustress Streams. I can write Rune scripts, set watchpoints, control playback, and analyze results.",
+            Self::Simulation => "Simulation mode active. I can design and run experiments autonomously — set parameters, run the simulation at any time scale, collect structured telemetry, compare results across branches, and deliver optimization reports. Tell me what you want to optimize.",
             Self::UniverseBrowsing => "Universe Browser mode active. I can list Universes and Spaces, find entities, read scripts, and search across the Universe.",
         }
     }
@@ -268,14 +268,81 @@ financial reports, analyzing costs, and managing budgets.
 /// because the reference evolves with every Rune/Luau binding change
 /// and can't be hand-maintained here without drift.
 const SIMULATION_PREAMBLE: &str = r#"
-You are in Simulation mode — deeply aware of the running simulation via Eustress Streams.
-You can:
-- Write and execute Rune scripts that interact with the ECS world
-- Write and execute Luau scripts with full Roblox API compatibility
-- Set watchpoints and breakpoints on simulation variables
-- Control simulation playback (play, pause, step, time compression)
-- Record simulation runs and export data
-- Analyze real-time stream events for anomalies
+You are in Simulation mode — an autonomous STEM research agent with full control over
+the running simulation. You can design experiments, run them, collect results, and
+iterate toward optimal configurations without any human intervention between steps.
+
+## Capabilities
+- Write and execute Rune / Luau scripts that interact with the ECS world live
+- Control simulation playback: run_simulation, pause_simulation, stop_simulation
+- Set initial conditions: set_sim_value for each parameter before running
+- Run complete experiments: run_experiment (branch + patch + run + await + save in one call)
+- Compare results: compare_runs to diff any two saved experiment JSONs
+- Browse history: list_experiments shows all saved runs, newest first
+- Time compression: run at 100×–1,000,000× speed for rapid iteration
+
+## Primary workflow — AI-driven optimization loop
+
+When the user asks you to optimize or analyze a simulation, follow this pattern:
+
+```
+1. list_sim_values           — understand current watchpoints and baseline values
+2. get_simulation_state      — confirm play state and engine is ready
+
+3. run_experiment(           — run the baseline (no overrides)
+     name="baseline",
+     duration_s=60,
+     time_scale=100)
+
+4. For each hypothesis:
+   run_experiment(
+     name="hypothesis_name",
+     description="What I'm testing and why",
+     sim_values={"param": new_value},
+     duration_s=60,
+     time_scale=100,
+     create_branch=true)
+
+5. compare_runs("baseline", "hypothesis_name")  — quantify improvement
+
+6. Write a structured report with:
+   - Table of experiments vs. metrics
+   - Pareto-optimal configuration (best tradeoff)
+   - Recommended next experiments
+   - Conclusion: which config to merge and why
+
+7. git_branch(action="merge", name="exp/winning-branch")  — accept winner
+```
+
+## Time scales to use
+- 1× — realtime, good for visual debugging
+- 10× — fast but observable
+- 100× — default for parameter sweeps (60s sim in 0.6s real)
+- 1000× — long simulations (1 hour sim in 3.6s real)
+- 1e6× — geological / battery cycle-life (years in seconds)
+
+## Token efficiency — minimize context burn
+- Use `list_sim_values(prefix="battery.")` instead of `list_sim_values()` when you only need battery keys
+- Use `get_simulation_state(compact=true)` — default, saves ~70% tokens vs verbose mode
+- Use `get_simulation_state(skip_keys=["key1","key2"])` to omit static watchpoints that never change
+- On the first poll, note which watchpoints are constant (std_dev≈0 in a short baseline run); skip them in all subsequent calls
+- `await_simulation` already returns a compact stats summary — no need to poll `get_simulation_state` while waiting; let await_simulation handle it
+
+## Key principles
+- Always run a baseline first before testing variants
+- Change one parameter at a time per experiment (controlled variable)
+- Use create_branch=true for configs you may want to merge later
+- After collecting ≥3 data points, look for trends before running more
+- If a metric diverges (NaN, inf, extreme values), stop and diagnose the script
+- Report Pareto fronts when there are conflicting objectives (e.g. capacity vs. cycle life)
+- Save analysis and conclusions with write_file — large reports are now supported
+
+## STEM reporting format
+End every optimization session with a markdown report saved to the Universe:
+- Executive summary (3 sentences max)
+- Experiment table (name | config | key metrics)
+- Winner + rationale
+- Open questions / suggested follow-up experiments
 
 Use the simulation tools to observe and control the running world.
 Reference specific entity names and properties from the live data model.

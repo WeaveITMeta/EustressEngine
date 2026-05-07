@@ -236,6 +236,8 @@ pub enum SlintSystems {
 pub enum SlintAction {
     // File operations
     NewUniverse,
+    NewUniverseConfirmed(String),
+    NewSpaceConfirmed(String),
     NewScene,
     OpenScene,
     SaveScene,
@@ -497,6 +499,13 @@ pub enum SlintAction {
     WorkshopMentionCommit(i32),
     /// User hit Escape or clicked outside the popup.
     WorkshopMentionCancel,
+    /// Ctrl+V fired while Workshop input is focused — Rust reads the
+    /// clipboard; if it's an image, set has-attached-image + attached-image.
+    WorkshopAttachImage,
+    /// User clicked × on the image preview strip.
+    WorkshopClearImage,
+    /// User picked a different mode from the dropdown.
+    WorkshopModeChanged(String),
 
     // Problems panel — VS Code-style diagnostic list
     /// Click a row → jump the editor to that file/line/column.
@@ -1011,6 +1020,7 @@ impl Plugin for StudioUiPlugin {
             .add_plugins(super::floating_windows::FloatingWindowsPlugin)
             // Systems
             .init_resource::<super::file_event_handler::PendingFileActions>()
+            .init_resource::<super::file_event_handler::PendingUniversePath>()
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
             .add_systems(Update, crate::commands::process_history_events)
@@ -1148,6 +1158,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_center_tabs_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, drain_pending_build.after(SlintSystems::Drain))
             .init_resource::<super::file_event_handler::PendingFileActions>()
+            .init_resource::<super::file_event_handler::PendingUniversePath>()
             // UI systems
             .add_systems(Update, handle_window_close_request)
             .add_systems(Update, handle_explorer_toggle)
@@ -1262,6 +1273,10 @@ fn setup_slint_overlay(world: &mut World) {
     // File operations
     let q = queue.clone();
     ui.on_new_universe(move || q.push(SlintAction::NewUniverse));
+    let q = queue.clone();
+    ui.on_new_universe_confirmed(move |name| q.push(SlintAction::NewUniverseConfirmed(name.to_string())));
+    let q = queue.clone();
+    ui.on_new_space_confirmed(move |name| q.push(SlintAction::NewSpaceConfirmed(name.to_string())));
     let q = queue.clone();
     ui.on_new_scene(move || q.push(SlintAction::NewScene));
     let q = queue.clone();
@@ -1724,6 +1739,12 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_reorder_tab(move |id, idx| q.push(SlintAction::WorkshopReorderTab(id.to_string(), idx)));
     let q = queue.clone();
     ui.on_workshop_new_conversation(move || q.push(SlintAction::WorkshopNewConversation));
+    let q = queue.clone();
+    ui.on_workshop_attach_image(move || q.push(SlintAction::WorkshopAttachImage));
+    let q = queue.clone();
+    ui.on_workshop_clear_image(move || q.push(SlintAction::WorkshopClearImage));
+    let q = queue.clone();
+    ui.on_workshop_mode_changed(move |m| q.push(SlintAction::WorkshopModeChanged(m.to_string())));
     let q = queue.clone();
     ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
     let q = queue.clone();
@@ -2663,6 +2684,7 @@ struct DrainEventWriters<'w> {
     workshop_edit: MessageWriter<'w, crate::workshop::WorkshopEditMcpEvent>,
     workshop_open_artifact: MessageWriter<'w, crate::workshop::WorkshopOpenArtifactEvent>,
     workshop_optimize: MessageWriter<'w, crate::workshop::OptimizeAndBuildEvent>,
+    workshop_set_mode: MessageWriter<'w, crate::workshop::WorkshopSetModeEvent>,
     plugin_action: MessageWriter<'w, crate::studio_plugins::PluginActionEvent>,
     // Modal tool activations — ToolOptionsBar control edits + explicit cancel.
     modal_tool_option: MessageWriter<'w, crate::modal_tool::ToolOptionChangedEvent>,
@@ -2756,6 +2778,10 @@ struct DrainResources<'w> {
     notification_queue: Option<ResMut<'w, super::notifications_impl::NotificationQueue>>,
     /// User-facing notification preferences mirrored from File > Settings
     notification_settings: Option<ResMut<'w, super::notifications_impl::NotificationSettings>>,
+    /// Space load generation — bump on space switch so deferred loaders know to discard old entries
+    space_load_gen: Option<ResMut<'w, crate::space::file_loader::SpaceLoadGeneration>>,
+    /// Deferred service loader — clear pending on space switch to prevent old-space services loading
+    deferred_service_loader: Option<ResMut<'w, crate::space::file_loader::DeferredServiceLoader>>,
 }
 
 /// Perform Ed25519 challenge-response auth against the API.
@@ -3052,10 +3078,127 @@ struct DrainActionQueries<'w, 's> {
     terrain_chunks: Query<'w, 's, Entity, With<eustress_common::terrain::Chunk>>,
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
     gui_displays: Query<'w, 's, &'static mut eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+    /// All selected entities — used to broadcast boolean physics props to the whole selection.
+    selected_entities: Query<'w, 's, Entity, With<crate::selection_box::Selected>>,
+}
+
+
+/// Extracted from `drain_slint_actions` to keep that function's stack frame small.
+#[inline(never)]
+fn do_reparent_node(
+    source_id: i32,
+    target_id: i32,
+    queries: &mut DrainActionQueries,
+    res: &mut DrainResources,
+    commands: &mut Commands,
+) {
+    let normalize = |p: &std::path::Path| -> std::path::PathBuf {
+        if p.is_dir() { p.to_path_buf() } else { p.parent().unwrap_or(p).to_path_buf() }
+    };
+
+    let primary_source = res.explorer_state.as_ref()
+        .and_then(|es| es.entity_id_cache.get(&source_id).copied());
+    let target_entity = res.explorer_state.as_ref()
+        .and_then(|es| es.entity_id_cache.get(&target_id).copied());
+
+    let all_selected: Vec<Entity> = queries.selected_entities.iter().collect();
+    let source_entities: Vec<Entity> = if all_selected.len() > 1 {
+        all_selected
+    } else {
+        primary_source.into_iter().collect()
+    };
+
+    let Some(target) = target_entity else {
+        if let Some(ref mut out) = res.output {
+            out.warn("Reparent: could not find target entity".to_string());
+        }
+        return;
+    };
+    if source_entities.is_empty() {
+        if let Some(ref mut out) = res.output {
+            out.warn("Reparent: could not find source entity".to_string());
+        }
+        return;
+    }
+
+    let Some(tgt_folder) = queries.loaded_from_file.get(target).ok()
+        .map(|(_, lff)| normalize(&lff.path)) else { return };
+
+    for source in source_entities {
+        if source == target { continue; }
+
+        let Some(src_folder) = queries.loaded_from_file.get(source).ok()
+            .map(|(_, lff)| normalize(&lff.path)) else { continue };
+
+        if tgt_folder.starts_with(&src_folder) {
+            if let Some(ref mut out) = res.output {
+                out.warn(format!("Cannot move '{}' into itself or a descendant",
+                    src_folder.file_name().unwrap_or_default().to_string_lossy()));
+            }
+            continue;
+        }
+
+        let src_name = src_folder.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let dest = tgt_folder.join(&src_name);
+        if src_folder == dest || dest.exists() { continue; }
+
+        if let Some(ref mut registry) = res.file_registry {
+            registry.rename_in_progress.insert(src_folder.clone());
+            registry.rename_in_progress.insert(src_folder.join("_instance.toml"));
+        }
+
+        match std::fs::rename(&src_folder, &dest) {
+            Ok(_) => {
+                commands.entity(source).insert(ChildOf(target));
+                info!("📂 Reparented '{}' → '{}'", src_folder.display(), dest.display());
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Moved {} into {}",
+                        src_name, tgt_folder.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
+                    if lff.path.is_dir() || lff.path == src_folder {
+                        lff.path = dest.clone();
+                    } else {
+                        let rel = lff.path.strip_prefix(&src_folder)
+                            .unwrap_or(std::path::Path::new("_instance.toml"));
+                        lff.path = dest.join(rel);
+                    }
+                }
+                if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
+                    if inst_file.toml_path.starts_with(&src_folder) {
+                        let rel = inst_file.toml_path.strip_prefix(&src_folder)
+                            .unwrap_or(std::path::Path::new("_instance.toml"));
+                        inst_file.toml_path = dest.join(rel);
+                    }
+                }
+                if let Some(ref mut registry) = res.file_registry {
+                    let _ = registry.rename_file(
+                        &src_folder.join("_instance.toml"),
+                        dest.join("_instance.toml"),
+                    );
+                }
+            }
+            Err(e) => {
+                if let Some(ref mut registry) = res.file_registry {
+                    registry.rename_in_progress.remove(&src_folder);
+                    registry.rename_in_progress.remove(&src_folder.join("_instance.toml"));
+                }
+                if let Some(ref mut out) = res.output {
+                    out.error(format!("Move '{}' failed: {}", src_name, e));
+                }
+            }
+        }
+    }
+
+    if let Some(ref mut es) = res.explorer_state {
+        es.dirty = true;
+        es.needs_immediate_sync = true;
+    }
 }
 
 /// Drains the SlintActionQueue each frame and dispatches to Bevy events/state.
 /// This is the Slint→Bevy direction: UI button clicks become Bevy state changes and events.
+#[inline(never)]
 fn drain_slint_actions(
     queue: Option<Res<SlintActionQueue>>,
     slint_context: Option<NonSend<SlintUiState>>,
@@ -3083,6 +3226,8 @@ fn drain_slint_actions(
         match action {
             // File operations → FileEvent
             SlintAction::NewUniverse => { events.file_events.write(FileEvent::NewUniverse); }
+            SlintAction::NewUniverseConfirmed(name) => { events.file_events.write(FileEvent::NewUniverseConfirmed(name)); }
+            SlintAction::NewSpaceConfirmed(name) => { events.file_events.write(FileEvent::NewSpaceConfirmed(name)); }
             SlintAction::NewScene => { events.file_events.write(FileEvent::NewScene); }
             SlintAction::OpenScene => { events.file_events.write(FileEvent::OpenScene); }
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
@@ -4547,10 +4692,22 @@ fn drain_slint_actions(
                         if let Ok((_, inst)) = queries.instances.get(entity) {
                             info!("📂 OpenNode class: {:?}", inst.class_name);
                             if inst.class_name == eustress_common::classes::ClassName::SoulScript {
-                                // Open SoulScript in tabbed viewer
+                                // Open SoulScript in tabbed viewer.
+                                // `loaded.path` points to `_instance.toml` — resolve to the
+                                // parent folder so route_file_to_tab_type sees a directory and
+                                // correctly reads the `.rune` source via resolve_script_source.
                                 if let Ok((_, loaded)) = queries.loaded_from_file.get(entity) {
                                     if let Some(ref mut mgr) = res.tab_manager {
-                                        let idx = mgr.open_file(&loaded.path);
+                                        let open_path = if loaded.path.file_name()
+                                            .map(|n| n == "_instance.toml").unwrap_or(false)
+                                        {
+                                            loaded.path.parent()
+                                                .map(|p| p.to_path_buf())
+                                                .unwrap_or_else(|| loaded.path.clone())
+                                        } else {
+                                            loaded.path.clone()
+                                        };
+                                        let idx = mgr.open_file(&open_path);
                                         if let Some(ref mut out) = res.output {
                                             out.info(format!("Opened SoulScript: {} (tab {})", inst.name, idx));
                                         }
@@ -4736,113 +4893,7 @@ fn drain_slint_actions(
             }
             
             SlintAction::ReparentNode(source_id, target_id) => {
-                // Drag-and-drop reparent: move source entity folder into target entity folder.
-                //
-                // LoadedFromFile.path can be either the folder itself (initial scan)
-                // or the _instance.toml inside it (file watcher). Normalize both to
-                // the containing folder so we always move entire entity folders.
-                let source_entity = res.explorer_state.as_ref()
-                    .and_then(|es| es.entity_id_cache.get(&source_id).copied());
-                let target_entity = res.explorer_state.as_ref()
-                    .and_then(|es| es.entity_id_cache.get(&target_id).copied());
-
-                if let (Some(source), Some(target)) = (source_entity, target_entity) {
-                    // Resolve both paths to folder paths (not TOML paths).
-                    let normalize_to_folder = |p: &std::path::Path| -> std::path::PathBuf {
-                        if p.is_dir() {
-                            p.to_path_buf()
-                        } else {
-                            // _instance.toml or .part.toml → parent folder
-                            p.parent().unwrap_or(p).to_path_buf()
-                        }
-                    };
-
-                    let source_path = queries.loaded_from_file.get(source).ok()
-                        .map(|(_, lff)| normalize_to_folder(&lff.path));
-                    let target_path = queries.loaded_from_file.get(target).ok()
-                        .map(|(_, lff)| normalize_to_folder(&lff.path));
-
-                    if let (Some(src_folder), Some(tgt_folder)) = (source_path, target_path) {
-                        // Prevent dropping a folder into itself or a descendant
-                        if tgt_folder.starts_with(&src_folder) {
-                            if let Some(ref mut out) = res.output {
-                                out.warn("Cannot move a folder into itself or a descendant".to_string());
-                            }
-                        } else {
-                            let src_name = src_folder.file_name()
-                                .unwrap_or_default().to_string_lossy().to_string();
-                            let dest = tgt_folder.join(&src_name);
-
-                            if src_folder != dest && !dest.exists() {
-                                // Suppress file watcher for both the folder and the TOML
-                                if let Some(ref mut registry) = res.file_registry {
-                                    registry.rename_in_progress.insert(src_folder.clone());
-                                    let src_toml = src_folder.join("_instance.toml");
-                                    registry.rename_in_progress.insert(src_toml);
-                                }
-                                match std::fs::rename(&src_folder, &dest) {
-                                    Ok(_) => {
-                                        // 1. Update ECS hierarchy (only after successful disk move)
-                                        commands.entity(source).insert(ChildOf(target));
-
-                                        info!("📂 Reparented '{}' → '{}'", src_folder.display(), dest.display());
-                                        if let Some(ref mut out) = res.output {
-                                            out.info(format!("Moved {} into {}", src_name,
-                                                tgt_folder.file_name().unwrap_or_default().to_string_lossy()));
-                                        }
-                                        // Update LoadedFromFile path to the new folder location
-                                        if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
-                                            // If it was storing the folder, update to new folder.
-                                            // If it was storing the TOML, update to new TOML path.
-                                            if lff.path.is_dir() || lff.path == src_folder {
-                                                lff.path = dest.clone();
-                                            } else {
-                                                // Was storing _instance.toml — rebase into dest
-                                                let relative = lff.path.strip_prefix(&src_folder)
-                                                    .unwrap_or(std::path::Path::new("_instance.toml"));
-                                                lff.path = dest.join(relative);
-                                            }
-                                        }
-                                        // Update InstanceFile.toml_path if present
-                                        if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
-                                            if inst_file.toml_path.starts_with(&src_folder) {
-                                                let relative = inst_file.toml_path.strip_prefix(&src_folder)
-                                                    .unwrap_or(std::path::Path::new("_instance.toml"));
-                                                inst_file.toml_path = dest.join(relative);
-                                            }
-                                        }
-                                        // Also update file registry mapping so the file
-                                        // watcher resolves the entity at its new path.
-                                        if let Some(ref mut registry) = res.file_registry {
-                                            let old_toml = src_folder.join("_instance.toml");
-                                            let new_toml = dest.join("_instance.toml");
-                                            let _ = registry.rename_file(&old_toml, new_toml);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let Some(ref mut registry) = res.file_registry {
-                                            registry.rename_in_progress.remove(&src_folder);
-                                            let src_toml = src_folder.join("_instance.toml");
-                                            registry.rename_in_progress.remove(&src_toml);
-                                        }
-                                        if let Some(ref mut out) = res.output {
-                                            out.error(format!("Move failed: {}", e));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(ref mut es) = res.explorer_state {
-                        es.dirty = true;
-                        es.needs_immediate_sync = true;
-                    }
-                } else {
-                    if let Some(ref mut out) = res.output {
-                        out.warn("Reparent: could not find source or target entity".to_string());
-                    }
-                }
+                do_reparent_node(source_id, target_id, &mut queries, &mut res, &mut commands);
             }
 
             SlintAction::AddService => {
@@ -5274,8 +5325,18 @@ fn drain_slint_actions(
                             }
                         }
                         "Locked" => {
-                            if let Ok(mut bp) = queries.base_parts.get_mut(entity) {
-                                bp.locked = val == "true";
+                            let target = val == "true";
+                            // Apply to every selected entity, not just the primary.
+                            let all_selected: Vec<Entity> = queries.selected_entities.iter().collect();
+                            let targets = if all_selected.is_empty() {
+                                vec![entity]
+                            } else {
+                                all_selected
+                            };
+                            for e in targets {
+                                if let Ok(mut bp) = queries.base_parts.get_mut(e) {
+                                    bp.locked = target;
+                                }
                             }
                         }
                         // GUI element properties — live-update GuiElementDisplay component
@@ -5476,35 +5537,34 @@ fn drain_slint_actions(
                             }
                         }
                         "Size" => {
-                            // Parts expose `Size` sourced from
-                            // `BasePart.size` (Transform.scale is kept
-                            // at `[1, 1, 1]` for primitives since the
-                            // mesh is regenerated at the requested
-                            // size instead of relying on scaling).
-                            // Route through `ResizePartEvent` so the
-                            // scale-tool's `apply_size_to_entity`
-                            // helper handles mesh regen + `cframe`
-                            // bookkeeping in one code path. Without
-                            // this branch, pasting a Size triple
-                            // landed on no component (just fell
-                            // through to the `_` arm) — the exact
-                            // "paste always ends up 1, 1, 1" bug the
-                            // user caught on 2026-04-23.
+                            // Route through `ResizePartEvent` so the scale-tool's
+                            // `apply_size_to_entity` handles mesh regen + cframe
+                            // bookkeeping. Apply to ALL selected entities so that
+                            // typing a size while several parts are selected resizes
+                            // every one of them — not just the primary.
                             let parts: Vec<f32> = val.split(',')
                                 .filter_map(|s| parse_finite(s.trim()))
                                 .collect();
-                            // `>= 3` — see Position branch rationale.
                             if parts.len() >= 3 {
-                                events.resize_part_events.write(
-                                    crate::scale_tool::ResizePartEvent {
-                                        entity,
-                                        new_size: Vec3::new(
-                                            parts[0].max(1e-4),
-                                            parts[1].max(1e-4),
-                                            parts[2].max(1e-4),
-                                        ),
-                                    },
+                                let new_size = Vec3::new(
+                                    parts[0].max(1e-4),
+                                    parts[1].max(1e-4),
+                                    parts[2].max(1e-4),
                                 );
+                                let all_selected: Vec<Entity> = queries.selected_entities.iter().collect();
+                                let targets = if all_selected.is_empty() {
+                                    vec![entity]
+                                } else {
+                                    all_selected
+                                };
+                                for target in targets {
+                                    events.resize_part_events.write(
+                                        crate::scale_tool::ResizePartEvent {
+                                            entity: target,
+                                            new_size,
+                                        },
+                                    );
+                                }
                             }
                         }
                         "Material" => {
@@ -5938,14 +5998,181 @@ fn drain_slint_actions(
                     let mut default_mesh_cache = crate::space::instance_loader::PrimitiveMeshCache::default();
                     let mesh_c = res.mesh_cache.as_deref_mut().unwrap_or(&mut default_mesh_cache);
 
+                    // Two-pass spawn: BillboardGui first (so TextLabel can reference parent entity).
+                    // Maps Luau entity_id → spawned Bevy Entity for parent resolution.
+                    let mut luau_to_bevy: std::collections::HashMap<i64, Entity> = std::collections::HashMap::new();
+
+                    // ── Pass 1: BillboardGui ────────────────────────────────────────
                     for inst in &created_instances {
-                        // Determine mesh from class
+                        if inst.class_name != "BillboardGui" { continue; }
+
+                        let offset = inst.units_offset.unwrap_or([0.0, 2.0, 0.0]);
+                        let size = inst.ui_size
+                            .map(|s| [s[1], s[3]])  // offset_x, offset_y as pixel size
+                            .unwrap_or([200.0, 50.0]);
+
+                        let billboard = eustress_common::classes::BillboardGui {
+                            units_offset: offset,
+                            size,
+                            always_on_top: inst.always_on_top.unwrap_or(false),
+                            max_distance: inst.max_distance.unwrap_or(100.0),
+                            ..Default::default()
+                        };
+
+                        let bevy_instance = eustress_common::classes::Instance {
+                            name: inst.name.clone(),
+                            class_name: eustress_common::classes::ClassName::BillboardGui,
+                            archivable: true,
+                            ..Default::default()
+                        };
+
+                        // Write TOML so it persists on disk (file-system-first)
+                        let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
+                        let instance_dir = workspace_dir.join(&folder_name);
+                        let _ = std::fs::create_dir_all(&instance_dir);
+                        let toml_path = instance_dir.join("_instance.toml");
+
+                        let gui_def = crate::space::gui_loader::GuiTomlFile {
+                            instance: crate::space::gui_loader::GuiTomlInstance { name: inst.name.clone() },
+                            metadata: crate::space::gui_loader::GuiTomlMetadata {
+                                class_name: "BillboardGui".to_string(),
+                                archivable: true,
+                            },
+                            gui: crate::space::gui_loader::GuiTomlProperties {
+                                position: offset.to_vec(),
+                                size: size.to_vec(),
+                                always_on_top: Some(billboard.always_on_top),
+                                max_distance: Some(billboard.max_distance),
+                                adornee: inst.adornee_name.clone(),
+                                ..Default::default()
+                            },
+                            text: None,
+                            asset: None,
+                            transform: None,
+                            properties: None,
+                        };
+
+                        if let Err(e) = crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Failed to write {}: {}", inst.name, e));
+                            }
+                            continue;
+                        }
+
+                        let entity = crate::spawn::spawn_billboard_gui(&mut commands, bevy_instance, billboard);
+                        luau_to_bevy.insert(inst.luau_entity_id, entity);
+
+                        if let Some(ref mut registry) = res.file_registry {
+                            registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
+                                path: instance_dir, file_type: crate::space::FileType::Directory,
+                                service: "Workspace".to_string(), name: inst.name.clone(),
+                                size: 0, modified: std::time::SystemTime::now(), children: Vec::new(),
+                            });
+                        }
+
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("✓ Spawned BillboardGui '{}'", inst.name));
+                        }
+                    }
+
+                    // ── Pass 2: TextLabel (parented to BillboardGui) ────────────────
+                    for inst in &created_instances {
+                        if inst.class_name != "TextLabel" { continue; }
+
+                        let text_color = inst.text_color.unwrap_or([0.0, 0.0, 0.0]);
+                        let font_size = inst.text_size.unwrap_or(14.0);
+
+                        let label = eustress_common::classes::TextLabel {
+                            text: inst.text.clone().unwrap_or_default(),
+                            text_color3: text_color,
+                            font_size,
+                            size: [200.0, 50.0],
+                            visible: true,
+                            ..Default::default()
+                        };
+
+                        let bevy_instance = eustress_common::classes::Instance {
+                            name: inst.name.clone(),
+                            class_name: eustress_common::classes::ClassName::TextLabel,
+                            archivable: true,
+                            ..Default::default()
+                        };
+
+                        let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
+                        let instance_dir = workspace_dir.join(&folder_name);
+                        let _ = std::fs::create_dir_all(&instance_dir);
+                        let toml_path = instance_dir.join("_instance.toml");
+
+                        let gui_def = crate::space::gui_loader::GuiTomlFile {
+                            instance: crate::space::gui_loader::GuiTomlInstance { name: inst.name.clone() },
+                            metadata: crate::space::gui_loader::GuiTomlMetadata {
+                                class_name: "TextLabel".to_string(),
+                                archivable: true,
+                            },
+                            gui: crate::space::gui_loader::GuiTomlProperties {
+                                size: vec![200.0, 50.0],
+                                ..Default::default()
+                            },
+                            text: Some(crate::space::gui_loader::GuiTomlText {
+                                text: label.text.clone(),
+                                text_color: [text_color[0], text_color[1], text_color[2], 1.0],
+                                font_size,
+                                font: inst.font.clone().unwrap_or_default(),
+                                font_family: String::new(),
+                                text_x_alignment: "center".to_string(),
+                                text_y_alignment: "center".to_string(),
+                            }),
+                            asset: None,
+                            transform: None,
+                            properties: None,
+                        };
+
+                        if let Err(e) = crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Failed to write {}: {}", inst.name, e));
+                            }
+                            continue;
+                        }
+
+                        let entity = crate::spawn::spawn_text_label(&mut commands, bevy_instance, label);
+
+                        // Parent to BillboardGui entity if available
+                        if let Some(parent_id) = inst.parent_entity_id {
+                            if let Some(&parent_entity) = luau_to_bevy.get(&parent_id) {
+                                commands.entity(parent_entity).add_child(entity);
+                            }
+                        }
+
+                        luau_to_bevy.insert(inst.luau_entity_id, entity);
+
+                        if let Some(ref mut registry) = res.file_registry {
+                            registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
+                                path: instance_dir, file_type: crate::space::FileType::Directory,
+                                service: "Workspace".to_string(), name: inst.name.clone(),
+                                size: 0, modified: std::time::SystemTime::now(), children: Vec::new(),
+                            });
+                        }
+
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("✓ Spawned TextLabel '{}'", inst.name));
+                        }
+                    }
+
+                    // ── Pass 3: Regular Parts / other geometry ──────────────────────
+                    for inst in &created_instances {
+                        if matches!(inst.class_name.as_str(), "BillboardGui" | "TextLabel") { continue; }
+
                         let mesh_path = match inst.class_name.as_str() {
-                            "Part" | "MeshPart" => "assets/parts/block.glb",
-                            "WedgePart" => "assets/parts/wedge.glb",
-                            "SpherePart" => "assets/parts/ball.glb",
-                            "CylinderPart" => "assets/parts/cylinder.glb",
-                            _ => "assets/parts/block.glb",
+                            "Part" | "MeshPart" => match inst.shape.as_str() {
+                                "Ball" | "Sphere" => "parts/ball.glb",
+                                "Cylinder" => "parts/cylinder.glb",
+                                "Wedge" => "parts/wedge.glb",
+                                _ => "parts/block.glb",
+                            },
+                            "WedgePart" => "parts/wedge.glb",
+                            "SpherePart" => "parts/ball.glb",
+                            "CylinderPart" => "parts/cylinder.glb",
+                            _ => "parts/block.glb",
                         };
 
                         let now = chrono::Utc::now().to_rfc3339();
@@ -5977,7 +6204,7 @@ fn drain_slint_actions(
                                 ..Default::default()
                             },
                             metadata: crate::space::instance_loader::InstanceMetadata {
-                                class_name: "Part".to_string(),
+                                class_name: inst.class_name.clone(),
                                 archivable: true,
                                 name: Some(inst.name.clone()),
                                 created: now.clone(),
@@ -5994,10 +6221,6 @@ fn drain_slint_actions(
                             extra: std::collections::HashMap::new(),
                         };
 
-                        // Unique folder name — flat-file-aware via the
-                        // shared helper (catches `Block.toml` / `.glb.toml`
-                        // siblings that a bare `dir.join(name).exists()`
-                        // would miss).
                         let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
                         let instance_dir = workspace_dir.join(&folder_name);
                         let _ = std::fs::create_dir_all(&instance_dir);
@@ -6346,6 +6569,43 @@ fn drain_slint_actions(
                     ui.set_workshop_mention_popup_visible(false);
                     ui.set_workshop_mention_selected_index(0);
                 }
+            }
+
+            SlintAction::WorkshopAttachImage => {
+                #[cfg(feature = "clipboard")]
+                {
+                    use arboard::Clipboard;
+                    if let Ok(mut cb) = Clipboard::new() {
+                        if let Ok(img) = cb.get_image() {
+                            // Convert arboard ImageData (RGBA8) to a Slint SharedPixelBuffer
+                            let w = img.width as u32;
+                            let h = img.height as u32;
+                            let rgba: Vec<u8> = img.bytes.into_owned();
+                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                                &rgba, w, h,
+                            );
+                            let slint_img = slint::Image::from_rgba8(buf);
+                            if let Some(ui) = ui {
+                                ui.set_workshop_attached_image(slint_img);
+                                ui.set_workshop_has_attached_image(true);
+                            }
+                        }
+                        // If clipboard is text, do nothing — TextInput handles it natively.
+                    }
+                }
+            }
+
+            SlintAction::WorkshopClearImage => {
+                if let Some(ui) = ui {
+                    ui.set_workshop_has_attached_image(false);
+                }
+            }
+
+            SlintAction::WorkshopModeChanged(mode_name) => {
+                if let Some(ui) = ui {
+                    ui.set_workshop_active_mode_name(mode_name.as_str().into());
+                }
+                events.workshop_set_mode.write(crate::workshop::WorkshopSetModeEvent { mode_name });
             }
 
             // Problems panel — jump to the click location in the script editor.
@@ -6934,10 +7194,13 @@ fn drain_slint_actions(
                         //   * folder-based entity (`Foo/_instance.toml`) →
                         //     parent folder
                         //   * flat-file entity → the file path itself
-                        // Returns `None` when the entity has no `InstanceFile`
-                        // (e.g. procedurally spawned, never persisted).
+                        // Returns the filesystem path for an entity:
+                        //   * folder-instance entity  → parent folder of `_instance.toml`
+                        //   * flat-file entity        → the file path itself
+                        //   * material/service entity → `LoadedFromFile.path` fallback
+                        //   * purely procedural       → None
                         let entity_fs_path = |ent: Entity| -> Option<String> {
-                            queries.instance_files.get(ent).ok().and_then(|inst| {
+                            if let Ok(inst) = queries.instance_files.get(ent) {
                                 let toml = &inst.toml_path;
                                 let is_folder_instance = toml
                                     .file_name()
@@ -6949,7 +7212,12 @@ fn drain_slint_actions(
                                     Some(toml.clone())
                                 };
                                 resolved.map(|p| p.to_string_lossy().to_string())
-                            })
+                            } else {
+                                // Fall back to LoadedFromFile.path for entities that never
+                                // got an InstanceFile (e.g. MaterialService presets).
+                                queries.loaded_from_file.get(ent).ok()
+                                    .map(|(_, lff)| lff.path.to_string_lossy().to_string())
+                            }
                         };
 
                         let payload: Option<String> = if let Some(idx) = soul_entity_idx {
@@ -7073,7 +7341,12 @@ fn drain_slint_actions(
                     "group" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Group)); }
                     "ungroup" => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Ungroup)); }
                     "rename" => {
-                        // TODO: Trigger inline rename in explorer panel
+                        if let Some(ui) = ui {
+                            let target = ui.get_context_menu_target_id();
+                            if target >= 0 {
+                                ui.set_explorer_renaming_node_id(target);
+                            }
+                        }
                     }
                     "insert" => {
                         // TODO: Open insert submenu or switch to toolbox tab
@@ -8032,6 +8305,20 @@ fn drain_slint_actions(
                 if crate::space::looks_like_space_root(&space_path) {
                     info!("UniverseBrowser: switching to space {:?}", space_path);
 
+                    // Bump load generation so deferred loaders discard stale entries
+                    if let Some(ref mut gen) = res.space_load_gen {
+                        gen.0 += 1;
+                    }
+                    // Clear deferred service queue so old-space services don't load into new space
+                    if let Some(ref mut deferred) = res.deferred_service_loader {
+                        deferred.pending.clear();
+                        deferred.priority_done = false;
+                    }
+                    // Clear material registry so old materials don't bleed into new space
+                    if let Some(ref mut mr) = res.material_registry {
+                        **mr = crate::space::material_loader::MaterialRegistry::default();
+                    }
+
                     // Despawn all entities loaded from files (full data model clear)
                     let loaded_entities: Vec<Entity> = queries.loaded_from_file
                         .iter()
@@ -8039,7 +8326,11 @@ fn drain_slint_actions(
                         .collect();
                     let count = loaded_entities.len();
                     for entity in loaded_entities {
-                        commands.entity(entity).despawn();
+                        commands.queue(move |world: &mut World| {
+                            if world.get_entity(entity).is_ok() {
+                                world.despawn(entity);
+                            }
+                        });
                     }
                     info!("Despawned {} file-loaded entities", count);
 
@@ -12665,31 +12956,29 @@ fn sync_tab_manager_to_studio_state(
 /// underlines aligned with the text they annotate.
 pub fn sync_analyzer_to_slint(
     analysis: Option<Res<crate::script_editor::ScriptAnalysis>>,
+    space_diag: Option<Res<crate::script_editor::SpaceDiagnostics>>,
     slint_context: Option<NonSend<SlintUiState>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
-    mut last_generation: Local<u64>,
+    mut last_gen: Local<(u64, u64)>,
 ) {
     const CHAR_WIDTH: f32 = 7.8;
     let Some(analysis) = analysis else { return };
     let Some(ctx) = slint_context else { return };
-    if analysis.generation == *last_generation {
-        return;
-    }
-    *last_generation = analysis.generation;
 
-    // ── Squiggle spans on the editor overlay ──────────────────────────
+    let editor_gen = analysis.generation;
+    let space_gen = space_diag.as_ref().map(|s| s.generation).unwrap_or(0);
+    if (editor_gen, space_gen) == *last_gen { return; }
+    *last_gen = (editor_gen, space_gen);
+
+    // ── Squiggle spans — active editor file only ──────────────────────
     let spans: Vec<DiagnosticSpan> = analysis.result.diagnostics.iter()
         .map(|d| {
-            // 1-based → 0-based for Slint rendering.
             let line = d.range.start_line.saturating_sub(1) as i32;
             let x_start = (d.range.start_column.saturating_sub(1)) as f32 * CHAR_WIDTH;
-            // If the diagnostic crosses lines, clip to end of start line.
             let end_col_same_line = if d.range.end_line == d.range.start_line {
                 d.range.end_column.saturating_sub(1)
             } else {
-                // Fall back to +1 character when multi-line — visible hint
-                // without needing the full source to measure.
                 d.range.start_column
             };
             let x_end = (end_col_same_line as f32 * CHAR_WIDTH).max(x_start + CHAR_WIDTH);
@@ -12711,39 +13000,71 @@ pub fn sync_analyzer_to_slint(
     let model = std::rc::Rc::new(slint::VecModel::from(spans));
     ctx.window.set_script_diagnostic_spans(slint::ModelRc::from(model));
 
-    // ── Problems panel list ───────────────────────────────────────────
-    // Flatten file path into basename for the compact display column
-    // while keeping the full path for click-to-jump routing.
-    let file_full = analysis.active_path.clone().unwrap_or_default();
-    let file_short = std::path::Path::new(&file_full)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
+    // ── Problems panel — all Space scripts merged ─────────────────────
+    // The active editor's live diagnostics override the cached scan entry
+    // for its file. All other files come from the background Space scan.
+    let mut items: Vec<ProblemItem> = Vec::new();
 
-    let items: Vec<ProblemItem> = analysis.result.diagnostics.iter()
-        .map(|d| ProblemItem {
-            severity: match d.severity {
-                crate::script_editor::Severity::Error => "error".into(),
-                crate::script_editor::Severity::Warning => "warning".into(),
-                crate::script_editor::Severity::Info => "info".into(),
-                crate::script_editor::Severity::Hint => "hint".into(),
-            },
-            file: file_short.as_str().into(),
-            file_path: file_full.as_str().into(),
-            line: d.range.start_line as i32,
-            column: d.range.start_column as i32,
-            message: d.message.as_str().into(),
-            source: d.source.into(),
-        })
-        .collect();
+    fn append_diags(
+        items: &mut Vec<ProblemItem>,
+        file_full: &str,
+        diags: &[crate::script_editor::Diagnostic],
+    ) {
+        let file_short = std::path::Path::new(file_full)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        for d in diags {
+            items.push(ProblemItem {
+                severity: match d.severity {
+                    crate::script_editor::Severity::Error => "error".into(),
+                    crate::script_editor::Severity::Warning => "warning".into(),
+                    crate::script_editor::Severity::Info => "info".into(),
+                    crate::script_editor::Severity::Hint => "hint".into(),
+                },
+                file: file_short.as_str().into(),
+                file_path: file_full.into(),
+                line: d.range.start_line as i32,
+                column: d.range.start_column as i32,
+                message: d.message.as_str().into(),
+                source: d.source.into(),
+            });
+        }
+    }
+
+    if let Some(sd) = space_diag.as_ref() {
+        let active = analysis.active_path.as_deref().unwrap_or("");
+        // Active editor's live diagnostics first (freshest).
+        if !active.is_empty() {
+            append_diags(&mut items, active, &analysis.result.diagnostics);
+        }
+        // All other files from the background scan, sorted for stable order.
+        let mut file_paths: Vec<&String> = sd.by_file.keys()
+            .filter(|p| p.as_str() != active)
+            .collect();
+        file_paths.sort();
+        for path in file_paths {
+            if let Some(diags) = sd.by_file.get(path) {
+                append_diags(&mut items, path, diags);
+            }
+        }
+    } else {
+        // SpaceDiagnostics not yet populated — fall back to active file only.
+        let file_full = analysis.active_path.clone().unwrap_or_default();
+        append_diags(&mut items, &file_full, &analysis.result.diagnostics);
+    }
+
+    let error_count = items.iter()
+        .filter(|i| i.severity.as_str() == "error").count() as i32;
+    let warning_count = items.iter()
+        .filter(|i| i.severity.as_str() == "warning").count() as i32;
 
     let problem_model = std::rc::Rc::new(slint::VecModel::from(items));
     ctx.window.set_problem_items(slint::ModelRc::from(problem_model));
-    ctx.window.set_problem_error_count(analysis.error_count() as i32);
-    ctx.window.set_problem_warning_count(analysis.warning_count() as i32);
+    ctx.window.set_problem_error_count(error_count);
+    ctx.window.set_problem_warning_count(warning_count);
 
-    // "Fix with Workshop" is only live when Soul Settings has a usable key.
     let has_key = match (&global_settings, &space_settings) {
         (Some(g), Some(s)) => !s.effective_api_key(g).is_empty(),
         _ => false,

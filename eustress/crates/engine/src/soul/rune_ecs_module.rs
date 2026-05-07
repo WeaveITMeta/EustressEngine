@@ -1638,6 +1638,10 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
                 name: inst_data.name.clone(),
                 position: pos, rotation, size, color, material, shape,
                 transparency: 0.0, anchored, can_collide: true,
+                units_offset: None, ui_size: None, adornee_name: None,
+                always_on_top: None, max_distance: None,
+                text: None, text_color: None, text_size: None, font: None,
+                luau_entity_id: 0, parent_entity_id: None,
             });
         }
     }

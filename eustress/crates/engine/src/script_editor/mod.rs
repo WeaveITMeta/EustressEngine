@@ -46,5 +46,5 @@ pub use analyzer::{
     HoverInfo, HoverSource, Range, Severity, Symbol, SymbolIndex, SymbolKind,
     TextEdit, RUNE_KEYWORDS,
 };
-pub use plugin::{ScriptAnalysis, ScriptAnalysisPlugin};
+pub use plugin::{ScriptAnalysis, ScriptAnalysisPlugin, SpaceDiagnostics};
 pub use workspace::{WorkspaceIndex, WorkspaceSymbol};

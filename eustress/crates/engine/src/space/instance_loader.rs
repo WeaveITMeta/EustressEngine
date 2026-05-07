@@ -1907,6 +1907,12 @@ pub fn write_instance_changes_system(
         anchored: Option<bool>,
         can_collide: Option<bool>,
         locked: Option<bool>,
+        /// True when the entity references a custom GLB mesh (e.g. V-Cell
+        /// parts). For these, `scale` in the TOML is the user-set multiplier
+        /// and must NOT be overwritten from `BasePart.size` (which comes from
+        /// the mesh bounding box and would clobber the user's value with
+        /// whatever the mesh happens to measure in scene units).
+        is_custom_mesh: bool,
     }
     let mut jobs: Vec<WriteJob> = Vec::new();
 
@@ -1915,6 +1921,15 @@ pub fn write_instance_changes_system(
             continue;
         }
         if recently_written.was_recently_written(&instance_file.toml_path) {
+            continue;
+        }
+        // Lighting-service entities (Star/Sun, Moon, Sky, Atmosphere) have
+        // runtime-driven Transforms (sun direction from time_of_day, etc.)
+        // that must not be persisted — their authoritative state lives in
+        // LightingService, not the TOML. Writing them would produce a stutter
+        // loop: transform write → file-watcher event → class_schema self-heal
+        // → another file-watcher event, every ~2 s.
+        if instance_file.toml_path.components().any(|c| c.as_os_str() == "Lighting") {
             continue;
         }
 
@@ -1937,6 +1952,17 @@ pub fn write_instance_changes_system(
         // the engine alive.
         let safe_transform = sanitize_transform(*transform);
         let mut td = TransformData::from(safe_transform);
+        // Detect custom mesh: a primitive mesh path ends with parts/*.glb;
+        // anything else is a user-supplied GLB (V-Cell, CAD exports, etc.)
+        let is_custom_mesh = {
+            let p = instance_file.mesh_path.to_string_lossy();
+            let fname = instance_file.mesh_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // Primitives are block/ball/cylinder/wedge/corner_wedge/cone
+            !matches!(fname, "block.glb"|"ball.glb"|"cylinder.glb"|"wedge.glb"|"corner_wedge.glb"|"cone.glb")
+            && !p.is_empty()
+        };
         let mut job = WriteJob {
             path: instance_file.toml_path.clone(),
             transform: td.clone(),
@@ -1947,12 +1973,20 @@ pub fn write_instance_changes_system(
             anchored: None,
             can_collide: None,
             locked: None,
+            is_custom_mesh,
         };
         if let Some(bp) = base_part {
             // Same guard for `BasePart.size` — sanitize_size clamps each
             // axis to [0.1, +∞) and replaces NaN with the floor.
             let safe_size = sanitize_size(bp.size);
-            job.transform.scale = [safe_size.x, safe_size.y, safe_size.z];
+            // Custom-mesh parts: do NOT overwrite `scale` from BasePart.size.
+            // The scale in the TOML is the user's multiplier; BasePart.size
+            // comes from the mesh bounding box at spawn time. If the mesh
+            // ever loads incorrectly (wrong GLB path → block.glb fallback),
+            // persisting that bounding box would permanently corrupt the TOML.
+            if !is_custom_mesh {
+                job.transform.scale = [safe_size.x, safe_size.y, safe_size.z];
+            }
             // Persist all BasePart visual properties so material changes,
             // color edits, transparency tweaks, etc. survive reload.
             let mat_name = if bp.material_name.is_empty() {
@@ -1983,39 +2017,101 @@ pub fn write_instance_changes_system(
     std::thread::spawn(move || {
         let start = std::time::Instant::now();
         for job in &jobs {
-            match load_instance_definition(&job.path) {
-                Ok(mut instance) => {
-                    instance.transform = job.transform.clone();
-                    // Persist BasePart visual properties alongside transform
-                    if let Some(ref mat) = job.material {
-                        instance.properties.material = mat.clone();
-                    }
-                    if let Some(color) = job.color {
-                        instance.properties.color = color;
-                    }
-                    if let Some(t) = job.transparency {
-                        instance.properties.transparency = t;
-                    }
-                    if let Some(r) = job.reflectance {
-                        instance.properties.reflectance = r;
-                    }
-                    if let Some(a) = job.anchored {
-                        instance.properties.anchored = a;
-                    }
-                    if let Some(c) = job.can_collide {
-                        instance.properties.can_collide = c;
-                    }
-                    if let Some(l) = job.locked {
-                        instance.properties.locked = l;
-                    }
-                    instance.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-                    if let Err(e) = write_instance_definition(&job.path, &instance) {
-                        tracing::error!("Failed to write instance {:?}: {}", job.path, e);
-                    }
+            // Patch the raw TOML in-place rather than going through
+            // load_instance_definition.  That path runs the self-heal pass which
+            // (a) can rewrite the file while we're reading it and
+            // (b) re-serialises through InstanceDefinition, silently dropping any
+            // section the typed struct doesn't recognise ([material], [thermodynamic],
+            // [electrochemical], [material.custom], etc.).  A surgical patch on the
+            // raw toml::Value preserves every section we don't touch.
+            let patch_result = (|| -> Result<(), String> {
+                let text = std::fs::read_to_string(&job.path)
+                    .map_err(|e| format!("read {:?}: {}", job.path, e))?;
+                let mut doc: toml::Value = text.parse()
+                    .map_err(|e: toml::de::Error| format!("parse {:?}: {}", job.path, e))?;
+
+                let root = doc.as_table_mut()
+                    .ok_or_else(|| format!("TOML root is not a table: {:?}", job.path))?;
+
+                // ── [transform] ────────────────────────────────────────────────
+                // For custom-mesh parts the scale lives in the TOML as the user's
+                // size multiplier; BasePart.size comes from the mesh AABB and must
+                // not clobber it.  For primitives scale == size, so always write.
+                let tf = root.entry("transform")
+                    .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                    .as_table_mut()
+                    .ok_or("transform is not a table")?;
+
+                let [px, py, pz] = job.transform.position;
+                tf.insert("position".into(), toml::Value::Array(vec![
+                    toml::Value::Float(px as f64),
+                    toml::Value::Float(py as f64),
+                    toml::Value::Float(pz as f64),
+                ]));
+                let [rx, ry, rz, rw] = job.transform.rotation;
+                tf.insert("rotation".into(), toml::Value::Array(vec![
+                    toml::Value::Float(rx as f64),
+                    toml::Value::Float(ry as f64),
+                    toml::Value::Float(rz as f64),
+                    toml::Value::Float(rw as f64),
+                ]));
+                if !job.is_custom_mesh {
+                    let [sx, sy, sz] = job.transform.scale;
+                    tf.insert("scale".into(), toml::Value::Array(vec![
+                        toml::Value::Float(sx as f64),
+                        toml::Value::Float(sy as f64),
+                        toml::Value::Float(sz as f64),
+                    ]));
                 }
-                Err(e) => {
-                    tracing::error!("Failed to load instance for write-back {:?}: {}", job.path, e);
+                // [asset] is never touched — mesh path is immutable from auto-save.
+
+                // ── [properties] ───────────────────────────────────────────────
+                let props = root.entry("properties")
+                    .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                    .as_table_mut()
+                    .ok_or("properties is not a table")?;
+
+                if let Some(ref mat) = job.material {
+                    props.insert("material".into(), toml::Value::String(mat.clone()));
                 }
+                if let Some(color) = job.color {
+                    props.insert("color".into(), toml::Value::Array(vec![
+                        toml::Value::Float(color[0] as f64),
+                        toml::Value::Float(color[1] as f64),
+                        toml::Value::Float(color[2] as f64),
+                        toml::Value::Float(color[3] as f64),
+                    ]));
+                }
+                if let Some(t) = job.transparency {
+                    props.insert("transparency".into(), toml::Value::Float(t as f64));
+                }
+                if let Some(r) = job.reflectance {
+                    props.insert("reflectance".into(), toml::Value::Float(r as f64));
+                }
+                if let Some(a) = job.anchored {
+                    props.insert("anchored".into(), toml::Value::Boolean(a));
+                }
+                if let Some(c) = job.can_collide {
+                    props.insert("can_collide".into(), toml::Value::Boolean(c));
+                }
+                if let Some(l) = job.locked {
+                    props.insert("locked".into(), toml::Value::Boolean(l));
+                }
+
+                // ── [metadata].last_modified ────────────────────────────────────
+                if let Some(meta) = root.get_mut("metadata").and_then(|m| m.as_table_mut()) {
+                    meta.insert("last_modified".into(),
+                        toml::Value::String(chrono::Utc::now().to_rfc3339()));
+                }
+
+                let out = toml::to_string_pretty(&doc)
+                    .map_err(|e| format!("serialize {:?}: {}", job.path, e))?;
+                std::fs::write(&job.path, out)
+                    .map_err(|e| format!("write {:?}: {}", job.path, e))?;
+                Ok(())
+            })();
+            if let Err(e) = patch_result {
+                tracing::error!("Instance patch write failed: {}", e);
             }
         }
         let elapsed = start.elapsed();

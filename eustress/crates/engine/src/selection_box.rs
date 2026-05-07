@@ -195,11 +195,45 @@ fn spawn_selection_adornments(
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
     query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), Added<Selected>>,
+    children_query: Query<&Children>,
+    descendant_parts: Query<(&GlobalTransform, &BasePart), Without<SelectionAdornment>>,
 ) {
     let Some(mats) = materials else { return };
     if query.is_empty() { return; }
 
     for (entity, global_transform, base_part, part) in &query {
+        // For containers (Model/Folder) with no BasePart, compute the world-space
+        // AABB from all descendant BaseParts and draw the wireframe around that.
+        if base_part.is_none() {
+            if let Some((aabb_center, aabb_size)) =
+                compute_descendants_aabb(entity, &children_query, &descendant_parts)
+            {
+                let wireframe_handle = get_or_create_wireframe(
+                    &mut cache, &mut meshes, ShapeKind::Box, aabb_size,
+                );
+                // Adornment is a child of the model entity. Convert the world-space
+                // AABB center into model-local space so the box draws around the content.
+                let local_offset = global_transform.affine()
+                    .inverse()
+                    .transform_point3(aabb_center);
+                commands.spawn((
+                    Mesh3d(wireframe_handle),
+                    MeshMaterial3d(mats.selection.clone()),
+                    Transform::from_translation(local_offset),
+                    SelectionAdornment,
+                    eustress_common::adornments::Adornment { meta: true },
+                    NotShadowCaster,
+                    Name::new("SelectionWireframe"),
+                    ChildOf(entity),
+                ));
+                spawn_corner_dots_at(
+                    &mut commands, &mut cache, &mut meshes, &mats,
+                    entity, aabb_size, local_offset,
+                );
+            }
+            continue;
+        }
+
         // Use BasePart.size if available, otherwise fall back to Transform.scale
         // (GLB/mesh entities use Transform.scale for sizing, not BasePart)
         let size = base_part.map(|bp| bp.size).unwrap_or_else(|| {
@@ -280,10 +314,36 @@ fn spawn_hover_adornments(
     mut cache: ResMut<WireframeMeshCache>,
     materials: Option<Res<SelectionMaterials>>,
     query: Query<(Entity, &GlobalTransform, Option<&BasePart>, Option<&Part>), (Added<Hovered>, Without<Selected>)>,
+    children_query: Query<&Children>,
+    descendant_parts: Query<(&GlobalTransform, &BasePart), Without<HoverAdornment>>,
 ) {
     let Some(mats) = materials else { return };
 
     for (entity, global_transform, base_part, part) in &query {
+        if base_part.is_none() {
+            if let Some((aabb_center, aabb_size)) =
+                compute_descendants_aabb(entity, &children_query, &descendant_parts)
+            {
+                let wireframe_handle = get_or_create_wireframe(
+                    &mut cache, &mut meshes, ShapeKind::Box, aabb_size,
+                );
+                let local_offset = global_transform.affine()
+                    .inverse()
+                    .transform_point3(aabb_center);
+                commands.spawn((
+                    Mesh3d(wireframe_handle),
+                    MeshMaterial3d(mats.hover.clone()),
+                    Transform::from_translation(local_offset),
+                    HoverAdornment,
+                    eustress_common::adornments::Adornment { meta: true },
+                    NotShadowCaster,
+                    Name::new("HoverWireframe"),
+                    ChildOf(entity),
+                ));
+            }
+            continue;
+        }
+
         let size = base_part.map(|bp| bp.size).unwrap_or_else(|| {
             let t = global_transform.compute_transform();
             t.scale
@@ -638,6 +698,95 @@ fn get_or_create_dot_mesh(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Walk all descendants of `root` and compute the world-space axis-aligned
+/// bounding box from every `BasePart` found. Returns `(center, size)` in
+/// world space, or `None` if there are no descendant parts.
+fn compute_descendants_aabb<F: bevy::ecs::query::QueryFilter>(
+    root: Entity,
+    children_query: &Query<&Children>,
+    parts: &Query<(&GlobalTransform, &BasePart), F>,
+) -> Option<(Vec3, Vec3)> {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut found = false;
+
+    let mut stack = vec![root];
+    while let Some(entity) = stack.pop() {
+        if let Ok((gt, bp)) = parts.get(entity) {
+            // Project all 8 corners of the OBB into world space and grow the AABB.
+            let m = gt.affine();
+            let h = bp.size * 0.5;
+            for sx in [-1.0f32, 1.0] {
+                for sy in [-1.0f32, 1.0] {
+                    for sz in [-1.0f32, 1.0] {
+                        let corner = m.transform_point3(Vec3::new(sx * h.x, sy * h.y, sz * h.z));
+                        min = min.min(corner);
+                        max = max.max(corner);
+                    }
+                }
+            }
+            found = true;
+        }
+        if let Ok(children) = children_query.get(entity) {
+            stack.extend(children.iter());
+        }
+    }
+
+    if found {
+        Some(((min + max) * 0.5, max - min))
+    } else {
+        None
+    }
+}
+
+/// Spawn corner dots for a Model selection box. `center_local` is the
+/// offset (in the model entity's local space) to the AABB center.
+fn spawn_corner_dots_at(
+    commands: &mut Commands,
+    cache: &mut WireframeMeshCache,
+    meshes: &mut Assets<Mesh>,
+    mats: &SelectionMaterials,
+    parent: Entity,
+    size: Vec3,
+    center_local: Vec3,
+) {
+    let dot_mesh = get_or_create_dot_mesh(cache, meshes);
+
+    let h = size * 0.5;
+    let corners = [
+        Vec3::new(-h.x, -h.y, -h.z),
+        Vec3::new( h.x, -h.y, -h.z),
+        Vec3::new(-h.x,  h.y, -h.z),
+        Vec3::new( h.x,  h.y, -h.z),
+        Vec3::new(-h.x, -h.y,  h.z),
+        Vec3::new( h.x, -h.y,  h.z),
+        Vec3::new(-h.x,  h.y,  h.z),
+        Vec3::new( h.x,  h.y,  h.z),
+    ];
+
+    let world_radius = (size.max_element() * CORNER_DOT_FRACTION)
+        .max(CORNER_DOT_MIN)
+        .min(CORNER_DOT_MAX);
+    let local_scale = Vec3::splat(world_radius);
+
+    for corner in &corners {
+        commands.spawn((
+            Mesh3d(dot_mesh.clone()),
+            MeshMaterial3d(mats.corner_dot.clone()),
+            Transform {
+                translation: center_local + *corner,
+                scale: local_scale,
+                ..default()
+            },
+            SelectionAdornment,
+            eustress_common::adornments::Adornment { meta: true },
+            NotShadowCaster,
+            Name::new("CornerDot"),
+            ChildOf(parent),
+        ));
+    }
+}
 
 /// Cleanup: remove all selection adornments.
 /// Called when deselecting everything or on app shutdown.

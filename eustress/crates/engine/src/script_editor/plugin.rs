@@ -15,9 +15,11 @@
 //! task finish and throw its result away (its source text is already stale
 //! — the fresh task's output supersedes it).
 
-use super::analyzer::{self, AnalysisResult};
+use super::analyzer::{self, AnalysisResult, Diagnostic};
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Debounce delay between the last edit and the analysis kickoff. Tuned to
@@ -76,6 +78,38 @@ impl ScriptAnalysis {
     }
 }
 
+/// Space-wide diagnostics collected by scanning all scripts on load.
+/// Keyed by absolute file path string. The active editor's diagnostics
+/// (from `ScriptAnalysis`) override the cached entry for that file.
+#[derive(Resource, Default)]
+pub struct SpaceDiagnostics {
+    /// file_path → diagnostics from the last completed scan of that file.
+    pub by_file: HashMap<String, Vec<Diagnostic>>,
+    /// Bumped each time any entry changes, so `sync_analyzer_to_slint`
+    /// can skip no-op frames.
+    pub generation: u64,
+    /// In-flight batch scan task. Produces a full map replacement.
+    in_flight: Option<Task<HashMap<String, Vec<Diagnostic>>>>,
+    /// Space root at the time the scan was launched — used to detect
+    /// whether we need to re-scan when the Space changes.
+    scanned_root: Option<PathBuf>,
+}
+
+impl SpaceDiagnostics {
+    pub fn error_count(&self) -> usize {
+        self.by_file.values()
+            .flat_map(|v| v.iter())
+            .filter(|d| d.severity == analyzer::Severity::Error)
+            .count()
+    }
+    pub fn warning_count(&self) -> usize {
+        self.by_file.values()
+            .flat_map(|v| v.iter())
+            .filter(|d| d.severity == analyzer::Severity::Warning)
+            .count()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Systems
 // ─────────────────────────────────────────────────────────────────────────
@@ -104,15 +138,115 @@ fn kick_off_analysis(mut analysis: ResMut<ScriptAnalysis>) {
 }
 
 /// Poll the in-flight task; when it finishes, store the result and bump
-/// the generation counter so UI systems redraw.
-fn poll_analysis(mut analysis: ResMut<ScriptAnalysis>) {
+/// the generation counter so UI systems redraw. Also updates the
+/// Space-wide cache so the Problems panel shows live edits.
+fn poll_analysis(
+    mut analysis: ResMut<ScriptAnalysis>,
+    mut space_diag: ResMut<SpaceDiagnostics>,
+) {
     let Some(task) = analysis.in_flight.as_mut() else { return };
     let Some(result) = future::block_on(future::poll_once(task)) else {
-        return; // Still running — poll again next tick.
+        return;
     };
+    // Mirror into SpaceDiagnostics for the merged Problems panel view.
+    if let Some(path) = &analysis.active_path.clone() {
+        update_space_diag_from_editor(&mut space_diag, path, result.diagnostics.clone());
+    }
     analysis.result = result;
     analysis.generation = analysis.generation.wrapping_add(1);
     analysis.in_flight = None;
+}
+
+/// Kick off a background scan of all `.rune` / `.luau` files under the
+/// current Space's `SoulService/` folder when the Space root changes.
+fn kick_off_space_scan(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut space_diag: ResMut<SpaceDiagnostics>,
+) {
+    let Some(space_root) = space_root else { return };
+    // Only re-scan when the root has actually changed.
+    let current_root = space_root.0.clone();
+    if space_diag.scanned_root.as_ref().map(|p| p.as_path()) == Some(current_root.as_path()) {
+        return;
+    }
+    // Don't queue a new scan while one is in-flight for the same root.
+    if space_diag.in_flight.is_some() {
+        return;
+    }
+    space_diag.scanned_root = Some(current_root.clone());
+
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        scan_space_scripts(&current_root)
+    });
+    space_diag.in_flight = Some(task);
+}
+
+/// Poll the background scan task. When done, replace `by_file` and bump
+/// the generation so the Problems panel redraws.
+fn poll_space_scan(mut space_diag: ResMut<SpaceDiagnostics>) {
+    let Some(task) = space_diag.in_flight.as_mut() else { return };
+    let Some(result) = future::block_on(future::poll_once(task)) else {
+        return;
+    };
+    space_diag.by_file = result;
+    space_diag.generation = space_diag.generation.wrapping_add(1);
+    space_diag.in_flight = None;
+}
+
+/// Called from `submit_active_script` / `poll_analysis` to keep the
+/// Space-wide cache in sync with live edits in the active tab.
+pub fn update_space_diag_from_editor(
+    space_diag: &mut SpaceDiagnostics,
+    path: &str,
+    diagnostics: Vec<Diagnostic>,
+) {
+    space_diag.by_file.insert(path.to_string(), diagnostics);
+    space_diag.generation = space_diag.generation.wrapping_add(1);
+}
+
+/// Walk `<space_root>/SoulService/` (and fall back to the whole Space root)
+/// for every `.rune` and `.luau` file and run the analyzer on each.
+fn scan_space_scripts(space_root: &std::path::Path) -> HashMap<String, Vec<Diagnostic>> {
+    let soul_dir = space_root.join("SoulService");
+    let scan_root = if soul_dir.is_dir() { soul_dir } else { space_root.to_path_buf() };
+
+    let mut results = HashMap::new();
+    walk_for_scripts(&scan_root, 0, &mut results);
+    results
+}
+
+fn walk_for_scripts(
+    dir: &std::path::Path,
+    depth: usize,
+    out: &mut HashMap<String, Vec<Diagnostic>>,
+) {
+    if depth > 12 { return; }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let ft = match entry.file_type() { Ok(f) => f, Err(_) => continue };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            walk_for_scripts(&path, depth + 1, out);
+        } else if ft.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "rune" || ext == "luau" {
+                if let Ok(source) = std::fs::read_to_string(&path) {
+                    let result = analyzer::analyze(&source);
+                    if !result.diagnostics.is_empty() {
+                        out.insert(path.display().to_string(), result.diagnostics);
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -124,10 +258,13 @@ pub struct ScriptAnalysisPlugin;
 impl Plugin for ScriptAnalysisPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScriptAnalysis>()
+           .init_resource::<SpaceDiagnostics>()
            .add_systems(Update, (
                submit_active_script,
                kick_off_analysis,
                poll_analysis,
+               kick_off_space_scan,
+               poll_space_scan,
            ).chain());
     }
 }

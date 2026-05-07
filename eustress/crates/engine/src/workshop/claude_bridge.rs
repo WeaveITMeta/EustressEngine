@@ -760,6 +760,17 @@ fn build_tool_context(
                     transparency: i.transparency,
                     anchored: i.anchored,
                     can_collide: i.can_collide,
+                    units_offset: i.units_offset,
+                    ui_size: i.ui_size,
+                    adornee_name: i.adornee_name,
+                    always_on_top: i.always_on_top,
+                    max_distance: i.max_distance,
+                    text: i.text,
+                    text_color: i.text_color,
+                    text_size: i.text_size,
+                    font: i.font,
+                    luau_entity_id: i.luau_entity_id,
+                    parent_entity_id: i.parent_entity_id,
                 }
             }).collect();
             let count = entities.len();

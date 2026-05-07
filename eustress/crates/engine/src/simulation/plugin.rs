@@ -19,6 +19,14 @@ use crate::play_mode::PlayModeState;
 #[derive(Resource, Default)]
 pub struct SimValuesResource(pub std::collections::HashMap<String, f64>);
 
+/// Tracks MCP-requested auto-stop target (simulation time in seconds).
+/// Set by `run_simulation` command when `duration_s` is provided;
+/// cleared on stop or when the threshold is crossed.
+#[derive(Resource, Default)]
+pub struct SimAutoStop {
+    pub stop_at_sim_s: Option<f64>,
+}
+
 /// Core simulation plugin providing tick-based time compression
 #[derive(Default)]
 pub struct SimulationPlugin;
@@ -28,6 +36,7 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<SimulationClock>()
             .init_resource::<SimulationState>()
             .init_resource::<SimValuesResource>()
+            .init_resource::<SimAutoStop>()
             .init_resource::<WatchPointRegistry>()
             .init_resource::<BreakPointRegistry>()
             .init_resource::<ActiveRecording>()
@@ -47,6 +56,13 @@ impl Plugin for SimulationPlugin {
                 advance_simulation_clock
                     .run_if(in_state(PlayModeState::Playing))
                     .after(drain_sim_commands),
+            )
+            // Auto-stop when requested duration_s is reached
+            .add_systems(
+                PreUpdate,
+                check_auto_stop
+                    .run_if(in_state(PlayModeState::Playing))
+                    .after(advance_simulation_clock),
             )
             // Record watchpoint values + publish to stream each frame
             .add_systems(
@@ -81,8 +97,10 @@ fn on_play_pause(mut sim_state: ResMut<SimulationState>) {
 fn on_play_stop(
     mut sim_clock: ResMut<SimulationClock>,
     mut sim_state: ResMut<SimulationState>,
+    mut sim_values: ResMut<SimValuesResource>,
     mut watchpoints: ResMut<WatchPointRegistry>,
     mut breakpoints: ResMut<BreakPointRegistry>,
+    mut auto_stop: ResMut<SimAutoStop>,
     mut recording: ResMut<ActiveRecording>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
@@ -157,6 +175,14 @@ fn on_play_stop(
     sim_state.reset();
     watchpoints.reset_all();
     breakpoints.reset_all();
+    auto_stop.stop_at_sim_s = None;
+
+    // Clear sim values so HUD and BillboardGui widgets return to their
+    // TOML-initialized defaults rather than showing stale mid-run readings.
+    sim_values.0.clear();
+
+    // Also clear the thread-local mirror so Rune scripts on next on_init see clean state.
+    crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| sv.borrow_mut().clear());
 
     info!("⏹ Simulation stopped and reset");
 }
@@ -190,6 +216,21 @@ fn advance_simulation_clock(
         
         if !should_continue {
             break;
+        }
+    }
+}
+
+/// Stop simulation when the MCP-requested duration is reached.
+fn check_auto_stop(
+    clock: Res<SimulationClock>,
+    mut auto_stop: ResMut<SimAutoStop>,
+    mut next_state: ResMut<NextState<PlayModeState>>,
+) {
+    if let Some(stop_at) = auto_stop.stop_at_sim_s {
+        if clock.simulation_time_s >= stop_at {
+            info!("⏹ Auto-stop: sim time {:.3}s reached target {:.3}s", clock.simulation_time_s, stop_at);
+            auto_stop.stop_at_sim_s = None;
+            next_state.set(PlayModeState::Editing);
         }
     }
 }
@@ -426,6 +467,7 @@ fn drain_sim_commands(
     mut sim_values_res: ResMut<SimValuesResource>,
     mut clock: ResMut<SimulationClock>,
     mut next_play_state: ResMut<NextState<PlayModeState>>,
+    mut auto_stop: ResMut<SimAutoStop>,
 ) {
     let Some(sr) = space_root.as_deref() else { return };
 
@@ -474,13 +516,24 @@ fn drain_sim_commands(
                 }
             }
             "run_simulation" => {
-                if let Some(scale) = cmd.get("time_scale").and_then(|v| v.as_f64()) {
-                    clock.set_time_scale(scale);
+                let scale = cmd.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                clock.set_time_scale(scale);
+                if let Some(dur) = cmd.get("duration_s").and_then(|v| v.as_f64()) {
+                    auto_stop.stop_at_sim_s = Some(clock.simulation_time_s + dur);
+                    info!("MCP: run_simulation (time_scale={:.1}x, auto-stop at {:.2}s sim-time)",
+                        scale, clock.simulation_time_s + dur);
+                } else {
+                    auto_stop.stop_at_sim_s = None;
+                    info!("MCP: run_simulation (time_scale={:.1}x, indefinite)", scale);
                 }
                 next_play_state.set(PlayModeState::Playing);
-                info!("MCP: run_simulation (time_scale={:.1}x)", clock.time_scale);
+            }
+            "pause_simulation" => {
+                next_play_state.set(PlayModeState::Paused);
+                info!("MCP: pause_simulation");
             }
             "stop_simulation" => {
+                auto_stop.stop_at_sim_s = None;
                 next_play_state.set(PlayModeState::Editing);
                 info!("MCP: stop_simulation");
             }

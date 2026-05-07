@@ -928,16 +928,25 @@ impl IdeationPipeline {
 
             self.messages.push(ChatMessage {
                 id,
-                role,
+                role: role.clone(),
                 content: entry.content.clone(),
                 timestamp: chrono::DateTime::from_timestamp_millis(entry.timestamp as i64)
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_default(),
                 mcp_endpoint: entry.mcp_endpoint.clone(),
                 mcp_method: None,
-                mcp_status: None, // TODO: parse from string
+                mcp_status: {
+                    let parsed = entry.mcp_status.as_deref().and_then(|s| {
+                        serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+                    });
+                    // Historical entries with no saved status were completed calls —
+                    // default to Done so they don't show pending approval buttons.
+                    if role == MessageRole::Mcp { Some(parsed.unwrap_or(McpCommandStatus::Done)) } else { parsed }
+                },
                 artifact_path: entry.artifact_path.as_ref().map(std::path::PathBuf::from),
-                artifact_type: None, // TODO: parse from string
+                artifact_type: entry.artifact_type.as_deref().and_then(|s| {
+                    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+                }),
                 estimated_cost: entry.cost,
                 actual_cost: None,
                 ..Default::default()
@@ -1016,6 +1025,13 @@ pub struct ProductCreatedEvent {
     pub output_dir: PathBuf,
     /// Session ID for traceability
     pub session_id: String,
+}
+
+/// Fired when the user picks a different mode from the Workshop dropdown.
+#[derive(Message, Debug, Clone)]
+pub struct WorkshopSetModeEvent {
+    /// Display name (e.g. "General", "Simulation") from the dropdown.
+    pub mode_name: String,
 }
 
 /// Fired when the user clicks "Optimize & Build" to hand off to Systems 1-8
@@ -1431,6 +1447,35 @@ fn handle_open_artifact(
     }
 }
 
+/// User picked a mode from the Workshop dropdown. Map display name →
+/// WorkshopMode and replace the pipeline's active modes with the new single
+/// selection (General is always kept as the base).
+fn handle_set_mode(
+    mut events: MessageReader<WorkshopSetModeEvent>,
+    mut pipeline: ResMut<IdeationPipeline>,
+) {
+    for event in events.read() {
+        let mode = match event.mode_name.as_str() {
+            "Simulation"    => modes::WorkshopMode::Simulation,
+            "Manufacturing" => modes::WorkshopMode::Manufacturing,
+            "Fabrication"   => modes::WorkshopMode::Fabrication,
+            "Finance"       => modes::WorkshopMode::Finance,
+            "Shopping"      => modes::WorkshopMode::Shopping,
+            "Travel"        => modes::WorkshopMode::Travel,
+            "Supply Chain"  => modes::WorkshopMode::SupplyChain,
+            "Warehousing"   => modes::WorkshopMode::Warehousing,
+            "Universe"      => modes::WorkshopMode::UniverseBrowsing,
+            _               => modes::WorkshopMode::General,
+        };
+        let mut new_modes = modes::ActiveModes::default();
+        if mode != modes::WorkshopMode::General {
+            new_modes.activate(mode);
+        }
+        pipeline.active_modes = new_modes;
+        info!("Workshop: mode switched to {:?}", mode);
+    }
+}
+
 /// Process Claude responses — route by step type:
 /// - None (chat): add system message, stay in Conversing state
 /// - Step 0 (normalize): parse TOML → write ideation_brief.toml → propose patent step
@@ -1705,6 +1750,7 @@ impl Plugin for WorkshopPlugin {
             .add_message::<OptimizeAndBuildEvent>()
             .add_message::<ClaudeResponseEvent>()
             .add_message::<ClaudeErrorEvent>()
+            .add_message::<WorkshopSetModeEvent>()
             // Core systems: handle user actions → update pipeline state
             // Must run AFTER SlintSystems::Drain so WorkshopSendMessageEvent etc. are available
             .add_systems(Update, (
@@ -1715,6 +1761,7 @@ impl Plugin for WorkshopPlugin {
                 handle_open_artifact,
                 handle_claude_response,
                 handle_claude_error,
+                handle_set_mode,
             ).chain().after(crate::ui::SlintSystems::Drain).in_set(WorkshopCoreSystems))
             // Poll background tool dispatch threads (non-blocking approve)
             .add_systems(Update, poll_tool_dispatches.after(WorkshopCoreSystems))

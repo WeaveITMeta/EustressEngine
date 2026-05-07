@@ -39,6 +39,34 @@ pub struct LuauCreatedInstance {
     pub transparency: f32,
     pub anchored: bool,
     pub can_collide: bool,
+
+    // BillboardGui properties (optional)
+    /// StudsOffset for BillboardGui (Vector3)
+    pub units_offset: Option<[f32; 3]>,
+    /// Size for BillboardGui as [scale_x, offset_x, scale_y, offset_y]
+    pub ui_size: Option<[f32; 4]>,
+    /// Adornee name for BillboardGui (parent Part name to attach to)
+    pub adornee_name: Option<String>,
+    /// AlwaysOnTop flag for BillboardGui
+    pub always_on_top: Option<bool>,
+    /// MaxDistance for BillboardGui
+    pub max_distance: Option<f32>,
+
+    // TextLabel properties (optional)
+    /// Text content for TextLabel
+    pub text: Option<String>,
+    /// TextColor3 for TextLabel
+    pub text_color: Option<[f32; 3]>,
+    /// TextSize for TextLabel
+    pub text_size: Option<f32>,
+    /// Font for TextLabel
+    pub font: Option<String>,
+
+    // Parent tracking
+    /// Luau _entityId of this instance (for parent resolution)
+    pub luau_entity_id: i64,
+    /// Luau _entityId of the Parent instance (for TextLabel → BillboardGui linking)
+    pub parent_entity_id: Option<i64>,
 }
 
 // Thread-local output buffer for capturing print/warn/error from Luau scripts.
@@ -205,6 +233,39 @@ impl LuauRuntime {
                     .map(|v| euler_deg_to_quat(v.0.x, v.0.y, v.0.z)))
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
+            // BillboardGui properties
+            let units_offset = inst.get::<mlua::AnyUserData>("StudsOffset").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauVector3>().ok()
+                    .map(|v| [v.0.x as f32, v.0.y as f32, v.0.z as f32]));
+
+            let ui_size = inst.get::<mlua::AnyUserData>("Size").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauUDim2>().ok()
+                    .map(|s| [s.x_scale as f32, s.x_offset as f32, s.y_scale as f32, s.y_offset as f32]));
+
+            let adornee_name = inst.get::<mlua::Value>("Adornee").ok()
+                .and_then(|v| match v {
+                    mlua::Value::Table(t) => t.get::<String>("Name").ok(),
+                    _ => None,
+                });
+
+            let always_on_top = inst.get("AlwaysOnTop").ok();
+            let max_distance = inst.get::<f64>("MaxDistance").ok().map(|v| v as f32);
+
+            // TextLabel properties
+            let text = inst.get::<String>("Text").ok();
+            let text_color = inst.get::<mlua::AnyUserData>("TextColor3").ok()
+                .and_then(|ud| ud.borrow::<super::types::LuauColor3>().ok()
+                    .map(|c| [c.0.r as f32, c.0.g as f32, c.0.b as f32]));
+            let text_size = inst.get::<f64>("TextSize").ok().map(|v| v as f32);
+            let font = inst.get::<String>("Font").ok();
+
+            let luau_entity_id: i64 = inst.get("_entityId").unwrap_or(0);
+            let parent_entity_id = inst.get::<mlua::Value>("Parent").ok()
+                .and_then(|v| match v {
+                    mlua::Value::Table(t) => t.get::<i64>("_entityId").ok(),
+                    _ => None,
+                });
+
             instances.push(LuauCreatedInstance {
                 class_name,
                 name,
@@ -217,6 +278,17 @@ impl LuauRuntime {
                 transparency: transparency as f32,
                 anchored,
                 can_collide,
+                units_offset,
+                ui_size,
+                adornee_name,
+                always_on_top,
+                max_distance,
+                text,
+                text_color,
+                text_size,
+                font,
+                luau_entity_id,
+                parent_entity_id,
             });
         }
 

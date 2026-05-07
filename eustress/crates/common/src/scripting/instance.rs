@@ -904,12 +904,20 @@ impl InstanceFactory {
                 instance.set_property("PlaybackSpeed", 1.0.into());
                 instance.set_property("TimePosition", 0.0.into());
             }
-            "Frame" | "TextLabel" | "TextButton" | "ImageLabel" | "ImageButton" => {
+            "Frame" | "ImageLabel" | "ImageButton" => {
                 instance.set_property("Visible", true.into());
                 instance.set_property("BackgroundTransparency", 0.0.into());
                 instance.set_property("BackgroundColor3", Color3::WHITE.into());
             }
-            "TextLabel" | "TextButton" | "TextBox" => {
+            "TextLabel" | "TextButton" => {
+                instance.set_property("Visible", true.into());
+                instance.set_property("BackgroundTransparency", 0.0.into());
+                instance.set_property("BackgroundColor3", Color3::WHITE.into());
+                instance.set_property("Text", "".into());
+                instance.set_property("TextColor3", Color3::BLACK.into());
+                instance.set_property("TextSize", 14.0.into());
+            }
+            "TextBox" => {
                 instance.set_property("Text", "".into());
                 instance.set_property("TextColor3", Color3::BLACK.into());
                 instance.set_property("TextSize", 14.0.into());

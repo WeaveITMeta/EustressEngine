@@ -675,6 +675,11 @@ fn handle_file_created(
         }
 
         FileType::Toml => {
+            // If the entity is already registered (e.g. written by auto-save while loaded),
+            // this is a modify not a create — skip spawning a duplicate.
+            if registry.is_loaded(&event.path) {
+                return;
+            }
             // Load .part.toml, .model.toml, .instance.toml files
             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
                 Ok(instance) => {
@@ -693,6 +698,28 @@ fn handle_file_created(
                         .unwrap_or("Unknown")
                         .to_string();
                     
+                    // Parent to containing folder entity or service root.
+                    // event.path = .../V1/VCell_Foo/_instance.toml
+                    // parent_dir  = .../V1/VCell_Foo/          (the part folder itself)
+                    // grandparent = .../V1/                     (the folder that should own it)
+                    if let Some(part_folder) = event.path.parent() {
+                        if let Some(grandparent_dir) = part_folder.parent() {
+                            // Try grandparent as a named folder (registered by path)
+                            let grandparent_instance = grandparent_dir.join("_instance.toml");
+                            if let Some(parent_entity) = registry.get_entity(&grandparent_instance)
+                                .or_else(|| registry.get_entity(grandparent_dir))
+                            {
+                                commands.entity(entity).insert(ChildOf(parent_entity));
+                            } else {
+                                // grandparent is the service root itself
+                                let service_toml = space_root.join(&event.service).join("_service.toml");
+                                if let Some(service_entity) = registry.get_entity(&service_toml) {
+                                    commands.entity(entity).insert(ChildOf(service_entity));
+                                }
+                            }
+                        }
+                    }
+
                     registry.register(
                         event.path.clone(),
                         entity,
@@ -706,7 +733,7 @@ fn handle_file_created(
                             children: Vec::new(),
                         },
                     );
-                    
+
                     info!("✅ Loaded new instance file: {:?}", event.path);
                 }
                 Err(e) => {

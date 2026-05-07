@@ -1,0 +1,15 @@
+[material]
+name = "Bronze"
+preset = "Bronze"
+description = "Polished bronze — warm copper-gold metallic alloy"
+
+[pbr]
+base_color = [0.804, 0.498, 0.196, 1.0]
+metallic = 1.0
+roughness = 0.45
+reflectance = 0.55
+
+[textures]
+base_color = "materials/textures/bronze_base_color.png"
+normal = "materials/textures/bronze_normal.png"
+metallic_roughness = "materials/textures/bronze_metallic_roughness.png"

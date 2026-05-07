@@ -561,3 +561,99 @@ fn obb_face_corners(
     }
     corners
 }
+
+// ============================================================================
+// 9. OBB-Proximity Face Contact — surface snapping without cursor-ray dependency
+// ============================================================================
+
+/// Result from [`find_face_contact`]: the adjusted center that places
+/// the moving part's face flush against the nearest target face, plus
+/// the contact normal and the target part's transform for grid-frame snap.
+pub struct FaceContactResult {
+    /// Moving part's center after face-flush adjustment.
+    pub adjusted_center: Vec3,
+    /// World-space outward normal of the target face (points away from target, toward moving part).
+    pub contact_normal: Vec3,
+    /// World-space center of the target OBB — used to set the snap grid origin.
+    pub target_center: Vec3,
+    /// World-space rotation of the target OBB — used to align snap grid to target face.
+    pub target_rot: Quat,
+    /// World-space size of the target OBB — needed for face corner computation.
+    pub target_size: Vec3,
+}
+
+/// Scan all candidate (static) OBBs and find the one whose face the
+/// moving OBB is nearest to, then return the adjusted center that
+/// places the moving face flush against that static face.
+///
+/// Works independently of cursor-ray hits so it fires even when the
+/// mouse is not directly over the target surface (e.g. dragging a brick
+/// sideways against a wall, or stacking by dragging from the side).
+///
+/// `snap_distance` is the maximum gap (or penetration depth) that
+/// triggers a snap. Use `settings.snap_size` or a fixed 1-stud value.
+pub fn find_face_contact(
+    moving_center: Vec3,
+    moving_size: Vec3,
+    moving_rot: Quat,
+    candidates: &[(Vec3, Vec3, Quat)],
+    snap_distance: f32,
+) -> Option<FaceContactResult> {
+    let moving_half_diag = moving_size.length() * 0.5;
+    // (gap_abs, adjusted_center, normal, target_center, target_rot, target_size)
+    let mut best: Option<(f32, Vec3, Vec3, Vec3, Quat, Vec3)> = None;
+
+    for (b_center, b_size, b_rot) in candidates {
+        let b_half = *b_size * 0.5;
+        let b_half_diag = b_size.length() * 0.5;
+
+        // Broad-phase sphere check — skip distant parts immediately.
+        if (moving_center - *b_center).length() > moving_half_diag + b_half_diag + snap_distance {
+            continue;
+        }
+
+        for (axis_idx, &local_axis) in [Vec3::X, Vec3::Y, Vec3::Z].iter().enumerate() {
+            let b_local_half = match axis_idx { 0 => b_half.x, 1 => b_half.y, _ => b_half.z };
+
+            for sign in [1.0f32, -1.0] {
+                let face_normal = (*b_rot * local_axis * sign).normalize();
+
+                // Only snap when the moving part is on the outside of this face.
+                // Dot of (moving_center - b_center) with face_normal > 0 means
+                // moving center is on the outward side — the expected approach direction.
+                if (moving_center - *b_center).dot(face_normal) <= 0.0 {
+                    continue;
+                }
+
+                // B's face plane: points P on the plane satisfy P·n = face_plane_d
+                let face_plane_d = b_center.dot(face_normal) + b_local_half;
+
+                // A's half-extent toward this face (OBB support along face_normal).
+                let a_extent = calculate_surface_offset(&moving_size, &moving_rot, &face_normal);
+
+                // A's face position along the face normal.
+                // gap > 0 → A's face has not yet reached B's face (approaching).
+                // gap < 0 → A's face has passed B's face (penetrating).
+                // Either case: adjusting by (face_normal * gap) places A's face flush.
+                let a_face_d = moving_center.dot(face_normal) - a_extent;
+                let gap = face_plane_d - a_face_d;
+
+                if gap.abs() < snap_distance {
+                    let adjusted = moving_center + face_normal * gap;
+                    let score = gap.abs();
+                    if best.as_ref().map(|(s, ..)| score < *s).unwrap_or(true) {
+                        best = Some((score, adjusted, face_normal, *b_center, *b_rot, *b_size));
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(_, adjusted_center, contact_normal, target_center, target_rot, target_size)| FaceContactResult {
+        adjusted_center,
+        contact_normal,
+        target_center,
+        target_rot,
+        target_size,
+    })
+}

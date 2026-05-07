@@ -58,6 +58,11 @@ export component ExplorerPanel inherits Rectangle {
     callback on-context-menu(length, length, int, string); // x, y, node-id, node-type
     callback on-search-changed(string);
     callback on-rename-node(int, string, string);
+    /// Fired when inline rename should start for the given node id.
+    /// Handled by main.slint which sets explorer-renaming-node-id.
+    callback on-start-rename(int);
+    /// Fired when rename is committed or cancelled — main.slint clears the id.
+    callback on-cancel-rename();
     callback on-add-service();  // (+) button to add a new service
     callback on-expand-all();   // Expand all tree nodes
     callback on-collapse-all(); // Collapse all tree nodes
@@ -68,6 +73,14 @@ export component ExplorerPanel inherits Rectangle {
     callback navigate-expand();   // Arrow right — expand current node
     // Drag-and-drop reparenting: source node dragged onto target node
     callback on-reparent-node(/* source-id */ int, /* target-id */ int);
+
+    /// Node id currently being inline-renamed (-1 = none). Driven by
+    /// main.slint via the on-start-rename / on-cancel-rename callbacks.
+    in property <int> renaming-node-id: -1;
+
+    /// Last node that received a clicked() — used by F2 to know which
+    /// node to rename without requiring a Slint array search in a callback.
+    property <int> last-selected-id: -1;
 
     // Drag state
     in-out property <bool> drag-active: false;
@@ -222,6 +235,12 @@ export component ExplorerPanel inherits Rectangle {
             key-pressed(event) => {
                 if event.text == Key.Control { self.ctrl-held = true; return accept; }
                 if event.text == Key.Shift { self.shift-held = true; return accept; }
+                if event.text == Key.F2 {
+                    if root.last-selected-id >= 0 {
+                        root.on-start-rename(root.last-selected-id);
+                    }
+                    return accept;
+                }
                 if event.text == Key.UpArrow   { root.navigate-up();       return accept; }
                 if event.text == Key.DownArrow  { root.navigate-down();     return accept; }
                 if event.text == Key.LeftArrow  { root.navigate-collapse(); return accept; }
@@ -275,9 +294,11 @@ export component ExplorerPanel inherits Rectangle {
                         // worse than a wrong-row drop target.
                         ctrl-held: explorer-keys.ctrl-held;
                         shift-held: explorer-keys.shift-held;
+                        renaming: node.id == root.renaming-node-id;
 
                         clicked(ctrl, shift) => {
                             explorer-keys.focus();
+                            root.last-selected-id = node.id;
                             root.on-select-node(node.id, node.node-type, ctrl, shift);
                         }
                         double-clicked => {
@@ -308,6 +329,13 @@ export component ExplorerPanel inherits Rectangle {
                                 root.on-select-node(node.id, node.node-type, false, false);
                             }
                             root.on-context-menu(x, y, node.id, node.node-type);
+                        }
+                        rename-committed(new-name) => {
+                            root.on-rename-node(node.id, new-name, node.node-type);
+                            root.on-cancel-rename();
+                        }
+                        rename-cancelled() => {
+                            root.on-cancel-rename();
                         }
 
                         drag-started(id, abs-x, abs-y) => {

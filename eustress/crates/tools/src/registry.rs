@@ -86,7 +86,7 @@ pub trait ToolHandler: Send + Sync + 'static {
 // Tool Context
 // ---------------------------------------------------------------------------
 
-/// An entity created by a Luau script via `Instance.new("Part")`.
+/// An entity created by a Luau script via `Instance.new(...)`.
 /// Returned by the `LuauExecutor` callback so `execute_luau` can
 /// materialize the instances as on-disk entity folders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +104,34 @@ pub struct LuauCreatedEntity {
     pub transparency: f32,
     pub anchored: bool,
     pub can_collide: bool,
+
+    // BillboardGui fields
+    #[serde(default)]
+    pub units_offset: Option<[f32; 3]>,
+    #[serde(default)]
+    pub ui_size: Option<[f32; 4]>,
+    #[serde(default)]
+    pub adornee_name: Option<String>,
+    #[serde(default)]
+    pub always_on_top: Option<bool>,
+    #[serde(default)]
+    pub max_distance: Option<f32>,
+
+    // TextLabel / TextButton fields
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub text_color: Option<[f32; 3]>,
+    #[serde(default)]
+    pub text_size: Option<f32>,
+    #[serde(default)]
+    pub font: Option<String>,
+
+    // Parent tracking for GUI hierarchy
+    #[serde(default)]
+    pub luau_entity_id: i64,
+    #[serde(default)]
+    pub parent_entity_id: Option<i64>,
 }
 
 fn default_shape() -> String { "Block".to_string() }

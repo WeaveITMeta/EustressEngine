@@ -86,8 +86,8 @@ impl ToolHandler for ReadFileTool {
 
         match std::fs::read_to_string(&resolved) {
             Ok(content) => {
-                let truncated = if content.len() > 10_000 {
-                    format!("{}...\n[truncated — {} bytes]", &content[..10_000], content.len())
+                let truncated = if content.len() > 50_000 {
+                    format!("{}...\n[truncated — {} bytes]", &content[..50_000], content.len())
                 } else { content };
                 ToolResult {
                     tool_name: "read_file".to_string(), tool_use_id: String::new(), success: true,
@@ -248,6 +248,19 @@ impl ToolHandler for WriteFileTool {
             Some(p) => p,
             None => return err_result("write_file", format!("Path '{}' outside sandbox", path_str)),
         };
+        // Engine-managed files must not be overwritten by the AI agent.
+        // _instance.toml files are the authoritative source of truth for
+        // entity state; the engine writes them atomically via
+        // write_instance_definition_signed. Clobbering them with a minimal
+        // template (e.g. one that defaults mesh to parts/block.glb) destroys
+        // custom mesh references and all physics/material data. Use
+        // create_entity / update_entity instead.
+        if resolved.file_name().map(|n| n == "_instance.toml").unwrap_or(false) {
+            return err_result(
+                "write_file",
+                "Cannot overwrite _instance.toml — use create_entity or update_entity instead".into(),
+            );
+        }
         if let Some(parent) = resolved.parent() { let _ = std::fs::create_dir_all(parent); }
         match std::fs::write(&resolved, content) {
             Ok(_) => ToolResult {

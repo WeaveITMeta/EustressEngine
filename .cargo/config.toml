@@ -1,3 +1,9 @@
 # Apply wasm cfg globally when building any crate for wasm32-unknown-unknown
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=wasm_js"]
+
+# slint_ui.rs has a ~14k-line file with a massive drain_slint_actions function.
+# rustc's default 8 MB thread stack overflows during type-checking of it.
+# RUST_MIN_STACK=67108864 (64 MB) gives enough headroom.
+[env]
+RUST_MIN_STACK = "67108864"

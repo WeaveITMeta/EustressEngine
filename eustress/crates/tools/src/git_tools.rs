@@ -288,12 +288,12 @@ impl ToolHandler for GitBranchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "git_branch",
-            description: "List, create, switch, or delete git branches in the Universe repository. Actions: 'list' (default), 'create', 'switch', 'delete'. Prototype lattice branches (v0001, v0002, ...) are managed here.",
+            description: "List, create, switch, delete, or merge git branches in the Universe repository. Actions: 'list' (default), 'create', 'switch', 'delete', 'merge'. Experiment branches (exp/<name>-<ts>) are created by run_experiment; use merge to accept a winning configuration.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "description": "Branch action: list, create, switch, delete", "default": "list" },
-                    "name": { "type": "string", "description": "Branch name (required for create, switch, delete)" }
+                    "action": { "type": "string", "description": "Branch action: list, create, switch, delete, merge", "default": "list" },
+                    "name": { "type": "string", "description": "Branch name (required for create, switch, delete, merge)" }
                 }
             }),
             modes: &[WorkshopMode::General],
@@ -400,10 +400,33 @@ impl ToolHandler for GitBranchTool {
                     },
                 }
             }
+            "merge" => {
+                if name.is_empty() {
+                    return ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: "Branch name required for 'merge'".to_string(),
+                        structured_data: None, stream_topic: None,
+                    };
+                }
+                let msg = format!("Merge experiment branch '{}'", name);
+                match git(ctx, &["merge", "--no-ff", name, "-m", &msg]) {
+                    Ok(output) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: true,
+                        content: format!("Merged '{}' into current branch.\n{}", name, output.trim()),
+                        structured_data: Some(serde_json::json!({ "action": "merge", "branch": name })),
+                        stream_topic: Some("workshop.tool.git_branch".to_string()),
+                    },
+                    Err(e) => ToolResult {
+                        tool_name: "git_branch".to_string(), tool_use_id: String::new(),
+                        success: false, content: e, structured_data: None, stream_topic: None,
+                    },
+                }
+            }
             _ => ToolResult {
                 tool_name: "git_branch".to_string(), tool_use_id: String::new(),
                 success: false,
-                content: format!("Unknown action '{}'. Use: list, create, switch, delete.", action),
+                content: format!("Unknown action '{}'. Use: list, create, switch, delete, merge.", action),
                 structured_data: None, stream_topic: None,
             },
         }

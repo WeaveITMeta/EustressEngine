@@ -1018,7 +1018,7 @@ Generate a complete, compilable Rust module with a Plugin implementation."#,
 
         let request = ClaudeRequestWithTools {
             model: model.to_string(),
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: system_prompt.map(|s| s.to_string()),
             messages: messages.to_vec(),
             tools: tools.to_vec(),

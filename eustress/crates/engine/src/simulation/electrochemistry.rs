@@ -46,7 +46,11 @@ fn publish_echem_to_sim_values(
     query: Query<(&ElectrochemicalState, Option<&ThermodynamicState>)>,
     mut sim_res: ResMut<crate::simulation::plugin::SimValuesResource>,
 ) {
-    let Some((echem, thermo)) = query.iter().next() else { return };
+    // Use the entity with the highest capacity_ah — that's the cell stack / assembly,
+    // not passive components (anode, electrolyte etc.) which have capacity_ah = 0.
+    let Some((echem, thermo)) = query.iter()
+        .max_by(|(a, _), (b, _)| a.capacity_ah.partial_cmp(&b.capacity_ah).unwrap_or(std::cmp::Ordering::Equal))
+    else { return };
 
     let temp_c = thermo.map(|t| t.temperature - 273.15).unwrap_or(25.0);
 
@@ -83,13 +87,16 @@ fn publish_echem_to_sim_values(
 fn set_default_discharge(
     mut query: Query<&mut ElectrochemicalState>,
 ) {
-    for mut echem in &mut query {
-        if echem.capacity_ah > 0.0 {
-            // Default: 0.5C discharge (positive current = discharge)
-            echem.current = echem.capacity_ah * 0.5;
-            info!("⚡ Default discharge set: {:.1}A (0.5C) for {:.1}Ah cell",
-                echem.current, echem.capacity_ah);
-        }
+    // Find and set current only on the cell stack (highest capacity_ah).
+    // Passive components (anode slice, electrolyte etc.) have capacity_ah = 0
+    // and must stay at zero current — they are not independent cells.
+    if let Some(mut echem) = query.iter_mut()
+        .filter(|e| e.capacity_ah > 0.0)
+        .max_by(|a, b| a.capacity_ah.partial_cmp(&b.capacity_ah).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        echem.current = echem.capacity_ah * 0.5;
+        info!("⚡ Default discharge set: {:.1}A (0.5C) for {:.1}Ah cell",
+            echem.current, echem.capacity_ah);
     }
     // Also set the mode in SIM_VALUES so scripts know we're discharging
     crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
@@ -115,9 +122,14 @@ fn apply_sim_values_to_ecs(
         )
     });
 
-    for mut echem in &mut query {
-        if echem.capacity_ah <= 0.0 { continue; }
+    // Apply mode only to the cell stack entity (highest capacity_ah).
+    let Some(mut echem) = query.iter_mut()
+        .filter(|e| e.capacity_ah > 0.0)
+        .max_by(|a, b| a.capacity_ah.partial_cmp(&b.capacity_ah).unwrap_or(std::cmp::Ordering::Equal))
+    else { return };
 
+    {
+        let echem = &mut *echem;
         match mode as i32 {
             0 => {
                 // Idle — no current

@@ -119,6 +119,10 @@ impl Default for PublishRequest {
 pub enum FileEvent {
     /// Create a new Universe folder
     NewUniverse,
+    /// Create universe with confirmed name (from UI dialog)
+    NewUniverseConfirmed(String),
+    /// Create space with confirmed name (from UI dialog, after universe is created)
+    NewSpaceConfirmed(String),
     /// Create a new empty scene
     NewScene,
     /// Open an existing scene file

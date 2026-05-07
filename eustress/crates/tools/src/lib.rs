@@ -123,7 +123,13 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     // Simulation control — proactive Workshop can start/stop/inspect sims.
     registry.register(simulation_tools::RunSimulationTool);
     registry.register(simulation_tools::StopSimulationTool);
+    registry.register(simulation_tools::PauseSimulationTool);
     registry.register(simulation_tools::GetSimulationStateTool);
+    // Experiment loop — await result, run named experiments, compare runs.
+    registry.register(simulation_tools::AwaitSimulationTool);
+    registry.register(simulation_tools::RunExperimentTool);
+    registry.register(simulation_tools::CompareRunsTool);
+    registry.register(simulation_tools::ListExperimentsTool);
 
     // Telemetry — tail live watchpoint streams for feedback loops.
     registry.register(simulation_tools::TailTelemetryTool);

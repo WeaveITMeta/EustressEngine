@@ -540,9 +540,45 @@ fn main() {
         app.add_plugins(eustress_engine::stream_node_plugin::StreamNodePlugin::default());
     }
 
-    app.run();
-    
-    println!("✅ Eustress Engine closed gracefully");
+    // Wrap App::run() so GPU surface-lost panics (swap chain unavailable,
+    // uniform buffer unwrap, wgpu buffer invalid) don't show a crash dialog.
+    // These happen when: window minimized → zero-size surface, GPU driver
+    // TDR reset, or display mode change mid-frame. They are transient but
+    // Bevy 0.18 panics instead of recovering. We catch them and exit cleanly.
+    let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        app.run();
+    }));
+
+    match run_result {
+        Ok(()) => {
+            println!("✅ Eustress Engine closed gracefully");
+        }
+        Err(payload) => {
+            let msg = payload.downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+
+            let is_gpu_surface_panic =
+                msg.contains("swap chain")
+                || msg.contains("Acquiring a texture")
+                || msg.contains("unrecoverable")
+                || msg.contains("operation unrecoverable")
+                || (msg.contains("None value")
+                    && (msg.contains("uniform_buffer") || msg.contains("bevy_render")))
+                || msg.contains("Buffer") && msg.contains("invalid");
+
+            if is_gpu_surface_panic {
+                // GPU surface was lost (minimized window, driver reset, display change).
+                // This is not a code bug — exit cleanly without a crash dialog.
+                eprintln!("⚠️  GPU surface lost — exiting cleanly (not a crash).");
+                std::process::exit(0);
+            } else {
+                // Real panic — re-raise so dev gets a proper backtrace.
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

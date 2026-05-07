@@ -22,12 +22,12 @@ pub struct CreateEntityTool;
 /// invisible and unselectable in the viewport.
 fn primitive_mesh_path(shape: &str) -> Option<&'static str> {
     match shape.to_ascii_lowercase().as_str() {
-        "block" | "part" | "cube"                 => Some("assets/parts/block.glb"),
-        "ball" | "sphere"                         => Some("assets/parts/ball.glb"),
-        "cylinder"                                => Some("assets/parts/cylinder.glb"),
-        "wedge"                                   => Some("assets/parts/wedge.glb"),
-        "corner_wedge" | "corner" | "cornerwedge" => Some("assets/parts/corner_wedge.glb"),
-        "cone"                                    => Some("assets/parts/cone.glb"),
+        "block" | "part" | "cube"                 => Some("parts/block.glb"),
+        "ball" | "sphere"                         => Some("parts/ball.glb"),
+        "cylinder"                                => Some("parts/cylinder.glb"),
+        "wedge"                                   => Some("parts/wedge.glb"),
+        "corner_wedge" | "corner" | "cornerwedge" => Some("parts/corner_wedge.glb"),
+        "cone"                                    => Some("parts/cone.glb"),
         _                                         => None,
     }
 }

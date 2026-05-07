@@ -22,7 +22,7 @@
 
 use bevy::prelude::*;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
-use bevy::window::{WindowFocused, WindowMode};
+use bevy::window::{WindowFocused, WindowMode, WindowResized};
 use bevy::winit::{UpdateMode, WinitSettings};
 use std::time::{Duration, Instant};
 
@@ -205,35 +205,47 @@ impl Plugin for WindowFocusPlugin {
 /// Handle window focus change events
 fn handle_window_focus(
     mut focus_events: MessageReader<WindowFocused>,
+    mut resize_events: MessageReader<WindowResized>,
     mut focus_state: ResMut<WindowFocusState>,
     windows: Query<&Window>,
 ) {
     for event in focus_events.read() {
         let was_focused = focus_state.focused;
         focus_state.focused = event.focused;
-        
+
         if event.focused {
-            // Window gained focus
             focus_state.unfocused_since = None;
             focus_state.reset_idle();
             info!("🔆 Window focused - switching to Active mode");
         } else if was_focused {
-            // Window just lost focus
             focus_state.unfocused_since = Some(Instant::now());
             info!("🔅 Window unfocused - switching to Background mode");
         }
     }
-    
-    // Check if window is minimized
+
+    // Detect minimization via resize events (fired before the Window component
+    // updates, so this catches the zero-size surface one frame earlier).
+    for event in resize_events.read() {
+        let is_zero = event.width <= 0.0 || event.height <= 0.0;
+        if is_zero && !focus_state.minimized {
+            focus_state.minimized = true;
+            info!("📦 Window minimized (resize→0) - suspending rendering");
+        } else if !is_zero && focus_state.minimized {
+            focus_state.minimized = false;
+            info!("📦 Window restored - resuming rendering");
+        }
+    }
+
+    // Secondary check via Window component (catches cases where no resize event fires)
     for window in windows.iter() {
-        let is_minimized = window.window_level == bevy::window::WindowLevel::Normal 
-            && window.mode == WindowMode::Windowed
-            && window.resolution.width() == 0.0;
-        
+        let is_minimized = window.mode == WindowMode::Windowed
+            && window.resolution.width() <= 0.0;
         if focus_state.minimized != is_minimized {
             focus_state.minimized = is_minimized;
             if is_minimized {
-                info!("📦 Window minimized - switching to Minimized mode");
+                info!("📦 Window minimized (size=0) - suspending rendering");
+            } else {
+                info!("📦 Window restored - resuming rendering");
             }
         }
     }
@@ -331,13 +343,13 @@ fn apply_power_settings(
             );
         }
         PowerMode::Minimized => {
-            // Minimal updates when minimized
-            winit_settings.focused_mode = UpdateMode::reactive_low_power(
-                Duration::from_millis(settings.minimized_update_ms)
-            );
-            winit_settings.unfocused_mode = UpdateMode::reactive_low_power(
-                Duration::from_millis(settings.minimized_update_ms)
-            );
+            // When minimized the swap chain surface is zero-size on Windows.
+            // Submitting ANY render frame to it panics in wgpu's prepare_windows.
+            // Use a very long reactive wait so no frame is ever submitted while
+            // minimized; the main loop still wakes on user events (click to restore).
+            let suspend = Duration::from_secs(3600);
+            winit_settings.focused_mode = UpdateMode::reactive_low_power(suspend);
+            winit_settings.unfocused_mode = UpdateMode::reactive_low_power(suspend);
         }
     }
 }

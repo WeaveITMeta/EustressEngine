@@ -224,13 +224,115 @@ impl ToolHandler for ExecuteLuauTool {
             let _ = std::fs::create_dir_all(&generated_dir);
             let mut spawned = 0;
 
-            for entity in &result.created_entities {
+            // Two-pass write: BillboardGui first so TextLabel parent_ids resolve.
+            // Maps luau_entity_id → written folder name for parent linking.
+            let mut luau_id_to_name: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+
+            // Pass 1: BillboardGui
+            for entity in result.created_entities.iter().filter(|e| e.class_name == "BillboardGui") {
                 let safe_name = entity.name.replace(' ', "_").replace('/', "_");
                 let entity_dir = generated_dir.join(&safe_name);
                 let _ = std::fs::create_dir_all(&entity_dir);
                 let instance_path = entity_dir.join("_instance.toml");
 
-                // Select mesh based on Part shape — fixes all-Block default
+                let offset = entity.units_offset.unwrap_or([0.0, 2.0, 0.0]);
+                let size = entity.ui_size.map(|s| [s[1], s[3]]).unwrap_or([200.0, 50.0]);
+                let adornee = entity.adornee_name.as_deref().unwrap_or("");
+                let always_on_top = entity.always_on_top.unwrap_or(false);
+                let max_distance = entity.max_distance.unwrap_or(100.0);
+
+                let toml_content = format!(
+r#"[instance]
+name = "{name}"
+
+[metadata]
+class_name = "BillboardGui"
+archivable = true
+
+[gui]
+position = [{ox}, {oy}, {oz}]
+size = [{sw}, {sh}]
+adornee = "{adornee}"
+always_on_top = {aot}
+max_distance = {md}
+"#,
+                    name = entity.name,
+                    ox = offset[0], oy = offset[1], oz = offset[2],
+                    sw = size[0], sh = size[1],
+                    adornee = adornee,
+                    aot = always_on_top,
+                    md = max_distance,
+                );
+
+                if std::fs::write(&instance_path, &toml_content).is_ok() {
+                    luau_id_to_name.insert(entity.luau_entity_id, safe_name);
+                    spawned += 1;
+                }
+            }
+
+            // Pass 2: TextLabel / TextButton
+            for entity in result.created_entities.iter().filter(|e| matches!(e.class_name.as_str(), "TextLabel" | "TextButton")) {
+                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                // If parented to a BillboardGui, nest inside its folder
+                let entity_dir = if let Some(pid) = entity.parent_entity_id {
+                    if let Some(parent_name) = luau_id_to_name.get(&pid) {
+                        generated_dir.join(parent_name).join(&safe_name)
+                    } else {
+                        generated_dir.join(&safe_name)
+                    }
+                } else {
+                    generated_dir.join(&safe_name)
+                };
+                let _ = std::fs::create_dir_all(&entity_dir);
+                let instance_path = entity_dir.join("_instance.toml");
+
+                let text = entity.text.as_deref().unwrap_or("");
+                let tc = entity.text_color.unwrap_or([0.0, 0.0, 0.0]);
+                let font_size = entity.text_size.unwrap_or(14.0);
+                let font = entity.font.as_deref().unwrap_or("");
+
+                let toml_content = format!(
+r#"[instance]
+name = "{name}"
+
+[metadata]
+class_name = "{class}"
+archivable = true
+
+[gui]
+size = [200.0, 50.0]
+
+[text]
+text = "{text}"
+text_color = [{tr}, {tg}, {tb}, 1.0]
+font_size = {font_size}
+font = "{font}"
+font_family = ""
+text_x_alignment = "center"
+text_y_alignment = "center"
+"#,
+                    name = entity.name,
+                    class = entity.class_name,
+                    text = text.replace('"', "\\\""),
+                    tr = tc[0], tg = tc[1], tb = tc[2],
+                    font_size = font_size,
+                    font = font,
+                );
+
+                if std::fs::write(&instance_path, &toml_content).is_ok() {
+                    luau_id_to_name.insert(entity.luau_entity_id, safe_name);
+                    spawned += 1;
+                }
+            }
+
+            // Pass 3: all other geometry (Parts etc.)
+            for entity in result.created_entities.iter().filter(|e| !matches!(e.class_name.as_str(), "BillboardGui" | "TextLabel" | "TextButton")) {
+                let safe_name = entity.name.replace(' ', "_").replace('/', "_");
+                let entity_dir = generated_dir.join(&safe_name);
+                let _ = std::fs::create_dir_all(&entity_dir);
+                let instance_path = entity_dir.join("_instance.toml");
+
+                // Select mesh based on Part shape
                 let mesh_path = if entity.class_name == "Part" {
                     match entity.shape.as_str() {
                         "Ball"        => "assets/parts/ball.glb",

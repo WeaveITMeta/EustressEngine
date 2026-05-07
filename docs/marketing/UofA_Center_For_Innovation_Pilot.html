@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Eustress Engine — Alpha Pilot for the University of Arizona Center for Innovation</title>
+<style>
+  /* ============================================================
+     Print target: US Letter, single page, no margins.
+     Color system mixes UArizona Wildcat Red/Navy/White with
+     Eustress's high-tech Black + Electric Blue + Green.
+     ============================================================ */
+  @page {
+    size: letter;
+    margin: 0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 8.5in;
+    height: 11in;
+    font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #e8eef7;
+    background: #06080d;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page {
+    width: 8.5in;
+    height: 11in;
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse 70% 50% at 85% -10%, rgba(0,188,212,0.18) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at -10% 110%, rgba(0,200,120,0.10) 0%, transparent 65%),
+      linear-gradient(180deg, #06080d 0%, #080b14 60%, #0a0e18 100%);
+  }
+  /* Wildcat Red top stripe */
+  .wildcat-stripe {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 0.18in;
+    background: linear-gradient(90deg, #AB0520 0%, #AB0520 60%, #0C234B 100%);
+    z-index: 2;
+  }
+  .wildcat-stripe::after {
+    content: "";
+    position: absolute;
+    bottom: -2px; left: 0; right: 0;
+    height: 2px;
+    background: #ffffff;
+    opacity: 0.85;
+  }
+  /* Subtle hex grid backdrop */
+  .grid-bg {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(0,188,212,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,188,212,0.04) 1px, transparent 1px);
+    background-size: 24px 24px;
+    pointer-events: none;
+    mask-image: radial-gradient(ellipse 100% 80% at 50% 40%, black 30%, transparent 100%);
+    -webkit-mask-image: radial-gradient(ellipse 100% 80% at 50% 40%, black 30%, transparent 100%);
+  }
+  /* Layout */
+  .content {
+    position: relative;
+    z-index: 3;
+    padding: 0.30in 0.40in 0.25in 0.40in;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  /* ── Header ── */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding-bottom: 0.08in;
+    margin-bottom: 0.10in;
+    border-bottom: 1px solid rgba(0,188,212,0.35);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-mark {
+    width: 44px; height: 44px;
+    flex-shrink: 0;
+  }
+  .brand-mark img {
+    width: 100%; height: 100%;
+    display: block;
+    object-fit: contain;
+  }
+  .brand-text { line-height: 1.05; }
+  .brand-text .name {
+    font-size: 19px; font-weight: 800; color: #ffffff;
+    letter-spacing: -0.3px;
+  }
+  .brand-text .tag {
+    font-size: 9.5px; color: #00bcd4;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    font-weight: 600;
+  }
+  .partner {
+    text-align: right;
+    line-height: 1.15;
+  }
+  .partner .pilot {
+    font-size: 9px;
+    color: #AB0520;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .partner .target {
+    font-size: 12px; font-weight: 700; color: #ffffff;
+    margin-top: 2px;
+  }
+  .partner .school {
+    font-size: 9.5px; color: #c9d4e6;
+    margin-top: 1px;
+  }
+
+  /* ── Hero ── */
+  .hero { margin-bottom: 0.10in; }
+  h1 {
+    font-size: 24px;
+    font-weight: 900;
+    letter-spacing: -0.6px;
+    line-height: 1.05;
+    color: #ffffff;
+    margin-bottom: 5px;
+  }
+  h1 .accent { color: #00e676; }
+  h1 .red    { color: #ff4d6d; }
+  .subtitle {
+    font-size: 11px;
+    color: #b8c5d8;
+    line-height: 1.35;
+    max-width: 7.2in;
+  }
+  .subtitle b { color: #ffffff; }
+
+  /* ── Body grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.10in 0.14in;
+    margin-bottom: 0.10in;
+  }
+  .card {
+    border: 1px solid rgba(0,188,212,0.25);
+    background: linear-gradient(180deg, rgba(12,35,75,0.32) 0%, rgba(8,11,20,0.55) 100%);
+    border-radius: 6px;
+    padding: 8px 10px 8px 11px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, #00bcd4 0%, #00e676 100%);
+  }
+  .card.red::before { background: linear-gradient(180deg, #AB0520 0%, #ff4d6d 100%); }
+  .card h3 {
+    font-size: 10.5px;
+    color: #00e676;
+    text-transform: uppercase;
+    letter-spacing: 1.3px;
+    font-weight: 800;
+    margin-bottom: 4px;
+  }
+  .card p {
+    font-size: 9.5px;
+    line-height: 1.4;
+    color: #d8e1ee;
+  }
+  .card p b { color: #ffffff; }
+  .card .stat {
+    font-size: 13px; font-weight: 800; color: #00bcd4;
+    margin-top: 3px;
+    font-feature-settings: "tnum";
+  }
+
+  /* ── Showcase row: screenshot + use cases ── */
+  .showcase {
+    display: grid;
+    grid-template-columns: 1.55fr 1fr;
+    gap: 0.14in;
+    margin-bottom: 0.10in;
+  }
+  .shot {
+    position: relative;
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid rgba(0,188,212,0.5);
+    background: #000;
+    box-shadow:
+      0 0 0 1px rgba(0,230,118,0.20) inset,
+      0 0 18px rgba(0,188,212,0.30);
+    aspect-ratio: 1909 / 1057;
+  }
+  .shot img {
+    width: 100%; height: 100%;
+    display: block;
+    object-fit: cover;
+  }
+  .shot::before, .shot::after {
+    content: ""; position: absolute;
+    width: 14px; height: 14px;
+    border: 2px solid #00e676;
+    z-index: 2;
+  }
+  .shot::before { top: 4px; left: 4px;   border-right: none; border-bottom: none; }
+  .shot::after  { bottom: 4px; right: 4px; border-left: none; border-top: none; }
+  .shot .corner-tr, .shot .corner-bl {
+    position: absolute;
+    width: 14px; height: 14px;
+    border: 2px solid #00bcd4;
+    z-index: 2;
+  }
+  .shot .corner-tr { top: 4px; right: 4px;  border-left: none; border-bottom: none; }
+  .shot .corner-bl { bottom: 4px; left: 4px; border-right: none; border-top: none; }
+  .shot .caption {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    padding: 6px 10px;
+    background: linear-gradient(180deg, transparent 0%, rgba(6,8,13,0.92) 100%);
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 8.5px;
+    color: #c9d4e6;
+    letter-spacing: 0.4px;
+  }
+  .shot .caption b { color: #00e676; font-weight: 800; }
+  .shot .caption .live {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #00e676;
+    box-shadow: 0 0 6px #00e676;
+    margin-right: 5px;
+    vertical-align: middle;
+  }
+
+  /* Use case stack on the right of the screenshot */
+  .uses {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-auto-rows: 1fr;
+    gap: 5px;
+    height: 100%;
+  }
+  .use {
+    text-align: center;
+    padding: 6px 4px;
+    border: 1px solid rgba(0,188,212,0.18);
+    background: linear-gradient(180deg, rgba(0,40,75,0.45) 0%, rgba(8,11,20,0.55) 100%);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+  }
+  .use .icon { font-size: 15px; line-height: 1; margin-bottom: 3px; }
+  .use .name {
+    font-size: 8.5px; font-weight: 800;
+    color: #ffffff;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .use .ex {
+    font-size: 7.5px; color: #b0bccf; margin-top: 2px;
+    line-height: 1.25;
+  }
+
+  /* ── How-it-works ribbon ── */
+  .ribbon {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    margin-bottom: 0.10in;
+    border: 1px solid rgba(0,188,212,0.22);
+    border-radius: 5px;
+    overflow: hidden;
+  }
+  .step {
+    padding: 7px 9px;
+    border-right: 1px solid rgba(0,188,212,0.15);
+    background: linear-gradient(180deg, rgba(0,188,212,0.06) 0%, transparent 100%);
+  }
+  .step:last-child { border-right: none; }
+  .step .num {
+    font-size: 9px; font-weight: 800;
+    color: #AB0520;
+    background: #ffffff;
+    padding: 1px 6px;
+    border-radius: 8px;
+    display: inline-block;
+    margin-bottom: 3px;
+  }
+  .step .title {
+    font-size: 10px; font-weight: 800; color: #ffffff;
+    margin-bottom: 2px;
+  }
+  .step .desc {
+    font-size: 8.5px; line-height: 1.35; color: #b8c5d8;
+  }
+
+  /* ── Why Eustress / participation block ── */
+  .why {
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 0.14in;
+    margin-bottom: 0.10in;
+  }
+  .why-card {
+    border-radius: 6px;
+    padding: 9px 12px;
+    border: 1px solid rgba(0,188,212,0.25);
+    background:
+      linear-gradient(135deg, rgba(0,30,60,0.55) 0%, rgba(8,11,20,0.65) 100%);
+    position: relative;
+  }
+  .why-card.green {
+    border-color: rgba(0,230,118,0.4);
+    background:
+      linear-gradient(135deg, rgba(0,55,35,0.55) 0%, rgba(8,11,20,0.65) 100%);
+  }
+  .why-card h4 {
+    font-size: 11px;
+    font-weight: 800;
+    color: #ffffff;
+    text-transform: uppercase;
+    letter-spacing: 1.3px;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .why-card.green h4 { color: #00e676; }
+  .why-card p {
+    font-size: 9.5px;
+    line-height: 1.45;
+    color: #d8e1ee;
+  }
+  .why-card p b { color: #ffffff; }
+  .why-card .free-pill {
+    display: inline-block;
+    margin-left: 6px;
+    background: linear-gradient(90deg, #00e676 0%, #00bcd4 100%);
+    color: #06080d;
+    font-size: 8px;
+    font-weight: 900;
+    padding: 1px 7px;
+    border-radius: 9px;
+    letter-spacing: 1px;
+    vertical-align: middle;
+  }
+
+  /* ── CTA ── */
+  .cta {
+    margin-top: auto;
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 0.14in;
+    align-items: stretch;
+  }
+  .cta-main {
+    padding: 11px 13px;
+    border-radius: 7px;
+    background:
+      linear-gradient(135deg, rgba(171,5,32,0.85) 0%, rgba(12,35,75,0.92) 50%, rgba(0,30,60,0.95) 100%);
+    border: 1px solid rgba(255,255,255,0.18);
+    position: relative;
+    overflow: hidden;
+  }
+  .cta-main::after {
+    content: "";
+    position: absolute; right: -40px; top: -40px;
+    width: 140px; height: 140px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,230,118,0.25) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .cta-main h2 {
+    font-size: 14px; font-weight: 900;
+    color: #ffffff;
+    margin-bottom: 4px;
+    letter-spacing: -0.2px;
+  }
+  .cta-main p {
+    font-size: 9.5px; color: #e8eef7;
+    line-height: 1.4;
+  }
+  .cta-main .signoff {
+    margin-top: 8px;
+    padding-top: 6px;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #00e676;
+    letter-spacing: 0.2px;
+    font-style: italic;
+    text-shadow: 0 0 12px rgba(0,230,118,0.35);
+  }
+  .cta-side {
+    display: flex; flex-direction: column; gap: 5px;
+    justify-content: space-between;
+  }
+  .cta-link {
+    display: block;
+    padding: 7px 11px;
+    border-radius: 5px;
+    text-decoration: none;
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #06080d;
+    background: linear-gradient(90deg, #00e676 0%, #00bcd4 100%);
+    border: 1px solid rgba(255,255,255,0.4);
+    line-height: 1.2;
+  }
+  .cta-link.alt {
+    background: transparent;
+    color: #ffffff;
+    border: 1px solid rgba(0,188,212,0.5);
+  }
+  .cta-link.red {
+    background: linear-gradient(90deg, #AB0520 0%, #ff4d6d 100%);
+    color: #ffffff;
+  }
+  .cta-link .url { display: block; font-weight: 500; opacity: 0.85; font-size: 9px; }
+
+  /* ── Footer strip ── */
+  footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 0.08in;
+    padding-top: 7px;
+    border-top: 1px solid rgba(0,188,212,0.22);
+    font-size: 8px;
+    color: #7c8aa1;
+    letter-spacing: 0.4px;
+  }
+  footer .left { color: #c9d4e6; font-weight: 600; }
+  .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: rgba(0,230,118,0.15);
+    border: 1px solid rgba(0,230,118,0.45);
+    color: #00e676;
+    font-weight: 700;
+    font-size: 8px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="wildcat-stripe"></div>
+  <div class="grid-bg"></div>
+  <div class="content">
+
+    <!-- ─── Header ─── -->
+    <header>
+      <div class="brand">
+        <div class="brand-mark"><img src="eustress_icon.png" alt="Eustress"></div>
+        <div class="brand-text">
+          <div class="name">EUSTRESS ENGINE</div>
+          <div class="tag">Open-source · Physics-as-Code · Built for inventors</div>
+        </div>
+      </div>
+      <div class="partner">
+        <div class="pilot">Alpha Pilot Program · 2026</div>
+        <div class="target">Center for Innovation</div>
+        <div class="school">University of Arizona · Wildcat Cohort</div>
+      </div>
+    </header>
+
+    <!-- ─── Hero ─── -->
+    <section class="hero">
+      <h1>Simulate <span class="accent">anything</span>. Validate <span class="red">faster</span>. Ship with conviction.</h1>
+      <div class="subtitle">
+        Eustress is a real-time, file-system-first simulation engine where founders model their product
+        in 3D, run it under real physics, and converse with an AI co-engineer that can read the scene,
+        edit it, and explain results.
+        <br><b>One API key. Real outcomes. No black box.</b>
+      </div>
+    </section>
+
+    <!-- ─── Capability cards ─── -->
+    <div class="grid">
+      <div class="card">
+        <h3>⚡ Workshop · Talk to Eustress</h3>
+        <p>Claude-powered agent with <b>full access to the running simulation</b> via MCP tools.
+          <br>Domain modes (Simulation, Manufacturing, Fabrication, Supply Chain, Finance) gate the
+          right tools for the right job.
+          <br>Bring your own API key — the engine handles the rest.</p>
+      </div>
+      <div class="card">
+        <h3>🔬 Real Physics, Not Effects</h3>
+        <p>Shipped laws: <b>Nernst, Butler-Volmer, Tafel, ohmic IR drop, Monroe-Newman dendrite risk,
+          thermodynamics, conservation, classical mechanics</b>.
+          <br>Time compression up to <b>1 year per second</b> for cycle-life and aging studies.</p>
+      </div>
+      <div class="card">
+        <h3>📡 Eustress Streams · Bring Your Data</h3>
+        <p>Pipe live signals from <b>sensors, MQTT brokers, databases, REST APIs, or shared memory</b>
+          directly into the 3D scene.
+          <br>Every entity becomes a real-time observable.</p>
+        <div class="stat">622k msg/s · 411 µs · 20.4M shared-memory</div>
+      </div>
+      <div class="card">
+        <h3>📐 Rune Scripting · Zero-copy ECS</h3>
+        <p>Type-safe, sandboxed scripting with <b>direct ECS memory access</b> — about 50× faster than
+          Lua FFI.
+          <br>VM pooling executes hot scripts in microseconds. Domain knowledge lives in code, not config.</p>
+      </div>
+    </div>
+
+    <!-- ─── Showcase: screenshot + use cases ─── -->
+    <div class="showcase">
+      <div class="shot">
+        <img src="screenshot.png" alt="Eustress Engine — V-Cell battery simulation with live HUD and Workshop panel">
+        <span class="corner-tr"></span>
+        <span class="corner-bl"></span>
+        <div class="caption">
+          <span><span class="live"></span><b>LIVE</b> &nbsp; V-Cell solid-state battery simulation</span>
+          <span>Real-time HUD · Workshop AI · 110 entities</span>
+        </div>
+      </div>
+      <div class="uses">
+        <div class="use">
+          <div class="icon">🔋</div>
+          <div class="name">STEM</div>
+          <div class="ex">Batteries, EVs, fuel cells, solar arrays, grid storage</div>
+        </div>
+        <div class="use">
+          <div class="icon">🏗️</div>
+          <div class="name">Civil</div>
+          <div class="ex">Structural loads, thermal envelopes, smart-city flow</div>
+        </div>
+        <div class="use">
+          <div class="icon">🛰️</div>
+          <div class="name">Aerospace</div>
+          <div class="ex">Orbits, propulsion, sensor packs, satellites</div>
+        </div>
+        <div class="use">
+          <div class="icon">🧬</div>
+          <div class="name">Life Sciences</div>
+          <div class="ex">Diffusion, kinetics, reaction networks, dosing</div>
+        </div>
+        <div class="use">
+          <div class="icon">🧪</div>
+          <div class="name">Biotech</div>
+          <div class="ex">Bioreactors, assays, microfluidics, fermentation</div>
+        </div>
+        <div class="use">
+          <div class="icon">🤖</div>
+          <div class="name">Robotics</div>
+          <div class="ex">Control loops, kinematics, perception, swarms</div>
+        </div>
+        <div class="use">
+          <div class="icon">🏭</div>
+          <div class="name">Manufacturing</div>
+          <div class="ex">BOM, supplier risk, cost rollup, line balancing</div>
+        </div>
+        <div class="use">
+          <div class="icon">🌱</div>
+          <div class="name">AgTech</div>
+          <div class="ex">IoT sensors, climate, irrigation, yield models</div>
+        </div>
+        <div class="use">
+          <div class="icon">🩺</div>
+          <div class="name">MedDevice</div>
+          <div class="ex">Mechanical, fluidic, thermal, regulatory artifacts</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── How it works ─── -->
+    <div class="ribbon">
+      <div class="step">
+        <span class="num">01</span>
+        <div class="title">Download</div>
+        <div class="desc">Free, open source. Windows, macOS, Linux. Vulkan / DX12 ready.</div>
+      </div>
+      <div class="step">
+        <span class="num">02</span>
+        <div class="title">Drop your API key</div>
+        <div class="desc">Workshop activates. Talk to Eustress. It builds, edits, and explains.</div>
+      </div>
+      <div class="step">
+        <span class="num">03</span>
+        <div class="title">Stream data in</div>
+        <div class="desc">Sensors, databases, telemetry. Bind any source to any entity.</div>
+      </div>
+      <div class="step">
+        <span class="num">04</span>
+        <div class="title">Iterate at compression</div>
+        <div class="desc">Hours of behavior in seconds. Watchpoints, breakpoints, recordings.</div>
+      </div>
+    </div>
+
+    <!-- ─── Why Eustress ─── -->
+    <div class="why">
+      <div class="why-card">
+        <h4>★ Why this is a game-changer for founders</h4>
+        <p>
+          Most simulation tooling is locked behind seat licenses, opaque file formats, and consultant
+          hours. Eustress flips that: <b>your project is a folder of plain-text TOML</b> that lives in
+          git, your physics laws are <b>auditable Rust source</b>, and your AI co-engineer can read
+          and edit every part of it. <b>Iterate in minutes, not months.</b> Bring a thesis to a
+          defensible prototype before you ever write a check for hardware. When you pitch, you walk
+          in with a real, runnable model — not a slide.
+        </p>
+      </div>
+      <div class="why-card green">
+        <h4>✓ Pilot Program <span class="free-pill">100% Free</span></h4>
+        <p>
+          Wildcat cohort participation is <b>free for the alpha window</b>. No license fees, no seat
+          minimums, no lock-in. You keep your data and your repo. In return we ask only that you
+          <b>build loudly</b>: post in the Slack, file the rough edges you find, and let us ship a
+          reply. Founders who help shape the engine in alpha get permanent recognition in the project
+          and a fast lane on future feature requests.
+        </p>
+      </div>
+    </div>
+
+    <!-- ─── CTA ─── -->
+    <div class="cta">
+      <div class="cta-main">
+        <h2>Wildcat Founders: claim your alpha seat.</h2>
+        <p>The Center for Innovation cohort gets <b>direct engineering access</b>, dedicated Slack channel,
+          and one-on-one onboarding for your first simulation. Help shape the open-source platform of the
+          future for inventors. Built in the open, owned by the community.</p>
+        <div class="signoff">— We cannot wait to see what you build.</div>
+      </div>
+      <div class="cta-side">
+        <a class="cta-link" href="https://eustress.dev/download">
+          ▼ Download the Engine
+          <span class="url">eustress.dev/download</span>
+        </a>
+        <a class="cta-link alt" href="https://eustressdev.slack.com/">
+          # Join the Slack
+          <span class="url">eustressdev.slack.com</span>
+        </a>
+        <a class="cta-link red" href="https://eustress.dev">
+          ★ Learn the Engine
+          <span class="url">eustress.dev</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- ─── Footer ─── -->
+    <footer>
+      <div class="left">
+        <span class="badge">Alpha</span>
+        &nbsp; Open source · MIT-friendly licensing · Git-diffable projects · No vendor lock-in
+      </div>
+      <div>eustress.dev · #BearDown · #UofA · #UACI</div>
+    </footer>
+
+  </div>
+</div>
+</body>
+</html>

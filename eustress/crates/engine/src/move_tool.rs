@@ -22,7 +22,7 @@ use crate::gizmo_tools::TransformGizmoGroup;
 use crate::math_utils::{
     ray_plane_intersection, ray_to_line_segment_distance, calculate_rotated_aabb,
     find_surface_with_physics, find_surface_under_cursor_with_normal,
-    calculate_surface_offset, snap_to_grid,
+    calculate_surface_offset, snap_to_grid, snap_to_grid_in_frame,
 };
 
 // ============================================================================
@@ -693,15 +693,17 @@ fn handle_move_interaction(
                 } else { None }
             } else { None };
 
-            let target_pos = if let Some(p) = snap_override {
+            // ── Step 1: cursor-derived unconstrained position ──────────────────
+            // Use the cursor ray surface hit when available; fall back to the
+            // infinite horizontal plane through the group center.
+            let cursor_pos = if let Some(p) = snap_override {
                 p
-            } else if let Some((hit_point, hit_normal, _)) = surface_hit {
-                let offset = calculate_surface_offset(&leader_size, &leader_rot, &hit_normal);
-                hit_point + hit_normal * offset
+            } else if let Some((hit_point, hit_normal, _)) = surface_hit.as_ref() {
+                let offset = calculate_surface_offset(&leader_size, &leader_rot, hit_normal);
+                hit_point + *hit_normal * offset
             } else {
-                // Fallback: drag on horizontal plane
+                // No surface hit — fall back to horizontal plane at group_center height.
                 if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, state.group_center, Vec3::Y) {
-                    // Clamp t to prevent dragging into the sky producing infinity positions
                     let t = t.min(2000.0);
                     let ground = ray.origin + *ray.direction * t;
                     let offset = calculate_surface_offset(&leader_size, &leader_rot, &Vec3::Y);
@@ -710,15 +712,54 @@ fn handle_move_interaction(
                     leader_initial
                 }
             };
+            let cursor_pos = if cursor_pos.is_finite() { cursor_pos } else { leader_initial };
+
+            // ── Step 2: OBB-proximity face contact ─────────────────────────────
+            // At the cursor-derived position, sweep the dragged OBB against all
+            // unselected parts. If any face is within snap_size distance (gap or
+            // penetration), snap the dragged face flush and record the target's
+            // transform for face-frame grid snapping.
+            //
+            // This fires even when the cursor ray doesn't hit the target face —
+            // enabling "drag sideways against a wall" or "stack by approaching
+            // from the side" without needing the cursor to be over the surface.
+            let face_contact: Option<crate::math_utils::FaceContactResult> = if snap_override.is_none() {
+                let candidates: Vec<(Vec3, Vec3, Quat)> = snap_candidates_q
+                    .iter()
+                    .map(|(_, gt, bp)| {
+                        let t = gt.compute_transform();
+                        (t.translation, bp.size, t.rotation)
+                    })
+                    .collect();
+                crate::math_utils::find_face_contact(
+                    cursor_pos,
+                    leader_size,
+                    leader_rot,
+                    &candidates,
+                    settings.snap_size.max(1.0),
+                )
+            } else {
+                None
+            };
+
+            // Choose final pre-guide position: OBB-proximity contact beats cursor hit
+            // because it keeps the face flush even when the cursor drifts off the face.
+            let (target_pos, effective_normal, snap_frame) = if let Some(ref fc) = face_contact {
+                (
+                    fc.adjusted_center,
+                    Some(fc.contact_normal),
+                    Some((fc.target_center, fc.target_rot)),
+                )
+            } else if let Some((_, hit_normal, _)) = surface_hit.as_ref() {
+                (cursor_pos, Some(*hit_normal), None)
+            } else {
+                (cursor_pos, None, None)
+            };
 
             // Guard: reject NaN/infinity positions that crash the physics engine
             let target_pos = if target_pos.is_finite() { target_pos } else { leader_initial };
 
-            // Phase-1 smart alignment guides — if enabled and no
-            // explicit snap is already in play, check whether the
-            // leader's AABB center / edges align with any unselected
-            // part's plane. Per-axis override; only applied axes are
-            // nudged.
+            // ── Step 3: smart alignment guides ─────────────────────────────────
             let target_pos = if snap_override.is_none() {
                 if let Some(ref guides) = smart_guides {
                     if guides.enabled {
@@ -761,19 +802,29 @@ fn handle_move_interaction(
                 } else { target_pos }
             } else { target_pos };
 
+            // ── Step 4: grid snap (face-frame when touching a surface) ─────────
+            // When resting against a surface, snap in the TARGET part's local
+            // frame so the grid aligns with the face's edges — not world XYZ.
+            // snap_to_grid_in_frame already preserves the normal-axis component
+            // so no additional flush-normal correction is needed after it.
             let final_target = if settings.snap_enabled {
-                let snapped = snap_to_grid(target_pos, settings.snap_size);
-                if let Some((_, hit_normal, _)) = surface_hit {
-                    // Face-snap: when resting against another part's face, keep the
-                    // NORMAL-axis contact exact so the AABBs meet without a gap; only
-                    // snap the tangent axes to the grid. Without this, grid rounding
-                    // pushes the leader off the target face (visible as a gap).
-                    let n = hit_normal.normalize();
-                    let flush_normal = n * target_pos.dot(n);
-                    let snapped_tangent = snapped - n * snapped.dot(n);
-                    snapped_tangent + flush_normal
+                if let Some(n) = effective_normal {
+                    if let Some((frame_origin, frame_rot)) = snap_frame {
+                        // Face-frame snap: grid aligned to target part's surface axes.
+                        snap_to_grid_in_frame(
+                            target_pos, frame_origin, frame_rot, n, settings.snap_size,
+                        )
+                    } else {
+                        // Cursor-raycast hit only — world-space tangent snap + flush normal.
+                        let snapped = snap_to_grid(target_pos, settings.snap_size);
+                        let nn = n.normalize();
+                        let flush = nn * target_pos.dot(nn);
+                        let tangent = snapped - nn * snapped.dot(nn);
+                        tangent + flush
+                    }
                 } else {
-                    // Free-air ground drag — clamp so grid snap doesn't bury the part.
+                    // Free-air drag — world-space snap, prevent downward burial.
+                    let snapped = snap_to_grid(target_pos, settings.snap_size);
                     let min_y = target_pos.y;
                     Vec3::new(snapped.x, snapped.y.max(min_y), snapped.z)
                 }
@@ -781,15 +832,34 @@ fn handle_move_interaction(
                 target_pos
             };
 
+            // ── Step 5: face edge/corner alignment (lateral micro-snap) ────────
+            // When an OBB face contact was established, additionally snap the
+            // dragged part's face corners toward the nearest target face corner
+            // within FACE_SNAP_THRESHOLD. This produces the satisfying "click"
+            // when edges align.
+            let final_target = if let Some(ref fc) = face_contact {
+                let lateral_offset = crate::math_utils::face_snap_offset(
+                    leader_size, leader_rot, final_target,
+                    fc.target_size, fc.target_rot, fc.target_center,
+                    fc.contact_normal,
+                    crate::math_utils::FACE_SNAP_THRESHOLD,
+                );
+                final_target + lateral_offset
+            } else {
+                final_target
+            };
+
             let selected_set: std::collections::HashSet<Entity> = query.iter().map(|(e, ..)| e).collect();
             let pivot = leader_initial;
 
             // Phase-1 align-to-normal: when the user has the toggle on
             // AND we hit a surface, rotate the leader so its local +Y
-            // matches the hit normal, and rotate other entities by the
-            // same delta so group-relative orientation is preserved.
+            // matches the hit normal. Use OBB-contact normal when available
+            // (more stable than cursor-ray normal when dragging against walls).
             let align_rotation: Option<Quat> = if settings.align_to_normal_on_drop {
-                surface_hit.as_ref().and_then(|(_, normal, _)| {
+                let normal_opt = face_contact.as_ref().map(|fc| fc.contact_normal)
+                    .or_else(|| surface_hit.as_ref().map(|(_, n, _)| *n));
+                normal_opt.and_then(|normal| {
                     let n = normal.normalize();
                     if n.length_squared() < 0.9 { return None; }
                     // Delta from the leader's initial local +Y to the

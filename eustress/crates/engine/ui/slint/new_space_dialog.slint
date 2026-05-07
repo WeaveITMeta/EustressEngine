@@ -1,0 +1,146 @@
+// ============================================================================
+// New Space Dialog — two-step creation Step 2
+// Ask user for Space folder name (after Universe is created)
+// ============================================================================
+
+import { LineEdit, Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component NewSpaceDialog inherits Rectangle {
+    in property <string> universe-name: "";
+    in-out property <string> space-name: "";
+
+    callback on-create(/* space-name */ string);
+    callback on-cancel();
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Backdrop click closes
+    TouchArea {
+        clicked => { root.on-cancel(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 400px;
+        height: 240px;
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+
+        // Absorb clicks inside the card
+        TouchArea {
+            scroll-event(event) => { return accept; }
+        }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                border-radius: 8px;
+
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "New Space";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-cancel(); }
+                    }
+
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 17px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%;
+                    height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Body ──
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+
+                Text {
+                    text: "Universe: " + root.universe-name;
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                }
+
+                Text {
+                    text: "Enter a name for the first Space in this Universe:";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                }
+
+                Rectangle {
+                    height: 32px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Theme.input-border;
+
+                    input-field := LineEdit {
+                        text <=> root.space-name;
+                        placeholder-text: "Space Name";
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.on-cancel(); }
+                        width: 80px;
+                    }
+
+                    Button {
+                        text: "Create";
+                        clicked => { root.on-create(root.space-name); }
+                        width: 80px;
+                    }
+                }
+            }
+        }
+    }
+}

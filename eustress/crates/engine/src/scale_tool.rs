@@ -326,6 +326,8 @@ fn handle_scale_interaction(
     mut undo_stack: ResMut<crate::undo::UndoStack>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
     studio_state: Option<Res<crate::ui::StudioState>>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    auth: Option<Res<crate::auth::AuthState>>,
 ) {
     if !state.active {
         // Clear stale hover state so the gizmo doesn't briefly flash a
@@ -635,6 +637,31 @@ fn handle_scale_interaction(
             if !old_states.is_empty() {
                 undo_stack.push(crate::undo::Action::ScaleEntities { old_states, new_states });
             }
+
+            // Persist the final size + position to each entity's TOML file.
+            // This mirrors the move-tool path: load → patch → write.
+            let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+            for (entity, _, transform, basepart_opt, _, _, _) in query.iter() {
+                let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
+                let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
+                let size_changed = (initial_size - new_size).length() > 0.001;
+                let initial_pos  = state.initial_positions.get(&entity).copied().unwrap_or(transform.translation);
+                let pos_changed  = (initial_pos - transform.translation).length() > 0.001;
+                if !size_changed && !pos_changed { continue; }
+                if let Ok(inst_file) = instance_files.get(entity) {
+                    if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                        def.transform.position = transform.translation.to_array();
+                        def.transform.rotation = [
+                            transform.rotation.x, transform.rotation.y,
+                            transform.rotation.z, transform.rotation.w,
+                        ];
+                        def.transform.scale = new_size.to_array();
+                        let _ = crate::space::instance_loader::write_instance_definition_signed(
+                            &inst_file.toml_path, &mut def, stamp.as_ref(),
+                        );
+                    }
+                }
+            }
         }
 
         state.dragged_axis = None;
@@ -655,8 +682,6 @@ fn handle_scale_interaction(
 ///   cursor-driven drag code path.
 ///
 /// Matches the existing mouse-release in that it pushes a `ScaleEntities`
-/// undo action; TOML persistence for Scale is handled elsewhere and is
-/// not duplicated here.
 #[allow(clippy::too_many_arguments)]
 fn finalize_numeric_input_on_scale(
     mut committed: MessageReader<crate::numeric_input::NumericInputCommittedEvent>,
@@ -668,6 +693,8 @@ fn finalize_numeric_input_on_scale(
     ), With<Selected>>,
     parent_query: Query<&ChildOf>,
     mut undo_stack: ResMut<crate::undo::UndoStack>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    auth: Option<Res<crate::auth::AuthState>>,
 ) {
     use crate::numeric_input::NumericInputOwner;
 
@@ -757,6 +784,30 @@ fn finalize_numeric_input_on_scale(
 
         if !old_states.is_empty() {
             undo_stack.push(crate::undo::Action::ScaleEntities { old_states, new_states });
+        }
+
+        // Persist the committed size + position for each entity.
+        let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+        for (entity, transform, basepart_opt) in query.iter() {
+            let Some(initial_size) = state.initial_scales.get(&entity).copied() else { continue };
+            let new_size = basepart_opt.as_ref().map(|bp| bp.size).unwrap_or(initial_size);
+            let initial_pos = state.initial_positions.get(&entity).copied().unwrap_or(transform.translation);
+            let size_changed = (initial_size - new_size).length() > 0.001;
+            let pos_changed  = (initial_pos - transform.translation).length() > 0.001;
+            if !size_changed && !pos_changed { continue; }
+            if let Ok(inst_file) = instance_files.get(entity) {
+                if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                    def.transform.position = transform.translation.to_array();
+                    def.transform.rotation = [
+                        transform.rotation.x, transform.rotation.y,
+                        transform.rotation.z, transform.rotation.w,
+                    ];
+                    def.transform.scale = new_size.to_array();
+                    let _ = crate::space::instance_loader::write_instance_definition_signed(
+                        &inst_file.toml_path, &mut def, stamp.as_ref(),
+                    );
+                }
+            }
         }
 
         state.dragged_axis = None;

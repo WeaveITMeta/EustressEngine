@@ -664,25 +664,35 @@ export component ScriptEditor inherits Rectangle {
             HorizontalLayout {
                 spacing: 0px;
 
-                // Line number gutter — one Text per line, explicitly
-                // positioned on the shared 18px grid.
+                // Line number gutter — non-interactive Flickable whose
+                // viewport-y is bound directly to the summary editor's
+                // scroll position. This guarantees pixel-perfect sync
+                // without relying on the + scroll-y per-item trick (which
+                // can desync on fast scroll in Slint's reactive system).
                 Rectangle {
                     width: 52px;
                     background: #141414;
                     clip: true;
 
-                    for num[idx] in root.line-numbers-array: Text {
-                        x: 0px;
-                        y: idx * 18px + 5px;
-                        width: parent.width - 10px;
-                        height: 18px;
-                        text: num;
-                        color: Theme.text-secondary;
-                        font-size: 13px;
-                        font-family: "Consolas";
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                        wrap: no-wrap;
+                    Flickable {
+                        interactive: false;
+                        x: 0px; y: 0px; width: 100%; height: 100%;
+                        viewport-height: max(self.height, root.line-numbers-array.length * 18px + 10px);
+                        viewport-y: summary-edit.scroll-y;
+
+                        for num[idx] in root.line-numbers-array: Text {
+                            x: 0px;
+                            y: idx * 18px + 5px;
+                            width: parent.width - 10px;
+                            height: 18px;
+                            text: num;
+                            color: Theme.text-secondary;
+                            font-size: 13px;
+                            font-family: "Consolas";
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            wrap: no-wrap;
+                        }
                     }
                 }
 
@@ -737,48 +747,41 @@ export component ScriptEditor inherits Rectangle {
             HorizontalLayout {
                 spacing: 0px;
 
-                // Line numbers gutter — fixed 52px column
+                // Line numbers gutter — fixed 52px column.
+                // Uses a non-interactive Flickable whose viewport-y mirrors
+                // editor-area.scroll-y exactly. This avoids the per-item
+                // `+ scroll-y` binding pattern whose reactivity can lag on
+                // fast scroll, causing the gutter to visually split from the
+                // code text.
                 Rectangle {
                     width: 52px;
                     background: Theme.background-secondary;
                     clip: true;
 
-                    // Colored accent strips (one per line, 18px tall) when highlights active.
-                    // Per-child `+ scroll-y` on each strip so they move in
-                    // lockstep with the line numbers and code above. The
-                    // outer Rectangle is just a scope holder — Slint
-                    // doesn't allow `if … for …` in a single binding.
-                    if root.has-highlights: Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: 3px;
-                        height: 100%;
+                    code-gutter-flick := Flickable {
+                        interactive: false;
+                        x: 0px; y: 0px; width: 100%; height: 100%;
+                        viewport-height: max(self.height, root.line-numbers-array.length * 18px + 10px);
+                        viewport-y: editor-area.scroll-y;
 
-                        for hl[idx] in root.highlight-lines: Rectangle {
-                            x: 0;
-                            y: idx * 18px + 5px + editor-area.scroll-y;
-                            width: 3px;
-                            height: 18px;
-                            background: rgba(hl.r, hl.g, hl.b, 0.55);
+                        // Colored accent strips — 3px left-edge, one per line
+                        if root.has-highlights: Rectangle {
+                            x: 0; y: 0; width: 3px;
+                            height: code-gutter-flick.viewport-height;
+
+                            for hl[idx] in root.highlight-lines: Rectangle {
+                                x: 0;
+                                y: idx * 18px + 5px;
+                                width: 3px;
+                                height: 18px;
+                                background: rgba(hl.r, hl.g, hl.b, 0.55);
+                            }
                         }
-                    }
 
-                    // Line number text — one Text per line on the same
-                    // 18px grid as the code overlay. Per-child `+ scroll-y`
-                    // keeps each number aligned with its matching code line
-                    // as the Flickable viewport moves. Must mirror the token
-                    // overlay's per-child approach exactly, or the gutter
-                    // desyncs from code during fast scrolls.
-                    Rectangle {
-                        x: 0;
-                        y: 0;
-                        width: 100%;
-                        height: 100%;
-                        background: transparent;
-
+                        // Line number text
                         for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
-                            y: idx * 18px + 5px + editor-area.scroll-y;
+                            y: idx * 18px + 5px;
                             width: parent.width - 10px;
                             height: 18px;
                             text: num;

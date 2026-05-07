@@ -26,16 +26,73 @@ use bevy::window::PrimaryWindow;
 use eustress_common::classes::BasePart;
 use crate::ui::{StudioState, Tool, SlintUIFocus};
 use crate::math_utils::ray_intersects_part;
+use crate::selection_box::Selected;
 
 pub struct LockToolPlugin;
 
 impl Plugin for LockToolPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Update, (
+            apply_lock_to_selection,
             handle_lock_unlock_clicks,
             cancel_on_escape,
-        ));
+        ).chain());
     }
+}
+
+/// When the ribbon Lock/Unlock button is pressed it switches `current_tool`.
+/// This system fires on that transition and immediately applies the lock state
+/// to every currently-selected entity, then returns to the Select tool.
+/// This handles the "multi-select → Lock" case — the paint mode remains
+/// for targeting individual un-selected parts when nothing is selected.
+fn apply_lock_to_selection(
+    mut studio_state: Option<ResMut<StudioState>>,
+    mut selected: Query<(Entity, &mut BasePart, &Name), With<Selected>>,
+    instance_files: Query<&crate::space::instance_loader::InstanceFile>,
+    auth: Option<Res<crate::auth::AuthState>>,
+    mut prev_tool: Local<Tool>,
+) {
+    let Some(ref mut state) = studio_state else { return };
+    let current = state.current_tool;
+    let previous = *prev_tool;
+    *prev_tool = current;
+
+    // Only fire on the frame we ENTER Lock or Unlock mode.
+    let target_locked = match current {
+        Tool::Lock   => true,
+        Tool::Unlock => false,
+        _ => return,
+    };
+    if previous == current { return; }
+
+    // If nothing is selected, leave paint mode active so the user can
+    // click individual parts.
+    if selected.is_empty() { return; }
+
+    let stamp = auth.as_deref().and_then(crate::space::instance_loader::current_stamp);
+
+    for (entity, mut bp, name) in selected.iter_mut() {
+        if bp.locked == target_locked { continue; }
+        bp.locked = target_locked;
+        info!(
+            "{} '{}' {}",
+            if target_locked { "🔒" } else { "🔓" },
+            name.as_str(),
+            if target_locked { "locked" } else { "unlocked" },
+        );
+        // Persist to TOML.
+        if let Ok(inst_file) = instance_files.get(entity) {
+            if let Ok(mut def) = crate::space::instance_loader::load_instance_definition(&inst_file.toml_path) {
+                def.properties.locked = target_locked;
+                let _ = crate::space::instance_loader::write_instance_definition_signed(
+                    &inst_file.toml_path, &mut def, stamp.as_ref(),
+                );
+            }
+        }
+    }
+
+    // Return to Select so the user doesn't accidentally paint more.
+    state.current_tool = Tool::Select;
 }
 
 /// Click handler for both [`Tool::Lock`] and [`Tool::Unlock`]. Reads the

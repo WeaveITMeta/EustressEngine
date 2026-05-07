@@ -791,6 +791,80 @@ pub fn new_universe(world: &mut World) {
     }
 }
 
+/// Create a Universe folder with a confirmed name from the UI dialog.
+/// This creates the universe directory structure but does NOT automatically create a space.
+/// The caller is responsible for creating spaces afterward.
+pub fn create_universe_folder(world: &mut World, universe_name: &str) -> Result<PathBuf, String> {
+    let workspace_root = crate::space::workspace_root();
+    let sanitized_name = sanitize_filename(universe_name);
+
+    if sanitized_name.is_empty() {
+        return Err("Universe name cannot be empty".to_string());
+    }
+
+    let universe_path = workspace_root.join(&sanitized_name);
+
+    // Check if already exists
+    if universe_path.exists() {
+        return Err(format!("Universe '{}' already exists", sanitized_name));
+    }
+
+    // Create universe directory
+    match std::fs::create_dir(&universe_path) {
+        Ok(()) => {
+            // Create universe-level directories and copy engine default parts
+            let _ = std::fs::create_dir_all(universe_path.join(".eustress").join("assets").join("parts"));
+            let _ = std::fs::create_dir_all(universe_path.join(".eustress").join("assets").join("meshes"));
+            let _ = std::fs::create_dir_all(universe_path.join(".eustress").join("knowledge"));
+            copy_engine_default_parts(&universe_path.join(".eustress").join("assets").join("parts"));
+
+            // Create Spaces directory (will contain spaces)
+            let _ = std::fs::create_dir(&universe_path.join("Spaces"));
+
+            info!("✓ Universe '{}' created at: {}", sanitized_name, universe_path.display());
+            Ok(universe_path)
+        }
+        Err(e) => {
+            Err(format!("Failed to create universe directory: {}", e))
+        }
+    }
+}
+
+/// Create a Space in an existing Universe and open it.
+/// This is called after create_universe_folder() has created the universe.
+pub fn create_space_in_universe(world: &mut World, universe_path: &Path, space_name: &str) -> Result<PathBuf, String> {
+    let sanitized_name = sanitize_filename(space_name);
+
+    if sanitized_name.is_empty() {
+        return Err("Space name cannot be empty".to_string());
+    }
+
+    let spaces_dir = universe_path.join("Spaces");
+    let space_path = spaces_dir.join(&sanitized_name);
+
+    // Check if already exists
+    if space_path.exists() {
+        return Err(format!("Space '{}' already exists in this Universe", sanitized_name));
+    }
+
+    let author = world.get_resource::<crate::auth::AuthState>()
+        .and_then(|a| a.user.as_ref())
+        .map(|u| u.username.clone())
+        .unwrap_or_else(|| "Eustress User".to_string());
+
+    match scaffold_new_space(&spaces_dir, &sanitized_name, &author) {
+        Ok(result) => {
+            info!("✓ Space '{}' created at: {}", sanitized_name, result.space_root.display());
+            // Open the newly created space
+            open_space(world, &result.space_root);
+            Ok(result.space_root)
+        }
+        Err(e) => {
+            Err(format!("Failed to scaffold space: {}", e))
+        }
+    }
+}
+
 /// Scaffold a Space directory with all standard services and space.toml.
 fn scaffold_space(space_root: &Path) {
     let services = [
