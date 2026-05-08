@@ -1,0 +1,173 @@
+// ============================================================================
+// NumericField — reusable float text input with steppers and unit suffix.
+// ============================================================================
+//
+// Slint's stock SpinBox is integer-only, which forced earlier code (see
+// the `OptionControlRow` ×100 hack in `tool_options_bar.slint`) to round
+// values to two decimals and re-divide on the Rust side. This component
+// is the canonical replacement: a TextInput that accepts decimal numbers
+// directly, optional ▲/▼ steppers, optional inline unit suffix, and
+// emits `value-changed(string)` for the parent to parse.
+//
+// Use anywhere a float number is entered. Designed for the tool options
+// bar, the right-side tool panel, the Properties drawer, etc.
+
+import { Theme } from "theme.slint";
+
+export component NumericField inherits Rectangle {
+    /// Current numeric value (caller renders to a string for display).
+    in property <float>  value: 0;
+    /// Min / max bounds; field clamps and steppers stop at these.
+    in property <float>  min: -1000000000;
+    in property <float>  max:  1000000000;
+    /// Stepper increment (and arrow-key step). Pass 0 to hide steppers.
+    in property <float>  step: 0;
+    /// Optional unit suffix shown right-aligned inside the field.
+    in property <string> unit: "";
+    /// Decimal digits used when formatting the value back to text.
+    in property <int>    decimals: 2;
+
+    /// Emitted when the user finishes editing (Enter, focus loss, or stepper
+    /// click). The parent parses the string and updates the source of truth.
+    callback value-changed(string);
+
+    /// Internal: the buffer the user is typing. Synced from `value` whenever
+    /// the inbound value changes (e.g. Rust pushes a new value during a
+    /// programmatic update); committed to `value-changed` on Enter / blur.
+    property <string> buffer: format-value(root.value, root.decimals);
+    changed value => {
+        // Don't clobber the buffer mid-edit. The user might be partway
+        // through typing "1.5" → had "1." which parses to 1.0; if we
+        // resync we'd reset their cursor. Only resync when the inbound
+        // value differs meaningfully from what the buffer already shows.
+        if abs(parse-buffer(self.buffer) - root.value) > 0.0001 && !text-input.has-focus {
+            self.buffer = format-value(root.value, root.decimals);
+        }
+    }
+
+    width:  84px;
+    height: 22px;
+    background: Theme.input-background;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: text-input.has-focus ? Theme.accent-eustress : Theme.input-border;
+    animate background, border-color { duration: 80ms; easing: ease-out; }
+
+    HorizontalLayout {
+        padding-left:  6px;
+        padding-right: root.step > 0 ? 0px : 6px;
+        spacing: 0;
+
+        // Text + unit, left-aligned.
+        Rectangle {
+            horizontal-stretch: 1;
+            text-input := TextInput {
+                text <=> root.buffer;
+                color: Theme.text-primary;
+                font-size: 11px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+                single-line: true;
+                input-type: text;  // we accept "-", ".", and digits — let parser validate
+
+                edited => {
+                    // No-op while typing; commit on Enter or blur.
+                }
+                accepted => {
+                    commit();
+                }
+                changed has-focus => {
+                    if !self.has-focus {
+                        commit();
+                    }
+                }
+            }
+
+            if root.unit != "": Text {
+                x: parent.width - self.width - 4px;
+                y: (parent.height - self.height) / 2;
+                text: root.unit;
+                color: Theme.text-disabled;
+                font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+
+        // Steppers ▲ / ▼ (only if step > 0). Stacked vertically inside a
+        // 14px-wide column. Each is half-height of the field.
+        if root.step > 0: VerticalLayout {
+            width: 14px;
+            spacing: 0;
+            padding: 0;
+
+            Rectangle {
+                height: parent.height / 2;
+                background: up-touch.has-hover ? Theme.button-hover : transparent;
+                border-top-right-radius: Theme.radius-sm;
+                Text {
+                    text: "▲";
+                    color: Theme.text-secondary;
+                    font-size: 7px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                up-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        let next = clamp(root.value + root.step, root.min, root.max);
+                        root.buffer = format-value(next, root.decimals);
+                        root.value-changed(root.buffer);
+                    }
+                }
+            }
+            Rectangle {
+                height: parent.height / 2;
+                background: down-touch.has-hover ? Theme.button-hover : transparent;
+                border-bottom-right-radius: Theme.radius-sm;
+                Text {
+                    text: "▼";
+                    color: Theme.text-secondary;
+                    font-size: 7px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                down-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        let next = clamp(root.value - root.step, root.min, root.max);
+                        root.buffer = format-value(next, root.decimals);
+                        root.value-changed(root.buffer);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────
+
+    /// Commit the current buffer to the parent. Parses, clamps, and
+    /// re-formats so the user sees a clean number even if they typed
+    /// "1.50000" or "  3 ".
+    function commit() {
+        let parsed = parse-buffer(root.buffer);
+        let clamped = clamp(parsed, root.min, root.max);
+        root.buffer = format-value(clamped, root.decimals);
+        root.value-changed(root.buffer);
+    }
+
+    /// Slint expression-language string→float.
+    pure function parse-buffer(s: string) -> float {
+        s.to-float()
+    }
+
+    /// Format a float to N decimals. Slint has no `printf` and no
+    /// `to-fixed`; convention in this codebase is round-to-power-of-ten
+    /// + concat-empty-string. Caps at 3 decimals — anything finer would
+    /// be lost in the round-trip anyway.
+    pure function format-value(v: float, d: int) -> string {
+        d <= 0 ? Math.round(v) + ""
+            : d == 1 ? Math.round(v * 10) / 10 + ""
+            : d == 2 ? Math.round(v * 100) / 100 + ""
+            : Math.round(v * 1000) / 1000 + ""
+    }
+}

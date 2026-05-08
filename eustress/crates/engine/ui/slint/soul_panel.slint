@@ -20,6 +20,12 @@ export struct SoulScriptData {
     language: string,
     /// Full filesystem path (for "Reveal in Explorer" + context menu)
     file-path: string,
+    /// Source file (`.rune`/`.luau`/`.lua`) exists on disk in the script's folder.
+    /// Drives the "Built" vs "Not built" pill — independent of in-memory build state.
+    source-exists: bool,
+    /// Summary markdown (`.md`) exists on disk in the script's folder.
+    /// Drives the "Summarized" vs "Not summarized" pill.
+    summary-exists: bool,
 }
 
 component SectionHeader inherits Rectangle {
@@ -64,6 +70,12 @@ component ScriptRow inherits Rectangle {
     in property <string> error-message: "";
     in property <bool> selected: false;
     in property <bool> can-build: true;
+    /// Source file (`.rune`/`.luau`/`.lua`) exists on disk. Drives the
+    /// "Built"/"Not built" pill; in-memory `status` still wins for the
+    /// transient "building" / "error" / "success" states.
+    in property <bool> source-exists: false;
+    /// Summary `.md` exists on disk. Drives the "Summarized"/"Not summarized" pill.
+    in property <bool> summary-exists: false;
     property <bool> expanded: false;
 
     callback clicked();
@@ -121,10 +133,15 @@ component ScriptRow inherits Rectangle {
                 }
             }
 
-            // Info
-            VerticalBox {
+            // Info — centered vertically inside the 48px row so the two
+            // text lines sit on the same horizontal centerline as the
+            // 32px icon to their left. Default VerticalBox alignment was
+            // dropping them to the bottom of the row.
+            VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 2px;
+                alignment: center;
+                padding: 0px;
 
                 Text {
                     text: root.name;
@@ -133,16 +150,53 @@ component ScriptRow inherits Rectangle {
                     overflow: elide;
                 }
 
-                Text {
-                    text: root.status == "building" ? "Building..." :
-                          root.status == "error" ? "Build failed — click to expand" :
-                          root.status == "success" ? "Built " + root.last-build :
-                          root.status == "not-built" ? "Not built" :
-                          "Idle";
-                    color: root.status == "error" ? Theme.text-error :
-                           root.status == "success" ? Theme.text-success :
-                           Theme.text-secondary;
-                    font-size: 11px;
+                // Status row: source pill + summary pill side-by-side.
+                // Source pill is driven by disk presence (source-exists),
+                // overridden by transient runtime states (building/error)
+                // so live build feedback still shows. Summary pill is
+                // purely a disk check on the script's `.md`.
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    // Source pill
+                    Rectangle {
+                        width: src-text.preferred-width + 12px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: root.status == "building" ? Theme.accent-blue :
+                                    root.status == "error"    ? Theme.text-error :
+                                    root.source-exists        ? #2e7d32 :
+                                                                Theme.background-tertiary;
+                        src-text := Text {
+                            x: 6px;
+                            text: root.status == "building" ? "Building…" :
+                                  root.status == "error"    ? "Build failed" :
+                                  root.source-exists        ? "Built" :
+                                                              "Not built";
+                            color: root.source-exists || root.status == "building" || root.status == "error"
+                                   ? white : Theme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Summary pill
+                    Rectangle {
+                        width: sum-text.preferred-width + 12px;
+                        height: 16px;
+                        border-radius: 8px;
+                        background: root.summary-exists ? #5e35b1 : Theme.background-tertiary;
+                        sum-text := Text {
+                            x: 6px;
+                            text: root.summary-exists ? "Summarized" : "Not summarized";
+                            color: root.summary-exists ? white : Theme.text-secondary;
+                            font-size: 10px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
 
@@ -380,6 +434,8 @@ export component SoulPanel inherits Rectangle {
                         status: script.status;
                         last-build: script.last-build;
                         error-message: script.error-message;
+                        source-exists: script.source-exists;
+                        summary-exists: script.summary-exists;
                         can-build: true;
                         selected: script.entity-id == root.selected-script;
 
@@ -404,6 +460,8 @@ export component SoulPanel inherits Rectangle {
                         status: script.status;
                         last-build: script.last-build;
                         error-message: script.error-message;
+                        source-exists: script.source-exists;
+                        summary-exists: script.summary-exists;
                         can-build: false;
                         selected: script.entity-id == root.selected-script;
 
@@ -427,6 +485,8 @@ export component SoulPanel inherits Rectangle {
                         status: script.status;
                         last-build: script.last-build;
                         error-message: script.error-message;
+                        source-exists: script.source-exists;
+                        summary-exists: script.summary-exists;
                         can-build: false;
                         selected: script.entity-id == root.selected-script;
 
@@ -450,6 +510,8 @@ export component SoulPanel inherits Rectangle {
                         status: script.status;
                         last-build: script.last-build;
                         error-message: script.error-message;
+                        source-exists: script.source-exists;
+                        summary-exists: script.summary-exists;
                         can-build: false;
                         selected: script.entity-id == root.selected-script;
 

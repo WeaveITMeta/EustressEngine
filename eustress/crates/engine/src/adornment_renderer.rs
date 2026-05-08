@@ -267,17 +267,21 @@ fn axis_material(
         // Greater) so a fragment "wins" the depth test by carrying a
         // HIGHER depth value. A large POSITIVE `depth_bias` pushes
         // the gizmo fragment toward near, so opaque geometry in
-        // front of it loses the test. The previous code used
-        // `-1000.0`, which is the correct sign for forward-Z but
-        // pushes reverse-Z fragments toward far — the exact
-        // symptom the user caught 2026-04-23 ("gizmo gets
-        // occluded by the solid block behind it").
+        // front of it loses the test.
+        //
+        // 2026-05-08: `AlphaMode::Blend` materials run in the
+        // transparent pass, which in Bevy 0.18 doesn't apply the
+        // material's `depth_bias` reliably (the bias is consumed by
+        // the prepass + opaque pipelines, not the transparent
+        // pipeline). The gizmo arrow shaft was being occluded by
+        // the part it was inside even though its tip — drawn from a
+        // less-occluded angle — was visible. Switching to Opaque
+        // puts the handle on the opaque pipeline where depth_bias
+        // works as advertised. The cost is that overlapping handle
+        // siblings can occlude each other from oblique angles,
+        // which is far less noticeable than the part-occlusion bug.
         depth_bias: 1.0e6,
-        // Keep `AlphaMode::Blend` so handles don't write depth and
-        // therefore never occlude each other's siblings or the real
-        // scene — just beat the test against whatever is already
-        // there.
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::Opaque,
         // Don't drop back-faces — with the heavy bias the viewing
         // angle can put us "inside" the cone, and we want the user
         // to still see the handle.

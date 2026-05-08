@@ -159,7 +159,9 @@ impl slint::platform::Platform for SlintBevyPlatform {
         // Push a STRONG clone so the adapter survives until the engine
         // explicitly takes it — Slint itself doesn't keep this alive.
         SLINT_WINDOWS.with(|windows| {
-            windows.borrow_mut().push(adapter.clone());
+            let mut w = windows.borrow_mut();
+            w.push(adapter.clone());
+            debug!("🪧 SLINT_WINDOWS push (len now {})", w.len());
         });
         Ok(adapter)
     }
@@ -646,6 +648,71 @@ impl OutputConsole {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Persist the current buffer to `<space_root>/.eustress/output.log`.
+    /// Lossy on overflow (we cap at 10k entries), best-effort on I/O —
+    /// failures log to stderr but never panic, since the Output panel is a
+    /// developer convenience and must not block a space switch.
+    pub fn save_to_space(&self, space_root: &std::path::Path) {
+        let dir = space_root.join(".eustress");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("OutputConsole.save_to_space: mkdir {:?} failed: {}", dir, e);
+            return;
+        }
+        let path = dir.join("output.log");
+        let serializable: Vec<SerializableLogEntry> = self.entries.iter()
+            .map(|e| SerializableLogEntry {
+                level: match e.level {
+                    LogLevel::Info => "info",
+                    LogLevel::Warn => "warn",
+                    LogLevel::Error => "error",
+                    LogLevel::Debug => "debug",
+                }.to_string(),
+                message: e.message.clone(),
+                timestamp: e.timestamp.clone(),
+                source: e.source.clone(),
+            })
+            .collect();
+        match serde_json::to_string(&serializable) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("OutputConsole.save_to_space: write {:?} failed: {}", path, e);
+                }
+            }
+            Err(e) => eprintln!("OutputConsole.save_to_space: serialize failed: {}", e),
+        }
+    }
+
+    /// Load the buffer from `<space_root>/.eustress/output.log` if it exists.
+    /// Replaces the current entries. Missing file = empty buffer (first open).
+    pub fn load_from_space(&mut self, space_root: &std::path::Path) {
+        self.entries.clear();
+        let path = space_root.join(".eustress").join("output.log");
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let Ok(entries): Result<Vec<SerializableLogEntry>, _> = serde_json::from_str(&text)
+            else { return };
+        self.entries = entries.into_iter().map(|e| LogEntry {
+            level: match e.level.as_str() {
+                "warn" => LogLevel::Warn,
+                "error" => LogLevel::Error,
+                "debug" => LogLevel::Debug,
+                _ => LogLevel::Info,
+            },
+            message: e.message,
+            timestamp: e.timestamp,
+            source: e.source,
+        }).collect();
+    }
+}
+
+/// On-disk form of a log entry. The runtime `LogEntry` has a non-serializable
+/// `LogLevel` enum, so we carry the level as a string in JSON.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct SerializableLogEntry {
+    level: String,
+    message: String,
+    timestamp: String,
+    source: String,
 }
 
 /// Log entry
@@ -1129,6 +1196,10 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_asset_manager_to_slint)
             // Output log → EustressStream topic "log/output" (fires only when console changes)
             .add_systems(Update, publish_output_logs)
+            // Persist Output panel to <space>/.eustress/output.log on app exit
+            // so logs survive a quit. Per-space switches are handled in
+            // open_space() directly.
+            .add_systems(Update, save_output_on_exit)
             // Workshop Panel sync: IdeationPipeline → Slint (throttled internally)
             .add_systems(Update, sync_workshop_to_slint.after(SlintSystems::Drain))
             // Workshop session list sync: rescans SoulService/Workshop/
@@ -4718,22 +4789,63 @@ fn drain_slint_actions(
                                     }
                                 }
                             } else if inst.class_name == eustress_common::classes::ClassName::WorkshopConversation {
-                                // Open WorkshopConversation in Workshop panel
-                                // Read the session_id from the _instance.toml properties
+                                // Open WorkshopConversation in Workshop panel.
+                                //
+                                // Resolve session_id by:
+                                //   1. Parsing `[properties].session_id` out of the
+                                //      _instance.toml — authoritative; survives folder renames.
+                                //   2. Falling back to the parent folder name.
+                                //
+                                // We additionally validate that the resolved session_id's
+                                // entries.json actually exists; if not, we walk the path
+                                // looking for the first ancestor that contains entries.json.
+                                // This avoids the "Workshop\Workshop\entries.json" double-up
+                                // when LoadedFromFile.path is unexpectedly the Workshop folder
+                                // itself rather than a session subfolder.
                                 if let Ok((_, loaded)) = queries.loaded_from_file.get(entity) {
-                                    // The session_id is the folder name
-                                    let session_id = loaded.path.parent()
+                                    let space = res.space_root.as_ref().map(|sr| sr.0.as_path());
+
+                                    // 1. Try toml [properties].session_id
+                                    let from_toml: Option<String> = std::fs::read_to_string(&loaded.path)
+                                        .ok()
+                                        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                                        .and_then(|v| v.get("properties")
+                                            .and_then(|p| p.get("session_id"))
+                                            .and_then(|s| s.as_str())
+                                            .map(|s| s.to_string()))
+                                        .filter(|s| !s.is_empty());
+
+                                    // 2. Fall back to the toml's parent folder name
+                                    let from_path: Option<String> = loaded.path.parent()
                                         .and_then(|p| p.file_name())
                                         .and_then(|n| n.to_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    if !session_id.is_empty() {
-                                        // Load conversation in Workshop panel
+                                        .map(|s| s.to_string())
+                                        .filter(|s| !s.is_empty() && s != "Workshop");
+
+                                    // Validate by checking entries.json exists at
+                                    // <space>/SoulService/Workshop/<id>/entries.json
+                                    let validate = |id: &str| -> bool {
+                                        let p = crate::workshop::persistence::session_entries_path_in_space(space, id);
+                                        p.exists()
+                                    };
+
+                                    let session_id = from_toml
+                                        .filter(|id| validate(id))
+                                        .or_else(|| from_path.filter(|id| validate(id)));
+
+                                    if let Some(session_id) = session_id {
                                         if let Some(ref queue) = res.action_queue {
                                             queue.push(SlintAction::WorkshopLoadConversation(session_id.clone()));
                                         }
                                         if let Some(ref mut out) = res.output {
                                             out.info(format!("Opening conversation: {}", inst.name));
+                                        }
+                                    } else {
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!(
+                                                "Cannot open conversation '{}': no entries.json found (toml path: {})",
+                                                inst.name, loaded.path.display()
+                                            ));
                                         }
                                     }
                                 }
@@ -4772,8 +4884,93 @@ fn drain_slint_actions(
                     let entity_opt = res.explorer_state.as_ref()
                         .and_then(|es| es.entity_id_cache.get(&id).copied());
                     if let Some(entity) = entity_opt {
+                        // 1. Update the in-memory Instance name so the
+                        //    Properties panel and Explorer label refresh.
                         if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
-                            inst.name = name;
+                            inst.name = name.clone();
+                        }
+                        // 2. If the entity is folder-backed (Part, SoulScript,
+                        //    Model, GUI containers, etc.), rename the parent
+                        //    folder on disk and update LoadedFromFile.path so
+                        //    subsequent saves go to the right place.
+                        //
+                        //    Without this, the Explorer shows the new name but
+                        //    the on-disk folder keeps the old one, the
+                        //    `_instance.toml` writes to the old path, and on
+                        //    reload the user sees the rename revert.
+                        let old_path = queries.loaded_from_file.get(entity)
+                            .ok()
+                            .map(|(_, lff)| lff.path.clone());
+                        if let Some(old_path) = old_path {
+                            // The on-disk identity is the FOLDER, not the
+                            // marker file inside it. If LoadedFromFile.path
+                            // points at `<folder>/_instance.toml`, walk up to
+                            // the folder; otherwise it already IS the folder.
+                            let old_folder = if old_path.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s == "_instance.toml" || s == "_service.toml")
+                                .unwrap_or(false)
+                            {
+                                old_path.parent().map(|p| p.to_path_buf())
+                            } else if old_path.is_dir() {
+                                Some(old_path.clone())
+                            } else {
+                                old_path.parent().map(|p| p.to_path_buf())
+                            };
+                            if let Some(old_folder) = old_folder {
+                                let new_folder = old_folder.with_file_name(&name);
+                                if old_folder != new_folder {
+                                    match std::fs::rename(&old_folder, &new_folder) {
+                                        Ok(_) => {
+                                            // Cascade `<old>.<ext>` → `<new>.<ext>`
+                                            // inside the renamed folder for
+                                            // SoulScript code + summary files.
+                                            let old_name = old_folder.file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            if !old_name.is_empty() {
+                                                let exts = ["rune", "luau", "soul", "lua", "md"];
+                                                for ext in &exts {
+                                                    let old_child = new_folder.join(format!("{}.{}", old_name, ext));
+                                                    let new_child = new_folder.join(format!("{}.{}", name, ext));
+                                                    if old_child.exists() && !new_child.exists() {
+                                                        let _ = std::fs::rename(&old_child, &new_child);
+                                                    }
+                                                }
+                                            }
+                                            // Update LoadedFromFile.path so
+                                            // future saves target the new
+                                            // location. Reconstruct the same
+                                            // file/folder shape relative to
+                                            // the new folder root.
+                                            if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(entity) {
+                                                let suffix = old_path.strip_prefix(&old_folder)
+                                                    .ok()
+                                                    .map(|p| p.to_path_buf());
+                                                lff.path = match suffix {
+                                                    Some(s) if !s.as_os_str().is_empty() => new_folder.join(s),
+                                                    _ => new_folder.clone(),
+                                                };
+                                            }
+                                            if let Some(ref mut out) = res.output {
+                                                out.info(format!(
+                                                    "Renamed {} → {}",
+                                                    old_folder.display(), new_folder.display(),
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(ref mut out) = res.output {
+                                                out.warn(format!(
+                                                    "Rename failed for {}: {}",
+                                                    old_folder.display(), e,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 } else {
@@ -8400,6 +8597,12 @@ fn sync_tool_options_bar_to_slint(
         ui.set_tool_options_visible(bar_state.visible);
     }
 
+    // Layout flag — bar (default) vs. right-side panel for form-only tools.
+    let current_use_panel = ui.get_tool_options_use_panel();
+    if current_use_panel != bar_state.use_panel {
+        ui.set_tool_options_use_panel(bar_state.use_panel);
+    }
+
     // Nothing else to sync when the bar is hidden; avoids rebuilding
     // the model every frame while no tool is active.
     if !bar_state.visible { return; }
@@ -9022,6 +9225,19 @@ fn sync_bevy_to_slint(
     
     // Workshop Panel sync is handled by the dedicated sync_workshop_to_slint system
     // (runs on its own schedule to avoid adding workshop as a parameter here)
+}
+
+/// Persist the Output console buffer to `<space>/.eustress/output.log` when
+/// `AppExit` fires. The space-switch path saves on its own; this catches
+/// quits, alt-F4, and crashes that propagate through the normal exit flow.
+fn save_output_on_exit(
+    mut exit: bevy::prelude::MessageReader<bevy::app::AppExit>,
+    console: Option<Res<OutputConsole>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
+    if exit.read().next().is_none() { return; }
+    let (Some(console), Some(space_root)) = (console, space_root) else { return };
+    console.save_to_space(&space_root.0);
 }
 
 /// Publishes new `OutputConsole` log entries to the EustressStream `"log/output"` topic.
@@ -9981,6 +10197,22 @@ fn convert_key_to_slint_text(key: &bevy::input::keyboard::Key) -> slint::SharedS
         BevyKey::Shift => SlintKey::Shift.into(),
         BevyKey::Control => SlintKey::Control.into(),
         BevyKey::Alt => SlintKey::Alt.into(),
+        // Function keys — needed so F2-rename, F12-go-to-definition,
+        // Shift+F12-find-references, etc. reach Slint FocusScopes. Without
+        // these mappings the keys fall through to SharedString::default()
+        // and `forward_keyboard_to_slint` drops them as "no text".
+        BevyKey::F1  => SlintKey::F1.into(),
+        BevyKey::F2  => SlintKey::F2.into(),
+        BevyKey::F3  => SlintKey::F3.into(),
+        BevyKey::F4  => SlintKey::F4.into(),
+        BevyKey::F5  => SlintKey::F5.into(),
+        BevyKey::F6  => SlintKey::F6.into(),
+        BevyKey::F7  => SlintKey::F7.into(),
+        BevyKey::F8  => SlintKey::F8.into(),
+        BevyKey::F9  => SlintKey::F9.into(),
+        BevyKey::F10 => SlintKey::F10.into(),
+        BevyKey::F11 => SlintKey::F11.into(),
+        BevyKey::F12 => SlintKey::F12.into(),
         _ => slint::SharedString::default(),
     }
 }
@@ -10988,6 +11220,14 @@ fn sync_unified_explorer_to_slint(
         explorer_state.last_tree_hash = new_hash;
         let model = std::rc::Rc::new(slint::VecModel::from(tree_nodes));
         ui.set_tree_nodes(slint::ModelRc::from(model));
+
+        // Mirror visible-only ids to Slint so the drag-target row resolver
+        // in explorer.slint can index by visible-row index without having
+        // to filter hidden rows itself.
+        let visible_model = std::rc::Rc::new(slint::VecModel::from(
+            explorer_state.visible_node_order.clone(),
+        ));
+        ui.set_visible_node_ids(slint::ModelRc::from(visible_model));
     }
 
     // Process pending scroll-to-selection — driven by 3D viewport
@@ -14314,8 +14554,55 @@ fn sync_soul_panel_to_slint(
     luau_scripts: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauScript)>,
     luau_locals: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauLocalScript)>,
     luau_modules: Query<(Entity, &eustress_common::classes::Instance, &eustress_common::luau::LuauModuleScript)>,
+    loaded_from_file: Query<&crate::space::LoadedFromFile>,
     mut last_hash: Local<u64>,
 ) {
+    // Helper: given an entity's LoadedFromFile path (which usually points at
+    // the `_instance.toml` marker inside the script folder), find that
+    // folder and probe the disk for `<name>.<ext>` source files plus the
+    // `<name>.md` summary. Returns `(source_exists, summary_exists)`.
+    fn probe_disk_status(
+        entity: Entity,
+        script_name: &str,
+        loaded_from_file: &Query<&crate::space::LoadedFromFile>,
+        explicit_path: Option<&std::path::Path>,
+    ) -> (bool, bool) {
+        // Resolve the script's enclosing folder.
+        let folder: Option<std::path::PathBuf> = if let Some(p) = explicit_path {
+            // Luau scripts hand us their `.luau` source path directly —
+            // the folder is its parent.
+            p.parent().map(|p| p.to_path_buf())
+        } else if let Ok(lff) = loaded_from_file.get(entity) {
+            let p = &lff.path;
+            // Walk past the `_instance.toml` marker to its parent folder.
+            let leaf = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if leaf == "_instance.toml" || leaf == "_service.toml" {
+                p.parent().map(|p| p.to_path_buf())
+            } else if p.is_dir() {
+                Some(p.clone())
+            } else {
+                p.parent().map(|p| p.to_path_buf())
+            }
+        } else {
+            None
+        };
+        let Some(folder) = folder else { return (false, false); };
+
+        // Source file: try `<name>.<ext>` for the four supported runtimes,
+        // then fall back to legacy `Source.<ext>`.
+        let source_exts = ["rune", "luau", "lua", "soul"];
+        let source_exists = source_exts.iter().any(|ext| {
+            folder.join(format!("{}.{}", script_name, ext)).is_file()
+                || folder.join(format!("Source.{}", ext)).is_file()
+        });
+
+        // Summary: `<name>.md` or legacy `Summary.md`.
+        let summary_exists = folder.join(format!("{}.md", script_name)).is_file()
+            || folder.join("Summary.md").is_file();
+
+        (source_exists, summary_exists)
+    }
+
     let Some(slint_context) = slint_context else { return };
     let ui = &slint_context.window;
 
@@ -14364,6 +14651,9 @@ fn sync_soul_panel_to_slint(
             SoulBuildStatus::Failed   => "error",
             SoulBuildStatus::Stale    => "idle",
         };
+        let (source_exists, summary_exists) = probe_disk_status(
+            entity, &inst.name, &loaded_from_file, None,
+        );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
             name: inst.name.clone().into(),
@@ -14373,6 +14663,8 @@ fn sync_soul_panel_to_slint(
             line_count: data.source.lines().count() as i32,
             language: "rune".into(),
             file_path: "".into(),
+            source_exists,
+            summary_exists,
         });
         rune_count += 1;
     }
@@ -14382,6 +14674,11 @@ fn sync_soul_panel_to_slint(
             (None, true) => ("success", String::new()),
             (None, false) => ("not-built", String::new()),
         };
+        let explicit = std::path::Path::new(&s.source_path);
+        let (source_exists, summary_exists) = probe_disk_status(
+            entity, &inst.name, &loaded_from_file,
+            if s.source_path.is_empty() { None } else { Some(explicit) },
+        );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
             name: inst.name.clone().into(),
@@ -14391,6 +14688,8 @@ fn sync_soul_panel_to_slint(
             line_count: s.source.lines().count() as i32,
             language: "luau-server".into(),
             file_path: s.source_path.clone().into(),
+            source_exists,
+            summary_exists,
         });
         luau_server_count += 1;
     }
@@ -14400,6 +14699,11 @@ fn sync_soul_panel_to_slint(
             (None, true) => ("success", String::new()),
             (None, false) => ("not-built", String::new()),
         };
+        let explicit = std::path::Path::new(&s.source_path);
+        let (source_exists, summary_exists) = probe_disk_status(
+            entity, &inst.name, &loaded_from_file,
+            if s.source_path.is_empty() { None } else { Some(explicit) },
+        );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
             name: inst.name.clone().into(),
@@ -14409,6 +14713,8 @@ fn sync_soul_panel_to_slint(
             line_count: s.source.lines().count() as i32,
             language: "luau-client".into(),
             file_path: s.source_path.clone().into(),
+            source_exists,
+            summary_exists,
         });
         luau_client_count += 1;
     }
@@ -14418,6 +14724,11 @@ fn sync_soul_panel_to_slint(
             (None, true) => ("success", String::new()),
             (None, false) => ("not-built", String::new()),
         };
+        let explicit = std::path::Path::new(&s.source_path);
+        let (source_exists, summary_exists) = probe_disk_status(
+            entity, &inst.name, &loaded_from_file,
+            if s.source_path.is_empty() { None } else { Some(explicit) },
+        );
         items.push(SoulScriptData {
             entity_id: entity.index().index() as i32,
             name: inst.name.clone().into(),
@@ -14427,6 +14738,8 @@ fn sync_soul_panel_to_slint(
             line_count: s.source.lines().count() as i32,
             language: "luau-module".into(),
             file_path: s.source_path.clone().into(),
+            source_exists,
+            summary_exists,
         });
         luau_module_count += 1;
     }

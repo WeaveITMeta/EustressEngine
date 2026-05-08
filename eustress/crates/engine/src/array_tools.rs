@@ -254,6 +254,12 @@ impl ModalTool for LinearArray {
     fn cancel(&mut self, _commands: &mut Commands) {
         self.ready_to_commit = false;
     }
+
+    /// Pattern tools don't pick anything in the viewport — selection is
+    /// the source, controls are the parameters. The right-side ToolPanel
+    /// fits a vertical form (count + step XYZ + Apply) far better than
+    /// the bar's horizontal pill.
+    fn prefers_panel(&self) -> bool { true }
 }
 
 // ============================================================================
@@ -430,6 +436,12 @@ impl ModalTool for RadialArray {
     fn cancel(&mut self, _commands: &mut Commands) {
         self.ready_to_commit = false;
     }
+
+    /// Pattern tools don't pick anything in the viewport — selection is
+    /// the source, controls are the parameters. The right-side ToolPanel
+    /// fits a vertical form (count + step XYZ + Apply) far better than
+    /// the bar's horizontal pill.
+    fn prefers_panel(&self) -> bool { true }
 }
 
 // ============================================================================
@@ -489,17 +501,17 @@ impl ModalTool for GridArray {
             ToolOptionControl {
                 id: "step_x".into(), label: "Step X".into(),
                 kind: ToolOptionKind::Number { value: self.step_x, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
-                advanced: true,
+                advanced: false,
             },
             ToolOptionControl {
                 id: "step_y".into(), label: "Step Y".into(),
                 kind: ToolOptionKind::Number { value: self.step_y, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
-                advanced: true,
+                advanced: false,
             },
             ToolOptionControl {
                 id: "step_z".into(), label: "Step Z".into(),
                 kind: ToolOptionKind::Number { value: self.step_z, min: 0.1, max: 100.0, step: 0.1, unit: "studs".into() },
-                advanced: true,
+                advanced: false,
             },
             ToolOptionControl {
                 id: "commit".into(), label: "Apply".into(),
@@ -579,6 +591,12 @@ impl ModalTool for GridArray {
     fn cancel(&mut self, _commands: &mut Commands) {
         self.ready_to_commit = false;
     }
+
+    /// Pattern tools don't pick anything in the viewport — selection is
+    /// the source, controls are the parameters. The right-side ToolPanel
+    /// fits a vertical form (count + step XYZ + Apply) far better than
+    /// the bar's horizontal pill.
+    fn prefers_panel(&self) -> bool { true }
 }
 
 // ============================================================================

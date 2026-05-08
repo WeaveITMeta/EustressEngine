@@ -384,18 +384,27 @@ export component SidePanelHeader inherits Rectangle {
 
         Rectangle { horizontal-stretch: 1; }
 
-        if root.count > 0: Rectangle {
+        // Badge sits in its own VerticalLayout slot so it can vertically
+        // center inside the 36px header. Text inside the pill fills the
+        // pill's full width/height so horizontal/vertical-alignment apply.
+        if root.count > 0: VerticalLayout {
             width: 24px;
-            height: 18px;
-            border-radius: 9px;
-            background: Theme.accent-blue;
-            Text {
-                text: root.count;
-                color: white;
-                font-size: 10px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            alignment: center;
+            Rectangle {
+                width: 24px;
+                height: 18px;
+                border-radius: 9px;
+                background: Theme.accent-blue;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.count;
+                    color: white;
+                    font-size: 10px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
     }

@@ -82,8 +82,18 @@ pub fn orbit_camera_system(
     mut mouse_motion_events: MessageReader<bevy::input::mouse::MouseMotion>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut mouse_wheel_events: MessageReader<bevy::input::mouse::MouseWheel>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
     _time: Res<Time>,
 ) {
+    // When the cursor is over a Slint UI panel (Explorer, Properties, Soul,
+    // SoulScript editor, etc.) the wheel belongs to that panel's scroll —
+    // not the camera. Drain the events so they don't accumulate and zoom
+    // when the cursor returns to the viewport.
+    let ui_owns_wheel = ui_focus.as_ref().map(|f| f.has_focus).unwrap_or(false);
+    if ui_owns_wheel {
+        for _ in mouse_wheel_events.read() {}
+    }
+
     for (mut transform, mut camera) in camera_query.iter_mut() {
         if camera.mode != CameraMode::Orbit {
             continue;
@@ -111,9 +121,11 @@ pub fn orbit_camera_system(
             }
         }
 
-        // Mouse wheel - zoom
-        for event in mouse_wheel_events.read() {
-            zoom_delta += event.y * camera.speed * 0.1;
+        // Mouse wheel - zoom (skipped when UI owns the wheel, see top of fn)
+        if !ui_owns_wheel {
+            for event in mouse_wheel_events.read() {
+                zoom_delta += event.y * camera.speed * 0.1;
+            }
         }
 
         // Apply rotation

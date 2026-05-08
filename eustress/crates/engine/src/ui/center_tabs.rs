@@ -176,6 +176,18 @@ pub struct CenterTabEntry {
 // Center Tab Manager Resource
 // ============================================================================
 
+/// Snapshot of a space's open tabs. Captured on `open_space` and restored
+/// when the user navigates back to the same space.
+#[derive(Debug, Clone, Default)]
+pub struct CenterTabSpaceSnapshot {
+    /// Non-Scene tabs (Scene is always rebuilt as index 0 by the manager).
+    pub tabs: Vec<CenterTabEntry>,
+    /// Active tab index in the original layout (clamped on restore).
+    pub active_tab: usize,
+    /// Recently closed tabs at time of snapshot.
+    pub closed_tabs: Vec<CenterTabEntry>,
+}
+
 /// Bevy Resource managing all open center tabs
 #[derive(Resource)]
 pub struct CenterTabManager {
@@ -191,6 +203,10 @@ pub struct CenterTabManager {
     pub focus_only: bool,
     /// Recently closed tabs (stack — most recent on top, max 20)
     pub closed_tabs: Vec<CenterTabEntry>,
+    /// Per-space tab snapshots. Keyed by absolute space path. Restored on
+    /// `open_space`. Tabs referencing entities are filtered to drop stale
+    /// references (entity IDs are not stable across world reloads).
+    pub space_snapshots: std::collections::HashMap<PathBuf, CenterTabSpaceSnapshot>,
 }
 
 impl Default for CenterTabManager {
@@ -216,11 +232,86 @@ impl Default for CenterTabManager {
             dirty: true,
             focus_only: false,
             closed_tabs: Vec::new(),
+            space_snapshots: std::collections::HashMap::new(),
         }
     }
 }
 
 impl CenterTabManager {
+    // ====================================================================
+    // Per-Space Snapshots
+    // ====================================================================
+
+    /// Capture the current non-Scene tabs into a snapshot keyed by `space_root`.
+    /// Called from `open_space` BEFORE the world is cleared. The Scene tab
+    /// (index 0) is always pinned and rebuilt by `Default::default()`, so we
+    /// skip it here.
+    pub fn snapshot_for_space(&mut self, space_root: &Path) {
+        let non_scene_tabs: Vec<CenterTabEntry> = self.tabs.iter()
+            .filter(|t| !matches!(t.tab_type, CenterTabType::Scene))
+            .cloned()
+            .collect();
+        // Active tab index in original space — translate to the same space
+        // when restored. If the Scene tab was active (index 0), the snapshot
+        // records 0 and the restore keeps Scene active.
+        let snapshot = CenterTabSpaceSnapshot {
+            tabs: non_scene_tabs,
+            active_tab: self.active_tab,
+            closed_tabs: self.closed_tabs.clone(),
+        };
+        self.space_snapshots.insert(space_root.to_path_buf(), snapshot);
+    }
+
+    /// Restore tabs from a previous snapshot of `space_root`. If no snapshot
+    /// exists (first visit), leaves the Default-only Scene tab in place.
+    /// Tabs whose `entity` reference would be stale after the world reload
+    /// are dropped — file-based tabs (CodeEditor, Document, ImageViewer,
+    /// VideoPlayer, WebBrowser, ApiBrowser, ServicesBrowser) survive.
+    /// Entity-based tabs (SoulScript, ParametersEditor) survive only when
+    /// they also carry a `file_path`; otherwise they're filtered.
+    pub fn restore_for_space(&mut self, space_root: &Path) {
+        // Always start with a fresh Scene tab in slot 0, but preserve the
+        // snapshots map across the reset so other spaces' state survives.
+        let preserved_snapshots = std::mem::take(&mut self.space_snapshots);
+        *self = Self::default();
+        self.space_snapshots = preserved_snapshots;
+        let Some(snapshot) = self.space_snapshots_take(space_root) else {
+            return;
+        };
+        for tab in snapshot.tabs.into_iter() {
+            let keep = match tab.tab_type {
+                CenterTabType::Scene => false, // Scene is always slot 0; never duplicate.
+                CenterTabType::SoulScript { .. }
+                | CenterTabType::ParametersEditor => tab.file_path.is_some(),
+                _ => true,
+            };
+            if !keep { continue; }
+            // Drop the stale entity reference; any consumer that needs an
+            // Entity must re-resolve it from `file_path` on first paint.
+            let mut restored = tab;
+            restored.entity = None;
+            // Re-stamp the id from this manager's counter so it doesn't
+            // collide with the rebuilt Scene tab (id=0).
+            restored.id = self.next_id();
+            self.tabs.push(restored);
+        }
+        // Restore active-tab clamped to current tab count. Snapshot's
+        // active_tab was an index into [Scene, ...] in the previous space;
+        // since we rebuilt with Scene at 0 plus the same non-Scene tabs in
+        // order, the index stays valid as long as nothing was filtered.
+        let target = snapshot.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.active_tab = target;
+        self.closed_tabs = snapshot.closed_tabs;
+        self.dirty = true;
+        self.focus_only = false;
+    }
+
+    /// Helper — pull a snapshot out of the map without holding a borrow on
+    /// `self.space_snapshots` while we mutate `self.tabs`.
+    fn space_snapshots_take(&mut self, space_root: &Path) -> Option<CenterTabSpaceSnapshot> {
+        self.space_snapshots.remove(space_root)
+    }
+
     // ====================================================================
     // Tab Lifecycle
     // ====================================================================

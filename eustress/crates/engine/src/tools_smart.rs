@@ -974,6 +974,11 @@ impl ModalTool for ModelReflect {
     fn cancel(&mut self, _commands: &mut Commands) {
         self.ready_to_commit = false;
     }
+
+    /// Mirror's UX is form-only — the user picks Plane / Linked /
+    /// Weld Fix-up and clicks Apply, no viewport picking. The
+    /// right-side panel fits this better than the bar.
+    fn prefers_panel(&self) -> bool { true }
 }
 
 // ============================================================================

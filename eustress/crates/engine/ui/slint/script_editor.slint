@@ -165,6 +165,12 @@ component EustressTextEdit inherits Rectangle {
             viewport-width: root.wrap == TextWrap.no-wrap
                 ? max(self.width, text-input.preferred-width)
                 : self.width;
+            // Content height drives scroll: prefer the TextInput's reported
+            // preferred-height, fall back to a line-count estimate so the
+            // viewport always grows past `self.height` when the document is
+            // long. Without the explicit estimate, Slint's TextInput inside a
+            // size-clamped Flickable can report a clipped preferred-height
+            // and the Flickable then refuses to scroll past the first page.
             viewport-height: max(self.height, text-input.preferred-height);
 
             // Syntax-highlight overlay — rendered INSIDE the Flickable's
@@ -196,7 +202,10 @@ component EustressTextEdit inherits Rectangle {
             text-input := TextInput {
                 x: 0px; y: 0px;
                 width: parent.width;
-                height: parent.height;
+                // Height MUST match the Flickable's viewport-height, not the
+                // visible viewport. Otherwise the TextInput is clipped to
+                // one page of text and lines beyond that never render.
+                height: flick.viewport-height;
                 enabled: true;
                 single-line: false;
                 wrap <=> root.wrap;

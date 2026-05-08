@@ -14,7 +14,8 @@
 // background + hairline + shadow per TOOLSET_UX.md §6.1.
 
 import { Theme } from "theme.slint";
-import { ComboBox, SpinBox } from "std-widgets.slint";
+import { ComboBox } from "std-widgets.slint";
+import { NumericField } from "numeric_field.slint";
 
 // ─ Data struct mirroring `ToolOptionControl` on the Rust side ─────────────
 //
@@ -75,32 +76,22 @@ component OptionControlRow inherits HorizontalLayout {
         vertical-alignment: center;
     }
 
-    // Number: SpinBox.
-    if root.data.kind == "number": Rectangle {
-        width: 84px;  height: 22px;
-        background: Theme.input-background;
-        border-radius: Theme.radius-sm;
-        border-width: 1px;
-        border-color: Theme.input-border;
-
-        spin := SpinBox {
-            width: 100%;  height: 100%;
-            value: Math.round(root.data.number-value * 100);
-            minimum: Math.round(root.data.number-min * 100);
-            maximum: Math.round(root.data.number-max * 100);
-            step-size: Math.max(1, Math.round(root.data.number-step * 100));
-            edited(v) => {
-                // Slint SpinBox only supports ints — we store × 100 to
-                // give users 2 decimals of precision. Rust side divides.
-                root.value-changed(root.data.id, (v / 100.0) + "");
-            }
-        }
-        if root.data.number-unit != "": Text {
-            x: parent.width - unit-text-width - 4px;  y: 3px;
-            text: root.data.number-unit;
-            color: Theme.text-disabled;
-            font-size: 10px;
-            property <length> unit-text-width: 20px;
+    // Number: NumericField (text-entry float input with steppers and unit).
+    // Replaces a previous SpinBox-×100 hack — Slint's stock SpinBox is
+    // integer-only, so floats had to be stored as ints multiplied by 100.
+    // NumericField handles decimals natively and emits a string the parent
+    // forwards verbatim to the tool's `on_option_changed`.
+    if root.data.kind == "number": NumericField {
+        width: 96px;
+        height: 22px;
+        value:    root.data.number-value;
+        min:      root.data.number-min;
+        max:      root.data.number-max;
+        step:     root.data.number-step;
+        unit:     root.data.number-unit;
+        decimals: 2;
+        value-changed(s) => {
+            root.value-changed(root.data.id, s);
         }
     }
 
@@ -209,12 +200,20 @@ export component ToolOptionsBar inherits Rectangle {
     opacity: root.visible-when ? 1.0 : 0.0;
     animate height  { duration: Theme.panel-anim-duration * Theme.motion-scale; easing: ease-in-out; }
     animate opacity { duration: Theme.panel-anim-duration * Theme.motion-scale; easing: ease-in-out; }
-    // Fixed cap at 900px. The instantiator (main.slint) positions the
-    // bar inside the viewport area and can override `width` if a
-    // narrower clamp is desired. Referencing `parent.width` at
-    // component-root definition time is a Slint design rule we can't
-    // break, and bare-float × length breaks the type system.
-    width: 900px;
+    /// Upper bound for the bar's auto-sized width. The instantiator
+    /// passes `parent.width - 32px` so the bar can't overflow the
+    /// viewport on narrow displays. 0 = no cap (use raw content width).
+    in property <length> available-width: 0px;
+
+    // Auto-size to content. The HorizontalLayout's `preferred-width`
+    // reflects the actual sum of icon-disc + title-stack + visible
+    // controls + cancel button + padding — so a 3-control tool
+    // (Grid Array's "3×1×3 + Apply") renders as a tight ~480 px pill
+    // instead of swimming inside the prior 900-px shell. 320px floor
+    // keeps the bar readable when only the title + step-label show.
+    width: root.available-width > 0px
+        ? min(max(main-row.preferred-width + 16px, 320px), root.available-width)
+        : max(main-row.preferred-width + 16px, 320px);
     background: Theme.panel-glass;
     border-radius: Theme.radius-lg;
     border-width: 1px;
@@ -246,7 +245,7 @@ export component ToolOptionsBar inherits Rectangle {
     // A prominent green Commit button appears when the tool exposes a
     // control with id "commit"; clicking it routes the same
     // control-changed event that the old tiny toggle did.
-    HorizontalLayout {
+    main-row := HorizontalLayout {
         x: 0;
         y: 0;
         height: 44px;
@@ -328,8 +327,9 @@ export component ToolOptionsBar inherits Rectangle {
             }
         }
 
-        // Spacer pushes ⋯ / Commit / × to the right edge.
-        Rectangle { horizontal-stretch: 1; }
+        // No stretch spacer — the bar auto-sizes to content via
+        // `width: clamp(main-row.preferred-width …)` so we don't want
+        // a stretchy rectangle inflating the row.
 
         // `⋯` advanced popover toggle. Wrapped in VerticalLayout so
         // the child is centered on the 44px row without setting `y`

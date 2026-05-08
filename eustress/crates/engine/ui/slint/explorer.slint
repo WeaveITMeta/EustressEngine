@@ -35,6 +35,11 @@ export struct TreeNode {
 export component ExplorerPanel inherits Rectangle {
     // Properties
     in property <[TreeNode]> tree-nodes: [];
+    // Parallel array of node ids for ONLY the currently-visible rows, in
+    // the same order as they're laid out. Drives drag-target resolution
+    // by row-index — see drag-moved on TreeItem below. Maintained Rust-side
+    // alongside `tree-nodes` so we don't have to filter+count in Slint.
+    in property <[int]> visible-node-ids: [];
     in-out property <string> search-text: "";
 
     // Programmatic scroll target — used by 3D-viewport selection to
@@ -272,26 +277,14 @@ export component ExplorerPanel inherits Rectangle {
                         selected: node.selected;
                         show: node.visible;
                         node-id: node.id;
+                        // drop-target is driven by drag-target-id which is
+                        // set in drag-moved below (math-based row resolver
+                        // using visible-node-ids + scroll offset). No
+                        // absolute-position read here, so no property cycle.
                         drop-target: root.drag-active
+                            && node.id == root.drag-target-id
                             && node.id != root.drag-source-id
-                            && root.drag-mouse-y >= self.absolute-position.y
-                            && root.drag-mouse-y < self.absolute-position.y + self.height
                             && node.visible;
-                        // **Do not** add a `changed drop-target =>`
-                        // handler that writes back to
-                        // `root.drag-target-id`. Tried 2026-04-23 —
-                        // Slint flags it as a property cycle at
-                        // layout time ("Recursion detected" panic in
-                        // `render_slint_to_texture`) because
-                        // `drop-target` reads `self.absolute-position.y`
-                        // which is a layout output, and the handler's
-                        // write runs inside the same property-eval
-                        // pass. The overlay's math-based approach
-                        // below (`abs-y → row index`) sidesteps the
-                        // property graph entirely. It still has the
-                        // scroll-offset + collapsed-visibility gap
-                        // that would be nice to fix, but a cycle is
-                        // worse than a wrong-row drop target.
                         ctrl-held: explorer-keys.ctrl-held;
                         shift-held: explorer-keys.shift-held;
                         renaming: node.id == root.renaming-node-id;
@@ -350,10 +343,30 @@ export component ExplorerPanel inherits Rectangle {
                         drag-moved(abs-x, abs-y) => {
                             root.drag-mouse-x = abs-x;
                             root.drag-mouse-y = abs-y;
+                            // Resolve the row under the cursor using the
+                            // visible-only id array so collapsed siblings
+                            // don't shift the index. Account for the
+                            // ScrollView's vertical scroll offset.
+                            // NOTE: row-touch keeps the mouse grab while
+                            // LMB is held, so OTHER TreeItems can't fire
+                            // hover events — we MUST resolve from the
+                            // source's drag-moved callback.
+                            if root.visible-node-ids.length > 0 {
+                                let local-y = abs-y - tree-scroll-area.absolute-position.y - tree-scroll.viewport-y;
+                                let row-idx = floor(local-y / 22px);
+                                if row-idx >= 0 && row-idx < root.visible-node-ids.length {
+                                    let candidate = root.visible-node-ids[row-idx];
+                                    if candidate != root.drag-source-id {
+                                        root.drag-target-id = candidate;
+                                    } else {
+                                        root.drag-target-id = -1;
+                                    }
+                                } else {
+                                    root.drag-target-id = -1;
+                                }
+                            }
                         }
                         drag-ended => {
-                            // Drop handled by overlay pointer-event when it catches mouse-up.
-                            // If overlay never received events, commit the drop here.
                             if root.drag-active && root.drag-source-id >= 0 && root.drag-target-id >= 0
                                 && root.drag-source-id != root.drag-target-id {
                                 root.on-reparent-node(root.drag-source-id, root.drag-target-id);
@@ -378,91 +391,49 @@ export component ExplorerPanel inherits Rectangle {
                 }
             }
 
-            // Drag overlay — sibling of ScrollView, covers the tree area during drag.
-            // Tracks mouse and handles drop on mouse-up. Ghost positioned from
-            // root.drag-mouse-x/y (absolute screen coords) minus this overlay's
-            // absolute-position (to get position local to overlay).
-            if root.drag-active: overlay-rect := Rectangle {
-                x: 0px; y: 0px; width: 100%; height: 100%;
-                background: #00000020;
-
-                drag-overlay := TouchArea {
-                    mouse-cursor: grabbing;
-                    moved => {
-                        root.drag-mouse-x = self.absolute-position.x + self.mouse-x;
-                        root.drag-mouse-y = self.absolute-position.y + self.mouse-y;
-                        // Map cursor position to a row index using the
-                        // overlay's own mouse-y — this TouchArea sits inside
-                        // the FocusScope that starts just below the 30px
-                        // search header, so `self.mouse-y` is already
-                        // tree-local. Don't subtract the header height
-                        // again (prior code did, which offset every drop
-                        // target by ~1.4 rows).
-                        if self.mouse-y > 0px && root.tree-nodes.length > 0 {
-                            let row-idx = floor(self.mouse-y / 22px);
-                            let clamped = max(0, min(row-idx, root.tree-nodes.length - 1));
-                            root.drag-target-id = root.tree-nodes[clamped].id;
-                        } else {
-                            root.drag-target-id = -1;
-                        }
-                    }
-                    pointer-event(event) => {
-                        if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
-                            if root.drag-source-id >= 0 && root.drag-target-id >= 0
-                                && root.drag-source-id != root.drag-target-id {
-                                root.on-reparent-node(root.drag-source-id, root.drag-target-id);
-                            }
-                            root.drag-active = false;
-                            root.drag-source-id = -1;
-                            root.drag-target-id = -1;
-                            root.drag-source-name = "";
-                        }
-                    }
-                }
-
-                // Ghost — cursor anchors at the top-left of the pill
-                // with a tiny 10px / 4px offset so the cursor arrow
-                // stays visible and points AT the ghost rather than
-                // sitting inside it. Prior `+14 / -11` offset centered
-                // the pill vertically on the cursor, which made the
-                // pill appear to "float loose" of the pointer and
-                // landed rows above / below the user's intent on tall
-                // trees. Anchor now matches the "you're holding this"
-                // affordance of every other Explorer (VS Code,
-                // Windows File Explorer, etc.).
-                Rectangle {
-                    x: root.drag-mouse-x - overlay-rect.absolute-position.x + 10px;
-                    y: root.drag-mouse-y - overlay-rect.absolute-position.y + 4px;
-                    width: drag-ghost-text.preferred-width + 40px;
-                    height: 22px;
-                    background: Theme.accent-blue;
-                    opacity: 0.9;
-                    border-radius: 4px;
-                    drop-shadow-blur: 4px;
-                    drop-shadow-color: #00000060;
-
-                    drag-ghost-icon := Image {
-                        x: 6px;
-                        y: 4px;
-                        width: 14px;
-                        height: 14px;
-                        source: root.drag-source-icon;
-                        image-fit: contain;
-                    }
-
-                    drag-ghost-text := Text {
-                        x: 24px;
-                        y: 0px;
-                        height: 22px;
-                        text: root.drag-source-name;
-                        color: white;
-                        font-size: 11px;
-                        font-weight: 500;
-                        vertical-alignment: center;
-                    }
-                }
-            }
         }
         } // close FocusScope
+    }
+
+    // Ghost — placed at the ExplorerPanel root level (sibling of the
+    // VerticalLayout, NOT inside `tree-scroll-area`) so the panel doesn't
+    // clip it when the cursor approaches the panel edges. drag-mouse-x/y
+    // are absolute screen coords; subtract this rect's absolute-position
+    // to get panel-local coords. Small +10/+4 nudge keeps the cursor
+    // arrow visible AT the pill rather than swallowed by it.
+    if root.drag-active: ghost-anchor := Rectangle {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        background: transparent;
+        Rectangle {
+            x: root.drag-mouse-x - ghost-anchor.absolute-position.x + 10px;
+            y: root.drag-mouse-y - ghost-anchor.absolute-position.y + 4px;
+            width: drag-ghost-text.preferred-width + 40px;
+            height: 22px;
+            background: Theme.accent-blue;
+            opacity: 0.9;
+            border-radius: 4px;
+            drop-shadow-blur: 4px;
+            drop-shadow-color: #00000060;
+
+            drag-ghost-icon := Image {
+                x: 6px;
+                y: 4px;
+                width: 14px;
+                height: 14px;
+                source: root.drag-source-icon;
+                image-fit: contain;
+            }
+
+            drag-ghost-text := Text {
+                x: 24px;
+                y: 0px;
+                height: 22px;
+                text: root.drag-source-name;
+                color: white;
+                font-size: 11px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
     }
 }

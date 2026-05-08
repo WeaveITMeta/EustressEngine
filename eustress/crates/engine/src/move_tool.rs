@@ -654,9 +654,16 @@ fn handle_move_interaction(
                 });
 
             let dragged_entity = state.dragged_entity;
+            // Fall back to the rendered scale when BasePart is absent — see
+            // the matching select_tool fix. Vec3::ONE understates tall slabs
+            // and produces half-embedded drops.
             let leader_size = dragged_entity
                 .and_then(|e| query.get(e).ok())
-                .and_then(|(_, _, _, bp)| bp.as_ref().map(|b| b.size))
+                .map(|(_, gt, _, bp)| {
+                    bp.as_ref()
+                        .map(|b| b.size)
+                        .unwrap_or_else(|| gt.compute_transform().scale)
+                })
                 .unwrap_or(Vec3::ONE);
             let leader_rot = dragged_entity
                 .and_then(|e| state.initial_rotations.get(&e).copied())

@@ -28,6 +28,7 @@ use crate::math_utils::{
     snap_to_grid as math_snap_to_grid,
     snap_to_grid_in_frame as math_snap_to_grid_in_frame,
     face_snap_offset as math_face_snap_offset,
+    find_face_contact as math_find_face_contact,
     FACE_SNAP_THRESHOLD,
 };
 
@@ -46,6 +47,14 @@ pub struct SelectToolState {
     pub drag_offset: Vec3,
     pub initial_position: Vec3,
     pub initial_cursor_pos: Vec2, // Track initial cursor position for threshold
+    /// World-space point on the part where the user originally clicked.
+    /// `grab_offset_local = part_rot.inverse() * (grab_world - part_center)`.
+    /// During drag, the cursor's surface hit should equal
+    /// `part_center + part_rot * grab_offset_local` — solve for part_center.
+    /// This is what makes the part feel "stuck to the cursor" on the exact
+    /// pixel the user grabbed (Roblox-style), not jumping its center to
+    /// the cursor.
+    pub grab_offset_local: Vec3,
     pub initial_positions: std::collections::HashMap<Entity, Vec3>, // Store all selected parts' positions
     pub initial_rotations: std::collections::HashMap<Entity, Quat>, // Store all selected parts' rotations
     // Group bounding box for multi-selection
@@ -71,6 +80,7 @@ impl Default for SelectToolState {
             drag_offset: Vec3::ZERO,
             initial_position: Vec3::ZERO,
             initial_cursor_pos: Vec2::ZERO,
+            grab_offset_local: Vec3::ZERO,
             initial_positions: std::collections::HashMap::new(),
             initial_rotations: std::collections::HashMap::new(),
             group_center: Vec3::ZERO,
@@ -337,8 +347,18 @@ fn handle_select_drag(
         for (entity, transform, global_transform, _part_entity, _instance, basepart_opt) in &selected_query {
             let t = global_transform.compute_transform();
             let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-            // Use precise OBB intersection with rotation for accurate click detection
-            if crate::math_utils::ray_intersects_part_rotated(&ray, t.translation, t.rotation, size) {
+            // Use precise OBB intersection with rotation. Returns the ray
+            // parameter `t_hit` if hit; we need it to compute the exact
+            // world-space click point on the part for the grab-pivot.
+            if let Some(t_hit) = crate::math_utils::ray_obb_intersection(
+                ray.origin, *ray.direction, t.translation, size * 0.5, t.rotation,
+            ) {
+                let grab_world = ray.origin + *ray.direction * t_hit;
+                // Convert to part-local frame so the offset rotates with
+                // the part (in case rotation changes mid-drag) and stays
+                // attached to the same physical point.
+                let grab_offset_local = t.rotation.inverse() * (grab_world - t.translation);
+                state.grab_offset_local = grab_offset_local;
                 state.dragging = true;
                 state.drag_started = false; // Not started until threshold exceeded
                 state.dragged_entity = Some(entity);
@@ -420,84 +440,112 @@ fn handle_select_drag(
                 let initial_leader_pos = state.initial_positions.get(&dragged_entity).cloned().unwrap_or(Vec3::ZERO);
                 let initial_leader_rot = state.initial_rotations.get(&dragged_entity).cloned().unwrap_or(Quat::IDENTITY);
 
-                // We need the leader's size for offset calculation
-                let leader_size = if let Ok((_, _, _, _, _, basepart_opt)) = selected_query.get(dragged_entity) {
-                    basepart_opt.map(|bp| bp.size).unwrap_or(Vec3::ONE)
+                // We need the leader's size for offset calculation. When BasePart
+                // is missing (Models, custom-mesh imports, partially-loaded
+                // entities) fall through to Transform.scale — that's the same
+                // fallback every other tool in this file uses (lines 230, 266,
+                // 283, 316, 339, 945). Without this match, dragging a custom-
+                // mesh part onto another part used Vec3::ONE for the offset,
+                // which placed taller parts half-embedded into their host.
+                let leader_size = if let Ok((_, t, _, _, _, basepart_opt)) = selected_query.get(dragged_entity) {
+                    basepart_opt.map(|bp| bp.size).unwrap_or(t.scale)
                 } else {
                     Vec3::ONE
                 };
                 
-                // 1. Find Surface
+                // 1. Find Surface (Roblox-style: cursor surface drives the drop)
                 let surface_hit = math_find_surface_with_physics(&spatial_query, &ray, &excluded_entities)
                     .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
-                    .or_else(|| math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities).map(|(pt, norm)| (pt, norm, None)));
+                    .or_else(|| math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
+                        .map(|(pt, norm)| (pt, norm, None)));
 
-                // 2. Calculate Target Position (NO rotation change - keep original orientation)
-                // This provides predictable drag behavior without auto-alignment.
-                // We also capture the surface frame (target rotation + center +
-                // normal) when we land on another part so the grid snap below
-                // can align to the target's *local* axes, not world XYZ.
+                // The grab pivot rotated into the current world frame.
+                // Drag math: the cursor's surface hit point should land on
+                // the SAME physical spot of the part the user grabbed —
+                // i.e. `cursor_world = center + rot * grab_offset_local`.
+                // Solving: `center = cursor_world - rot * grab_offset_local`.
+                let grab_offset_world = initial_leader_rot * state.grab_offset_local;
+
                 let mut surface_frame: Option<(Quat, Vec3, Vec3)> = None;
                 let target_pos = if let Some((hit_point, hit_normal, hit_entity)) = surface_hit {
-                    // HIT A SURFACE - position on top of it but keep original rotation
+                    // ── Surface follow ───────────────────────────────────
                     state.last_hit_entity = hit_entity;
                     state.last_surface_normal = hit_normal;
                     state.debug_hit_point = Some(hit_point);
                     state.debug_hit_normal = Some(hit_normal);
 
-                    // Calculate offset using the ORIGINAL rotation (not aligned)
+                    // Center if we glued the cursor's grabbed point to the surface hit.
+                    let cursor_pivot_center = hit_point - grab_offset_world;
+
+                    // But we also want the part's BOTTOM (the face whose outward
+                    // normal is closest to -hit_normal) to rest flush on the
+                    // surface. Compute the offset along the surface normal that
+                    // makes that happen, then mix: keep the cursor-pivot
+                    // tangent components, lift to flush along the normal.
                     let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &hit_normal);
+                    let flush_along_normal = hit_point + hit_normal * offset;
+                    // Strip the grab_offset_world's component along the
+                    // surface normal so the part's contact face sits ON the
+                    // surface, not above/below by the grab's vertical
+                    // offset. The tangent (sliding along the surface) part
+                    // of the grab pivot is preserved so the grabbed corner
+                    // tracks the cursor along the face.
+                    let grab_tangent = grab_offset_world - hit_normal * grab_offset_world.dot(hit_normal);
+                    let flush_pivot_center = flush_along_normal - grab_tangent;
 
-                    // Surface-flush position for the leader's center.
-                    let flush_pos = hit_point + hit_normal * offset;
+                    // Choose the flush variant — cursor stays on the surface,
+                    // part contact face is flush, grabbed point still tracks
+                    // along the surface plane.
+                    let _ = cursor_pivot_center;
+                    let target = flush_pivot_center;
 
-                    // Automatic face-snap + capture target frame for the
-                    // local-frame grid snap below.
-                    let snap_offset = if let Some(target_entity) = hit_entity {
+                    // Capture target frame for in-frame grid snap.
+                    if let Some(target_entity) = hit_entity {
                         if let Ok((_, target_xform, _, _, _, target_basepart)) = all_parts_query.get(target_entity) {
                             let target_size = target_basepart.map(|bp| bp.size).unwrap_or(Vec3::ONE);
                             let target_xf = target_xform.compute_transform();
                             surface_frame = Some((target_xf.rotation, target_xf.translation, hit_normal));
-                            math_face_snap_offset(
+
+                            // Edge-snap: when grabbed-corner is within
+                            // FACE_SNAP_THRESHOLD of a target corner, pull
+                            // it onto the corner so adjacent parts butt
+                            // cleanly. Operates on the part center.
+                            let snap = math_face_snap_offset(
                                 leader_size,
                                 initial_leader_rot,
-                                flush_pos,
+                                target,
                                 target_size,
                                 target_xf.rotation,
                                 target_xf.translation,
                                 hit_normal,
                                 FACE_SNAP_THRESHOLD,
-                            )
-                        } else {
-                            Vec3::ZERO
-                        }
-                    } else {
-                        // Surface from OBB fallback (no entity handle): still
-                        // a real surface, but we treat it as world-aligned
-                        // since we don't have the target's full transform.
-                        Vec3::ZERO
-                    };
-
-                    flush_pos + snap_offset
+                            );
+                            target + snap
+                        } else { target }
+                    } else { target }
                 } else {
-                    // NO SURFACE HIT - Drag on Ground Plane (Y=0)
+                    // ── No drop on empty space ───────────────────────────
+                    // Cursor is over the skybox. Roblox keeps the part at
+                    // its current height and slides it on the horizontal
+                    // plane through its initial Y. Don't fall to Y=0.
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
-                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, Vec3::ZERO, Vec3::Y) {
-                         let t = t.min(2000.0);
-                         let ground_pos = ray.origin + *ray.direction * t;
-                         // Calculate offset using original rotation
-                         let offset = math_calculate_surface_offset(&leader_size, &initial_leader_rot, &Vec3::Y);
-                         ground_pos + Vec3::new(0.0, offset, 0.0)
+                    let plane_y = initial_leader_pos.y;
+                    if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction,
+                        Vec3::new(0.0, plane_y, 0.0), Vec3::Y)
+                    {
+                        let t = t.clamp(0.0, 2000.0);
+                        let cursor_world = ray.origin + *ray.direction * t;
+                        // Glue the grabbed point to the cursor on this
+                        // horizontal plane. Y stays at plane_y.
+                        Vec3::new(
+                            cursor_world.x - grab_offset_world.x,
+                            plane_y,
+                            cursor_world.z - grab_offset_world.z,
+                        )
                     } else {
-                        // Fallback: Use intersection with horizontal plane at leader's initial height
-                         if let Some(t) = ray_plane_intersection(ray.origin, *ray.direction, initial_leader_pos, Vec3::Y) {
-                             let t = t.min(2000.0);
-                             ray.origin + *ray.direction * t
-                         } else {
-                             initial_leader_pos
-                         }
+                        initial_leader_pos
                     }
                 };
 
@@ -507,27 +555,32 @@ fn handle_select_drag(
                 // No rotation change during drag
                 let rotation_delta = Quat::IDENTITY;
 
-                // Apply grid snapping if enabled. When dragging onto a real
-                // part's surface, snap in the TARGET's local frame so the
-                // grid lines up with that part's edges (not world XYZ) — a
-                // rotated wall snaps along its own surface, not world space.
-                // Otherwise fall back to world-frame snapping.
+                // Apply grid snapping if enabled. Snap is applied to the
+                // GRABBED POINT, not the center — that's the Roblox feel
+                // where the corner the user is dragging clicks to grid
+                // intersections cleanly. When dragging onto another
+                // part's surface, snap in that target's local frame so
+                // the grid aligns to the surface edges (rotated walls
+                // snap along their own face). Empty-space drag uses
+                // world-frame snapping.
                 let final_target_pos = if editor_settings.snap_enabled {
-                    if let Some((tgt_rot, tgt_center, surf_n)) = surface_frame {
+                    let grab_world = target_pos + grab_offset_world;
+                    let snapped_grab = if let Some((tgt_rot, tgt_center, surf_n)) = surface_frame {
                         math_snap_to_grid_in_frame(
-                            target_pos,
+                            grab_world,
                             tgt_center,
                             tgt_rot,
                             surf_n,
                             editor_settings.snap_size,
                         )
                     } else {
-                        math_snap_to_grid(target_pos, editor_settings.snap_size)
-                    }
+                        math_snap_to_grid(grab_world, editor_settings.snap_size)
+                    };
+                    snapped_grab - grab_offset_world
                 } else {
                     target_pos
                 };
-                
+
                 state.last_target_position = final_target_pos;
                 
                 // 3. Apply Transformations

@@ -28,6 +28,7 @@ import { Theme } from "theme.slint";
 // Dock layout system
 import { LayoutPresetSelector, LayoutDropdownMenu, AdvancedTabBar, PerformanceOverlay, DockZoneIndicator, ThemeEditor, LayoutPreset, DockTab, DockZone } from "dock_layout.slint";
 import { ToolOptionsBar, ToolOptionControlData } from "tool_options_bar.slint";
+import { ToolPanel } from "tool_panel.slint";
 import { FloatingNumericInput } from "floating_numeric_input.slint";
 import { ToastUndo } from "toast_undo.slint";
 import { TimelinePanel, TimelineTrackData, TimelineMarkerData, TimelineFilterChipData } from "timeline_panel.slint";
@@ -464,6 +465,9 @@ export component StudioWindow inherits Window {
     
     // Unified explorer tree data: ECS entities + filesystem (pushed from Bevy)
     in-out property <[TreeNode]> tree-nodes: [];
+    // Visible-only id list mirror — pushed from Rust alongside tree-nodes
+    // so the explorer's drag-target row resolver can index without filtering.
+    in property <[int]> visible-node-ids: [];
     // Explorer auto-scroll target — driven by 3D-viewport selection so
     // the selected entity's tree row jumps to the top. `explorer-scroll-pulse`
     // is bumped from Rust each time a new selection occurs; the
@@ -522,11 +526,15 @@ export component StudioWindow inherits Window {
     in-out property <string> tool-options-step-label: "";
     in-out property <image>  tool-options-tool-icon;
     in-out property <[ToolOptionControlData]> tool-options-controls: [];
-    /// Callback fired when the user edits an option in the bar. Rust
-    /// routes this to `ActiveModalTool::on_option_changed(id, value)`.
+    /// True when the active tool prefers the right-side ToolPanel
+    /// (Pattern Linear/Radial/Grid, Mirror) instead of the floating bar
+    /// (Smart Edit pick-driven tools). Mirrors `ToolOptionsBarState.use_panel`.
+    in-out property <bool>   tool-options-use-panel: false;
+    /// Callback fired when the user edits an option in the bar OR panel.
+    /// Rust routes this to `ActiveModalTool::on_option_changed(id, value)`.
     callback tool-options-control-changed(string, string);
-    /// Callback fired when the user clicks × / presses Esc on the bar.
-    /// Rust fires `CancelModalToolEvent`.
+    /// Callback fired when the user clicks × / presses Esc on the bar
+    /// or panel. Rust fires `CancelModalToolEvent`.
     callback tool-options-cancel();
 
     // ──────────────────────────────────────────────────────────────────────
@@ -1258,6 +1266,7 @@ export component StudioWindow inherits Window {
                         
                         if root.left-tab-index == 0: ExplorerPanel {
                             tree-nodes: root.tree-nodes;
+                            visible-node-ids: root.visible-node-ids;
                             scroll-pulse: root.explorer-scroll-pulse;
                             scroll-target-y: root.explorer-scroll-target-y;
                             renaming-node-id: root.explorer-renaming-node-id;
@@ -2036,10 +2045,19 @@ export component StudioWindow inherits Window {
                             opacity: root.commit-flash-progress;
                         }
 
+                        // Bar OR panel — never both. Routed by
+                        // `tool-options-use-panel` which Rust derives
+                        // from `ModalTool::prefers_panel()`.
                         ToolOptionsBar {
                             x: 8px;
                             y: 48px;                 // below LayoutPresetSelector (40px tall + 8px gap)
-                            visible-when: root.tool-options-visible;
+                            // Cap width against the viewport — the bar
+                            // sets its own min via `max(content, 320px)`,
+                            // so the only thing left to clamp is the
+                            // upper bound. Subtract 32px so the right
+                            // edge has breathing room.
+                            available-width: parent.width - 32px;
+                            visible-when: root.tool-options-visible && !root.tool-options-use-panel;
                             tool-name:  root.tool-options-tool-name;
                             step-label: root.tool-options-step-label;
                             tool-icon:  root.tool-options-tool-icon;
@@ -2047,6 +2065,31 @@ export component StudioWindow inherits Window {
 
                             control-changed(id, value) => {
                                 root.tool-options-control-changed(id, value);
+                            }
+                            cancel => { root.tool-options-cancel(); }
+                        }
+
+                        ToolPanel {
+                            // Top-right of viewport with 12px breathing room.
+                            x: parent.width - self.width - 12px;
+                            y: 12px;
+                            visible-when: root.tool-options-visible && root.tool-options-use-panel;
+                            tool-name:  root.tool-options-tool-name;
+                            step-label: root.tool-options-step-label;
+                            tool-icon:  root.tool-options-tool-icon;
+                            controls:   root.tool-options-controls;
+
+                            control-changed(id, value) => {
+                                root.tool-options-control-changed(id, value);
+                            }
+                            apply => {
+                                // Apply button maps to the conventional
+                                // "commit" bool control that Pattern /
+                                // Mirror tools already wire up — clicking
+                                // it routes the same Commit signal the
+                                // bar's tiny toggle did, but with a real
+                                // primary button.
+                                root.tool-options-control-changed("commit", "true");
                             }
                             cancel => { root.tool-options-cancel(); }
                         }

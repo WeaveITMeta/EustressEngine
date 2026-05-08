@@ -171,8 +171,11 @@ fn spawn_billboard_render_state(
             .map(|g| g.translation())
             .unwrap_or(Vec3::ZERO);
 
-        // Instantiate the Slint card. The engine's platform pushes a new
-        // BevyWindowAdapter into a thread-local; we grab it right after.
+        // Instantiate the Slint card. Slint defers `create_window_adapter`
+        // until the component's window is first accessed (or `show()` is
+        // called) — `BillboardCard::new()` alone does NOT push an adapter.
+        // We call `show()` BEFORE grabbing the adapter so the platform's
+        // `create_window_adapter` runs and pushes into SLINT_WINDOWS.
         let card = match BillboardCard::new() {
             Ok(c) => c,
             Err(e) => {
@@ -180,6 +183,15 @@ fn spawn_billboard_render_state(
                 continue;
             }
         };
+
+        card.set_canvas_width(w as i32);
+        card.set_canvas_height(h as i32);
+
+        if let Err(e) = card.show() {
+            warn!("Failed to show BillboardCard for {:?}: {}", entity, e);
+            continue;
+        }
+
         let adapter = match crate::ui::slint_ui::take_latest_window_adapter() {
             Some(a) => a,
             None => {
@@ -190,6 +202,7 @@ fn spawn_billboard_render_state(
                 // software renderer has nowhere to draw, so skip the
                 // spawn entirely; we'll retry next frame because the
                 // marker still doesn't have a `BillboardRenderHandle`.
+                let _ = card.hide();
                 warn!(
                     "🪧 billboard {:?}: no window adapter from Slint platform — billboard skipped this frame",
                     entity
@@ -198,14 +211,7 @@ fn spawn_billboard_render_state(
             }
         };
 
-        card.set_canvas_width(w as i32);
-        card.set_canvas_height(h as i32);
         adapter.resize(slint::PhysicalSize::new(w, h), 1.0);
-
-        if let Err(e) = card.show() {
-            warn!("Failed to show BillboardCard for {:?}: {}", entity, e);
-            continue;
-        }
 
         let (image, material) =
             create_billboard_texture(w, h, marker.always_on_top, &mut images, &mut materials);

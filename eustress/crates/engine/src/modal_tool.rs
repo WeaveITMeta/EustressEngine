@@ -230,6 +230,20 @@ pub trait ModalTool: Send + Sync + 'static {
     /// checked).
     fn auto_exit_on_commit(&self) -> bool { true }
 
+    /// If true, the tool's controls render in a right-side dockable
+    /// `ToolPanel` (vertical, multi-row, dedicated Apply button) instead
+    /// of the floating top `ToolOptionsBar`.
+    ///
+    /// Use the panel for "form-only" tools that don't pick anything in
+    /// the viewport — Pattern (Linear/Radial/Grid), Mirror, etc. The
+    /// bar's horizontal pill is awkward when the user has 6+ controls
+    /// and isn't doing a multi-step pick flow.
+    ///
+    /// Use the bar (default) for pick-driven tools where the step-label
+    /// hint matters more than the controls — Gap Fill, Resize Align,
+    /// Edge Align, Part Swap.
+    fn prefers_panel(&self) -> bool { false }
+
     /// Entities currently owned by the tool as preview geometry.
     /// Runtime may despawn these on cancel; tool is responsible for
     /// keeping the list up to date. Empty = no preview.
@@ -254,6 +268,9 @@ impl ActiveModalTool {
     pub fn icon_path(&self) -> Option<&'static str> { self.0.as_ref().map(|t| t.icon_path()) }
     pub fn options(&self) -> Vec<ToolOptionControl> {
         self.0.as_ref().map(|t| t.options()).unwrap_or_default()
+    }
+    pub fn prefers_panel(&self) -> bool {
+        self.0.as_ref().map(|t| t.prefers_panel()).unwrap_or(false)
     }
     pub fn preview_entities(&self) -> Vec<Entity> {
         self.0.as_ref().map(|t| t.preview_entities()).unwrap_or_default()
@@ -325,6 +342,10 @@ pub struct ToolOptionsBarState {
     pub step_label: String,
     pub icon_path: String,
     pub controls: Vec<ToolOptionControl>,
+    /// When true, the tool's UI renders in the right-side dockable
+    /// `ToolPanel` instead of the floating top `ToolOptionsBar`.
+    /// Mirrors `ModalTool::prefers_panel()`.
+    pub use_panel: bool,
 }
 
 // ============================================================================
@@ -555,6 +576,7 @@ fn sync_tool_options_bar_state(
         bar.step_label = active.step_label().unwrap_or_default();
         bar.controls   = active.options();
         bar.icon_path  = active.icon_path().unwrap_or("").to_string();
+        bar.use_panel  = active.prefers_panel();
     } else if bar.visible {
         bar.visible = false;
         bar.tool_id.clear();
@@ -562,6 +584,7 @@ fn sync_tool_options_bar_state(
         bar.step_label.clear();
         bar.icon_path.clear();
         bar.controls.clear();
+        bar.use_panel = false;
     }
 }
 

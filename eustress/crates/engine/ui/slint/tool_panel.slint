@@ -1,0 +1,315 @@
+// ============================================================================
+// ToolPanel — right-side dockable form panel for non-pick CAD tools.
+// ============================================================================
+//
+// Sibling to `tool_options_bar.slint`. The bar is for pick-driven tools
+// (Gap Fill, Resize Align, Edge Align, Part Swap) where the cursor is in
+// the viewport and the step-label is the primary cue. The panel is for
+// form-only tools (Pattern Linear/Radial/Grid, Mirror) where the user
+// dials in numbers and clicks Apply.
+//
+// Layout: a 280-px-wide column docked top-right of the viewport, with
+// a header (icon + tool name), a vertical scroll of `OptionRow`s for
+// every control, then a sticky footer with prominent Apply + Cancel.
+// Numeric controls use `NumericField` so float entry feels real
+// (vs. the SpinBox-×100 hack that the bar still relies on for
+// backward compatibility while we migrate it).
+//
+// The Rust side sees ONE `ToolOptionsBarState` resource; the
+// `use_panel` flag (mirroring `ModalTool::prefers_panel()`) tells main
+// to render either the bar OR the panel — never both.
+
+import { Theme } from "theme.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
+import { ToolOptionControlData } from "tool_options_bar.slint";
+import { NumericField } from "numeric_field.slint";
+
+// ─ A single row inside the panel. Vertical "label above control" so
+//   long labels and wide numeric fields don't fight for horizontal space
+//   the way they do in the bar's HorizontalLayout.
+
+component PanelOptionRow inherits Rectangle {
+    in property <ToolOptionControlData> data;
+    callback value-changed(string /* id */, string /* value */);
+
+    height: row-content.preferred-height;
+    background: transparent;
+
+    row-content := VerticalLayout {
+        padding: 6px;
+        spacing: 4px;
+
+        // Label (skip for "label" kind which IS its own text).
+        if root.data.kind != "label" && root.data.label != "": Text {
+            text: root.data.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        // Control. Each branch produces a fixed-height widget so rows
+        // align to a regular vertical rhythm even when mixing kinds.
+        if root.data.kind == "number": NumericField {
+            value:    root.data.number-value;
+            min:      root.data.number-min;
+            max:      root.data.number-max;
+            step:     root.data.number-step;
+            unit:     root.data.number-unit;
+            decimals: 2;
+            width:    100%;
+            height:   26px;
+            value-changed(s) => { root.value-changed(root.data.id, s); }
+        }
+
+        if root.data.kind == "bool": Rectangle {
+            height: 26px;
+            background: transparent;
+            // Toggle pill, left-aligned. Kept identical in shape to the
+            // bar's so users see the same affordance in both contexts.
+            Rectangle {
+                x: 0; y: (parent.height - self.height) / 2;
+                width: 40px; height: 20px;
+                background: root.data.bool-value
+                    ? Theme.accent-eustress.with-alpha(0.8)
+                    : Theme.button-background;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: root.data.bool-value
+                    ? Theme.accent-eustress
+                    : Theme.border-color;
+                animate background { duration: 120ms; easing: ease-out; }
+
+                Rectangle {
+                    x: root.data.bool-value ? parent.width - 18px : 2px;
+                    y: 2px;
+                    width: 16px; height: 16px;
+                    background: white;
+                    border-radius: 8px;
+                    animate x { duration: 120ms; easing: ease-out; }
+                }
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.value-changed(
+                            root.data.id,
+                            root.data.bool-value ? "false" : "true"
+                        );
+                    }
+                }
+            }
+        }
+
+        if root.data.kind == "choice": ComboBox {
+            model: root.data.choice-options;
+            current-value: root.data.choice-selected;
+            height: 26px;
+            selected(v) => { root.value-changed(root.data.id, v); }
+        }
+
+        if root.data.kind == "label": Text {
+            text: root.data.label-text;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// ─ ToolPanel — main export ────────────────────────────────────────────────
+
+export component ToolPanel inherits Rectangle {
+    in property <bool>   visible-when: false;
+    in property <string> tool-name: "";
+    in property <string> step-label: "";
+    in property <image>  tool-icon;
+    in property <[ToolOptionControlData]> controls: [];
+
+    /// Routed from the inline OptionRow's value-changed.
+    callback control-changed(string, string);
+    /// Apply button — the Rust side conventionally exposes a `bool`
+    /// control with id `"commit"` that toggles to fire commit. The
+    /// panel's Apply button cuts out the toggle indirection: clicking
+    /// it emits `control-changed("commit", "true")` directly so tools
+    /// don't need new plumbing.
+    callback apply();
+    /// Cancel × — same semantics as the bar's cancel.
+    callback cancel();
+
+    visible: root.visible-when;
+    width: 280px;
+    background: Theme.panel-glass;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: Theme.shadow-float;
+
+    // Hairline top — same depth cue as the bar.
+    Rectangle {
+        y: 0; width: 100%; height: 1px;
+        background: Theme.border-highlight;
+    }
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+
+        // ── Header ────────────────────────────────────────────────
+        Rectangle {
+            height: 44px;
+            background: transparent;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 8px;
+                spacing: 10px;
+                alignment: center;
+
+                // Icon disc — matches the bar style for visual consistency.
+                Rectangle {
+                    width: 28px; height: 28px;
+                    border-radius: 14px;
+                    background: Theme.accent-eustress.with-alpha(0.18);
+                    border-width: 1px;
+                    border-color: Theme.accent-eustress.with-alpha(0.4);
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px; height: 16px;
+                        source: root.tool-icon;
+                        image-fit: contain;
+                        colorize: Theme.accent-eustress;
+                    }
+                }
+
+                // Title + step label stack. Step label appears under the
+                // tool name as a small hint (panels don't multi-step
+                // pick, but tools may still surface state hints —
+                // e.g. "3×1×3 = 9 instances").
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
+
+                    Text {
+                        text: root.tool-name;
+                        color: Theme.text-primary;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    if root.step-label != "": Text {
+                        text: root.step-label;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                    }
+                }
+
+                // Cancel × in the header (Apply lives in the footer).
+                Rectangle {
+                    width: 28px; height: 28px;
+                    background: cancel-touch.has-hover
+                        ? Theme.accent-red.with-alpha(0.2)
+                        : transparent;
+                    border-radius: Theme.radius-sm;
+                    Text {
+                        text: "×";
+                        color: cancel-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
+                        font-size: 18px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    cancel-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.cancel(); }
+                    }
+                }
+            }
+        }
+
+        // 1px divider header ↔ body
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        // ── Body — scrollable column of rows ──────────────────────
+        Rectangle {
+            // Hard cap so ultra-long control lists scroll instead of
+            // pushing the Apply footer off the viewport. 320px fits ~10
+            // rows comfortably; anything longer scrolls.
+            height: min(body-layout.preferred-height, 320px);
+
+            ScrollView {
+                width: 100%; height: 100%;
+                horizontal-scrollbar-policy: always-off;
+
+                body-layout := VerticalLayout {
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    spacing: 0;
+
+                    // Render every control, advanced or not — panel has
+                    // room. The "advanced" flag is a bar-only affordance
+                    // (the ⋯ collapse) and doesn't apply here.
+                    for ctrl[i] in root.controls: PanelOptionRow {
+                        // Skip the conventional commit/apply toggle —
+                        // the footer Apply button replaces it, and
+                        // rendering it inline would give the user two
+                        // ways to fire commit.
+                        visible: ctrl.id != "commit" && ctrl.id != "apply";
+                        height: self.visible ? self.preferred-height : 0px;
+                        data: ctrl;
+                        value-changed(id, v) => { root.control-changed(id, v); }
+                    }
+                }
+            }
+        }
+
+        // 1px divider body ↔ footer
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        // ── Footer — sticky Apply ─────────────────────────────────
+        Rectangle {
+            height: 44px;
+            background: transparent;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 8px;
+
+                // Apply button — primary. Eustress-cyan fill, white text.
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 28px;
+                    background: apply-touch.has-hover
+                        ? Theme.accent-eustress
+                        : Theme.accent-eustress.with-alpha(0.85);
+                    border-radius: Theme.radius-sm;
+                    animate background { duration: 100ms; easing: ease-out; }
+
+                    Text {
+                        text: "Apply";
+                        color: white;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    apply-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.apply(); }
+                    }
+                }
+            }
+        }
+    }
+}
