@@ -27,9 +27,14 @@ pub mod sandbox;
 
 // Named event bus — bridges Rust, Luau, Rune, and EustressStream
 pub mod events;
+// Cross-crate filesystem-change broadcast — one watcher, many subscribers.
+// See module docs for the architectural rationale.
+pub mod file_events;
 pub mod adornments;
 pub mod assets;
 pub mod attributes;
+// Roblox-parity 2D UI types: UDim, UDim2 with serde round-trip.
+pub mod ui_types;
 // Scene delta types (always available — rkyv is non-optional)
 pub mod scene_delta;
 // EustressStream change queue: Bevy Resource + producer/consumer (feature-gated)
@@ -50,6 +55,11 @@ pub mod classes;
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.
 pub mod class_schema;
+// Canonical entity-creation pipeline — every "create an instance of class X"
+// surface (Insert menu, Model ribbon, Toolbox, MCP `create_entity`, …) routes
+// through `instance_create::create_instance` so the resulting folder + TOML
+// shape is identical regardless of caller.
+pub mod instance_create;
 pub mod default_scene;
 pub mod eustress_format;
 pub mod generation;
@@ -78,6 +88,46 @@ pub mod realism;
 pub mod simulation;
 #[cfg(feature = "streaming")]
 pub mod streaming;
+
+// ============================================================================
+// Asset resolution — canonical paths to bundled templates
+// ============================================================================
+//
+// Every engine surface that needs a class default / service template / service
+// property TOML should call into one of these helpers, **not** join its own
+// crate's `CARGO_MANIFEST_DIR/assets/...`. Common is the source of truth;
+// engine assets directories were deleted as part of the 2026-05-12
+// consolidation.
+//
+// In dev builds `CARGO_MANIFEST_DIR` resolves to the common crate's path on
+// disk. In deployed builds (no source tree present) callers should ship the
+// `common/assets/` directory next to the binary; we'll add an exe-relative
+// fallback when ship time arrives.
+
+/// Path to the `common/assets/` directory — the single source of truth for
+/// bundled engine templates (class schemas, service templates, service
+/// properties). Resolves from this crate's manifest dir at compile time.
+pub fn assets_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
+}
+
+/// `common/assets/class_schema/` — per-class default TOMLs.
+pub fn class_schema_dir() -> std::path::PathBuf {
+    assets_dir().join("class_schema")
+}
+
+/// `common/assets/service_templates/` — per-service `_service.toml` +
+/// service-scoped templates (e.g. MaterialService/*.mat.toml).
+pub fn service_templates_dir() -> std::path::PathBuf {
+    assets_dir().join("service_templates")
+}
+
+/// `common/assets/service_properties/` — Roblox-style service property
+/// definition files (loaded by the engine's Properties panel for service
+/// entities like Lighting / Workspace / Chat).
+pub fn service_properties_dir() -> std::path::PathBuf {
+    assets_dir().join("service_properties")
+}
 
 // Re-export Attributes and Parameters for convenience
 pub use attributes::{

@@ -208,6 +208,11 @@ pub fn process_file_changes(
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut asset_manager_state: Option<ResMut<crate::ui::slint_ui::AssetManagerState>>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    // Outbound broadcast to non-ECS subsystems (streaming spatial grid,
+    // plugins, etc.). See `common::file_events` — this is the single
+    // notify-driven channel everyone subscribes to; no other notify
+    // watcher should exist in the workspace.
+    mut file_change_out: MessageWriter<eustress_common::file_events::FileChanged>,
 ) {
     let _start = std::time::Instant::now();
     let Some(watcher) = watcher else {
@@ -279,7 +284,21 @@ pub fn process_file_changes(
             debug!("Skipping hot-reload for recently written file: {:?}", event.path);
             continue;
         }
-        
+
+        // Skip dot-prefixed engine-internal paths. `.eustress/` holds the
+        // trash bin, undo cache, per-folder metadata — none of it is
+        // scene state. Without this guard, a delete-then-restore cycle
+        // (which trashes files to `.eustress/trash/<name>/`) would
+        // hot-load each trashed `_instance.toml` as a fresh workspace
+        // entity. Symptom: copy-paste of a parent that had ever held
+        // trashed children spawns ghost entries with the trashed names.
+        if event.path
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+
         match event.change_type {
             FileChangeType::Modified => {
                 // During startup grace period, skip spurious modify events
@@ -291,7 +310,7 @@ pub fn process_file_changes(
                 // which would trigger write_instance_changes_system. By marking it here,
                 // that system will skip writing this file.
                 recently_written.mark_written(event.path.clone());
-                
+
                 handle_file_modified(
                     &event,
                     &mut registry,
@@ -308,6 +327,20 @@ pub fn process_file_changes(
                 handle_file_removed(&event, &mut registry, &mut commands);
             }
         }
+
+        // Broadcast to any non-ECS subsystem that subscribed to disk
+        // changes (streaming spatial grid, plugin hosts, …). Emitted
+        // AFTER the engine's own processing so subscribers see a
+        // world where the ECS already reflects the change.
+        let kind = match event.change_type {
+            FileChangeType::Created  => eustress_common::file_events::FileChangeKind::Created,
+            FileChangeType::Modified => eustress_common::file_events::FileChangeKind::Modified,
+            FileChangeType::Removed  => eustress_common::file_events::FileChangeKind::Removed,
+        };
+        file_change_out.write(eustress_common::file_events::FileChanged {
+            path: event.path.clone(),
+            kind,
+        });
     }
 }
 
@@ -495,7 +528,20 @@ fn handle_file_modified(
                             gui_def.text.as_ref(),
                             gui_type,
                         );
-                        commands.entity(entity).insert(display);
+                        // The registry entry can outlive the entity in two
+                        // ways: (a) the entity got despawned + replaced
+                        // mid-frame (the spawn-replace pattern in the GUI
+                        // insert path) and the registry still points at
+                        // the stale id, or (b) a parent was despawned and
+                        // this child was reaped with it. Either way, a
+                        // best-effort insert is correct — guard with
+                        // `commands.get_entity` so a stale registry entry
+                        // doesn't surface Bevy's generic "Entity despawned"
+                        // warning every time the file watcher fires after
+                        // a respawn.
+                        if let Ok(mut ec) = commands.get_entity(entity) {
+                            ec.insert(display);
+                        }
                         info!("🔄 Hot-reloaded GUI element: {:?}", event.path);
                     }
                     Err(e) => {
@@ -680,6 +726,198 @@ fn handle_file_created(
             if registry.is_loaded(&event.path) {
                 return;
             }
+
+            // GUI classes (TextLabel, Frame, BillboardGui, …) inside an
+            // `_instance.toml` would otherwise route through
+            // `instance_loader::spawn_instance` and land in the "non-visual"
+            // branch (no `Aabb`, no `Text`, no `GuiElementDisplay`) — the
+            // entity exists in the Explorer but renders nothing and the
+            // billboard renderer's `collect_subtree` skips it. Peek at
+            // the file's class_name and route GUI classes through
+            // `gui_loader::spawn_gui_element` instead, which attaches the
+            // proper visual scaffolding.
+            //
+            // BillboardGui itself stays on the instance_loader path
+            // because `file_loader.rs` builds it as a 3D quad host with
+            // its own custom render pipeline; only its DESCENDANTS
+            // (TextLabel/Frame/etc.) need the gui_loader route.
+            let gui_class_name = std::fs::read_to_string(&event.path)
+                .ok()
+                .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                .and_then(|v| {
+                    let meta = v.get("metadata").or_else(|| v.get("Metadata"))?;
+                    let cn = meta.get("class_name").or_else(|| meta.get("ClassName"))?;
+                    cn.as_str().map(|s| s.to_string())
+                });
+            // BillboardGui hot-create (e.g. trash restore via undo): inline
+            // a minimal spawn that mirrors `file_loader.rs`'s BillboardGui
+            // branch. We don't bring back child UI elements here — the
+            // file watcher will fire separately for each restored
+            // descendant `_instance.toml` and the gui-descendant route
+            // below picks them up.
+            if matches!(gui_class_name.as_deref(), Some("BillboardGui")) {
+                let bb_dir = event.path.parent().unwrap_or(event.path.as_path()).to_path_buf();
+                let dir_name = bb_dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Label")
+                    .to_string();
+
+                // Strict UDim2 schema — no legacy fallback for `size` /
+                // `position` shapes. The class default fills in for
+                // missing fields when the TOML doesn't yet declare
+                // them.
+                let mut bb_class = eustress_common::classes::BillboardGui::default();
+                let bb_max_distance: f32;
+                let bb_always_on_top: bool;
+                let bb_offset: bevy::math::Vec3;
+                let mut bb_tags: Vec<String> = Vec::new();
+                if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
+                    bb_tags = gui_def.tags.clone();
+                    let g = &gui_def.gui;
+                    bb_class.size = g.size;
+                    bb_class.max_distance = g.max_distance.unwrap_or(bb_class.max_distance);
+                    bb_class.always_on_top = g.always_on_top.unwrap_or(bb_class.always_on_top);
+                    if let Some(v) = g.units_offset { bb_class.units_offset = v; }
+                    bb_max_distance = bb_class.max_distance;
+                    bb_always_on_top = bb_class.always_on_top;
+                    bb_offset = bevy::math::Vec3::new(
+                        bb_class.units_offset[0], bb_class.units_offset[1], bb_class.units_offset[2],
+                    );
+                } else {
+                    bb_max_distance = bb_class.max_distance;
+                    bb_always_on_top = bb_class.always_on_top;
+                    bb_offset = bevy::math::Vec3::new(
+                        bb_class.units_offset[0], bb_class.units_offset[1], bb_class.units_offset[2],
+                    );
+                }
+
+                // Resolve UDim2 → pixel size for the renderer marker.
+                // PIXELS_PER_METER == 50 (defined in billboard_gui.rs);
+                // duplicated here so this branch doesn't reach into
+                // engine internals.
+                let [w_px, h_px] = bb_class.size.to_pixels(50.0, 50.0);
+
+                let marker = eustress_common::gui::billboard_renderer::BillboardGuiMarker {
+                    size: [w_px.max(1.0), h_px.max(1.0)],
+                    max_distance: bb_max_distance,
+                    always_on_top: bb_always_on_top,
+                    face_camera: true,
+                    visible: true,
+                    ..Default::default()
+                };
+
+                let entity = commands.spawn((
+                    eustress_common::classes::Instance {
+                        name: dir_name.clone(),
+                        class_name: eustress_common::classes::ClassName::BillboardGui,
+                        archivable: true,
+                        id: 0,
+                        ai: false,
+                        uuid: String::new(),
+                    },
+                    bb_class,
+                    marker,
+                    super::file_loader::LoadedFromFile {
+                        path: bb_dir.clone(),
+                        file_type: super::file_loader::FileType::Directory,
+                        service: event.service.clone(),
+                    },
+                    super::instance_loader::InstanceFile {
+                        toml_path: event.path.clone(),
+                        mesh_path: std::path::PathBuf::new(),
+                        name: dir_name.clone(),
+                    },
+                    Name::new(dir_name.clone()),
+                    Transform::from_translation(bb_offset),
+                    Visibility::default(),
+                )).id();
+                // Tag hydration on hot-reload mirrors the cold-load path
+                // (file_loader BillboardGui branch) — keeps MCP/ECS in
+                // sync after the user edits tags in the TOML.
+                if !bb_tags.is_empty() {
+                    commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
+                }
+
+                // Parent to the containing folder if we can resolve it.
+                if let Some(gp) = bb_dir.parent() {
+                    let marker_path = gp.join("_instance.toml");
+                    if let Some(parent_entity) = registry.get_entity(&marker_path)
+                        .or_else(|| registry.get_entity(gp))
+                    {
+                        commands.entity(entity).insert(ChildOf(parent_entity));
+                    }
+                }
+
+                registry.register(
+                    event.path.clone(),
+                    entity,
+                    super::file_loader::FileMetadata {
+                        path: event.path.clone(),
+                        file_type: super::file_loader::FileType::Toml,
+                        service: event.service.clone(),
+                        name: dir_name,
+                        size: 0,
+                        modified: std::time::SystemTime::now(),
+                        children: Vec::new(),
+                    },
+                );
+                info!("✅ Hot-loaded restored BillboardGui: {:?}", bb_dir);
+                return;
+            }
+
+            let is_gui_descendant = matches!(
+                gui_class_name.as_deref(),
+                Some("TextLabel") | Some("TextButton") | Some("TextBox")
+                | Some("Frame") | Some("ScrollingFrame")
+                | Some("ImageLabel") | Some("ImageButton")
+                | Some("ScreenGui") | Some("ViewportFrame")
+            );
+            if is_gui_descendant {
+                match super::gui_loader::load_gui_definition(&event.path) {
+                    Ok(gui_def) => {
+                        let entity = super::gui_loader::spawn_gui_element(
+                            commands,
+                            &event.path,
+                            &gui_def,
+                        );
+                        // Parent to enclosing folder if it's a registered
+                        // entity (the BillboardGui / Frame / ScreenGui).
+                        if let Some(parent_dir) = event.path.parent().and_then(|p| p.parent()) {
+                            let parent_marker = parent_dir.join("_instance.toml");
+                            if let Some(parent_entity) = registry.get_entity(&parent_marker)
+                                .or_else(|| registry.get_entity(parent_dir))
+                            {
+                                commands.entity(entity).insert(ChildOf(parent_entity));
+                            }
+                        }
+                        let name = event.path.parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string();
+                        registry.register(
+                            event.path.clone(),
+                            entity,
+                            super::file_loader::FileMetadata {
+                                path: event.path.clone(),
+                                file_type: super::file_loader::FileType::GuiElement,
+                                service: event.service.clone(),
+                                name,
+                                size: 0,
+                                modified: std::time::SystemTime::now(),
+                                children: Vec::new(),
+                            },
+                        );
+                        info!("✅ Hot-loaded new GUI element from _instance.toml: {:?}", event.path);
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Failed to hot-load GUI element {:?}: {}", event.path, e);
+                        return;
+                    }
+                }
+            }
+
             // Load .part.toml, .model.toml, .instance.toml files
             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
                 Ok(instance) => {
@@ -692,7 +930,24 @@ fn handle_file_created(
                         event.path.clone(),
                         instance,
                     );
-                    
+
+                    // Attach `LoadedFromFile` so any system that
+                    // identifies the entity's backing file (Explorer
+                    // classification, drag-drop reparent, copy/cut)
+                    // can find it. Cold-load (file_loader::spawn_file_entry)
+                    // already does this externally; the hot-load path
+                    // used to skip it — so a Part created at runtime
+                    // via the Insert menu / paste / MCP looked
+                    // identical in the Explorer but couldn't be
+                    // dragged into another folder ("source X has no
+                    // LoadedFromFile — cannot move on disk; skipping"
+                    // was the user-reported regression).
+                    commands.entity(entity).insert(super::file_loader::LoadedFromFile {
+                        path: event.path.clone(),
+                        file_type: event.file_type,
+                        service: event.service.clone(),
+                    });
+
                     let name = event.path.file_stem()
                         .and_then(|n| n.to_str())
                         .unwrap_or("Unknown")

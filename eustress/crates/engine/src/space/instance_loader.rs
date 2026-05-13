@@ -173,13 +173,26 @@ fn safe_collider_from(
     })
 }
 
-/// Transform data (position, rotation, scale)
+/// Transform data (position, rotation, scale).
+///
+/// All three fields tolerate omission so meshless / unsized classes
+/// (Attachment, SoundSource, lighting probes, …) can ship a TOML
+/// with only the bits that matter. `scale` defaults to `[1, 1, 1]`,
+/// `rotation` to identity quaternion, `position` to origin — same
+/// values as `Default::default()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformData {
+    #[serde(default = "default_position")]
     pub position: [f32; 3],
+    #[serde(default = "default_rotation")]
     pub rotation: [f32; 4], // Quaternion (x, y, z, w)
+    #[serde(default = "default_scale")]
     pub scale: [f32; 3],
 }
+
+fn default_position() -> [f32; 3] { [0.0, 0.0, 0.0] }
+fn default_rotation() -> [f32; 4] { [0.0, 0.0, 0.0, 1.0] }
+fn default_scale() -> [f32; 3] { [1.0, 1.0, 1.0] }
 
 impl Default for TransformData {
     fn default() -> Self {
@@ -696,17 +709,13 @@ pub struct UiInstanceProperties {
     pub layout_order: i32,
     #[serde(default)]
     pub rotation: f32,
-    // ---- Layout / UDim2 (position + size) ----
+    // ---- Layout — strict UDim2 ([scale_x, offset_x, scale_y, offset_y]) ----
     #[serde(default)]
     pub anchor_point: [f32; 2],
     #[serde(default)]
-    pub position_scale: [f32; 2],
-    #[serde(default)]
-    pub position_offset: [f32; 2],
-    #[serde(default)]
-    pub size_scale: [f32; 2],
-    #[serde(default = "default_size_offset")]
-    pub size_offset: [f32; 2],
+    pub position: eustress_common::ui_types::UDim2,
+    #[serde(default = "default_size_udim2")]
+    pub size: eustress_common::ui_types::UDim2,
     // ---- Behavior ----
     #[serde(default = "default_true")]
     pub active: bool,
@@ -740,7 +749,9 @@ fn default_one_i32() -> i32 { 1 }
 fn default_border_mode() -> String { "Outline".to_string() }
 fn default_scale_type() -> String { "Stretch".to_string() }
 fn default_automatic_size() -> String { "None".to_string() }
-fn default_size_offset() -> [f32; 2] { [100.0, 100.0] }
+fn default_size_udim2() -> eustress_common::ui_types::UDim2 {
+    eustress_common::ui_types::UDim2::from_pixels(100.0, 100.0)
+}
 
 impl Default for UiInstanceProperties {
     fn default() -> Self {
@@ -769,10 +780,8 @@ impl Default for UiInstanceProperties {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: default_size_offset(),
+            position: eustress_common::ui_types::UDim2::default(),
+            size: default_size_udim2(),
             active: true,
             auto_button_color: true,
             image: String::new(),
@@ -981,134 +990,28 @@ pub fn write_instance_definition(
     let toml_str = toml::to_string_pretty(instance)
         .map_err(|e| format!("Failed to serialize instance: {}", e))?;
 
-    std::fs::write(toml_path, toml_str)
+    // Atomic write + retry on Windows file-lock races (file watcher
+    // reload pass, antivirus scanning, text-editor reads).
+    super::gui_loader::write_atomic(toml_path, toml_str.as_bytes())
         .map_err(|e| format!("Failed to write {}: {}", toml_path.display(), e))?;
 
     Ok(())
 }
 
-/// Returns true if `name` is available for a new entity in `dir` — i.e. no
-/// existing file or folder would collide.
-///
-/// Entity names map to two disk shapes: folder-based (`BASE/_instance.toml`)
-/// and legacy flat (`BASE.toml`, `BASE.glb.toml`, `BASE.<ext>.toml`). The
-/// file-loader treats both shapes as the same entity name "BASE". A naive
-/// `dir.join(name).exists()` check only catches the folder form — so
-/// duplicating a flat-file entity would create a sibling folder with the
-/// same name, producing two conflicting "BASE" entities on reload (the
-/// corruption the user reported: Block.toml + Block/_instance.toml).
-///
-/// This helper rejects the name if ANY entry in `dir` would resolve to it:
-/// a folder named `BASE`, a file `BASE.toml`, or any `BASE.<anything>.toml`.
-/// Also rejects EEP-reserved filenames (`_instance.toml`, `_service.toml`)
-/// — creating a folder with one of those names produces the
-/// `Part-XXXX/_instance.toml/_instance.toml` corruption the user hit
-/// 2026-04-25, where every part-folder loader tried to read a directory
-/// as a file. The guard lives on the availability check so EVERY caller
-/// inherits the protection, not just `unique_entity_name`.
-pub fn entity_name_is_available(dir: &Path, name: &str) -> bool {
-    if name.is_empty() { return false; }
-    if is_eep_reserved_name(name) { return false; }
-    // Folder with this exact name — the common path.
-    if dir.join(name).exists() { return false; }
-    // Any flat file whose first path segment (before the first `.`) matches.
-    // `.split('.').next()` yields the stem up to the first dot, so
-    // `Block.toml`, `Block.glb.toml`, and `Block.script.toml` all resolve
-    // to "Block" and therefore conflict.
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let fname = entry.file_name();
-            let Some(s) = fname.to_str() else { continue };
-            if s.split('.').next() == Some(name) {
-                if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    return false;
-                }
-            }
-        }
-    }
-    true
-}
-
-/// Names that EEP uses internally as folder markers. A user-facing
-/// entity must never claim one of these as its folder name — doing so
-/// creates a directory at the path the loader expects to be a file,
-/// which leaves the loader either silently skipping the entity or
-/// surfacing it as a phantom Folder in the Explorer (the regression
-/// hit on 2026-04-25 with `Part-7ed7/_instance.toml/`).
-///
-/// Case-insensitive on Windows + macOS — case folding catches users
-/// who type `_Instance.toml` thinking it's distinct.
-pub fn is_eep_reserved_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "_instance.toml"
-            | "_service.toml"
-            | "_universe.toml"
-            | "_space.toml"
-            | "_eustress"
-            | ".eustress"
-    )
-}
-
-/// Pick a unique entity name in `dir`, falling back to `BASE`, `BASE1`, …
-/// the flat-file-aware behavior from [`entity_name_is_available`].
-///
-/// **Collision strategy.** The first occurrence of a name keeps the
-/// plain base (`Block/`). Subsequent collisions get a short stable
-/// hex suffix derived from the system clock + a retry index
-/// (`Block-a3f2/`, `Block-9d1c/`, …) — deliberately **not** the
-/// sequential `Block1`, `Block2` convention an earlier version of
-/// this function used. The display name inside `_instance.toml`
-/// (`[metadata] name = "Block"`) is what the Explorer shows, so any
-/// number of sibling "Block" entities render identically in the UI
-/// while staying uniquely addressable on disk.
-pub fn unique_entity_name(dir: &Path, base: &str) -> String {
-    // Coerce reserved-name input to a safe placeholder so a buggy
-    // caller that hands us `_instance.toml` (etc.) can't bypass the
-    // EEP filename invariant. `entity_name_is_available` also rejects
-    // the reserved set, but doing the swap up-front means the rest of
-    // this function operates on a sane stem instead of churning
-    // through 10 000 retries that all fail the reserved check.
-    let base = if is_eep_reserved_name(base) {
-        tracing::warn!(
-            "unique_entity_name: caller passed reserved name {:?} — substituting 'Entity'",
-            base
-        );
-        "Entity"
-    } else {
-        base
-    };
-    if entity_name_is_available(dir, base) {
-        return base.to_string();
-    }
-    // Hex suffix pool. 4 chars = 65k values; collisions are vanishingly
-    // rare at any realistic sibling count, but we still iterate up to
-    // 10_000 attempts to be sure. Seeding off the nanosecond clock
-    // plus the attempt index means two `unique_entity_name` calls in
-    // the same microsecond don't both return the same candidate.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    for i in 0u32..10_000 {
-        // Mix seed + retry index with a cheap splittable hash so
-        // successive candidates don't share prefix bits.
-        let mut x = seed.wrapping_add(i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        x ^= x >> 30;
-        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        x ^= x >> 27;
-        let tag = (x as u32) & 0xFFFF;
-        let candidate = format!("{}-{:04x}", base, tag);
-        if entity_name_is_available(dir, &candidate) {
-            return candidate;
-        }
-    }
-    // Last-resort fallback: full timestamp. We've effectively never
-    // seen this path in practice — if it fires, something's already
-    // very wrong with the directory.
-    format!("{}-{}", base, chrono::Utc::now().timestamp())
-}
+// Naming helpers (entity_name_is_available, is_eep_reserved_name,
+// unique_entity_name) live in `eustress_common::instance_create` so
+// the in-process engine and the out-of-process MCP server share the
+// same uniqueness rules — disk-state mutations never disagree.
+//
+// Entity names map to two disk shapes: folder-based
+// (`BASE/_instance.toml`) and legacy flat (`BASE.toml`, `BASE.glb.toml`,
+// `BASE.<ext>.toml`). The availability check rejects ANY collision —
+// folder, flat file, or EEP-reserved name (`_instance.toml`, etc.) —
+// inheriting the 2026-04-25 corruption fix where a folder named
+// `_instance.toml/` produced a phantom Folder in the Explorer.
+pub use eustress_common::instance_create::{
+    entity_name_is_available, is_eep_reserved_name, unique_entity_name,
+};
 
 /// Return a [`CreatorStamp`] for the currently-authenticated user, or `None`
 /// if the user is offline / not logged in. Offline edits stay unsigned so the
@@ -1723,8 +1626,10 @@ pub fn attach_ui_component(
                 border_color3: u.border_color3,
                 text_x_alignment: u.to_x_align(),
                 text_y_alignment: u.to_y_align(),
-                position: u.position_offset,
-                size: u.size_offset,
+                // Roblox-parity Position/Size as UDim2. The TOML schema
+                // still carries split scale/offset; combine them here.
+                position: u.position,
+                size: u.size,
                 anchor_point: u.anchor_point,
                 rotation: u.rotation,
                 z_index: u.z_index,
@@ -1754,10 +1659,8 @@ pub fn attach_ui_component(
                 layout_order: u.layout_order,
                 rotation: u.rotation,
                 anchor_point: u.anchor_point,
-                position_scale: u.position_scale,
-                position_offset: u.position_offset,
-                size_scale: u.size_scale,
-                size_offset: u.size_offset,
+                position: u.position,
+                size: u.size,
                 visible: u.visible,
                 active: u.active,
                 auto_button_color: u.auto_button_color,
@@ -1792,10 +1695,8 @@ pub fn attach_ui_component(
                 layout_order: u.layout_order,
                 rotation: u.rotation,
                 anchor_point: u.anchor_point,
-                position_scale: u.position_scale,
-                position_offset: u.position_offset,
-                size_scale: u.size_scale,
-                size_offset: u.size_offset,
+                position: u.position,
+                size: u.size,
             });
         }
         ClassName::ImageLabel => {
@@ -1811,10 +1712,8 @@ pub fn attach_ui_component(
                 layout_order: u.layout_order,
                 rotation: u.rotation,
                 anchor_point: u.anchor_point,
-                position_scale: u.position_scale,
-                position_offset: u.position_offset,
-                size_scale: u.size_scale,
-                size_offset: u.size_offset,
+                position: u.position,
+                size: u.size,
                 visible: u.visible,
                 ..Default::default()
             });
@@ -1832,10 +1731,8 @@ pub fn attach_ui_component(
                 layout_order: u.layout_order,
                 rotation: u.rotation,
                 anchor_point: u.anchor_point,
-                position_scale: u.position_scale,
-                position_offset: u.position_offset,
-                size_scale: u.size_scale,
-                size_offset: u.size_offset,
+                position: u.position,
+                size: u.size,
                 visible: u.visible,
                 active: u.active,
                 auto_button_color: u.auto_button_color,
@@ -1853,10 +1750,8 @@ pub fn attach_ui_component(
                 layout_order: u.layout_order,
                 rotation: u.rotation,
                 anchor_point: u.anchor_point,
-                position_scale: u.position_scale,
-                position_offset: u.position_offset,
-                size_scale: u.size_scale,
-                size_offset: u.size_offset,
+                position: u.position,
+                size: u.size,
                 scrolling_enabled: u.scrolling_enabled,
                 scroll_bar_thickness: u.scroll_bar_thickness,
                 ..Default::default()
@@ -1878,13 +1773,34 @@ pub fn attach_ui_component(
 /// spawn (read TOML + write TOML per entity = 1-second freeze).
 /// Only entities whose Transform was **modified** (gizmo, properties panel)
 /// after initial spawn will be written back.
+/// Marker placed on an entity for the duration of a manipulator drag
+/// (Move / Rotate / Scale gizmos). While present, [`write_instance_changes_system`]
+/// skips disk writes for that entity — the tool's mouse-release branch is
+/// the canonical single TOML write per drag. Without this, every mouse-move
+/// frame during a drag would queue a TOML write, producing dozens of disk
+/// writes per second + a file-watcher reload storm.
+///
+/// Tools MUST pair every `insert(BeingDragged)` with a `remove::<BeingDragged>()`
+/// in all drag-exit paths (mouse-up, Escape cancel, numeric-input finalise,
+/// tool switch). The cancel paths are easy to miss — keep one mental
+/// invariant: `BeingDragged` should never outlive `state.dragged_axis` /
+/// `dragged_plane` / `free_drag`.
+#[derive(Component, Default)]
+pub struct BeingDragged;
+
 pub fn write_instance_changes_system(
     instances: Query<(
         Entity,
         &Transform,
         &InstanceFile,
         Option<&eustress_common::classes::BasePart>,
-    ), Or<(Changed<Transform>, Changed<eustress_common::classes::BasePart>)>>,
+    ), (
+        Or<(Changed<Transform>, Changed<eustress_common::classes::BasePart>)>,
+        // Defer TOML writes for entities currently held by a gizmo drag.
+        // The tool itself writes once on mouse-release; this auto-system
+        // is for non-drag changes (Properties panel edits, scripts, MCP).
+        Without<BeingDragged>,
+    )>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
 ) {
@@ -2106,7 +2022,12 @@ pub fn write_instance_changes_system(
 
                 let out = toml::to_string_pretty(&doc)
                     .map_err(|e| format!("serialize {:?}: {}", job.path, e))?;
-                std::fs::write(&job.path, out)
+                // Atomic write + retry so a transient file-lock from
+                // an external reader (antivirus, text editor, the
+                // engine's reload-after-write pass) doesn't silently
+                // drop the user's edit (see `gui_loader::write_atomic`
+                // for the full rationale).
+                super::gui_loader::write_atomic(&job.path, out.as_bytes())
                     .map_err(|e| format!("write {:?}: {}", job.path, e))?;
                 Ok(())
             })();
@@ -2117,6 +2038,235 @@ pub fn write_instance_changes_system(
         let elapsed = start.elapsed();
         if elapsed.as_millis() > 50 {
             tracing::warn!("🐌 Background instance writes: {:.1}ms ({} files)", elapsed.as_secs_f64() * 1000.0, job_count);
+        }
+    });
+}
+
+// ============================================================================
+// Tags + Attributes write-back — applies to ALL classes, not just BaseParts
+// ============================================================================
+//
+// `save_tags_and_attributes_changes` runs alongside `write_instance_changes_system`
+// but is filtered to `Changed<Tags>` / `Changed<Attributes>` so any class
+// (Part, Model, BillboardGui, Script, Folder, …) with an `InstanceFile`
+// component gets its tag / attribute mutations persisted to disk. Without
+// this system, tag changes from Rune scripts, Luau scripts, the
+// Properties panel, or future MCP-ECS-mediated paths would live only in
+// the ECS and disappear on restart.
+
+/// Convert a rich in-memory `AttributeValue` into a plain `toml::Value`
+/// suitable for the `[attributes]` section. Mirrors the inverse mapping
+/// in `rich_toml_value_to_attribute` (which loads TOML → ECS). Types
+/// outside the round-trip-safe set (Object / EntityRef / CFrame / …)
+/// fall back to a string display so the file stays human-readable even
+/// when the data isn't recoverable on load.
+fn attribute_to_toml(value: &eustress_common::AttributeValue) -> toml::Value {
+    use eustress_common::AttributeValue as A;
+    match value {
+        A::Bool(b)      => toml::Value::Boolean(*b),
+        A::Int(i)       => toml::Value::Integer(*i),
+        A::Number(n)    => toml::Value::Float(*n),
+        A::String(s)    => toml::Value::String(s.clone()),
+        A::Vector2(v)   => toml::Value::Array(vec![
+            toml::Value::Float(v.x as f64),
+            toml::Value::Float(v.y as f64),
+        ]),
+        A::Vector3(v)   => toml::Value::Array(vec![
+            toml::Value::Float(v.x as f64),
+            toml::Value::Float(v.y as f64),
+            toml::Value::Float(v.z as f64),
+        ]),
+        A::Color(c) | A::Color3(c) => {
+            let s = c.to_srgba();
+            toml::Value::Array(vec![
+                toml::Value::Float(s.red as f64),
+                toml::Value::Float(s.green as f64),
+                toml::Value::Float(s.blue as f64),
+                toml::Value::Float(s.alpha as f64),
+            ])
+        }
+        // Less common types fall through to display strings — readable
+        // in a TOML file but not currently re-parseable on reload. Good
+        // enough for diff-friendly snapshotting; full round-trip can
+        // be plumbed when a user surface needs it.
+        other => toml::Value::String(other.display_value()),
+    }
+}
+
+/// Patch a single `_instance.toml` with the entity's current tags and
+/// attributes. Pure on-disk operation — no Bevy types in or out. Runs
+/// on a background thread.
+fn patch_tags_attributes_toml(
+    path: &std::path::Path,
+    tags: Option<Vec<String>>,
+    attributes: Option<std::collections::HashMap<String, toml::Value>>,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read {:?}: {}", path, e))?;
+    let mut doc: toml::Value = raw.parse()
+        .map_err(|e| format!("parse {:?}: {}", path, e))?;
+    let Some(root) = doc.as_table_mut() else {
+        return Err(format!("{:?}: top-level is not a table", path));
+    };
+
+    if let Some(tags) = tags {
+        if tags.is_empty() {
+            root.remove("tags");
+        } else {
+            root.insert(
+                "tags".into(),
+                toml::Value::Array(tags.into_iter().map(toml::Value::String).collect()),
+            );
+        }
+    }
+
+    if let Some(attrs) = attributes {
+        if attrs.is_empty() {
+            root.remove("attributes");
+        } else {
+            let mut tbl = toml::map::Map::new();
+            for (k, v) in attrs {
+                tbl.insert(k, v);
+            }
+            root.insert("attributes".into(), toml::Value::Table(tbl));
+        }
+    }
+
+    // Touch [metadata].last_modified for parity with the transform
+    // write path so external tools that diff on the timestamp pick up
+    // tag-only edits.
+    if let Some(meta) = root.get_mut("metadata").and_then(|m| m.as_table_mut()) {
+        meta.insert(
+            "last_modified".into(),
+            toml::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+
+    let out = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("serialize {:?}: {}", path, e))?;
+    super::gui_loader::write_atomic(path, out.as_bytes())
+        .map_err(|e| format!("write {:?}: {}", path, e))?;
+    Ok(())
+}
+
+/// Ensure every entity with an `InstanceFile` carries default-empty
+/// `Tags` and `Attributes` components, so script APIs / MCP tools /
+/// Properties-panel edits always have a destination component to
+/// mutate on any class — not just BaseParts.
+///
+/// `spawn_instance` covers Part / class_schema entities directly, but
+/// services, folders, GUI, scripts, and future spawn paths each have
+/// their own siloed spawn site. This catch-all system runs on
+/// `Added<InstanceFile>` so it fires exactly once per entity, the
+/// frame after spawn. The `Without<Tags>` / `Without<Attributes>`
+/// filters keep it from re-inserting on entities that already have
+/// them, and `save_tags_and_attributes_changes`'s `Added<>` skip-set
+/// prevents the freshly-inserted-but-empty components from triggering
+/// a no-op TOML write-back on cold load.
+pub fn ensure_tags_and_attributes_components(
+    mut commands: Commands,
+    needs_tags: Query<
+        Entity,
+        (
+            Added<InstanceFile>,
+            Without<eustress_common::attributes::Tags>,
+        ),
+    >,
+    needs_attrs: Query<
+        Entity,
+        (
+            Added<InstanceFile>,
+            Without<eustress_common::attributes::Attributes>,
+        ),
+    >,
+) {
+    for entity in needs_tags.iter() {
+        commands
+            .entity(entity)
+            .insert(eustress_common::attributes::Tags::new());
+    }
+    for entity in needs_attrs.iter() {
+        commands
+            .entity(entity)
+            .insert(eustress_common::attributes::Attributes::new());
+    }
+}
+
+/// Persist `Changed<Tags>` / `Changed<Attributes>` mutations to disk.
+/// Class-agnostic — every entity with an `InstanceFile` participates,
+/// so a Folder, BillboardGui, Script, or custom class can carry tags
+/// and attributes that survive a restart.
+pub fn save_tags_and_attributes_changes(
+    q: Query<
+        (
+            Entity,
+            &InstanceFile,
+            Option<&eustress_common::attributes::Tags>,
+            Option<&eustress_common::attributes::Attributes>,
+        ),
+        (
+            Or<(
+                Changed<eustress_common::attributes::Tags>,
+                Changed<eustress_common::attributes::Attributes>,
+            )>,
+            Without<BeingDragged>,
+        ),
+    >,
+    added_tags: Query<Entity, Added<eustress_common::attributes::Tags>>,
+    added_attrs: Query<Entity, Added<eustress_common::attributes::Attributes>>,
+    mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
+) {
+    // Just-added entities had their components inserted this tick (cold
+    // load). Skipping them avoids a 1-per-entity TOML write on every
+    // Space open — the data already matches what's on disk.
+    let just_added: std::collections::HashSet<Entity> =
+        added_tags.iter().chain(added_attrs.iter()).collect();
+
+    struct Job {
+        path: std::path::PathBuf,
+        tags: Option<Vec<String>>,
+        attrs: Option<std::collections::HashMap<String, toml::Value>>,
+    }
+    let mut jobs: Vec<Job> = Vec::new();
+
+    for (entity, instance_file, tags, attrs) in q.iter() {
+        if just_added.contains(&entity) { continue; }
+        // Deliberately don't skip on recently_written — see
+        // `save_text_label_changes` for the rationale. The watcher's
+        // hot-reload loop is broken by `mark_written` below; gating
+        // the save itself on the same flag drops rapid edits.
+        let tags_payload = tags.map(|t| t.0.clone());
+        let attrs_payload = attrs.map(|a| {
+            let mut out = std::collections::HashMap::new();
+            for (k, v) in a.values.iter() {
+                out.insert(k.clone(), attribute_to_toml(v));
+            }
+            out
+        });
+        recently_written.mark_written(instance_file.toml_path.clone());
+        jobs.push(Job {
+            path: instance_file.toml_path.clone(),
+            tags: tags_payload,
+            attrs: attrs_payload,
+        });
+    }
+
+    if jobs.is_empty() { return; }
+
+    let job_count = jobs.len();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        for job in jobs {
+            if let Err(e) = patch_tags_attributes_toml(&job.path, job.tags, job.attrs) {
+                tracing::error!("Tags/Attributes patch write failed: {}", e);
+            }
+        }
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() > 50 {
+            tracing::warn!(
+                "🐌 Background tag/attr writes: {:.1}ms ({} files)",
+                elapsed.as_secs_f64() * 1000.0, job_count,
+            );
         }
     });
 }

@@ -2479,6 +2479,12 @@ pub struct BillboardGui {
     pub clips_descendants: bool,
     pub reset_on_spawn: bool,
     pub stiffness_by_distance: bool,
+    /// Roblox `FaceCamera`-style behaviour toggle. When `true` (default)
+    /// the billboard quad faces the active camera each frame via the
+    /// WGSL vertex shader's camera-basis math. When `false` the quad
+    /// uses the entity's own `Transform.rotation` literally — useful
+    /// for world-anchored signs that stay oriented in a fixed direction.
+    pub face_camera: bool,
     
     // Distance
     pub distance_lower_limit: f32,
@@ -2491,16 +2497,42 @@ pub struct BillboardGui {
     pub light_influence: f32,
     
     // Size/Position
-    pub size: [f32; 2],  // UDim2 simplified (scale only)
-    pub size_offset: [f32; 2],  // Normalized offset
-    pub extents_offset: [f32; 3],  // Pixel offset
+    /// Canvas pixel dimensions as `UDim2`. For BillboardGui, Scale is
+    /// interpreted as studs (1.0 ≈ 1 stud at the engine's
+    /// PIXELS_PER_METER ratio) and Offset is constant pixels — so
+    /// `[0, 200, 0, 50]` reads as a 200×50-pixel canvas regardless of
+    /// distance, which is the existing engine convention.
+    pub size: crate::ui_types::UDim2,
+    /// Roblox `SizeOffset` — `Vector2` pixel offset from the
+    /// BillboardGui's anchor point. Pure pixels, no Scale component;
+    /// Roblox-parity uses `Vector2`, not `UDim2`. Mostly informational
+    /// for the renderer today (the card is anchored at its centre).
+    pub size_offset: [f32; 2],
+    pub extents_offset: [f32; 3],          // Stud-space offset relative to adornee bounds
     pub extents_offset_world_space: [f32; 3],
-    pub units_offset: [f32; 3],  // Local offset (units)
+    pub units_offset: [f32; 3],            // Local stud offset — 3D, stays Vec3
     pub units_offset_world_space: [f32; 3],
     
     // Sorting
     pub z_index_behavior: ZIndexBehavior,
-    
+    /// Roblox-extended `ZIndex` — integer depth-bias for the billboard
+    /// quad. Higher values pull the quad toward the camera so a label
+    /// sitting *on* its own part (e.g. a word on a mindmap sphere) wins
+    /// the depth test against the part it's attached to, **without**
+    /// switching to `AlwaysOnTop` mode (which would also let it punch
+    /// through closer geometry like other spheres in front of it).
+    ///
+    /// The shader applies `bias_metres = z_index * 0.5` along the
+    /// camera-toward direction, so ZIndex `1` ≈ 50 cm forward — enough
+    /// to clear a 1-stud ball (1 m diameter, 0.5 m radius) at any
+    /// camera angle. A 2-stud ball needs ZIndex `2`, etc. Negative
+    /// values push the billboard away (part occludes the label).
+    ///
+    /// Distinct from Roblox semantics (Roblox `BillboardGui` has no
+    /// `ZIndex`; only child `GuiObject`s do, and they sort inside the
+    /// canvas). Here it controls billboard-vs-world depth ordering.
+    pub z_index: i32,
+
     // Runtime (read-only)
     pub current_distance: f32,
 }
@@ -2521,11 +2553,20 @@ impl Default for BillboardGui {
             clips_descendants: false,
             reset_on_spawn: true,
             stiffness_by_distance: false,
-            
+            // Default ON so billboards face the camera out of the box
+            // (matches Roblox's behaviour for new BillboardGui instances).
+            face_camera: true,
+
             distance_lower_limit: 0.0,
             distance_step: 0.0,
-            distance_upper_limit: f32::MAX,
-            max_distance: 1962.0,  // Eustress default
+            // Roblox parity: `DistanceUpperLimit` defaults to 1000 studs
+            // (Roblox uses 1e4 in some docs but 1000 is the user-visible
+            // default in Studio's property pane and what code samples
+            // assume). `MaxDistance` is the historical Eustress field —
+            // we honour the smaller of the two at runtime in
+            // `sync_billboard_class_to_marker`.
+            distance_upper_limit: 1000.0,
+            max_distance: 1000.0,
             
             brightness: 1.0,
             light_influence: 1.0,
@@ -2538,7 +2579,7 @@ impl Default for BillboardGui {
             // traced back to when a _instance.toml was loaded without an
             // explicit size field. 200×50 matches the Add-Label default
             // and reads as a single line of readable text.
-            size: [200.0, 50.0],
+            size: crate::ui_types::UDim2::from_pixels(200.0, 50.0),
             size_offset: [0.0, 0.0],
             extents_offset: [0.0, 0.0, 0.0],
             extents_offset_world_space: [0.0, 0.0, 0.0],
@@ -2546,7 +2587,8 @@ impl Default for BillboardGui {
             units_offset_world_space: [0.0, 0.0, 0.0],
             
             z_index_behavior: ZIndexBehavior::Sibling,
-            
+            z_index: 0,
+
             current_distance: 0.0,
         }
     }
@@ -2625,10 +2667,9 @@ pub struct SurfaceGui {
     pub horizontal_alignment: HorizontalAlignment,
     /// Vertical alignment on the face
     pub vertical_alignment: VerticalAlignment,
-    /// Size relative to face (0-1 scale)
-    pub size_scale: [f32; 2],
-    /// Offset in pixels
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Size as `UDim2` — Scale (fraction of the face,
+    /// 0-1) + Offset (constant pixels) per axis.
+    pub size: crate::ui_types::UDim2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
@@ -2664,8 +2705,8 @@ impl Default for SurfaceGui {
             max_distance: 1000.0,
             horizontal_alignment: HorizontalAlignment::Center,
             vertical_alignment: VerticalAlignment::Center,
-            size_scale: [1.0, 1.0],
-            size_offset: [0.0, 0.0],
+            // Default: cover the full face with no pixel inset.
+            size: crate::ui_types::UDim2::from_scale(1.0, 1.0),
         }
     }
 }
@@ -2747,12 +2788,11 @@ pub struct Frame {
     pub rotation: f32,
     /// Anchor point (0-1, relative to size)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — Scale (fraction of parent's
+    /// resolved pixel size) + Offset (constant pixels) per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
@@ -2777,10 +2817,8 @@ impl Default for Frame {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [100.0, 100.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(100.0, 100.0),
         }
     }
 }
@@ -2814,12 +2852,10 @@ pub struct ScrollingFrame {
     pub rotation: f32,
     /// Anchor point (0-1)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — `(scale, offset)` per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
     
     // === Scrolling-specific properties ===
     
@@ -2903,10 +2939,8 @@ impl Default for ScrollingFrame {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [200.0, 200.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(200.0, 200.0),
             // Scrolling defaults
             canvas_size: [0.0, 0.0], // 0 = auto-size to children
             canvas_position: [0.0, 0.0],
@@ -2953,12 +2987,10 @@ pub struct VideoFrame {
     pub rotation: f32,
     /// Anchor point (0-1)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — `(scale, offset)` per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
     
     // === Video-specific properties ===
     
@@ -3002,10 +3034,9 @@ impl Default for VideoFrame {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [320.0, 180.0], // 16:9 default
+            position: crate::ui_types::UDim2::default(),
+            // 16:9 default canvas (320×180 pixels)
+            size: crate::ui_types::UDim2::from_pixels(320.0, 180.0),
             video: String::new(),
             autoplay: false,
             looping: false,
@@ -3047,12 +3078,10 @@ pub struct DocumentFrame {
     pub rotation: f32,
     /// Anchor point (0-1)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — `(scale, offset)` per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
     
     // === Document-specific properties ===
     
@@ -3110,10 +3139,8 @@ impl Default for DocumentFrame {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [400.0, 500.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(400.0, 500.0),
             document: String::new(),
             current_page: 1,
             zoom: 1.0,
@@ -3155,12 +3182,10 @@ pub struct WebFrame {
     pub rotation: f32,
     /// Anchor point (0-1)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — `(scale, offset)` per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
     
     // === Web-specific properties ===
     
@@ -3200,10 +3225,8 @@ impl Default for WebFrame {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [800.0, 600.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(800.0, 600.0),
             url: String::from("about:blank"),
             interactive: true,
             javascript_enabled: true,
@@ -3254,10 +3277,8 @@ pub struct ImageLabel {
     pub layout_order: i32,
     pub rotation: f32,
     pub anchor_point: [f32; 2],
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    pub position: crate::ui_types::UDim2,
+    pub size: crate::ui_types::UDim2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect, Default)]
@@ -3289,10 +3310,8 @@ impl Default for ImageLabel {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [100.0, 100.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(100.0, 100.0),
         }
     }
 }
@@ -3335,10 +3354,8 @@ pub struct TextButton {
     pub layout_order: i32,
     pub rotation: f32,
     pub anchor_point: [f32; 2],
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    pub position: crate::ui_types::UDim2,
+    pub size: crate::ui_types::UDim2,
 }
 
 impl Default for TextButton {
@@ -3363,10 +3380,8 @@ impl Default for TextButton {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [200.0, 50.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(200.0, 50.0),
         }
     }
 }
@@ -3407,10 +3422,8 @@ pub struct ImageButton {
     pub layout_order: i32,
     pub rotation: f32,
     pub anchor_point: [f32; 2],
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    pub position: crate::ui_types::UDim2,
+    pub size: crate::ui_types::UDim2,
 }
 
 impl Default for ImageButton {
@@ -3433,10 +3446,8 @@ impl Default for ImageButton {
             layout_order: 0,
             rotation: 0.0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [100.0, 100.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(100.0, 100.0),
         }
     }
 }
@@ -3479,10 +3490,8 @@ pub struct TextBox {
     pub border_color3: [f32; 3],
     
     // Layout
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    pub position: crate::ui_types::UDim2,
+    pub size: crate::ui_types::UDim2,
     pub anchor_point: [f32; 2],
     pub z_index: i32,
     pub border_size_pixel: i32,
@@ -3506,10 +3515,8 @@ impl Default for TextBox {
             background_color3: [1.0, 1.0, 1.0],
             background_transparency: 0.0,
             border_color3: [0.3, 0.3, 0.3],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [200.0, 30.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(200.0, 30.0),
             anchor_point: [0.0, 0.0],
             z_index: 1,
             border_size_pixel: 1,
@@ -3538,12 +3545,10 @@ pub struct ViewportFrame {
     pub layout_order: i32,
     /// Anchor point (0-1)
     pub anchor_point: [f32; 2],
-    /// Position (scale + offset)
-    pub position_scale: [f32; 2],
-    pub position_offset: [f32; 2],
-    /// Size (scale + offset)
-    pub size_scale: [f32; 2],
-    pub size_offset: [f32; 2],
+    /// Roblox-parity Position as `UDim2` — `(scale, offset)` per axis.
+    pub position: crate::ui_types::UDim2,
+    /// Roblox-parity Size as `UDim2`.
+    pub size: crate::ui_types::UDim2,
     
     // Viewport-specific properties
     /// Camera entity to render from (if None, uses default)
@@ -3567,10 +3572,8 @@ impl Default for ViewportFrame {
             z_index: 1,
             layout_order: 0,
             anchor_point: [0.0, 0.0],
-            position_scale: [0.0, 0.0],
-            position_offset: [0.0, 0.0],
-            size_scale: [0.0, 0.0],
-            size_offset: [200.0, 200.0],
+            position: crate::ui_types::UDim2::default(),
+            size: crate::ui_types::UDim2::from_pixels(200.0, 200.0),
             current_camera: None,
             ambient: true,
             light_color: [1.0, 1.0, 1.0],
@@ -3614,9 +3617,9 @@ pub struct TextLabel {
     pub text_x_alignment: TextXAlignment,
     pub text_y_alignment: TextYAlignment,
     
-    // Layout
-    pub position: [f32; 2],  // UDim2 simplified
-    pub size: [f32; 2],
+    // Layout — Roblox-parity UDim2 (Scale + Offset per axis).
+    pub position: crate::ui_types::UDim2,
+    pub size: crate::ui_types::UDim2,
     pub anchor_point: [f32; 2],  // 0-1
     pub rotation: f32,  // Degrees
     pub z_index: i32,
@@ -3707,8 +3710,10 @@ impl Default for TextLabel {
             text_x_alignment: TextXAlignment::Center,
             text_y_alignment: TextYAlignment::Center,
             
-            position: [0.0, 0.0],
-            size: [1.0, 1.0],
+            position: crate::ui_types::UDim2::default(),
+            // Default size: full parent (Scale=1) on both axes. Mirrors
+            // the historical [1.0, 1.0] convention for new TextLabels.
+            size: crate::ui_types::UDim2::from_scale(1.0, 1.0),
             anchor_point: [0.0, 0.0],
             rotation: 0.0,
             z_index: 1,
@@ -7303,6 +7308,11 @@ pub enum PropertyValue {
     Bool(bool),
     Vector2([f32; 2]),
     Vector3(Vec3),
+    /// Roblox-parity 2D UI position/size. Each axis carries
+    /// `(scale, offset)` — scale is fraction-of-parent (or studs for
+    /// BillboardGui), offset is constant pixels. Properties panel
+    /// renders this as four numeric inputs grouped into X/Y pairs.
+    UDim2(crate::ui_types::UDim2),
     Color(Color),
     Color3([f32; 3]),  // RGB as [r, g, b] in 0.0-1.0 range
     Transform(Transform),

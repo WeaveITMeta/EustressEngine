@@ -36,8 +36,11 @@ component PanelOptionRow inherits Rectangle {
     background: transparent;
 
     row-content := VerticalLayout {
-        padding: 6px;
-        spacing: 4px;
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 2px;
 
         // Label (skip for "label" kind which IS its own text).
         if root.data.kind != "label" && root.data.label != "": Text {
@@ -137,7 +140,12 @@ export component ToolPanel inherits Rectangle {
     callback cancel();
 
     visible: root.visible-when;
-    width: 280px;
+    width: 240px;
+    // Sum of header (44) + 1px divider + body (up to 320) + 1px divider
+    // + footer (44). Body computes its own height from the visible
+    // controls, so the panel collapses to just what it needs — no
+    // empty vertical canyon below the Apply button.
+    height: panel-stack.preferred-height;
     background: Theme.panel-glass;
     border-radius: Theme.radius-lg;
     border-width: 1px;
@@ -151,7 +159,7 @@ export component ToolPanel inherits Rectangle {
         background: Theme.border-highlight;
     }
 
-    VerticalLayout {
+    panel-stack := VerticalLayout {
         padding: 0;
         spacing: 0;
 
@@ -236,10 +244,11 @@ export component ToolPanel inherits Rectangle {
 
         // ── Body — scrollable column of rows ──────────────────────
         Rectangle {
-            // Hard cap so ultra-long control lists scroll instead of
-            // pushing the Apply footer off the viewport. 320px fits ~10
-            // rows comfortably; anything longer scrolls.
-            height: min(body-layout.preferred-height, 320px);
+            // Cap so ultra-long control lists scroll instead of pushing
+            // the Apply footer off the viewport. 480px is enough for
+            // ~14 rows (Grid Array's biggest layout: 6 number fields +
+            // axis choice + advanced toggles); longer than that scrolls.
+            height: min(body-layout.preferred-height, 480px);
 
             ScrollView {
                 width: 100%; height: 100%;

@@ -293,6 +293,11 @@ component DropdownSeparator inherits Rectangle {
 export component Ribbon inherits Rectangle {
     // Properties
     in property <string> current-tool: "select";
+    /// Stable ID of the currently-active modal tool (Smart Edit / Pattern /
+    /// Mirror). Empty when no modal tool is running. Drives the per-button
+    /// `selected:` highlight on the CAD tab so users can see which tool is
+    /// armed without hunting for the floating bar/panel.
+    in property <string> active-modal-tool-id: "";
     in property <string> transform-mode: "world";
     in property <string> play-state: "stopped";
     in property <bool> has-unsaved-changes: false;
@@ -1894,6 +1899,7 @@ export component Ribbon inherits Rectangle {
                         label: "Gap Fill"; shortcut: "Ctrl+Alt+G";
                         tooltip: "Fill the gap between two parts with a bridging block";
                         tint: #00bcd4;
+                        selected: root.active-modal-tool-id == "gap_fill";
                         clicked => { root.on-activate-modal-tool("gap_fill"); }
                     }
                     IconButton {
@@ -1901,6 +1907,7 @@ export component Ribbon inherits Rectangle {
                         label: "Resize Align"; shortcut: "Ctrl+Alt+A";
                         tooltip: "Resize source part until its face meets target's face";
                         tint: #00bcd4;
+                        selected: root.active-modal-tool-id == "resize_align";
                         clicked => { root.on-activate-modal-tool("resize_align"); }
                     }
                     IconButton {
@@ -1908,6 +1915,7 @@ export component Ribbon inherits Rectangle {
                         label: "Edge Align"; shortcut: "";
                         tooltip: "Translate source so its edge coincides with target's edge";
                         tint: #00bcd4;
+                        selected: root.active-modal-tool-id == "edge_align";
                         clicked => { root.on-activate-modal-tool("edge_align"); }
                     }
                     IconButton {
@@ -1915,6 +1923,7 @@ export component Ribbon inherits Rectangle {
                         label: "Part Swap"; shortcut: "Ctrl+Alt+P";
                         tooltip: "Swap positions between two parts";
                         tint: #00bcd4;
+                        selected: root.active-modal-tool-id == "part_swap_positions";
                         clicked => { root.on-activate-modal-tool("part_swap_positions"); }
                     }
                     IconButton {
@@ -1922,6 +1931,7 @@ export component Ribbon inherits Rectangle {
                         label: "Mirror"; shortcut: "Ctrl+Alt+M";
                         tooltip: "Reflect selection across a plane";
                         tint: #00bcd4;
+                        selected: root.active-modal-tool-id == "model_reflect";
                         clicked => { root.on-activate-modal-tool("model_reflect"); }
                     }
                 }
@@ -1989,6 +1999,7 @@ export component Ribbon inherits Rectangle {
                         label: "Linear"; shortcut: "Ctrl+Alt+L";
                         tooltip: "Linear array — N copies along a step vector";
                         tint: #ba68c8;
+                        selected: root.active-modal-tool-id == "linear_array";
                         clicked => { root.on-activate-modal-tool("linear_array"); }
                     }
                     IconButton {
@@ -1996,6 +2007,7 @@ export component Ribbon inherits Rectangle {
                         label: "Radial"; shortcut: "Ctrl+Alt+R";
                         tooltip: "Radial array — N copies around a pivot axis";
                         tint: #ba68c8;
+                        selected: root.active-modal-tool-id == "radial_array";
                         clicked => { root.on-activate-modal-tool("radial_array"); }
                     }
                     IconButton {
@@ -2003,6 +2015,7 @@ export component Ribbon inherits Rectangle {
                         label: "Grid"; shortcut: "";
                         tooltip: "Grid array — Nx × Ny × Nz 3D pattern";
                         tint: #ba68c8;
+                        selected: root.active-modal-tool-id == "grid_array";
                         clicked => { root.on-activate-modal-tool("grid_array"); }
                     }
                 }

@@ -324,6 +324,7 @@ pub struct MoveToolSnapCtx<'w, 's> {
 }
 
 fn handle_move_interaction(
+    mut commands: Commands,
     mut state: ResMut<MoveToolState>,
     inputs: MoveToolInputs,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -384,6 +385,15 @@ fn handle_move_interaction(
                         bp.cframe.rotation = rot;
                     }
                 }
+            }
+            // Strip the drag marker so `write_instance_changes_system`
+            // resumes — but Escape RESTORED the original Transform, so
+            // Bevy doesn't mark it Changed; nothing to persist. Removing
+            // the marker is still correct so the next gizmo session
+            // (without this Escape having happened) writes properly.
+            for ent in state.initial_positions.keys() {
+                commands.entity(*ent)
+                    .remove::<crate::space::instance_loader::BeingDragged>();
             }
             state.dragged_axis = None;
             state.dragged_plane = None;
@@ -485,6 +495,9 @@ fn handle_move_interaction(
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
+                commands.entity(entity).insert(
+                    crate::space::instance_loader::BeingDragged,
+                );
             }
 
             // Initial mouse world on the drag plane (the plane handle itself).
@@ -514,6 +527,9 @@ fn handle_move_interaction(
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
+                commands.entity(entity).insert(
+                    crate::space::instance_loader::BeingDragged,
+                );
             }
 
             // Compute initial mouse world position on the axis drag plane.
@@ -543,6 +559,12 @@ fn handle_move_interaction(
                 for (ent, _, transform, _) in query.iter() {
                     state.initial_positions.insert(ent, transform.translation);
                     state.initial_rotations.insert(ent, transform.rotation);
+                    // Mark each dragged entity so `write_instance_changes_system`
+                    // skips disk writes while the gizmo is held. The release
+                    // branch below removes the marker AND writes once.
+                    commands.entity(ent).insert(
+                        crate::space::instance_loader::BeingDragged,
+                    );
                 }
 
                 // Initial mouse world on horizontal plane at group center height
@@ -947,6 +969,15 @@ fn handle_move_interaction(
             }
         }
 
+        // Drop the drag marker so `write_instance_changes_system` resumes
+        // catching property edits etc. Done unconditionally (even when
+        // `was_dragging` is false) so a stray marker can't outlive its
+        // session — defensive against any state.dragged_* clear path we
+        // might add later that forgets the marker.
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.dragged_plane = None;
         state.free_drag = false;
@@ -967,6 +998,7 @@ fn handle_move_interaction(
 /// v1 scope: axis drag only. Plane drags + free drags pass through.
 #[allow(clippy::too_many_arguments)]
 fn finalize_numeric_input_on_move(
+    mut commands: Commands,
     mut committed: MessageReader<crate::numeric_input::NumericInputCommittedEvent>,
     mut state: ResMut<MoveToolState>,
     mut query: Query<(Entity, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
@@ -1030,6 +1062,10 @@ fn finalize_numeric_input_on_move(
         }
 
         // Clear drag state — matches the mouse-released path.
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.dragged_plane = None;
         state.free_drag = false;

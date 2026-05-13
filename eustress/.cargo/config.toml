@@ -8,6 +8,12 @@ jobs = 8
 # ── Build tier aliases ────────────────────────────────────────────────────────
 # These match the [features] tiers in crates/engine/Cargo.toml.
 # `cargo core` / `cargo studio-dev` / etc. run from the eustress/ workspace root.
+#
+# Note on `bevy/dynamic_linking` (the `dev` feature): it would normally be
+# the biggest incremental compile win, BUT Bevy's exported symbol count
+# (~220k) blows past Windows PE's 65k DLL export cap. So `--features dev`
+# is intentionally NOT enabled here on Windows. On Linux/macOS, add
+# `--features dev` to the run-studio alias for a 3-5× incremental speed-up.
 [alias]
 # Core: stable release build (all features currently, strip later)
 core          = "build --release -p eustress-engine --no-default-features --features core"
@@ -15,23 +21,37 @@ core-dev      = "build -p eustress-engine --no-default-features --features core"
 # Studio: active development build with default features (= core today)
 studio        = "build --release -p eustress-engine"
 studio-dev    = "build -p eustress-engine"
-# Run shortcuts
-run-core      = "run --release -p eustress-engine --no-default-features --features core"
-run-studio    = "run -p eustress-engine"
+# Run shortcuts. `run-studio` is the everyday command. The lld linker +
+# `line-tables-only` debug info + opt-level-1 deps in [profile.dev] still
+# give a meaningful incremental rebuild speed-up on Windows even without
+# dynamic_linking.
+run-core       = "run --release -p eustress-engine --bin eustress-engine --no-default-features --features core"
+run-studio     = "run -p eustress-engine --bin eustress-engine"
+run-studio-rel = "run --release -p eustress-engine --bin eustress-engine"
 
-# Uncomment for faster local builds on Windows (requires rust-lld in PATH):
-# [target.x86_64-pc-windows-msvc]
-# linker = "rust-lld.exe"
-# rustflags = ["-C", "linker-flavor=lld-link"]
+# Use rust-lld (ships with rustup) on Windows MSVC — typically 30-50%
+# faster link time than the default link.exe. rust-lld is the LLVM linker
+# rebadged for Rust; same binary on every platform.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "linker-flavor=lld-link"]
 
 [profile.dev]
-# Minimal optimization for fast compile
+# Minimal optimisation on our crates — we want fast compile, not fast runtime.
 opt-level = 0
-# Skip debug info for faster compile (comment out if you need debugging)
-debug = 0
-# Split debuginfo for faster linking
+# `line-tables-only` keeps the file:line info that panic backtraces need
+# but skips full DWARF symbol info. Roughly 2× faster link than `debug=2`
+# (a.k.a. "full") with no loss of stack-trace usefulness for crash diagnosis.
+debug = "line-tables-only"
+# Unpacked split debuginfo lets the linker skip rewriting it on every link.
 split-debuginfo = "unpacked"
+# Maximum codegen parallelism; makes incremental rebuilds finish sooner.
+codegen-units = 256
+# Incremental output is implicit at opt-level 0 but be explicit.
+incremental = true
 
 [profile.dev.package."*"]
-# Optimize dependencies even in dev mode (they don't change often)
-opt-level = 2
+# Dependencies barely change — pay opt-level 1 once and reap faster runtime
+# (fewer monomorphisation explosions trickling into our code) without the
+# heavy compile-time cost of opt-level 2/3.
+opt-level = 1

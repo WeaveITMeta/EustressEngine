@@ -593,6 +593,21 @@ fn handle_menu_action_events(
             Action::ScaleTool  => { studio_state.current_tool = crate::ui::Tool::Scale; }
             Action::RotateTool => { studio_state.current_tool = crate::ui::Tool::Rotate; }
 
+            // Ctrl+L — flip the gizmo / transform-input frame between
+            // world-axis (default) and the active entity's local-axis
+            // basis. Matches Blender's `,` / Maya's `w` toggle. Affects
+            // Move + Rotate + Scale tools uniformly via `studio_state`.
+            Action::ToggleTransformSpace => {
+                studio_state.transform_mode = match studio_state.transform_mode {
+                    crate::ui::TransformMode::World => crate::ui::TransformMode::Local,
+                    crate::ui::TransformMode::Local => crate::ui::TransformMode::World,
+                };
+                info!(
+                    "⌨️ Shortcut: Toggle Transform Space → {:?}",
+                    studio_state.transform_mode,
+                );
+            }
+
             // Manual save (Ctrl+S) — write ECS to disk + commit to git
             // as a recoverable save point. Routed through `FileEvent` so
             // it goes through the same exclusive-system path as the
@@ -700,10 +715,31 @@ fn handle_menu_action_events(
                 } else {
                     let mut camera_deleted = false;
                     let mut trashed_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+                    let mut skipped_services = 0u32;
 
                     for (entity, _, _) in entity_query.iter() {
                         let id = format!("{}v{}", entity.index(), entity.generation());
                         if !selected_ids.contains(&id) { continue; }
+
+                        // Core-service guard: Workspace, Lighting, SoulService,
+                        // ReplicatedStorage, etc. are scaffolding for the entire
+                        // Space — deleting one orphans every child and breaks the
+                        // file watcher. Refuse silently-counted so a multi-select
+                        // delete still removes the non-service items and the user
+                        // gets a single explanatory toast at the end.
+                        let path_for_protection = instance_file_query.get(entity)
+                            .map(|inst| inst.toml_path.clone())
+                            .ok()
+                            .or_else(|| loaded_from_file_query.get(entity)
+                                .ok().map(|l| l.path.clone()));
+                        if let Some(ref p) = path_for_protection {
+                            if crate::space::is_protected_service_path(p) {
+                                skipped_services += 1;
+                                info!("🔒 Skipping delete on protected service: {:?}", p);
+                                continue;
+                            }
+                        }
+
                         if instance_query.get(entity)
                             .map(|inst| inst.class_name == eustress_common::classes::ClassName::Camera)
                             .unwrap_or(false)
@@ -996,6 +1032,12 @@ fn handle_menu_action_events(
                             Name::new("Camera"),
                         ));
                         info!("📷 Camera deleted — respawned default camera at origin");
+                    }
+                    if skipped_services > 0 {
+                        warn!(
+                            "🔒 Refused to delete {} core service{} — Workspace, Lighting, SoulService, etc. are protected scaffolding.",
+                            skipped_services, if skipped_services == 1 { "" } else { "s" },
+                        );
                     }
                 }
             }

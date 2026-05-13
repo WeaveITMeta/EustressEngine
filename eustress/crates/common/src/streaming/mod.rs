@@ -8,7 +8,10 @@
 //! - `chunk_grid`     — SpatialChunkGrid: chunk-keyed DashMap with R-tree spatial index
 //! - `radius_gate`    — HysteresisRadiusGate: two-threshold promote/demote logic
 //! - `dirty_flusher`  — DirtyBitFlusher: background thread batched async write-back
-//! - `toml_watcher`   — TomlWatcher: notify-based reactive reload on external edits
+//! - `toml_watcher`   — stateless consumer of `crate::file_events::FileChanged`
+//!                      (the engine's single notify watcher). Translates
+//!                      path events → `WatchEvent` and refreshes the
+//!                      `SpatialChunkGrid` from disk on Modify.
 //! - `instance_index` — InstanceIndex: flat metadata index for Explorer queries
 //! - `plugin`         — StreamingPlugin: Bevy plugin wiring ECS events
 //!
@@ -46,6 +49,14 @@ pub use sidecar::{encode_sidecar, decode_sidecar, invalidate_sidecar, SidecarHea
 pub use chunk_grid::SpatialChunkGrid;
 pub use radius_gate::HysteresisRadiusGate;
 pub use dirty_flusher::DirtyBitFlusher;
-pub use toml_watcher::TomlWatcher;
+// `TomlWatcher` no longer exists as a type — the streaming module's
+// notify-based watcher was removed in the 2026-05-12 consolidation
+// (two parallel notify watchers raced on every file write). Consumers
+// that need the per-instance event stream should depend on the
+// engine's `eustress_common::file_events::FileChanged` broadcast
+// instead. Helper functions `classify_file_change` and
+// `apply_watch_event` stay exported for plugins that want to add
+// their own `FileChanged` consumer system.
+pub use toml_watcher::{WatchEvent, classify_file_change, apply_watch_event};
 pub use instance_index::InstanceIndex;
 pub use plugin::StreamingPlugin;

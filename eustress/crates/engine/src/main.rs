@@ -323,8 +323,11 @@ fn main() {
         // Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
         .add_plugins(eustress_common::gui::SlintGuiPlugin)
         // BillboardGui: per-entity Slint BillboardCard software-rendered onto
-        // a 3D quad. Replaces the deprecated fontdue/atlas path; the legacy
-        // BillboardRendererPlugin in `common` is now a no-op shim.
+        // a 3D quad. The pipeline plugin owns the WGSL shader + render-graph
+        // hookup for the Transparent3d phase (with proper depth-testing for
+        // occlusion); the gui plugin owns the per-entity texture allocation
+        // and the Slint-card→texture blit pump.
+        .add_plugins(eustress_engine::billboard_pipeline::BillboardPipelinePlugin)
         .add_plugins(eustress_engine::billboard_gui::BillboardGuiPlugin)
         // Adornments — Roblox-style mesh-based tool handles. Registers the
         // HandleAdornment / BoxHandle / ConeHandle / CylinderHandle /
@@ -518,6 +521,7 @@ fn main() {
     // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]
     {
+        app.add_message::<part_selection::DoubleClickedPart>();
         app.add_systems(Update, part_selection::part_selection_system
             .after(ui::slint_ui::SlintSystems::Drain)
             .after(ui::slint_ui::update_slint_ui_focus));

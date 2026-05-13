@@ -153,77 +153,80 @@ pub fn handle_spawn_part_events(
             info!("📷 Camera focused on new {} at {:?}", part_name, actual_position);
         }
         
-        // Auto-save TOML for the new part (file-system-first: entity exists on disk immediately)
+        // Auto-save TOML for the new part. Routes through the canonical
+        // pipeline: the Part class template provides the base body and
+        // the override block patches in this spawn's transform + mesh.
+        // Synchronous ECS spawn already happened above; registering the
+        // returned TOML path in `SpaceFileRegistry` makes the file
+        // watcher's `is_loaded(path)` check skip its own spawn pass.
         if !is_playing {
             if let Some(ref sr) = space_root {
                 let workspace_dir = sr.0.join("Workspace");
-                // Folder-first: each Part is a folder with _instance.toml inside
-                let folder_name = if workspace_dir.join(part_name).exists() {
-                    format!("{}_{}", part_name, spawned_entity.index())
-                } else {
-                    part_name.to_string()
+                let mesh_path = crate::spawn::part_type_to_glb_path(&event.part_type);
+                let overrides = eustress_common::instance_create::InstanceOverrides {
+                    display_name: Some(part_name.to_string()),
+                    position: Some([actual_position.x, actual_position.y, actual_position.z]),
+                    scale: Some([size.x, size.y, size.z]),
+                    asset_mesh: Some(mesh_path.to_string()),
+                    ..Default::default()
                 };
-                let instance_dir = workspace_dir.join(&folder_name);
-                let _ = std::fs::create_dir_all(&instance_dir);
-                let final_path = instance_dir.join("_instance.toml");
-                // Write minimal TOML definition
-                let toml_content = format!(
-                    "[asset]\nmesh = \"{}\"\nscene = \"Scene0\"\n\n[transform]\nposition = [{:.4}, {:.4}, {:.4}]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [{:.4}, {:.4}, {:.4}]\n\n[properties]\ncolor = [128, 128, 128, 255]\ntransparency = 0.0\nanchored = false\ncan_collide = true\ncast_shadow = true\nreflectance = 0.0\nmaterial = \"Plastic\"\nlocked = false\n\n[metadata]\nclass_name = \"Part\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n",
-                    crate::spawn::part_type_to_glb_path(&event.part_type),
-                    actual_position.x, actual_position.y, actual_position.z,
-                    size.x, size.y, size.z,
-                    chrono::Utc::now().to_rfc3339(),
-                    chrono::Utc::now().to_rfc3339(),
-                );
-                if let Err(e) = std::fs::write(&final_path, &toml_content) {
-                    warn!("Failed to auto-save part TOML: {}", e);
-                } else {
-                    // Register the file so file_loader tracks it
-                    commands.entity(spawned_entity).insert(
-                        crate::space::instance_loader::InstanceFile {
-                            toml_path: final_path.clone(),
-                            mesh_path: std::path::PathBuf::from(crate::spawn::part_type_to_glb_path(&event.part_type)),
-                            name: part_name.to_string(),
-                        }
-                    );
+                match eustress_common::instance_create::create_instance(
+                    &workspace_dir,
+                    "Part",
+                    Some(part_name),
+                    overrides,
+                ) {
+                    Ok(created) => {
+                        let final_path = created.toml_path.clone();
 
-                    // Tag with LoadedFromFile so Explorer classification routes
-                    // this entity into the Workspace service bucket — otherwise
-                    // the spawned part ends up as an unclassified root node.
-                    commands.entity(spawned_entity).insert(
-                        crate::space::file_loader::LoadedFromFile {
-                            path: final_path.clone(),
-                            file_type: crate::space::file_loader::FileType::Toml,
-                            service: "Workspace".to_string(),
-                        }
-                    );
+                        commands.entity(spawned_entity).insert(
+                            crate::space::instance_loader::InstanceFile {
+                                toml_path: final_path.clone(),
+                                mesh_path: std::path::PathBuf::from(mesh_path),
+                                name: part_name.to_string(),
+                            }
+                        );
 
-                    // Register in SpaceFileRegistry so the file watcher's
-                    // `is_loaded(path)` check returns true when it sees the
-                    // newly-written TOML — prevents duplicate spawning.
-                    if let Some(ref mut registry) = file_registry {
-                        registry.register(
-                            final_path.clone(),
-                            spawned_entity,
-                            crate::space::file_loader::FileMetadata {
+                        // Tag with LoadedFromFile so Explorer classification routes
+                        // this entity into the Workspace service bucket — otherwise
+                        // the spawned part ends up as an unclassified root node.
+                        commands.entity(spawned_entity).insert(
+                            crate::space::file_loader::LoadedFromFile {
                                 path: final_path.clone(),
                                 file_type: crate::space::file_loader::FileType::Toml,
                                 service: "Workspace".to_string(),
-                                name: part_name.to_string(),
-                                size: toml_content.len() as u64,
-                                modified: std::time::SystemTime::now(),
-                                children: Vec::new(),
-                            },
+                            }
                         );
-                    }
 
-                    // Force the Explorer to re-sync next frame so the new
-                    // entity appears immediately without the 30-frame throttle.
-                    if let Some(ref mut es) = explorer_state {
-                        es.needs_immediate_sync = true;
-                    }
+                        // Register in SpaceFileRegistry so the file watcher's
+                        // `is_loaded(path)` check returns true when it sees the
+                        // newly-written TOML — prevents duplicate spawning.
+                        if let Some(ref mut registry) = file_registry {
+                            let toml_size = std::fs::metadata(&final_path)
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            registry.register(
+                                final_path.clone(),
+                                spawned_entity,
+                                crate::space::file_loader::FileMetadata {
+                                    path: final_path.clone(),
+                                    file_type: crate::space::file_loader::FileType::Toml,
+                                    service: "Workspace".to_string(),
+                                    name: part_name.to_string(),
+                                    size: toml_size,
+                                    modified: std::time::SystemTime::now(),
+                                    children: Vec::new(),
+                                },
+                            );
+                        }
 
-                    info!("💾 Auto-saved {:?}", final_path.file_name().unwrap_or_default());
+                        if let Some(ref mut es) = explorer_state {
+                            es.needs_immediate_sync = true;
+                        }
+
+                        info!("💾 Auto-saved {:?}", final_path.file_name().unwrap_or_default());
+                    }
+                    Err(e) => warn!("Failed to auto-save part TOML: {}", e),
                 }
             }
         }

@@ -639,7 +639,15 @@ pub fn extract_world_snapshot(
             billboard_active: billboard_gui.map(|g| g.active),
             billboard_enabled: billboard_gui.map(|g| g.enabled),
             billboard_always_on_top: billboard_gui.map(|g| g.always_on_top),
-            billboard_size: billboard_gui.map(|g| bevy::math::Vec2::new(g.size[0], g.size[1])),
+            // Roblox-parity `Size` is now `UDim2`; resolve to pixels for
+            // the snapshot consumer (which expects a `Vec2`). Scale uses
+            // 50 as the studs-per-pixel reference (== PIXELS_PER_METER in
+            // billboard_gui), so a pure-pixel UDim2 (Scale=0) still
+            // resolves correctly.
+            billboard_size: billboard_gui.map(|g| {
+                let [w, h] = g.size.to_pixels(50.0, 50.0);
+                bevy::math::Vec2::new(w, h)
+            }),
             billboard_units_offset: billboard_gui.map(|g| bevy::math::Vec3::new(g.units_offset[0], g.units_offset[1], g.units_offset[2])),
             billboard_max_distance: billboard_gui.map(|g| g.max_distance),
             billboard_brightness: billboard_gui.map(|g| g.brightness),

@@ -1191,50 +1191,89 @@ impl PropertyAccess for BillboardGui {
             "AlwaysOnTop" => Some(PropertyValue::Bool(self.always_on_top)),
             "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             "ClipsDescendants" => Some(PropertyValue::Bool(self.clips_descendants)),
+            "FaceCamera" => Some(PropertyValue::Bool(self.face_camera)),
+            "ResetOnSpawn" => Some(PropertyValue::Bool(self.reset_on_spawn)),
+            "StiffnessByDistance" => Some(PropertyValue::Bool(self.stiffness_by_distance)),
             "MaxDistance" => Some(PropertyValue::Float(self.max_distance)),
             "DistanceLowerLimit" => Some(PropertyValue::Float(self.distance_lower_limit)),
             "DistanceUpperLimit" => Some(PropertyValue::Float(self.distance_upper_limit)),
             "DistanceStep" => Some(PropertyValue::Float(self.distance_step)),
             "Brightness" => Some(PropertyValue::Float(self.brightness)),
             "LightInfluence" => Some(PropertyValue::Float(self.light_influence)),
-            "Size" => Some(PropertyValue::Vector2(self.size)),
+            // Roblox-parity: `Size` is `UDim2` — Scale interpreted as
+            // studs (1.0 == 1 stud), Offset as pixels of the canvas.
+            "Size" => Some(PropertyValue::UDim2(self.size)),
+            // `SizeOffset` is intentionally not exposed in the Properties
+            // panel — its Roblox semantic (Vector2 pixel nudge from the
+            // canvas anchor) overlaps confusingly with `Size`'s pixel
+            // dimensions in the BillboardGui editor. Drop it from the
+            // panel; scripts can still set the underlying field via
+            // direct ECS mutation if a use-case ever shows up.
             "UnitsOffset" => Some(PropertyValue::Vector3(Vec3::new(self.units_offset[0], self.units_offset[1], self.units_offset[2]))),
+            "UnitsOffsetWorldSpace" => Some(PropertyValue::Vector3(Vec3::new(self.units_offset_world_space[0], self.units_offset_world_space[1], self.units_offset_world_space[2]))),
+            "ExtentsOffset" => Some(PropertyValue::Vector3(Vec3::new(self.extents_offset[0], self.extents_offset[1], self.extents_offset[2]))),
+            "ExtentsOffsetWorldSpace" => Some(PropertyValue::Vector3(Vec3::new(self.extents_offset_world_space[0], self.extents_offset_world_space[1], self.extents_offset_world_space[2]))),
+            "ZIndexBehavior" => Some(PropertyValue::Enum(format!("{:?}", self.z_index_behavior))),
+            "ZIndex" => Some(PropertyValue::Int(self.z_index)),
             "CurrentDistance" => Some(PropertyValue::Float(self.current_distance)),
             _ => None,
         }
     }
-    
+
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
         match (name, value) {
             ("Active", PropertyValue::Bool(v)) => { self.active = v; Ok(()) }
             ("AlwaysOnTop", PropertyValue::Bool(v)) => { self.always_on_top = v; Ok(()) }
             ("Enabled", PropertyValue::Bool(v)) => { self.enabled = v; Ok(()) }
             ("ClipsDescendants", PropertyValue::Bool(v)) => { self.clips_descendants = v; Ok(()) }
+            ("FaceCamera", PropertyValue::Bool(v)) => { self.face_camera = v; Ok(()) }
+            ("ResetOnSpawn", PropertyValue::Bool(v)) => { self.reset_on_spawn = v; Ok(()) }
+            ("StiffnessByDistance", PropertyValue::Bool(v)) => { self.stiffness_by_distance = v; Ok(()) }
             ("MaxDistance", PropertyValue::Float(v)) => { self.max_distance = v.max(0.0); Ok(()) }
             ("DistanceLowerLimit", PropertyValue::Float(v)) => { self.distance_lower_limit = v.max(0.0); Ok(()) }
             ("DistanceUpperLimit", PropertyValue::Float(v)) => { self.distance_upper_limit = v.max(0.0); Ok(()) }
             ("DistanceStep", PropertyValue::Float(v)) => { self.distance_step = v.max(0.0); Ok(()) }
             ("Brightness", PropertyValue::Float(v)) => { self.brightness = v.max(0.0); Ok(()) }
             ("LightInfluence", PropertyValue::Float(v)) => { self.light_influence = v.clamp(0.0, 1.0); Ok(()) }
-            ("Size", PropertyValue::Vector2(v)) => { self.size = v; Ok(()) }
+            ("Size", PropertyValue::UDim2(v)) => { self.size = v; Ok(()) }
             ("UnitsOffset", PropertyValue::Vector3(v)) => { self.units_offset = [v.x, v.y, v.z]; Ok(()) }
+            ("UnitsOffsetWorldSpace", PropertyValue::Vector3(v)) => { self.units_offset_world_space = [v.x, v.y, v.z]; Ok(()) }
+            ("ExtentsOffset", PropertyValue::Vector3(v)) => { self.extents_offset = [v.x, v.y, v.z]; Ok(()) }
+            ("ExtentsOffsetWorldSpace", PropertyValue::Vector3(v)) => { self.extents_offset_world_space = [v.x, v.y, v.z]; Ok(()) }
+            ("ZIndexBehavior", PropertyValue::Enum(s)) => {
+                self.z_index_behavior = match s.as_str() {
+                    "Global" => crate::classes::ZIndexBehavior::Global,
+                    _ => crate::classes::ZIndexBehavior::Sibling,
+                };
+                Ok(())
+            }
+            ("ZIndex", PropertyValue::Int(v)) => { self.z_index = v; Ok(()) }
             _ => Err(format!("Unknown property: {}", name)),
         }
     }
-    
+
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
         vec![
             PropertyDescriptor { name: "Active".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
             PropertyDescriptor { name: "Enabled".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
             PropertyDescriptor { name: "AlwaysOnTop".to_string(), property_type: "bool".to_string(), read_only: false, category: "Appearance".to_string() },
             PropertyDescriptor { name: "ClipsDescendants".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
+            PropertyDescriptor { name: "FaceCamera".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
+            PropertyDescriptor { name: "ResetOnSpawn".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
+            PropertyDescriptor { name: "StiffnessByDistance".to_string(), property_type: "bool".to_string(), read_only: false, category: "Behavior".to_string() },
             PropertyDescriptor { name: "MaxDistance".to_string(), property_type: "float".to_string(), read_only: false, category: "Distance".to_string() },
             PropertyDescriptor { name: "DistanceLowerLimit".to_string(), property_type: "float".to_string(), read_only: false, category: "Distance".to_string() },
             PropertyDescriptor { name: "DistanceUpperLimit".to_string(), property_type: "float".to_string(), read_only: false, category: "Distance".to_string() },
+            PropertyDescriptor { name: "DistanceStep".to_string(), property_type: "float".to_string(), read_only: false, category: "Distance".to_string() },
             PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
             PropertyDescriptor { name: "LightInfluence".to_string(), property_type: "float".to_string(), read_only: false, category: "Appearance".to_string() },
-            PropertyDescriptor { name: "Size".to_string(), property_type: "Vector2".to_string(), read_only: false, category: "Data".to_string() },
+            PropertyDescriptor { name: "Size".to_string(), property_type: "UDim2".to_string(), read_only: false, category: "Data".to_string() },
             PropertyDescriptor { name: "UnitsOffset".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Data".to_string() },
+            PropertyDescriptor { name: "UnitsOffsetWorldSpace".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Data".to_string() },
+            PropertyDescriptor { name: "ExtentsOffset".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Data".to_string() },
+            PropertyDescriptor { name: "ExtentsOffsetWorldSpace".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Data".to_string() },
+            PropertyDescriptor { name: "ZIndexBehavior".to_string(), property_type: "enum".to_string(), read_only: false, category: "Behavior".to_string() },
+            PropertyDescriptor { name: "ZIndex".to_string(), property_type: "int".to_string(), read_only: false, category: "Behavior".to_string() },
             PropertyDescriptor { name: "CurrentDistance".to_string(), property_type: "float".to_string(), read_only: true, category: "Data".to_string() },
         ]
     }
@@ -1242,14 +1281,21 @@ impl PropertyAccess for BillboardGui {
 
 // ── helpers shared by all UI PropertyAccess impls ──────────────────────────
 // These macros must be defined before any impl that uses them.
+// Roblox-parity layout: `Position` and `Size` are unified `UDim2` fields
+// per axis (Scale + Offset). The legacy `PositionScale`/`PositionOffset`/
+// `SizeScale`/`SizeOffset` accessors are kept for back-compat — they
+// surface the X/Y components individually so older callers and the
+// engine's older Properties panel widgets keep working.
 macro_rules! layout_get {
     ($s:expr, $name:expr) => {
         match $name {
             "AnchorPoint"    => Some(PropertyValue::Vector2($s.anchor_point)),
-            "PositionScale"  => Some(PropertyValue::Vector2($s.position_scale)),
-            "PositionOffset" => Some(PropertyValue::Vector2($s.position_offset)),
-            "SizeScale"      => Some(PropertyValue::Vector2($s.size_scale)),
-            "SizeOffset"     => Some(PropertyValue::Vector2($s.size_offset)),
+            "Position"       => Some(PropertyValue::UDim2($s.position)),
+            "Size"           => Some(PropertyValue::UDim2($s.size)),
+            "PositionScale"  => Some(PropertyValue::Vector2([$s.position.x.scale, $s.position.y.scale])),
+            "PositionOffset" => Some(PropertyValue::Vector2([$s.position.x.offset, $s.position.y.offset])),
+            "SizeScale"      => Some(PropertyValue::Vector2([$s.size.x.scale, $s.size.y.scale])),
+            "SizeOffset"     => Some(PropertyValue::Vector2([$s.size.x.offset, $s.size.y.offset])),
             _ => None,
         }
     };
@@ -1258,10 +1304,20 @@ macro_rules! layout_set {
     ($s:expr, $name:expr, $value:expr) => {
         match ($name, $value) {
             ("AnchorPoint",    PropertyValue::Vector2(v)) => { $s.anchor_point    = v; Ok(()) }
-            ("PositionScale",  PropertyValue::Vector2(v)) => { $s.position_scale  = v; Ok(()) }
-            ("PositionOffset", PropertyValue::Vector2(v)) => { $s.position_offset = v; Ok(()) }
-            ("SizeScale",      PropertyValue::Vector2(v)) => { $s.size_scale      = v; Ok(()) }
-            ("SizeOffset",     PropertyValue::Vector2(v)) => { $s.size_offset     = v; Ok(()) }
+            ("Position",       PropertyValue::UDim2(v))   => { $s.position        = v; Ok(()) }
+            ("Size",           PropertyValue::UDim2(v))   => { $s.size            = v; Ok(()) }
+            ("PositionScale",  PropertyValue::Vector2(v)) => {
+                $s.position.x.scale  = v[0]; $s.position.y.scale  = v[1]; Ok(())
+            }
+            ("PositionOffset", PropertyValue::Vector2(v)) => {
+                $s.position.x.offset = v[0]; $s.position.y.offset = v[1]; Ok(())
+            }
+            ("SizeScale",      PropertyValue::Vector2(v)) => {
+                $s.size.x.scale      = v[0]; $s.size.y.scale      = v[1]; Ok(())
+            }
+            ("SizeOffset",     PropertyValue::Vector2(v)) => {
+                $s.size.x.offset     = v[0]; $s.size.y.offset     = v[1]; Ok(())
+            }
             _ => Err(format!("Unknown property: {}", $name)),
         }
     };
@@ -1277,11 +1333,9 @@ macro_rules! pd {
 macro_rules! layout_list {
     () => {
         vec![
-            pd!("AnchorPoint",    "vec2", "Layout"),
-            pd!("PositionScale",  "vec2", "Layout"),
-            pd!("PositionOffset", "vec2", "Layout"),
-            pd!("SizeScale",      "vec2", "Layout"),
-            pd!("SizeOffset",     "vec2", "Layout"),
+            pd!("AnchorPoint",    "vec2",  "Layout"),
+            pd!("Position",       "UDim2", "Layout"),
+            pd!("Size",            "UDim2", "Layout"),
         ]
     };
 }
@@ -1311,8 +1365,8 @@ impl PropertyAccess for TextLabel {
             "BackgroundTransparency" => Some(PropertyValue::Float(self.background_transparency)),
             "BorderColor3"           => Some(PropertyValue::Color3(self.border_color3)),
             "BorderSizePixel"        => Some(PropertyValue::Int(self.border_size_pixel)),
-            "Size"                   => Some(PropertyValue::Vector2(self.size)),
-            "Position"               => Some(PropertyValue::Vector2(self.position)),
+            "Size"                   => Some(PropertyValue::UDim2(self.size)),
+            "Position"               => Some(PropertyValue::UDim2(self.position)),
             "AnchorPoint"            => Some(PropertyValue::Vector2(self.anchor_point)),
             "Rotation"               => Some(PropertyValue::Float(self.rotation)),
             "ZIndex"                 => Some(PropertyValue::Int(self.z_index)),
@@ -1345,7 +1399,7 @@ impl PropertyAccess for TextLabel {
                 };
                 Ok(())
             }
-            ("FontSize",               PropertyValue::Float(v))  => { self.font_size = v.max(1.0); Ok(()) }
+            ("FontSize",               PropertyValue::Float(v))  => { self.font_size = v.clamp(1.0, 72.0); Ok(()) }
             ("LineHeight",             PropertyValue::Float(v))  => { self.line_height = v.max(0.1); Ok(()) }
             ("TextColor3",             PropertyValue::Color3(v)) => { self.text_color3 = v; Ok(()) }
             ("TextTransparency",       PropertyValue::Float(v))  => { self.text_transparency = v.clamp(0.0,1.0); Ok(()) }
@@ -1363,8 +1417,8 @@ impl PropertyAccess for TextLabel {
             ("BackgroundTransparency", PropertyValue::Float(v))  => { self.background_transparency = v.clamp(0.0,1.0); Ok(()) }
             ("BorderColor3",           PropertyValue::Color3(v)) => { self.border_color3 = v; Ok(()) }
             ("BorderSizePixel",        PropertyValue::Int(v))    => { self.border_size_pixel = v.max(0); Ok(()) }
-            ("Size",                   PropertyValue::Vector2(v))=> { self.size = v; Ok(()) }
-            ("Position",               PropertyValue::Vector2(v))=> { self.position = v; Ok(()) }
+            ("Size",                   PropertyValue::UDim2(v))  => { self.size = v; Ok(()) }
+            ("Position",               PropertyValue::UDim2(v))  => { self.position = v; Ok(()) }
             ("AnchorPoint",            PropertyValue::Vector2(v))=> { self.anchor_point = v; Ok(()) }
             ("Rotation",               PropertyValue::Float(v))  => { self.rotation = v; Ok(()) }
             ("ZIndex",                 PropertyValue::Int(v))    => { self.z_index = v; Ok(()) }
@@ -1403,8 +1457,8 @@ impl PropertyAccess for TextLabel {
             pd!("AutomaticSize",          "enum",   "Behavior"),
             pd!("Active",                 "bool",   "Behavior"),
             pd!("Visible",                "bool",   "Behavior"),
-            pd!("Position",               "vec2",   "Layout"),
-            pd!("Size",                   "vec2",   "Layout"),
+            pd!("Position",               "UDim2",  "Layout"),
+            pd!("Size",                   "UDim2",  "Layout"),
             pd!("AnchorPoint",            "vec2",   "Layout"),
             pd!("Rotation",               "float",  "Transform"),
         ]
@@ -1854,7 +1908,7 @@ impl PropertyAccess for TextButton {
             ("Active",                 PropertyValue::Bool(b))    => { self.active = b; Ok(()) }
             ("AutoButtonColor",        PropertyValue::Bool(b))    => { self.auto_button_color = b; Ok(()) }
             ("Text",                   PropertyValue::String(s))  => { self.text = s; Ok(()) }
-            ("FontSize",               PropertyValue::Float(f))   => { self.font_size = f.max(1.0); Ok(()) }
+            ("FontSize",               PropertyValue::Float(f))   => { self.font_size = f.clamp(1.0, 72.0); Ok(()) }
             ("TextColor3",             PropertyValue::Color3(c))  => { self.text_color3 = c; Ok(()) }
             ("TextTransparency",       PropertyValue::Float(f))   => { self.text_transparency = f.clamp(0.0,1.0); Ok(()) }
             ("TextStrokeColor3",       PropertyValue::Color3(c))  => { self.text_stroke_color3 = c; Ok(()) }
@@ -2002,7 +2056,7 @@ impl PropertyAccess for TextBox {
             ("Visible", PropertyValue::Bool(b)) => { self.visible = b; Ok(()) }
             ("Text", PropertyValue::String(s)) => { self.text = s; Ok(()) }
             ("PlaceholderText", PropertyValue::String(s)) => { self.placeholder_text = s; Ok(()) }
-            ("FontSize", PropertyValue::Float(f)) => { self.font_size = f.max(1.0); Ok(()) }
+            ("FontSize", PropertyValue::Float(f)) => { self.font_size = f.clamp(1.0, 72.0); Ok(()) }
             ("TextEditable", PropertyValue::Bool(b)) => { self.text_editable = b; Ok(()) }
             ("ClearTextOnFocus", PropertyValue::Bool(b)) => { self.clear_text_on_focus = b; Ok(()) }
             ("MultiLine", PropertyValue::Bool(b)) => { self.multi_line = b; Ok(()) }

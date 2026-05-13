@@ -1061,10 +1061,12 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         .to_string();
     let entity_name = sanitize_entity_name(&stem);
 
-    // 3. Write the entity folder + _instance.toml under StarterGui so
-    //    the file watcher spawns the entity. StarterGui is conventionally
-    //    where 2D/3D media surface entities live; users can drag them
-    //    into Workspace afterward via the Explorer.
+    // 3. Route through the canonical pipeline: copy the Image/Video
+    //    class template from common, patch `[asset].path` with the
+    //    Universe-relative path we just wrote. StarterGui is created
+    //    on-demand because it's not part of the default scaffold for
+    //    older Spaces — the import would otherwise fail on day-one
+    //    Universes that predate the service.
     let starter_gui = space_root.join("StarterGui");
     if !starter_gui.exists() {
         if let Err(e) = std::fs::create_dir_all(&starter_gui) {
@@ -1076,28 +1078,35 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
             "[service]\nclass_name = \"StarterGui\"\nicon = \"startergui\"\n",
         );
     }
-    let entity_dir = unique_entity_dir(&starter_gui, &entity_name);
-    if let Err(e) = std::fs::create_dir_all(&entity_dir) {
-        notify_err(world, format!("Could not create entity dir {:?}: {}", entity_dir, e));
-        return;
-    }
 
-    let now = Utc::now().to_rfc3339();
-    let instance_toml = build_instance_toml(kind, &now, &universe_rel_asset);
-    if let Err(e) = std::fs::write(entity_dir.join("_instance.toml"), instance_toml) {
-        notify_err(world, format!("Failed to write _instance.toml: {}", e));
-        return;
-    }
+    let class_name = kind.class_name();
+    let overrides = eustress_common::instance_create::InstanceOverrides {
+        display_name: Some(entity_name.clone()),
+        asset_path: Some(universe_rel_asset.clone()),
+        ..Default::default()
+    };
+    let created = match eustress_common::instance_create::create_instance(
+        &starter_gui,
+        class_name,
+        Some(&entity_name),
+        overrides,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            notify_err(world, format!("Failed to materialise {} entity: {}", class_name, e));
+            return;
+        }
+    };
 
     if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
         n.success(format!(
             "{} imported '{}' as {}",
-            kind.icon(), file_name, entity_name,
+            kind.icon(), file_name, created.folder_name,
         ));
     }
     info!(
         "📥 Imported {:?} as {} class entity '{}' (asset: {})",
-        source, kind.label(), entity_name, universe_rel_asset,
+        source, kind.label(), created.folder_name, universe_rel_asset,
     );
 }
 
@@ -1114,18 +1123,8 @@ impl AssetKind {
     fn icon(&self) -> &'static str {
         match self { Self::Image => "[img]", Self::Video => "[vid]" }
     }
-}
-
-fn build_instance_toml(kind: AssetKind, now: &str, universe_rel_asset: &str) -> String {
-    match kind {
-        AssetKind::Image => format!(
-            "[metadata]\nclass_name = \"Image\"\narchivable = true\ncreated = \"{now}\"\nlast_modified = \"{now}\"\n\n[transform]\nposition = [0.0, 2.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 4.0, 1.0]\n\n[asset]\npath = \"{path}\"\n\n[image]\nsize = [4.0, 4.0]\ncolor = [1.0, 1.0, 1.0, 1.0]\ntransparency = 0.0\n",
-            now = now, path = universe_rel_asset,
-        ),
-        AssetKind::Video => format!(
-            "[metadata]\nclass_name = \"Video\"\narchivable = true\ncreated = \"{now}\"\nlast_modified = \"{now}\"\n\n[transform]\nposition = [0.0, 3.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [6.0, 3.375, 1.0]\n\n[asset]\npath = \"{path}\"\n\n[video]\nsize = [6.0, 3.375]\ncolor = [1.0, 1.0, 1.0, 1.0]\ntransparency = 0.0\nautoplay = true\nlooped = true\nvolume = 0.5\n",
-            now = now, path = universe_rel_asset,
-        ),
+    fn class_name(&self) -> &'static str {
+        match self { Self::Image => "Image", Self::Video => "Video" }
     }
 }
 
@@ -1181,12 +1180,3 @@ fn unique_dest_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{}-{:x}{}", stem, ts, ext))
 }
 
-fn unique_entity_dir(parent: &Path, name: &str) -> PathBuf {
-    let candidate = parent.join(name);
-    if !candidate.exists() { return candidate; }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    parent.join(format!("{}-{:x}", name, ts))
-}

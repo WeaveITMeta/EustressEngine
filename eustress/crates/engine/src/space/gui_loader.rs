@@ -51,6 +51,14 @@ pub struct GuiTomlFile {
     pub transform: Option<toml::Value>,
     #[serde(default)]
     pub properties: Option<toml::Value>,
+    /// `CollectionService` tags for this GUI instance — written from
+    /// `LuauCreatedInstance.tags` and hydrated into the ECS
+    /// [`Tags`](eustress_common::attributes::Tags) component on space load.
+    /// Same shape and semantics as `instance_loader::InstanceDefinition.tags`,
+    /// so MCP `add_tag` / `get_tagged_entities` see GUI tags identically to
+    /// Part tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// [instance] section
@@ -70,12 +78,18 @@ pub struct GuiTomlMetadata {
 }
 
 /// [gui] section — shared visual properties
+///
+/// **Roblox parity, no legacy paths.** `position` and `size` are
+/// strictly `UDim2` (4-float `[scale_x, offset_x, scale_y, offset_y]`).
+/// The previous `Vec<f32>` accept-anything form has been removed —
+/// older TOML files using `[x, y]` / `[w, h]` will fail to load and
+/// must be migrated to the 4-tuple form.
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct GuiTomlProperties {
     #[serde(default)]
-    pub position: Vec<f32>,           // [x, y] for 2D GUI, [x, y, z] for BillboardGui offset
-    #[serde(default = "default_size")]
-    pub size: Vec<f32>,               // [w, h]
+    pub position: eustress_common::ui_types::UDim2,
+    #[serde(default = "default_size_udim2")]
+    pub size: eustress_common::ui_types::UDim2,
     #[serde(default)]
     pub anchor_point: [f32; 2],
     #[serde(default = "default_bg_color")]
@@ -90,12 +104,62 @@ pub struct GuiTomlProperties {
     pub visible: bool,
     #[serde(default)]
     pub z_index: i32,
-    // BillboardGui-specific properties
-    #[serde(default)]
-    pub max_distance: Option<f32>,
-    #[serde(default)]
+
+    // ── BillboardGui-specific properties ──────────────────────────────────
+    // Behaviour flags
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_on_top: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clips_descendants: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_on_spawn: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stiffness_by_distance: Option<bool>,
+
+    // Distance
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_lower_limit: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_upper_limit: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distance_step: Option<f32>,
+
+    // Appearance
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_influence: Option<f32>,
+
+    // Offsets — skip-if-none so files don't bloat with zeroes.
+    /// Roblox `SizeOffset` — `Vector2` `[offset_x, offset_y]` in pixels.
+    /// Lenient deserialize accepts BOTH the new 2-tuple and the older
+    /// 4-tuple UDim2 shape `[scale_x, offset_x, scale_y, offset_y]` —
+    /// when migrating from a previous version the existing offset
+    /// components survive even though Scale is discarded (Roblox parity
+    /// makes Scale meaningless for `SizeOffset`).
+    #[serde(default, deserialize_with = "deserialize_size_offset_lenient", skip_serializing_if = "Option::is_none")]
+    pub size_offset: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extents_offset: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extents_offset_world_space: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_offset: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_offset_world_space: Option<[f32; 3]>,
+
+    // Sorting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z_index_behavior: Option<String>,  // "Sibling" | "Global"
+
+    // Adornee — instance name reference; resolved to entity at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adornee: Option<String>,
 }
 
@@ -118,6 +182,12 @@ pub struct GuiTomlText {
     pub text_x_alignment: String,
     #[serde(default = "default_center")]
     pub text_y_alignment: String,
+    /// Roblox `TextScaled`. When `true` the renderer ignores `font_size`
+    /// and auto-fits the text to the element's rect (binary search).
+    /// `skip_serializing_if = false` keeps TOMLs that haven't opted in
+    /// from carrying a redundant `text_scaled = false` line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_scaled: bool,
 }
 
 /// Map a font name to a CSS-style weight. Conservative: anything with "Bold"
@@ -130,14 +200,39 @@ pub fn font_weight_from_name(name: &str) -> i32 {
     else { 400 }
 }
 
-fn default_size() -> Vec<f32> { vec![100.0, 30.0] }
+fn default_size_udim2() -> eustress_common::ui_types::UDim2 {
+    eustress_common::ui_types::UDim2::from_pixels(100.0, 30.0)
+}
 fn default_bg_color() -> [f32; 4] { [0.2, 0.2, 0.2, 0.8] }
 fn default_border_color() -> [f32; 4] { [0.5, 0.5, 0.5, 1.0] }
 fn default_text_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
 fn default_font_size() -> f32 { 14.0 }
-fn default_left() -> String { "left".to_string() }
-fn default_center() -> String { "center".to_string() }
+fn default_left() -> String { "Left".to_string() }
+fn default_center() -> String { "Center".to_string() }
 fn default_true() -> bool { true }
+
+/// Accept the new 2-element `[offset_x, offset_y]` form for `size_offset`.
+/// Legacy 4-element UDim2 shapes are treated as missing (default `[0, 0]`):
+/// an earlier code path wrote `size_offset` as a UDim2 carrying the same
+/// values as `size`, so naively extracting `[arr[1], arr[3]]` would
+/// migrate stale duplicate data into the Vector2 field. Roblox's
+/// `SizeOffset` default is `(0, 0)`; resetting on migration matches that
+/// and the save-on-change pass writes the cleaned value back to disk on
+/// the first edit. Users with legitimately-set non-zero values will need
+/// to re-enter them once after upgrade — acceptable since the field is
+/// rarely used and the cleanup eliminates a confusing redundancy.
+fn deserialize_size_offset_lenient<'de, D>(de: D) -> Result<Option<[f32; 2]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v: Option<Vec<f32>> = Option::deserialize(de)?;
+    Ok(v.and_then(|arr| match arr.len() {
+        2 => Some([arr[0], arr[1]]),
+        // Legacy 4-tuple → reset to default. See doc above.
+        _ => None,
+    }))
+}
 
 // ============================================================================
 // 2. Create / Write GUI TOML files
@@ -163,17 +258,20 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             // `font_weight_from_name` helper. Default is empty — tools
             // read either field.
             font: String::new(),
-            text_x_alignment: "center".to_string(),
-            text_y_alignment: "center".to_string(),
+            text_x_alignment: "Center".to_string(),
+            text_y_alignment: "Center".to_string(),
+            text_scaled: false,
         })
     } else {
         None
     };
 
+    // Strict UDim2 sizes per class. Pure-pixel offsets (Scale=0) for
+    // most; ScreenGui inherits its viewport so size is ignored.
     let size = match class_name {
-        "ScreenGui" => vec![0.0, 0.0],     // ScreenGui is fullscreen, size is ignored
-        "Frame" | "ScrollingFrame" => vec![200.0, 150.0],
-        _ => default_size(),
+        "ScreenGui"                => eustress_common::ui_types::UDim2::default(),
+        "Frame" | "ScrollingFrame" => eustress_common::ui_types::UDim2::from_pixels(200.0, 150.0),
+        _                          => default_size_udim2(),
     };
 
     let bg = match class_name {
@@ -191,7 +289,7 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             archivable: true,
         },
         gui: GuiTomlProperties {
-            position: vec![0.0, 0.0],
+            position: eustress_common::ui_types::UDim2::default(),
             size,
             anchor_point: [0.0, 0.0],
             background_color: bg,
@@ -200,14 +298,17 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             corner_radius: if class_name == "TextButton" { 4.0 } else { 0.0 },
             visible: true,
             z_index: 0,
-            max_distance: None,
-            always_on_top: None,
-            adornee: None,
+            // BillboardGui-specific fields default to None — the loader
+            // applies class defaults when these are absent. Listing them
+            // explicitly is wasteful; `..Default::default()` covers the
+            // full optional set in one line.
+            ..Default::default()
         },
         text,
         asset: None,
         transform: None,
         properties: None,
+        tags: Vec::new(),
     }
 }
 
@@ -219,9 +320,90 @@ pub fn write_gui_toml(path: &Path, gui_def: &GuiTomlFile) -> Result<(), String> 
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
     }
-    std::fs::write(path, content)
-        .map_err(|e| format!("Failed to write GUI TOML {:?}: {}", path, e))?;
-    Ok(())
+    // Atomic-write + retry. Windows reports `os error 32` ("file in
+    // use by another process") whenever something has the file open
+    // without the FILE_SHARE_WRITE flag — antivirus, text editors,
+    // and the engine's own reload-after-write pass all trip this
+    // race transiently. A naive `std::fs::write` would lose the edit
+    // silently, which is exactly the bug users reported as
+    // "copy-paste keeps the defaults" — the source save never landed
+    // on disk, so the copy read the pre-edit content. (Historically
+    // this was made worse by a redundant `notify::Watcher` in the
+    // streaming module; that was consolidated away on 2026-05-12.)
+    //
+    // Strategy:
+    //   1. Write to `<path>.tmp` (a separate file that no reader is
+    //      currently holding).
+    //   2. Rename `<path>.tmp` → `<path>`. On Windows, `rename` over an
+    //      existing file is implemented as `MoveFileEx` with the
+    //      REPLACE_EXISTING flag; it's atomic from the filesystem's
+    //      perspective, so any reader sees either the OLD bytes or the
+    //      NEW bytes — never a half-written mix.
+    //   3. Retry the rename a few times on transient `os error 32`,
+    //      since AV/file watchers can still hold a brief lock on the
+    //      destination at the moment of replacement.
+    write_atomic(path, content.as_bytes())
+        .map_err(|e| format!("Failed to write GUI TOML {:?}: {}", path, e))
+}
+
+/// Atomic-write helper used by every TOML save path in the workspace.
+/// Writes to a sibling `.tmp` file, then renames it onto `path`. The
+/// rename is the atomic step from the filesystem's perspective; any
+/// concurrent reader sees either the OLD complete bytes or the NEW
+/// complete bytes, never a mid-write torn read. Retries the rename a
+/// few times when Windows reports the destination is briefly locked
+/// (antivirus mid-scan, file watcher mid-reload, text-editor reads)
+/// so the transient share-mode conflict doesn't drop a user edit.
+///
+/// Since the workspace now has exactly ONE notify watcher
+/// (`engine::space::file_watcher`, which marks paths it just wrote as
+/// `recently_written` so it skips its own reload pass), the retry
+/// count of 8 is generous — under normal operation the first rename
+/// succeeds. The retries exist as a guard against external readers
+/// (AV, text editor, OS indexer) that we don't control.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let tmp_path = parent.join(format!(".{}.tmp", stem));
+    std::fs::write(&tmp_path, bytes)?;
+
+    // Three attempts is the sweet spot now that the workspace runs
+    // exactly one notify watcher (the engine's own, which
+    // self-suppresses via `recently_written`). The first try
+    // succeeds in the steady state; the second/third absorb the
+    // rare external-reader collision (AV scan, indexer, text-editor
+    // reload). A longer ladder is just sleep time after a real
+    // permission error.
+    const ATTEMPTS: u32 = 3;
+    let mut last_err: Option<std::io::Error> = None;
+    for i in 0..ATTEMPTS {
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let kind = e.kind();
+                let transient = matches!(
+                    kind,
+                    std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::Other,
+                );
+                if !transient {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+                last_err = Some(e);
+                if i + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp_path);
+    Err(last_err.unwrap_or_else(|| std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "write_atomic: exhausted retries without a recorded error",
+    )))
 }
 
 // ============================================================================
@@ -384,7 +566,7 @@ pub fn spawn_gui_element(
         service: "StarterGui".to_string(),
     };
 
-    match gui_type {
+    let entity = match gui_type {
         "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name),
         "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
@@ -399,14 +581,47 @@ pub fn spawn_gui_element(
                 text: format!("[{}]", gui_type),
                 text_color: [0.5, 0.5, 0.5, 0.8],
                 font_size: 12.0,
-                text_x_alignment: "center".to_string(),
-                text_y_alignment: "center".to_string(),
+                text_x_alignment: "Center".to_string(),
+                text_y_alignment: "Center".to_string(),
                 ..Default::default()
             });
             spawn_frame_element_with_text(commands, instance, loaded_from, &display_name, gui, placeholder_text.as_ref())
         }
         _ => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
+    };
+
+    // CRITICAL: attach `InstanceFile` so the save_*_changes systems
+    // (Changed<TextLabel>, Changed<BillboardGui>, Changed<Frame>, …)
+    // can find the entity. Their queries require BOTH the class
+    // component AND InstanceFile to write back to disk; without it,
+    // every Properties-panel edit silently no-ops at save time —
+    // ECS mutates, watcher never sees a TOML modification, the
+    // edit dies on the next session reload. This bit users
+    // 2026-05-12: "copy-paste loses all properties" was the visible
+    // symptom but the root cause was the source TOML never being
+    // updated in the first place.
+    let display_name_for_inst = if !gui_def.instance.name.is_empty() {
+        gui_def.instance.name.clone()
+    } else {
+        gui_display_name(path).to_string()
+    };
+    commands.entity(entity).insert(super::instance_loader::InstanceFile {
+        toml_path: path.to_path_buf(),
+        mesh_path: std::path::PathBuf::new(),
+        name: display_name_for_inst,
+    });
+    info!("🪧 spawn_gui_element: {} attached InstanceFile → {}", gui_type, path.display());
+
+    // Attach the ECS Tags component so MCP `get_tagged_entities` and other
+    // engine systems can see GUI tags. Empty-tags case is a no-op — the
+    // Tags component would just hold an empty Vec.
+    if !gui_def.tags.is_empty() {
+        commands.entity(entity).insert(
+            eustress_common::attributes::Tags(gui_def.tags.clone()),
+        );
     }
+
+    entity
 }
 
 /// ScreenGui — fullscreen absolute overlay root container
@@ -436,27 +651,43 @@ fn spawn_screen_gui_element(
 /// Frame — container with background color and optional border
 /// Build a GuiElementDisplay from TOML properties + optional text
 pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
-    let (text, text_color, font_size, text_align, font_weight) = if let Some(tp) = text_props {
+    let (text, text_color, font_size, text_align, text_y_align, font_weight, text_scaled) = if let Some(tp) = text_props {
         let weight_source = if !tp.font.is_empty() { &tp.font } else { &tp.font_family };
         (
             tp.text.clone(),
             tp.text_color,
             tp.font_size,
             tp.text_x_alignment.clone(),
+            tp.text_y_alignment.clone(),
             font_weight_from_name(weight_source),
+            tp.text_scaled,
         )
     } else {
-        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "center".to_string(), 400)
+        (String::new(), [1.0, 1.0, 1.0, 1.0], 14.0, "Center".to_string(), "Center".to_string(), 400, false)
     };
 
+    // `gui.position` and `gui.size` are `UDim2`. We store the source
+    // 4-tuple AND a best-effort resolved-pixel rect (Offset-only here,
+    // since the parent's pixel extent isn't known at this site).
+    // `collect_subtree` resolves Scale at render time using the parent
+    // billboard's canvas dimensions.
     GuiElementDisplay {
-        x: gui.position.get(0).copied().unwrap_or(0.0),
-        y: gui.position.get(1).copied().unwrap_or(0.0),
-        width: gui.size.get(0).copied().unwrap_or(100.0),
-        height: gui.size.get(1).copied().unwrap_or(30.0),
+        x: gui.position.x.offset,
+        y: gui.position.y.offset,
+        width: gui.size.x.offset.max(1.0),
+        height: gui.size.y.offset.max(1.0),
+        position_udim2: [
+            gui.position.x.scale, gui.position.x.offset,
+            gui.position.y.scale, gui.position.y.offset,
+        ],
+        size_udim2: [
+            gui.size.x.scale, gui.size.x.offset,
+            gui.size.y.scale, gui.size.y.offset,
+        ],
+        anchor_point: gui.anchor_point,
         z_order: gui.z_index,
         visible: gui.visible,
-        clip_children: class_type == "scrollingframe",
+        clip_children: class_type.eq_ignore_ascii_case("scrollingframe"),
         scroll_x: 0.0,
         scroll_y: 0.0,
         bg_color: gui.background_color,
@@ -468,6 +699,9 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
         font_size,
         font_weight,
         text_align,
+        text_y_align,
+        text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+        text_scaled,
         image_path: String::new(),
         class_type: class_type.to_string(),
         mouse_filter: "stop".to_string(),
@@ -486,7 +720,7 @@ fn spawn_frame_element(
         Name::new(display_name.to_string()),
         // Minimal Node for Bevy hierarchy — actual rendering is done by Slint overlay
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, None, "frame"),
+        gui_display_from_props(gui, None, "Frame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -502,7 +736,11 @@ fn spawn_frame_element_with_text(
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
     let class = instance.class_name;
-    let class_str = format!("{:?}", class).to_lowercase();
+    // Roblox-parity: class_type stores the PascalCase class identifier
+    // (TextLabel, TextButton, ImageLabel, …). Debug-format already gives
+    // PascalCase since `ClassName` derives `Debug` on its variants, so no
+    // post-processing is needed.
+    let class_str = format!("{:?}", class);
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
@@ -525,13 +763,30 @@ fn spawn_scrolling_frame_element(
         instance,
         Name::new(display_name.to_string()),
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, None, "scrollingframe"),
+        gui_display_from_props(gui, None, "ScrollingFrame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
 }
 
-/// TextLabel — non-interactive text display
+/// TextLabel — non-interactive text display.
+///
+/// Mirrors the component set produced by `spawn::spawn_text_label`
+/// (the Insert-menu path) so reloaded TextLabels behave identically
+/// to freshly-inserted ones. The earlier version was missing the
+/// `TextLabel` ECS class component entirely AND inserted a stray
+/// `Node{display:None}` that confused Bevy's UI layout when the
+/// parent was a 3D BillboardGui (which is the common case for
+/// MindSpace-attached labels). Both fixes here:
+///
+///   1. Insert the typed `TextLabel` component, populated from the
+///      `[text]` and `[gui]` TOML sections so Properties panel and
+///      anything that queries by class component see real data.
+///   2. Drop the `Node` entirely — the billboard renderer reads
+///      `GuiElementDisplay` directly. ScreenGui-parented TextLabels
+///      get their Bevy UI Node added later by the runtime UI system
+///      (`runtime_ui::sync_screen_gui_layout`), so a hardcoded Node
+///      here just stomps on that.
 fn spawn_text_label_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,
@@ -540,12 +795,68 @@ fn spawn_text_label_element(
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
 ) -> Entity {
+    use eustress_common::classes::{TextLabel, Font, TextXAlignment, TextYAlignment};
+
+    let (text_value, text_color3, font_size, x_align, y_align, font) = match text_props {
+        Some(t) => {
+            let weight_source = if !t.font.is_empty() { &t.font } else { &t.font_family };
+            let font_variant = match weight_source.as_str() {
+                "GothamBold" | "Bold" => Font::GothamBold,
+                "GothamLight" | "Light" => Font::GothamLight,
+                _ => Font::default(),
+            };
+            let xa = match t.text_x_alignment.to_ascii_lowercase().as_str() {
+                "left"   => TextXAlignment::Left,
+                "right"  => TextXAlignment::Right,
+                _        => TextXAlignment::Center,
+            };
+            let ya = match t.text_y_alignment.to_ascii_lowercase().as_str() {
+                "top"    => TextYAlignment::Top,
+                "bottom" => TextYAlignment::Bottom,
+                _        => TextYAlignment::Center,
+            };
+            (
+                t.text.clone(),
+                [t.text_color[0], t.text_color[1], t.text_color[2]],
+                t.font_size,
+                xa, ya,
+                font_variant,
+            )
+        }
+        None => (
+            String::new(),
+            [1.0, 1.0, 1.0],
+            14.0,
+            TextXAlignment::Center,
+            TextYAlignment::Center,
+            Font::default(),
+        ),
+    };
+
+    let mut label = TextLabel::default();
+    label.text = text_value;
+    label.text_color3 = text_color3;
+    label.text_transparency = text_props.map(|t| 1.0 - t.text_color[3]).unwrap_or(0.0);
+    label.font = font;
+    label.font_size = font_size;
+    label.text_x_alignment = x_align;
+    label.text_y_alignment = y_align;
+    label.background_color3 = [gui.background_color[0], gui.background_color[1], gui.background_color[2]];
+    label.background_transparency = 1.0 - gui.background_color[3];
+    label.border_color3 = [gui.border_color[0], gui.border_color[1], gui.border_color[2]];
+    label.border_size_pixel = gui.border_size as i32;
+    // Roblox-parity Position/Size as UDim2 — single source of truth on disk.
+    label.size = gui.size;
+    label.position = gui.position;
+    label.visible = gui.visible;
+    label.z_index = gui.z_index;
+
     let entity = commands.spawn((
         instance,
+        label,
         Name::new(display_name.to_string()),
         TextLabelMarker,
-        Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props, "textlabel"),
+        gui_display_from_props(gui, text_props, "TextLabel"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -564,7 +875,7 @@ fn spawn_text_button_element(
         instance,
         Name::new(display_name.to_string()),
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props, "textbutton"),
+        gui_display_from_props(gui, text_props, "TextButton"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -584,7 +895,7 @@ fn spawn_text_box_element(
         Name::new(display_name.to_string()),
         TextBoxMarker,
         Node { display: Display::None, ..default() },
-        gui_display_from_props(gui, text_props, "textbox"),
+        gui_display_from_props(gui, text_props, "TextBox"),
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -604,13 +915,13 @@ fn resolve_text_props(text_props: Option<&GuiTomlText>) -> (String, Color, f32, 
     match text_props {
         Some(t) => {
             let text_color = to_color(&t.text_color);
-            let justify = match t.text_x_alignment.as_str() {
+            let justify = match t.text_x_alignment.to_ascii_lowercase().as_str() {
                 "left" => JustifyContent::FlexStart,
                 "center" => JustifyContent::Center,
                 "right" => JustifyContent::FlexEnd,
                 _ => JustifyContent::FlexStart,
             };
-            let align = match t.text_y_alignment.as_str() {
+            let align = match t.text_y_alignment.to_ascii_lowercase().as_str() {
                 "top" => AlignItems::FlexStart,
                 "center" => AlignItems::Center,
                 "bottom" => AlignItems::FlexEnd,

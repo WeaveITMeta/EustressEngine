@@ -260,6 +260,12 @@ fn property_to_json(value: PropertyValue) -> serde_json::Value {
         }
         PropertyValue::Material(m) => serde_json::json!(format!("{:?}", m)),
         PropertyValue::Enum(e) => serde_json::json!(e),
+        // UDim2 serialises as the canonical 4-tuple
+        // `[scale_x, offset_x, scale_y, offset_y]` — same shape as the
+        // on-disk TOML form so JSON ↔ TOML round-trips don't drift.
+        PropertyValue::UDim2(u) => serde_json::json!([
+            u.x.scale, u.x.offset, u.y.scale, u.y.offset
+        ]),
     }
 }
 
@@ -277,6 +283,21 @@ fn json_to_property(json: &serde_json::Value, property_type: &str) -> Option<Pro
                         arr[0].as_f64()? as f32,
                         arr[1].as_f64()? as f32,
                         arr[2].as_f64()? as f32,
+                    )))
+                } else {
+                    None
+                }
+            })
+        }
+        "UDim2" => {
+            // Strict 4-float form `[scale_x, offset_x, scale_y, offset_y]`.
+            json.as_array().and_then(|arr| {
+                if arr.len() >= 4 {
+                    Some(PropertyValue::UDim2(eustress_common::ui_types::UDim2::new(
+                        arr[0].as_f64()? as f32,
+                        arr[1].as_f64()? as f32,
+                        arr[2].as_f64()? as f32,
+                        arr[3].as_f64()? as f32,
                     )))
                 } else {
                     None
@@ -1848,10 +1869,8 @@ fn scrollingframe_from_properties(props: &HashMap<String, serde_json::Value>) ->
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([200.0, 200.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(200.0, 200.0)),
         canvas_size: json_to_vec2(props.get("canvas_size")).unwrap_or([0.0, 0.0]),
         canvas_position: json_to_vec2(props.get("canvas_position")).unwrap_or([0.0, 0.0]),
         scroll_bar_enabled_x: props.get("scroll_bar_enabled_x").and_then(|v| v.as_bool()).unwrap_or(true),
@@ -1897,6 +1916,42 @@ fn json_to_vec2(value: Option<&serde_json::Value>) -> Option<[f32; 2]> {
             None
         }
     })
+}
+
+/// Helper to parse a Roblox-parity UDim2 from a JSON object's properties
+/// map. Reads the canonical 4-float form `name = [scale_x, offset_x,
+/// scale_y, offset_y]` first; falls back to the legacy split fields
+/// `name_scale = [sx, sy]` + `name_offset = [ox, oy]` for files written
+/// before the UDim2 unification. Returns `None` when neither form is
+/// present so callers can supply class-specific defaults.
+fn json_to_udim2(
+    props: &std::collections::HashMap<String, serde_json::Value>,
+    name: &str,
+) -> Option<eustress_common::ui_types::UDim2> {
+    if let Some(v) = props.get(name).and_then(|v| v.as_array()) {
+        if v.len() == 4 {
+            return Some(eustress_common::ui_types::UDim2::new(
+                v[0].as_f64().unwrap_or(0.0) as f32,
+                v[1].as_f64().unwrap_or(0.0) as f32,
+                v[2].as_f64().unwrap_or(0.0) as f32,
+                v[3].as_f64().unwrap_or(0.0) as f32,
+            ));
+        }
+        if v.len() == 2 {
+            return Some(eustress_common::ui_types::UDim2::from_pixels(
+                v[0].as_f64().unwrap_or(0.0) as f32,
+                v[1].as_f64().unwrap_or(0.0) as f32,
+            ));
+        }
+    }
+    let scale = json_to_vec2(props.get(&format!("{}_scale", name)));
+    let offset = json_to_vec2(props.get(&format!("{}_offset", name)));
+    if scale.is_some() || offset.is_some() {
+        let s = scale.unwrap_or([0.0, 0.0]);
+        let o = offset.unwrap_or([0.0, 0.0]);
+        return Some(eustress_common::ui_types::UDim2::new(s[0], o[0], s[1], o[1]));
+    }
+    None
 }
 
 /// Helper to parse [f32; 3] vector from JSON
@@ -1964,10 +2019,8 @@ fn videoframe_from_properties(props: &HashMap<String, serde_json::Value>) -> Vid
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([320.0, 180.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(320.0, 180.0)),
         video: props.get("video").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         autoplay: props.get("autoplay").and_then(|v| v.as_bool()).unwrap_or(false),
         looping: props.get("looping").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -2014,10 +2067,8 @@ fn documentframe_from_properties(props: &HashMap<String, serde_json::Value>) -> 
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([400.0, 500.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(400.0, 500.0)),
         document: props.get("document").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         current_page: props.get("current_page").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
         zoom: props.get("zoom").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
@@ -2051,10 +2102,8 @@ fn webframe_from_properties(props: &HashMap<String, serde_json::Value>) -> WebFr
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([800.0, 600.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(800.0, 600.0)),
         url: props.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank").to_string(),
         interactive: props.get("interactive").and_then(|v| v.as_bool()).unwrap_or(true),
         javascript_enabled: props.get("javascript_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
@@ -2101,10 +2150,8 @@ fn frame_from_properties(props: &HashMap<String, serde_json::Value>) -> Frame {
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([100.0, 100.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(100.0, 100.0)),
     }
 }
 
@@ -2147,10 +2194,8 @@ fn imagelabel_from_properties(props: &HashMap<String, serde_json::Value>) -> Ima
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([100.0, 100.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(100.0, 100.0)),
     }
 }
 
@@ -2214,10 +2259,8 @@ fn imagebutton_from_properties(props: &HashMap<String, serde_json::Value>) -> Im
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([100.0, 100.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(100.0, 100.0)),
     }
 }
 
@@ -2271,10 +2314,8 @@ fn textbutton_from_properties(props: &HashMap<String, serde_json::Value>) -> Tex
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         rotation: props.get("rotation").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([200.0, 50.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0)),
     }
 }
 
@@ -2509,8 +2550,8 @@ fn surfacegui_from_properties(props: &HashMap<String, serde_json::Value>) -> Sur
                 _ => VerticalAlignment::Center,
             })
             .unwrap_or(VerticalAlignment::Center),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([1.0, 1.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([0.0, 0.0]),
+        // SurfaceGui defaults to filling its target face (Scale=1, Offset=0).
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_scale(1.0, 1.0)),
     }
 }
 
@@ -2540,10 +2581,8 @@ fn textbox_from_properties(props: &HashMap<String, serde_json::Value>) -> TextBo
         background_color3: json_to_color3(props.get("background_color3")).unwrap_or([1.0, 1.0, 1.0]),
         background_transparency: props.get("background_transparency").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         border_color3: json_to_color3(props.get("border_color3")).unwrap_or([0.3, 0.3, 0.3]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([200.0, 30.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(200.0, 30.0)),
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
         z_index: props.get("z_index").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
         border_size_pixel: props.get("border_size_pixel").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
@@ -2567,10 +2606,8 @@ fn viewportframe_from_properties(props: &HashMap<String, serde_json::Value>) -> 
         z_index: props.get("z_index").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
         layout_order: props.get("layout_order").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         anchor_point: json_to_vec2(props.get("anchor_point")).unwrap_or([0.0, 0.0]),
-        position_scale: json_to_vec2(props.get("position_scale")).unwrap_or([0.0, 0.0]),
-        position_offset: json_to_vec2(props.get("position_offset")).unwrap_or([0.0, 0.0]),
-        size_scale: json_to_vec2(props.get("size_scale")).unwrap_or([0.0, 0.0]),
-        size_offset: json_to_vec2(props.get("size_offset")).unwrap_or([200.0, 200.0]),
+        position: json_to_udim2(props, "position").unwrap_or_default(),
+        size: json_to_udim2(props, "size").unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(200.0, 200.0)),
         current_camera: None, // Entity references need special handling
         ambient: props.get("ambient").and_then(|v| v.as_bool()).unwrap_or(true),
         light_color: json_to_color3(props.get("light_color")).unwrap_or([1.0, 1.0, 1.0]),

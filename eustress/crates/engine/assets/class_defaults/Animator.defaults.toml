@@ -1,9 +1,0 @@
-# Animator — Animation controller (child of Humanoid)
-# Bevy: AnimationPlayer component
-
-[animator]
-enabled = true
-
-[metadata]
-class_name = "Animator"
-archivable = true

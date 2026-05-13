@@ -208,10 +208,15 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(http_json_encode)?;
     module.function_meta(http_json_decode)?;
     
-    // P2: CollectionService API (tags)
+    // P2: CollectionService API (tags). Bridges to ECS `Tags` component via
+    // the per-instance tag list pulled by `drain_entity_tags` and persisted
+    // through the `LuauCreatedInstance.tags` field.
     module.function_meta(collection_add_tag)?;
+    module.function_meta(collection_add_tag_by_id)?;
     module.function_meta(collection_remove_tag)?;
+    module.function_meta(collection_remove_tag_by_id)?;
     module.function_meta(collection_has_tag)?;
+    module.function_meta(collection_has_tag_by_id)?;
     module.function_meta(collection_get_tagged)?;
     
     // P2: Sound API
@@ -1591,11 +1596,18 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
 
     let r = eustress_common::soul::rune_runtime::execute_oneshot(&modules, source, "command_bar");
 
+    // Drain tags first so the per-instance lookup below picks them up
+    // without races against `clear_instance_registry`. The map is keyed by
+    // i64 entity-id (the same value `InstanceRune.entity_id` exposes to
+    // Rune scripts), so it matches `InstanceRegistry::iter()`'s `&u64` key
+    // when the latter is cast.
+    let mut tag_map = drain_entity_tags();
+
     // Drain created instances
     let mut created = Vec::new();
     {
         let reg = instance_registry.read().unwrap();
-        for (_id, inst_data) in reg.iter() {
+        for (id, inst_data) in reg.iter() {
             use eustress_common::scripting::PropertyValue as PV;
             let pos = inst_data.properties.get("Position")
                 .and_then(|v| if let PV::Vector3(vec) = v { Some([vec.x as f32, vec.y as f32, vec.z as f32]) } else { None })
@@ -1633,6 +1645,11 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
                 } else { None })
                 .unwrap_or([0.0, 0.0, 0.0, 1.0]);
 
+            // Pull this instance's tags out of the drained map. We use the
+            // registry id (cast u64 → i64) which matches what Rune scripts
+            // pass via `InstanceRune.entity_id` to `CollectionService::AddTag`.
+            let tags = tag_map.remove(&(*id as i64)).unwrap_or_default();
+
             created.push(eustress_common::luau::runtime::LuauCreatedInstance {
                 class_name: inst_data.class_name.clone(),
                 name: inst_data.name.clone(),
@@ -1641,7 +1658,8 @@ pub fn execute_rune_oneshot(source: &str) -> Result<Vec<eustress_common::luau::r
                 units_offset: None, ui_size: None, adornee_name: None,
                 always_on_top: None, max_distance: None,
                 text: None, text_color: None, text_size: None, font: None,
-                luau_entity_id: 0, parent_entity_id: None,
+                luau_entity_id: *id as i64, parent_entity_id: None,
+                tags,
             });
         }
     }
@@ -2607,69 +2625,174 @@ fn http_json_decode(json: &str) -> Option<String> {
 
 // ============================================================================
 // P2: CollectionService API (Tags)
+//
+// Tags live in a per-execution thread-local indexed by Rune entity-id. At the
+// end of `execute_rune_oneshot`, [`drain_entity_tags`] pulls them and the
+// drain pass attaches them to each `LuauCreatedInstance.tags`. The spawner
+// then writes them to `_instance.toml`'s `tags = [...]` array, which Bevy
+// hydrates into the ECS [`Tags`](eustress_common::attributes::Tags) component
+// — the same storage backing the MCP `add_tag` / `get_tagged_entities`
+// tools. Tags set from Rune are therefore queryable from MCP and from
+// future script runs, not orphaned in the VM.
+//
+// `GetTagged` also reads from `EXISTING_TAGS` — a per-script-run snapshot of
+// live ECS tags injected by the engine before execution — so a Rune script
+// can find entities that the engine, MCP, or earlier scripts tagged.
+//
+// API accepts EITHER an `&InstanceRune` reference (the idiomatic form,
+// `CollectionService::AddTag(part, "Foo")`) or a numeric `i64` entity-id (for
+// callers that already hold a raw id). The two arities are exposed as
+// separate function names because Rune lacks overloading.
 // ============================================================================
 
-/// Thread-local tag storage for entities.
+/// Thread-local tag storage for entities (script-run scope).
 #[cfg(feature = "realism-scripting")]
 thread_local! {
     static ENTITY_TAGS: std::cell::RefCell<std::collections::HashMap<i64, std::collections::HashSet<String>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Engine-supplied snapshot of `{ tag -> [entity_id, ...] }` tags from
+    /// the live ECS, populated before each `execute_rune_oneshot`. Cleared
+    /// alongside `ENTITY_TAGS`.
+    static EXISTING_TAGS: std::cell::RefCell<std::collections::HashMap<String, Vec<i64>>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Add a tag to an entity.
-/// 
-/// ## Rune: `CollectionService::AddTag(entity_id, "Enemy");`
+/// Drain all script-set tags keyed by entity-id. Called from the
+/// `execute_rune_oneshot` drain pass to populate `LuauCreatedInstance.tags`
+/// before clearing for the next script invocation.
 #[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn collection_add_tag(entity_id: i64, tag: &str) {
+pub fn drain_entity_tags() -> std::collections::HashMap<i64, Vec<String>> {
     ENTITY_TAGS.with(|cell| {
-        let mut tags = cell.borrow_mut();
-        tags.entry(entity_id)
+        let map = std::mem::take(&mut *cell.borrow_mut());
+        map.into_iter()
+            .map(|(id, set)| {
+                let mut v: Vec<String> = set.into_iter().collect();
+                v.sort();
+                (id, v)
+            })
+            .collect()
+    })
+}
+
+/// Seed the engine-supplied tag snapshot before a script run so
+/// `CollectionService::GetTagged` can see real ECS tags.
+#[cfg(feature = "realism-scripting")]
+pub fn seed_existing_tags(snapshot: std::collections::HashMap<String, Vec<i64>>) {
+    EXISTING_TAGS.with(|cell| *cell.borrow_mut() = snapshot);
+}
+
+/// Clear the engine-supplied snapshot. Pair with [`seed_existing_tags`].
+#[cfg(feature = "realism-scripting")]
+pub fn clear_existing_tags() {
+    EXISTING_TAGS.with(|cell| cell.borrow_mut().clear());
+}
+
+// ── Plain-Rust helpers (the actual implementations) ──────────────────────
+// `#[rune::function]` rewrites the annotated `fn` into a meta-data generator
+// callable as `name()` returning `Result<FunctionMetaData, _>` — calling it
+// with arguments from Rust fails with "0 arguments expected". The Rune-
+// exported wrappers below therefore delegate into these plain helpers.
+
+#[cfg(feature = "realism-scripting")]
+fn tag_add(entity_id: i64, tag: &str) {
+    ENTITY_TAGS.with(|cell| {
+        cell.borrow_mut()
+            .entry(entity_id)
             .or_insert_with(std::collections::HashSet::new)
             .insert(tag.to_string());
     });
 }
 
-/// Remove a tag from an entity.
-/// 
-/// ## Rune: `CollectionService::RemoveTag(entity_id, "Enemy");`
 #[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn collection_remove_tag(entity_id: i64, tag: &str) {
+fn tag_remove(entity_id: i64, tag: &str) {
     ENTITY_TAGS.with(|cell| {
-        let mut tags = cell.borrow_mut();
-        if let Some(entity_tags) = tags.get_mut(&entity_id) {
+        if let Some(entity_tags) = cell.borrow_mut().get_mut(&entity_id) {
             entity_tags.remove(tag);
         }
     });
 }
 
-/// Check if an entity has a tag.
-/// 
-/// ## Rune: `let is_enemy = CollectionService::HasTag(entity_id, "Enemy");`
 #[cfg(feature = "realism-scripting")]
-#[rune::function]
-fn collection_has_tag(entity_id: i64, tag: &str) -> bool {
+fn tag_has(entity_id: i64, tag: &str) -> bool {
     ENTITY_TAGS.with(|cell| {
-        let tags = cell.borrow();
-        tags.get(&entity_id)
+        cell.borrow()
+            .get(&entity_id)
             .map(|t| t.contains(tag))
             .unwrap_or(false)
     })
 }
 
-/// Get all entities with a specific tag.
-/// 
+// ── Rune-exported wrappers ─────────────────────────────────────────────────
+
+/// Add a tag to an entity referenced by Instance.
+///
+/// ## Rune: `CollectionService::AddTag(part, "Enemy");`
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_add_tag(instance: &InstanceRune, tag: &str) {
+    tag_add(instance.entity_id, tag);
+}
+
+/// Add a tag to an entity referenced by numeric id (compat / advanced).
+///
+/// ## Rune: `CollectionService::AddTagById(part.entity_id, "Enemy");`
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_add_tag_by_id(entity_id: i64, tag: &str) {
+    tag_add(entity_id, tag);
+}
+
+/// Remove a tag from an entity.
+///
+/// ## Rune: `CollectionService::RemoveTag(part, "Enemy");`
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_remove_tag(instance: &InstanceRune, tag: &str) {
+    tag_remove(instance.entity_id, tag);
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_remove_tag_by_id(entity_id: i64, tag: &str) {
+    tag_remove(entity_id, tag);
+}
+
+/// Check if an entity has a tag.
+///
+/// ## Rune: `let is_enemy = CollectionService::HasTag(part, "Enemy");`
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_has_tag(instance: &InstanceRune, tag: &str) -> bool {
+    tag_has(instance.entity_id, tag)
+}
+
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn collection_has_tag_by_id(entity_id: i64, tag: &str) -> bool {
+    tag_has(entity_id, tag)
+}
+
+/// Get all entity-ids with a specific tag — both script-set and from the
+/// engine-supplied ECS snapshot. Script-set ids come first; engine-snapshot
+/// ids are appended (deduplicated against script-set ids).
+///
 /// ## Rune: `let enemies = CollectionService::GetTagged("Enemy");`
 #[cfg(feature = "realism-scripting")]
 #[rune::function]
 fn collection_get_tagged(tag: &str) -> Vec<i64> {
-    ENTITY_TAGS.with(|cell| {
+    let mut out: Vec<i64> = ENTITY_TAGS.with(|cell| {
         let tags = cell.borrow();
         tags.iter()
             .filter(|(_, entity_tags)| entity_tags.contains(tag))
             .map(|(id, _)| *id)
             .collect()
-    })
+    });
+    EXISTING_TAGS.with(|cell| {
+        if let Some(ids) = cell.borrow().get(tag) {
+            for id in ids {
+                if !out.contains(id) { out.push(*id); }
+            }
+        }
+    });
+    out
 }
 
 // ============================================================================

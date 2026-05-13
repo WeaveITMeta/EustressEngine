@@ -183,6 +183,19 @@ impl FileType {
             
             // StarterGui: GUI elements spawn as UI entities
             (Self::GuiElement | Self::Toml, "StarterGui") => true,
+
+            // Workspace: GUI elements spawn here too — a BillboardGui /
+            // SurfaceGui parented to a Part (e.g. SimpleBlock/Label/) can
+            // have child UI elements (TextLabel, Frame, ImageLabel, …)
+            // serialised as `.textlabel.toml` / etc. inside the same
+            // folder. Without this arm, the file walker recurses into the
+            // BillboardGui's directory, finds the child file, but
+            // `spawns_entity_in_service` returns false → the child is
+            // silently skipped → the Explorer reloads the BillboardGui
+            // empty and the rendered billboard has no content. Mirror the
+            // StarterGui rule so file-system-first parity holds wherever
+            // the user attaches a GUI tree.
+            (Self::GuiElement, "Workspace") => true,
             
             // MaterialService: Material definitions + texture images
             (Self::Material | Self::Png | Self::Jpg, "MaterialService") => true,
@@ -996,12 +1009,17 @@ pub fn spawn_directory_entry(
             // GuiElementDisplay with visible flag — children inherit this for rendering
             eustress_common::gui::billboard_renderer::GuiElementDisplay {
                 x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+                position_udim2: [0.0; 4], size_udim2: [0.0; 4],
+                anchor_point: [0.0, 0.0],
                 z_order: 0, visible: screen_gui_visible, clip_children: false,
                 scroll_x: 0.0, scroll_y: 0.0,
                 bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
                 corner_radius: 0.0,
                 text: String::new(), text_color: [1.0; 4],
-                font_size: 14.0, font_weight: 400, text_align: "center".to_string(),
+                font_size: 14.0, font_weight: 400,
+                text_align: "Center".to_string(), text_y_align: "Center".to_string(),
+                text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+                text_scaled: false,
                 image_path: String::new(),
                 class_type: "screengui".to_string(),
                 mouse_filter: "ignore".to_string(),
@@ -1022,15 +1040,20 @@ pub fn spawn_directory_entry(
             // Fallback: invisible container
             eustress_common::gui::billboard_renderer::GuiElementDisplay {
                 x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+                position_udim2: [0.0; 4], size_udim2: [0.0; 4],
+                anchor_point: [0.0, 0.0],
                 z_order: 1, visible: true, clip_children: false,
                 scroll_x: 0.0, scroll_y: 0.0,
                 bg_color: [0.0, 0.0, 0.0, 0.0],
                 border_size: 0.0, border_color: [0.0; 4],
                 corner_radius: 0.0,
                 text: String::new(), text_color: [1.0; 4],
-                font_size: 14.0, font_weight: 400, text_align: "center".to_string(),
+                font_size: 14.0, font_weight: 400,
+                text_align: "Center".to_string(), text_y_align: "Center".to_string(),
+                text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+                text_scaled: false,
                 image_path: String::new(),
-                class_type: "frame".to_string(),
+                class_type: "Frame".to_string(),
                 mouse_filter: "stop".to_string(),
             }
         };
@@ -1053,41 +1076,113 @@ pub fn spawn_directory_entry(
             gui_display,
         )).id()
     } else if matches!(class_name, eustress_common::classes::ClassName::BillboardGui) {
-        // BillboardGui — 3D billboard entity (quad facing camera)
-        // Read size, max_distance, always_on_top from _instance.toml
+        // BillboardGui — 3D billboard entity (quad facing camera).
+        //
+        // Roblox parity: every `BillboardGui` instance property is
+        // round-tripped through `_instance.toml`. Optional fields default
+        // to the class's `Default::default()` so older TOML files (which
+        // pre-date a property) load cleanly without overwriting existing
+        // defaults.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let (bb_size, bb_max_distance, bb_always_on_top, bb_offset) =
-            if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
-                let g = &gui_def.gui;
-                let w = g.size.get(0).copied().unwrap_or(200.0);
-                let h = g.size.get(1).copied().unwrap_or(100.0);
-                let max_d = g.max_distance.unwrap_or(100.0);
-                let aot = g.always_on_top.unwrap_or(false);
-                let offset = if g.position.len() >= 3 {
-                    Vec3::new(g.position[0], g.position[1], g.position[2])
-                } else {
-                    Vec3::new(0.0, 2.0, 0.0)
-                };
-                ([w, h], max_d, aot, offset)
-            } else {
-                ([200.0f32, 100.0], 100.0, false, Vec3::new(0.0, 2.0, 0.0))
-            };
-
-        // Build the BillboardGui *class component* in addition to the
-        // runtime marker. Without this, Properties-panel edits go nowhere
-        // (sync_billboard_class_to_marker queries Changed<BillboardGui>
-        // and would never see the entity), and any save_space pass that
-        // round-trips through the class component would silently drop
-        // the billboard. The class component carries the same size /
-        // max_distance / always_on_top / units_offset values the marker
-        // is initialised with, so the two stay coherent on reload.
         let mut bb_class = eustress_common::classes::BillboardGui::default();
-        bb_class.size = bb_size;
-        bb_class.max_distance = bb_max_distance;
-        bb_class.always_on_top = bb_always_on_top;
-        bb_class.units_offset = [bb_offset.x, bb_offset.y, bb_offset.z];
+        let mut bb_offset = Vec3::new(0.0, 2.0, 0.0);
+        // Collected from `gui_def.tags` so we can attach the ECS Tags
+        // component after spawn (lives outside the `if let Ok` scope).
+        let mut bb_tags: Vec<String> = Vec::new();
 
-        commands.spawn((
+        if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+            bb_tags = gui_def.tags.clone();
+            let g = &gui_def.gui;
+
+            // Geometry — strict UDim2 from the schema, no legacy fallback.
+            bb_class.size = g.size;
+            if let Some(v) = g.size_offset { bb_class.size_offset = v; }
+            if let Some(v) = g.extents_offset { bb_class.extents_offset = v; }
+            if let Some(v) = g.extents_offset_world_space { bb_class.extents_offset_world_space = v; }
+            if let Some(v) = g.units_offset { bb_class.units_offset = v; }
+            if let Some(v) = g.units_offset_world_space { bb_class.units_offset_world_space = v; }
+
+            // BillboardGui's 3D placement still comes from `units_offset`
+            // (Vec3 stud offset) — separate from the 2D-canvas
+            // `position: UDim2`. Mirror it into `bb_offset` for the
+            // entity's Transform.
+            bb_offset = Vec3::new(
+                bb_class.units_offset[0],
+                bb_class.units_offset[1],
+                bb_class.units_offset[2],
+            );
+
+            // Distance
+            if let Some(v) = g.max_distance { bb_class.max_distance = v; }
+            if let Some(v) = g.distance_lower_limit { bb_class.distance_lower_limit = v; }
+            if let Some(v) = g.distance_upper_limit { bb_class.distance_upper_limit = v; }
+            if let Some(v) = g.distance_step { bb_class.distance_step = v; }
+
+            // Behaviour flags
+            if let Some(v) = g.active { bb_class.active = v; }
+            if let Some(v) = g.enabled { bb_class.enabled = v; }
+            if let Some(v) = g.always_on_top { bb_class.always_on_top = v; }
+            if let Some(v) = g.clips_descendants { bb_class.clips_descendants = v; }
+            if let Some(v) = g.reset_on_spawn { bb_class.reset_on_spawn = v; }
+            if let Some(v) = g.stiffness_by_distance { bb_class.stiffness_by_distance = v; }
+
+            // Appearance
+            if let Some(v) = g.brightness { bb_class.brightness = v; }
+            if let Some(v) = g.light_influence { bb_class.light_influence = v; }
+
+            // Sorting
+            if let Some(ref s) = g.z_index_behavior {
+                bb_class.z_index_behavior = match s.as_str() {
+                    "Global" => eustress_common::classes::ZIndexBehavior::Global,
+                    _ => eustress_common::classes::ZIndexBehavior::Sibling,
+                };
+            }
+            // NOTE: `g.adornee` carries the instance name; resolution to
+            // an Entity reference happens in a post-load pass once all
+            // instances are spawned (see resolve_billboard_adornees, TODO).
+        }
+
+        // Build the runtime marker by copying the parity-relevant subset
+        // of the class. `sync_billboard_class_to_marker` will keep these
+        // in sync on subsequent edits, but we initialise them here so
+        // the first frame shows correct visibility / depth / size.
+        // Marker mirrors the renderer's resolved-pixel inputs. Class
+        // carries the source-of-truth UDim2; we resolve to pixels here
+        // (Scale × PIXELS_PER_METER + Offset) so the renderer doesn't
+        // have to revisit UDim2 math each frame.
+        let [size_w_px, size_h_px] = bb_class.size.to_pixels(50.0, 50.0);
+        // `size_offset` is Roblox-parity `Vector2` — already in pixels.
+        let [size_off_x, size_off_y] = bb_class.size_offset;
+        let marker = eustress_common::gui::billboard_renderer::BillboardGuiMarker {
+            size: [size_w_px.max(1.0), size_h_px.max(1.0)],
+            size_offset: [size_off_x, size_off_y],
+            extents_offset: bb_class.extents_offset,
+            extents_offset_world_space: bb_class.extents_offset_world_space,
+            units_offset_world_space: bb_class.units_offset_world_space,
+            max_distance: if bb_class.max_distance > 0.0 && bb_class.distance_upper_limit > 0.0 {
+                bb_class.max_distance.min(bb_class.distance_upper_limit)
+            } else {
+                bb_class.max_distance.max(bb_class.distance_upper_limit)
+            },
+            distance_lower_limit: bb_class.distance_lower_limit.max(0.0),
+            distance_step: bb_class.distance_step.max(0.0),
+            always_on_top: bb_class.always_on_top,
+            clips_descendants: bb_class.clips_descendants,
+            brightness: bb_class.brightness.clamp(0.0, 8.0),
+            light_influence: bb_class.light_influence.clamp(0.0, 1.0),
+            face_camera: true,
+            visible: bb_class.enabled,
+            z_index: bb_class.z_index,
+        };
+
+        // The Properties panel keys its rich-class display branch off
+        // `InstanceFile` (it's the marker that says "this entity has a
+        // canonical `_instance.toml` on disk you can edit"). Without it,
+        // a freshly-reloaded BillboardGui falls through to the basic
+        // Data + Transform fallback and the user can't edit AlwaysOnTop /
+        // MaxDistance / Brightness / etc. through the panel.
+        let instance_toml_path = dir_meta.path.join("_instance.toml");
+        let entity = commands.spawn((
             eustress_common::classes::Instance {
                 name: dir_meta.name.clone(),
                 class_name,
@@ -1097,22 +1192,27 @@ pub fn spawn_directory_entry(
                 uuid: String::new(),
             },
             bb_class,
-            eustress_common::gui::billboard_renderer::BillboardGuiMarker {
-                size: bb_size,
-                max_distance: bb_max_distance,
-                always_on_top: bb_always_on_top,
-                face_camera: true,
-                visible: true,
-            },
+            marker,
             LoadedFromFile {
                 path: dir_meta.path.clone(),
                 file_type: FileType::Directory,
                 service: dir_meta.service.clone(),
             },
+            super::instance_loader::InstanceFile {
+                toml_path: instance_toml_path,
+                mesh_path: std::path::PathBuf::new(),
+                name: dir_meta.name.clone(),
+            },
             Name::new(dir_meta.name.clone()),
             Transform::from_translation(bb_offset),
             Visibility::default(),
-        )).id()
+        )).id();
+        // Tag hydration matches `instance_loader::spawn_instance`'s path
+        // for Parts so MCP / ECS queries see GUI tags identically.
+        if !bb_tags.is_empty() {
+            commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
+        }
+        entity
     } else if matches!(class_name, eustress_common::classes::ClassName::Image | eustress_common::classes::ClassName::Video) {
         // Image / Video — imported media class. Loads the asset_path
         // referenced by `[asset].path` in _instance.toml, which lives
@@ -1845,6 +1945,12 @@ impl Plugin for SpaceFileLoaderPlugin {
             // `ExtraSectionClaim` impls on `ExtraSectionRegistry`.
             .init_resource::<eustress_common::class_schema::ClassSchemaResource>()
             .init_resource::<eustress_common::class_schema::ExtraSectionRegistry>()
+            // Single canonical filesystem-change broadcast. Sourced by
+            // `SpaceFileWatcher`'s notify thread, consumed by any
+            // subsystem that needs to react to disk changes (streaming
+            // spatial grid, plugins, future tooling). See
+            // `common::file_events` for the design rationale.
+            .add_message::<eustress_common::file_events::FileChanged>()
             .add_systems(Startup, (
                 // Register every first-party ExtraSectionClaim that
                 // ships with common (currently just ThermodynamicClaim).
@@ -1869,6 +1975,8 @@ impl Plugin for SpaceFileLoaderPlugin {
                 load_deferred_services,
                 super::file_watcher::process_file_changes,
                 super::instance_loader::write_instance_changes_system,
+                super::instance_loader::ensure_tags_and_attributes_components,
+                super::instance_loader::save_tags_and_attributes_changes,
                 super::space_ops::apply_space_rescan,
                 super::instance_loader::update_base_part_size_from_mesh,
                 // Per-frame safety net: clamp NaN/Inf and sky-distance

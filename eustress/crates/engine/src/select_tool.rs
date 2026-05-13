@@ -528,6 +528,15 @@ fn handle_select_drag(
                     // Cursor is over the skybox. Roblox keeps the part at
                     // its current height and slides it on the horizontal
                     // plane through its initial Y. Don't fall to Y=0.
+                    //
+                    // The initial Y is the part's CURRENT height, NOT the
+                    // grid-snapped one — but the grid snap below WILL
+                    // round it to a clean Y (e.g. 1.755 → 2.0 with
+                    // snap_size=1). That's exactly what the user wants:
+                    // off-grid parts converge to the grid as soon as
+                    // they're dragged. Earlier code locked Y at the
+                    // initial value, blocking the snap from ever fixing
+                    // off-grid drift.
                     state.debug_hit_point = None;
                     state.debug_hit_normal = None;
 
@@ -538,7 +547,9 @@ fn handle_select_drag(
                         let t = t.clamp(0.0, 2000.0);
                         let cursor_world = ray.origin + *ray.direction * t;
                         // Glue the grabbed point to the cursor on this
-                        // horizontal plane. Y stays at plane_y.
+                        // horizontal plane. Y stays at plane_y for now;
+                        // the world-frame grid snap below will lock it
+                        // to a clean grid Y on every frame.
                         Vec3::new(
                             cursor_world.x - grab_offset_world.x,
                             plane_y,
@@ -555,14 +566,26 @@ fn handle_select_drag(
                 // No rotation change during drag
                 let rotation_delta = Quat::IDENTITY;
 
-                // Apply grid snapping if enabled. Snap is applied to the
-                // GRABBED POINT, not the center — that's the Roblox feel
-                // where the corner the user is dragging clicks to grid
-                // intersections cleanly. When dragging onto another
-                // part's surface, snap in that target's local frame so
-                // the grid aligns to the surface edges (rotated walls
-                // snap along their own face). Empty-space drag uses
-                // world-frame snapping.
+                // Apply grid snapping if enabled.
+                //
+                // Three cases:
+                //
+                // 1. Surface hit (cursor over a part) — snap the grabbed
+                //    point IN THE TARGET'S LOCAL FRAME, but preserve the
+                //    surface-normal component so the dragged part stays
+                //    flush. This is the existing `snap_to_grid_in_frame`
+                //    behaviour. Operates on the grabbed point so corners
+                //    click cleanly to grid intersections.
+                //
+                // 2. Empty space hit (cursor over skybox) — snap the
+                //    grabbed point in WORLD frame on ALL THREE axes
+                //    (including Y). Earlier code preserved the initial
+                //    Y so off-grid parts (Y=1.755) carried that offset
+                //    forever; this now rounds Y to the universal grid
+                //    so parts converge to clean grid lines as you drag.
+                //
+                // 3. No snap (snap_enabled = false) — use the raw
+                //    target_pos unchanged.
                 let final_target_pos = if editor_settings.snap_enabled {
                     let grab_world = target_pos + grab_offset_world;
                     let snapped_grab = if let Some((tgt_rot, tgt_center, surf_n)) = surface_frame {
@@ -576,7 +599,27 @@ fn handle_select_drag(
                     } else {
                         math_snap_to_grid(grab_world, editor_settings.snap_size)
                     };
-                    snapped_grab - grab_offset_world
+                    let mut center = snapped_grab - grab_offset_world;
+                    // **Anti-clipping guard.** If we have a surface frame,
+                    // the grid-snap may have rounded the grabbed-point's
+                    // Y onto a grid line that doesn't sit on the surface
+                    // plane — yanking the part's center along the normal
+                    // and burying part of it into the geometry. Restore
+                    // the unsnapped center's normal-axis component so
+                    // the contact face stays flush. Tangent axes still
+                    // snap, which gives the "click to grid along the
+                    // surface" feel without the clip-through.
+                    if let Some((_, _, surf_n)) = surface_frame {
+                        let n = surf_n.normalize_or_zero();
+                        if n.length_squared() > 0.5 {
+                            // Project both vectors onto the normal and
+                            // swap in the unsnapped component.
+                            let snapped_along_n = center.dot(n);
+                            let original_along_n = target_pos.dot(n);
+                            center += n * (original_along_n - snapped_along_n);
+                        }
+                    }
+                    center
                 } else {
                     target_pos
                 };

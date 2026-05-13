@@ -67,6 +67,17 @@ pub struct LuauCreatedInstance {
     pub luau_entity_id: i64,
     /// Luau _entityId of the Parent instance (for TextLabel → BillboardGui linking)
     pub parent_entity_id: Option<i64>,
+
+    /// CollectionService tags set on the instance via `CollectionService:AddTag`
+    /// (Luau) or `CollectionService::AddTag` (Rune). Carried through the drain
+    /// so the spawner persists them to `_instance.toml`'s `tags` array and
+    /// attaches the ECS [`Tags`](crate::attributes::Tags) component — the
+    /// same storage backing the MCP `add_tag` / `get_tagged_entities` tools.
+    ///
+    /// Empty when the script set no tags. Order preserved from script
+    /// insertion to keep diffs deterministic (it's a set semantically, but a
+    /// `Vec` for stable serialisation).
+    pub tags: Vec<String>,
 }
 
 // Thread-local output buffer for capturing print/warn/error from Luau scripts.
@@ -266,6 +277,25 @@ impl LuauRuntime {
                     _ => None,
                 });
 
+            // CollectionService:AddTag stores tags on `inst._tags` as a
+            // set-style table (`_tags["mindmap-node"] = true`). Collect
+            // them into a deterministic Vec — the spawner persists this
+            // to `_instance.toml`'s `tags = [...]` array, which Bevy then
+            // hydrates into the ECS `Tags` component on load.
+            let tags: Vec<String> = inst.get::<Option<mlua::Table>>("_tags")
+                .ok()
+                .flatten()
+                .map(|t| {
+                    let mut v: Vec<String> = t.pairs::<String, bool>()
+                        .filter_map(|p| p.ok())
+                        .filter(|(_, on)| *on)
+                        .map(|(k, _)| k)
+                        .collect();
+                    v.sort();
+                    v
+                })
+                .unwrap_or_default();
+
             instances.push(LuauCreatedInstance {
                 class_name,
                 name,
@@ -289,15 +319,68 @@ impl LuauRuntime {
                 font,
                 luau_entity_id,
                 parent_entity_id,
+                tags,
             });
         }
 
         instances
     }
 
+    /// Seed `__EXISTING_TAGS__` with a snapshot of live ECS tags so a script's
+    /// `CollectionService:GetTagged(tag)` call returns engine-side entity ids
+    /// in addition to script-created instances. Call before each script run;
+    /// the snapshot lives until [`clear_existing_tags`](Self::clear_existing_tags)
+    /// (or next seed call).
+    ///
+    /// `snapshot`: `tag -> [entity_id_1, entity_id_2, ...]`. Entity ids are
+    /// the same i64 values returned by `Instance.entity_id` in Luau, the
+    /// engine's ECS Entity (cast to i64), or MCP's `entity_id` field.
+    #[cfg(feature = "luau")]
+    pub fn seed_existing_tags(&self, snapshot: &HashMap<String, Vec<i64>>) -> Result<(), String> {
+        let globals = self.lua.globals();
+        let tbl = self.lua.create_table()
+            .map_err(|e| format!("Failed to create existing tags table: {}", e))?;
+        for (tag, ids) in snapshot {
+            let arr = self.lua.create_table()
+                .map_err(|e| format!("Failed to create tag id array: {}", e))?;
+            for (i, id) in ids.iter().enumerate() {
+                arr.set((i + 1) as i64, *id)
+                    .map_err(|e| format!("Failed to set tag id: {}", e))?;
+            }
+            tbl.set(tag.as_str(), arr)
+                .map_err(|e| format!("Failed to set tag entry: {}", e))?;
+        }
+        globals.set("__EXISTING_TAGS__", tbl)
+            .map_err(|e| format!("Failed to set __EXISTING_TAGS__: {}", e))?;
+        Ok(())
+    }
+
+    /// Clear the engine-supplied tag snapshot. Defensive — the next seed
+    /// call replaces it anyway, but useful at execution boundaries to
+    /// avoid scripts seeing stale data.
+    #[cfg(feature = "luau")]
+    pub fn clear_existing_tags(&self) -> Result<(), String> {
+        let globals = self.lua.globals();
+        let empty = self.lua.create_table()
+            .map_err(|e| format!("Failed to create empty tags table: {}", e))?;
+        globals.set("__EXISTING_TAGS__", empty)
+            .map_err(|e| format!("Failed to clear __EXISTING_TAGS__: {}", e))?;
+        Ok(())
+    }
+
     /// Fallback when luau feature is not enabled
     #[cfg(not(feature = "luau"))]
     pub fn drain_created_instances(&self) -> Vec<LuauCreatedInstance> { Vec::new() }
+
+    /// Fallback seed when luau feature is not enabled
+    #[cfg(not(feature = "luau"))]
+    pub fn seed_existing_tags(&self, _snapshot: &HashMap<String, Vec<i64>>) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Fallback clear when luau feature is not enabled
+    #[cfg(not(feature = "luau"))]
+    pub fn clear_existing_tags(&self) -> Result<(), String> { Ok(()) }
 
     /// Fallback when luau feature is not enabled
     #[cfg(not(feature = "luau"))]
@@ -2193,49 +2276,124 @@ Enum = setmetatable({}, {
 
     // ========================================================================
     // CollectionService (Tags)
+    //
+    // Tags live on each instance's own `_tags` table (set-style: `_tags[tag] = true`).
+    // The drain phase walks every instance in `__INSTANCE_REGISTRY__`, collects
+    // `_tags` into a `Vec<String>`, and the spawner persists that to the entity's
+    // `_instance.toml` `tags = [...]` array. Bevy then hydrates the ECS
+    // [`Tags`](crate::attributes::Tags) component from the TOML — the exact same
+    // path the MCP `add_tag` / `get_tagged_entities` tools use, so script-set
+    // tags are queryable across systems instead of dying with the VM.
+    //
+    // `GetTagged` also consults `__EXISTING_TAGS__` — a per-frame snapshot of
+    // the engine's ECS Tags injected before each script run — so scripts can
+    // query tags placed by the engine, by MCP, or by previous script runs.
+    //
+    // API surface accepts both Roblox-style method calls (`Service:Foo(arg)`,
+    // which passes `self` first) and dot-style calls. Each function checks the
+    // first arg's shape: a Lua table is treated as an Instance; an integer is
+    // treated as a numeric entity-id; a string for `GetTagged` is the tag.
     // ========================================================================
     #[cfg(feature = "luau")]
     fn inject_collection_service(lua: &mlua::Lua) -> Result<(), String> {
         let globals = lua.globals();
 
-        // ====================================================================
-        // P2: CollectionService (Tags)
-        // ====================================================================
         let collection_service_table = lua.create_table()
             .map_err(|error| format!("Failed to create CollectionService table: {}", error))?;
 
-        // Store tags in a global table
-        let tags_storage = lua.create_table()
-            .map_err(|error| format!("Failed to create tags storage: {}", error))?;
-        globals.set("__COLLECTION_TAGS__", tags_storage)
-            .map_err(|error| format!("Failed to set tags storage: {}", error))?;
+        // `__EXISTING_TAGS__` is a `{ tag -> {entity_id_1, entity_id_2, ...} }`
+        // table that the engine populates before each script run from the
+        // live ECS Tags. Scripts can query, but writes here do not flow back
+        // to ECS — script-spawned tags persist via the drain path described
+        // above. Initialised here so `GetTagged` doesn't error when the
+        // engine hasn't seeded it yet (e.g. tests).
+        let existing_present = globals.get::<mlua::Value>("__EXISTING_TAGS__")
+            .map(|v| !matches!(v, mlua::Value::Nil))
+            .unwrap_or(false);
+        if !existing_present {
+            let existing = lua.create_table()
+                .map_err(|error| format!("Failed to create existing tags table: {}", error))?;
+            globals.set("__EXISTING_TAGS__", existing)
+                .map_err(|error| format!("Failed to set existing tags table: {}", error))?;
+        }
 
-        // CollectionService:AddTag(instance, tag)
-        let add_tag = lua.create_function(|lua, (entity_id, tag): (i64, String)| {
-            let globals = lua.globals();
-            let tags: mlua::Table = globals.get("__COLLECTION_TAGS__")?;
-            
-            let entity_tags: mlua::Table = match tags.get::<Option<mlua::Table>>(entity_id)? {
+        // Helper: parse the first argument as either a Lua table (Instance,
+        // with `_entityId` and `_tags`), an integer (numeric id; resolved
+        // back to a registry table when possible), or a `nil`/missing arg
+        // that means "this was called dot-style without self". Returns the
+        // instance table to operate on, or `None` if the argument was an
+        // unbound integer id (no registry entry — caller chooses what to do).
+        fn resolve_instance(
+            lua: &mlua::Lua,
+            first: mlua::Value,
+        ) -> mlua::Result<Option<mlua::Table>> {
+            match first {
+                mlua::Value::Table(t) => {
+                    // Could be `self` (the CollectionService table itself —
+                    // detected by absence of `_entityId`) or the Instance.
+                    if t.contains_key("_entityId")? {
+                        Ok(Some(t))
+                    } else {
+                        Ok(None) // self table; caller will read remaining args
+                    }
+                }
+                mlua::Value::Integer(id) => {
+                    let registry: mlua::Table = lua.globals().get("__INSTANCE_REGISTRY__")?;
+                    Ok(registry.get::<Option<mlua::Table>>(id)?)
+                }
+                _ => Ok(None),
+            }
+        }
+
+        // Helper closure: from a starting `iter`, resolve the (instance, tag)
+        // pair handling both `Service:Foo(inst, tag)` (passes self first) and
+        // `Service.Foo(inst, tag)` (no self) call styles.
+        fn parse_inst_and_tag(
+            lua: &mlua::Lua,
+            args: mlua::MultiValue,
+            fn_name: &str,
+        ) -> mlua::Result<(mlua::Table, String)> {
+            let mut iter = args.into_iter();
+            let first = iter.next().unwrap_or(mlua::Value::Nil);
+            let inst_opt = resolve_instance(lua, first)?;
+            let instance = if let Some(inst) = inst_opt {
+                inst
+            } else {
+                let second = iter.next().unwrap_or(mlua::Value::Nil);
+                resolve_instance(lua, second)?.ok_or_else(|| mlua::Error::RuntimeError(
+                    format!("{}: instance must be an Instance table or numeric id", fn_name)))?
+            };
+            let tag = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Err(mlua::Error::RuntimeError(
+                    format!("{}: missing tag (string)", fn_name))),
+            };
+            Ok((instance, tag))
+        }
+
+        // CollectionService:AddTag(instance, tag) -- method or dot style
+        let add_tag = lua.create_function(|lua, args: mlua::MultiValue| {
+            let (instance, tag) = parse_inst_and_tag(lua, args, "CollectionService:AddTag")?;
+            // Lookup-or-create the per-instance `_tags` set.
+            let tags: mlua::Table = match instance.get::<Option<mlua::Table>>("_tags")? {
                 Some(t) => t,
                 None => {
-                    let new_table = lua.create_table()?;
-                    tags.set(entity_id, new_table.clone())?;
-                    new_table
+                    let t = lua.create_table()?;
+                    instance.set("_tags", t.clone())?;
+                    t
                 }
             };
-            entity_tags.set(tag, true)?;
+            tags.set(tag, true)?;
             Ok(())
         }).map_err(|error| format!("Failed to create AddTag: {}", error))?;
         collection_service_table.set("AddTag", add_tag)
             .map_err(|error| format!("Failed to set AddTag: {}", error))?;
 
         // CollectionService:RemoveTag(instance, tag)
-        let remove_tag = lua.create_function(|lua, (entity_id, tag): (i64, String)| {
-            let globals = lua.globals();
-            let tags: mlua::Table = globals.get("__COLLECTION_TAGS__")?;
-            
-            if let Some(entity_tags) = tags.get::<Option<mlua::Table>>(entity_id)? {
-                entity_tags.set(tag, mlua::Value::Nil)?;
+        let remove_tag = lua.create_function(|lua, args: mlua::MultiValue| {
+            let (instance, tag) = parse_inst_and_tag(lua, args, "CollectionService:RemoveTag")?;
+            if let Some(tags) = instance.get::<Option<mlua::Table>>("_tags")? {
+                tags.set(tag, mlua::Value::Nil)?;
             }
             Ok(())
         }).map_err(|error| format!("Failed to create RemoveTag: {}", error))?;
@@ -2243,12 +2401,10 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set RemoveTag: {}", error))?;
 
         // CollectionService:HasTag(instance, tag) -> bool
-        let has_tag = lua.create_function(|lua, (entity_id, tag): (i64, String)| {
-            let globals = lua.globals();
-            let tags: mlua::Table = globals.get("__COLLECTION_TAGS__")?;
-            
-            if let Some(entity_tags) = tags.get::<Option<mlua::Table>>(entity_id)? {
-                let has: bool = entity_tags.get::<Option<bool>>(tag)?.unwrap_or(false);
+        let has_tag = lua.create_function(|lua, args: mlua::MultiValue| {
+            let (instance, tag) = parse_inst_and_tag(lua, args, "CollectionService:HasTag")?;
+            if let Some(tags) = instance.get::<Option<mlua::Table>>("_tags")? {
+                let has: bool = tags.get::<Option<bool>>(tag)?.unwrap_or(false);
                 Ok(has)
             } else {
                 Ok(false)
@@ -2258,28 +2414,77 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set HasTag: {}", error))?;
 
         // CollectionService:GetTagged(tag) -> {instances}
-        let get_tagged = lua.create_function(|lua, tag: String| {
+        // Returns matching Instance tables from the script's registry PLUS
+        // numeric entity-ids from `__EXISTING_TAGS__` (engine ECS snapshot).
+        // Numeric ids are appended after script-side instances so the
+        // first elements are always usable as Instance tables.
+        let get_tagged = lua.create_function(|lua, args: mlua::MultiValue| {
+            // Sniff for the leading self table.
+            let mut iter = args.into_iter();
+            let first = iter.next().unwrap_or(mlua::Value::Nil);
+            let tag: String = match first {
+                mlua::Value::String(s) => s.to_str()?.to_string(),
+                mlua::Value::Table(_) => {
+                    // method-style; real tag is next arg
+                    let next = iter.next().unwrap_or(mlua::Value::Nil);
+                    if let mlua::Value::String(s) = next {
+                        s.to_str()?.to_string()
+                    } else {
+                        return Err(mlua::Error::RuntimeError(
+                            "CollectionService:GetTagged: tag must be a string".into()));
+                    }
+                }
+                _ => return Err(mlua::Error::RuntimeError(
+                    "CollectionService:GetTagged: tag must be a string".into())),
+            };
+
             let globals = lua.globals();
-            let tags: mlua::Table = globals.get("__COLLECTION_TAGS__")?;
+            let registry: mlua::Table = globals.get("__INSTANCE_REGISTRY__")?;
             let result = lua.create_table()?;
-            let mut index = 1;
-            
-            for pair in tags.pairs::<i64, mlua::Table>() {
-                if let Ok((entity_id, entity_tags)) = pair {
-                    if entity_tags.get::<Option<bool>>(tag.clone())?.unwrap_or(false) {
-                        result.set(index, entity_id)?;
+            let mut index = 1i64;
+
+            // Script-side matches first.
+            for pair in registry.pairs::<i64, mlua::Table>() {
+                let Ok((_id, inst)) = pair else { continue };
+                if let Some(tags) = inst.get::<Option<mlua::Table>>("_tags")? {
+                    if tags.get::<Option<bool>>(tag.clone())?.unwrap_or(false) {
+                        result.set(index, inst)?;
                         index += 1;
                     }
                 }
             }
-            
+
+            // Engine-side matches from the pre-script snapshot. Returned
+            // as integer entity-ids — scripts that need richer behaviour
+            // can pass these to engine-bound APIs (e.g. future ECS-backed
+            // helpers); for `for ... in ipairs` iteration both shapes
+            // coexist in the same returned table.
+            if let Ok(existing) = globals.get::<mlua::Table>("__EXISTING_TAGS__") {
+                if let Ok(ids) = existing.get::<mlua::Table>(tag) {
+                    for pair in ids.pairs::<i64, i64>() {
+                        let Ok((_k, id)) = pair else { continue };
+                        result.set(index, id)?;
+                        index += 1;
+                    }
+                }
+            }
+
             Ok(result)
         }).map_err(|error| format!("Failed to create GetTagged: {}", error))?;
         collection_service_table.set("GetTagged", get_tagged)
             .map_err(|error| format!("Failed to set GetTagged: {}", error))?;
 
-        globals.set("CollectionService", collection_service_table)
+        globals.set("CollectionService", collection_service_table.clone())
             .map_err(|error| format!("Failed to set CollectionService: {}", error))?;
+
+        // Also register on the `game` table so `game:GetService("CollectionService")`
+        // works — Roblox-parity entry point that previously errored
+        // `Service 'CollectionService' not found`. The two routes share the
+        // same backing table, so AddTag/GetTagged behaviour is identical.
+        if let Ok(game) = globals.get::<mlua::Table>("game") {
+            game.set("CollectionService", collection_service_table)
+                .map_err(|error| format!("Failed to set game.CollectionService: {}", error))?;
+        }
 
         Ok(())
     }

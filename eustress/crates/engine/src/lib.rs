@@ -25,6 +25,7 @@ pub mod particles;
 pub mod beams;
 pub mod decals;
 pub mod billboard_gui;
+pub mod billboard_pipeline;
 pub mod light_cookies;
 pub mod csg;
 pub mod attachments;

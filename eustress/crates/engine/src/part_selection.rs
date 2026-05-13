@@ -7,6 +7,26 @@ use crate::selection_box::Selected;
 use crate::math_utils::ray_obb_intersection;
 use crate::entity_utils::entity_to_id_string;
 
+/// Bevy message emitted when the user double-clicks a part in the
+/// 3D viewport. Consumers — currently only the billboard text-edit
+/// mode in `billboard_gui.rs` — read this to react to the
+/// just-double-clicked entity. Detection lives inside
+/// [`part_selection_system`] (same raycast result powers both single
+/// and double click) so we don't waste a second raycast per frame.
+#[derive(bevy::ecs::message::Message, Debug, Clone, Copy)]
+pub struct DoubleClickedPart {
+    pub entity: Entity,
+}
+
+/// Per-system click history used to detect double-clicks. Stored as
+/// a `Local<>` on `part_selection_system` so it doesn't pollute the
+/// world's resource set. 400 ms is the standard double-click window.
+#[derive(Default)]
+pub struct DoubleClickTracker {
+    pub last_at: Option<std::time::Instant>,
+    pub last_entity: Option<Entity>,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::BevySelectionManager;
 
@@ -22,6 +42,20 @@ pub struct PartSelectionToolStates<'w> {
     pub scale_state:  Option<Res<'w, crate::scale_tool::ScaleToolState>>,
     pub rotate_state: Option<Res<'w, crate::rotate_tool::RotateToolState>>,
     pub studio_state: Option<Res<'w, crate::ui::StudioState>>,
+}
+
+/// Click-extras bundle: double-click tracker + message writer +
+/// attributes lookup. Kept as a single `SystemParam` so the parent
+/// [`part_selection_system`] stays under Bevy's 16-tuple soft limit.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PartClickExtras<'w, 's> {
+    pub dbl_tracker: Local<'s, DoubleClickTracker>,
+    pub dbl_writer:  MessageWriter<'w, DoubleClickedPart>,
+    /// Queried so the Ctrl+Alt+Click handler can look up a `Link`
+    /// attribute on the hit entity and open it in the OS default
+    /// browser without going through the selection path.
+    pub attributes_q: Query<'w, 's, &'static eustress_common::attributes::Attributes>,
 }
 
 /// Supports both PartEntity (legacy) and Instance (modern) components
@@ -53,6 +87,9 @@ pub fn part_selection_system(
     // (Ctrl/Shift) deliberately doesn't scroll — it'd be jarring as
     // each accumulating click whips the tree around.
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    // Click extras: double-click tracker + writer + attributes query
+    // (Ctrl+Alt+Click follows an entity's `Link` attribute).
+    mut click_extras: PartClickExtras,
 ) {
     // Re-expose the bundle fields under their pre-bundle names so the
     // body below needs no further edits. Each field is already the
@@ -390,14 +427,73 @@ pub fn part_selection_system(
     // Update selection
     if let Some((part_id, distance, hit_entity, parent_model)) = closest_hit {
         info!("[select] hit part_id='{}' dist={:.2}", part_id, distance);
-        
+
+        // Ctrl+Alt+Click on a part with a `Link` attribute: open the
+        // URL in the OS default browser and skip the selection update
+        // entirely. The lookup walks up the ChildOf chain so clicking
+        // a part inside a Model with the Link attribute on the Model
+        // also resolves (and matches Roblox-style "tap part to follow
+        // link" intent). Case-insensitive key match — "Link", "link",
+        // "LINK" all work; the first hit on the chain wins.
+        if ctrl_pressed && alt_pressed {
+            let candidates = std::iter::once(hit_entity).chain(parent_model.into_iter());
+            let mut opened = false;
+            for candidate in candidates {
+                if let Ok(attrs) = click_extras.attributes_q.get(candidate) {
+                    let link = attrs.values.iter().find_map(|(k, v)| {
+                        if k.eq_ignore_ascii_case("Link") {
+                            if let eustress_common::AttributeValue::String(s) = v {
+                                return Some(s.clone());
+                            }
+                        }
+                        None
+                    });
+                    if let Some(url) = link {
+                        info!("[select] Ctrl+Alt+Click → opening Link '{}'", url);
+                        open_url_in_default_browser(&url);
+                        opened = true;
+                        break;
+                    }
+                }
+            }
+            if opened {
+                // Skip selection so Ctrl+Alt+Click feels like a hyperlink
+                // tap rather than a click that ALSO mutates selection.
+                return;
+            }
+        }
+
+        // Double-click detection — emit a message when this is the
+        // second click on the same entity within 400 ms. We run this
+        // BEFORE the tool-dragging short-circuit so a tool-active state
+        // doesn't swallow the double-click intent. The tracker is
+        // always updated so a single click followed by a click on
+        // empty space (closest_hit == None) doesn't carry stale state.
+        {
+            let now = std::time::Instant::now();
+            let is_double = click_extras
+                .dbl_tracker
+                .last_at
+                .map(|t| {
+                    now.duration_since(t).as_millis() < 400
+                        && click_extras.dbl_tracker.last_entity == Some(hit_entity)
+                })
+                .unwrap_or(false);
+            click_extras.dbl_tracker.last_at = Some(now);
+            click_extras.dbl_tracker.last_entity = Some(hit_entity);
+            if is_double {
+                info!("[select] DOUBLE-CLICK on entity {:?}", hit_entity);
+                click_extras.dbl_writer.write(DoubleClickedPart { entity: hit_entity });
+            }
+        }
+
         // Hit a part - check if we should allow selection changes
         // Only block if a tool is ACTIVELY DRAGGING (not just active/visible)
-        let tool_is_dragging = 
+        let tool_is_dragging =
             (move_active && move_dragging) ||
             (scale_active && scale_dragging) ||
             (rotate_active && rotate_dragging);
-        
+
         if tool_is_dragging {
             return; // Tool is being used right now, don't change selection
         }
@@ -545,6 +641,43 @@ pub fn part_selection_system(
         let sel = selection_manager.0.write();
         sel.clear();
         info!("Deselected - clicked on empty space");
+    }
+}
+
+/// Open `url` in the OS default browser via the platform's "open" shim.
+/// Best-effort: failure logs a warning but doesn't surface to the user
+/// (the worst case is a no-op click, which matches the failure mode of
+/// any other unhandled hyperlink).
+///
+/// We deliberately avoid pulling in the `webbrowser` / `opener` crates
+/// — the three native one-liners below are stable, sandbox-friendly
+/// (no NPM-style supply chain), and identical to what those crates do
+/// internally.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_url_in_default_browser(url: &str) {
+    // Reject anything that doesn't look like a URL. A `Link` attribute
+    // carrying a relative path or random string shouldn't trigger a
+    // shell invocation — that's how command-injection bugs are born.
+    let trimmed = url.trim();
+    let is_http = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    let is_mailto = trimmed.starts_with("mailto:");
+    if !(is_http || is_mailto) {
+        warn!("[select] Link attribute '{}' isn't an http(s)/mailto URL — ignoring", trimmed);
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    let spawn = std::process::Command::new("cmd")
+        .args(["/C", "start", "", trimmed])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawn = std::process::Command::new("open").arg(trimmed).spawn();
+    #[cfg(target_os = "linux")]
+    let spawn = std::process::Command::new("xdg-open").arg(trimmed).spawn();
+
+    match spawn {
+        Ok(_) => info!("[select] launched browser for {}", trimmed),
+        Err(e) => warn!("[select] failed to launch browser for '{}': {}", trimmed, e),
     }
 }
 

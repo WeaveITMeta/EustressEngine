@@ -22,6 +22,13 @@ export struct PropertyData {
     x-value: string,
     y-value: string,
     z-value: string,
+    // UDim2 parsed values (populated by Rust for udim2 types).
+    // Order matches the on-disk canonical 4-tuple
+    // `[scale_x, offset_x, scale_y, offset_y]`.
+    x-scale: string,
+    x-offset: string,
+    y-scale: string,
+    y-offset: string,
     // Color preview swatch — populated by Rust for color rows. Slint
     // can't parse the "r, g, b" string at runtime, so we pre-compute a
     // typed `color` here for the chip background.
@@ -434,10 +441,17 @@ component PropRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
-    
+
+    // Hidden focus sink used by `accepted()` handlers to move focus away
+    // from the LineEdit on Enter. Without this, pressing Enter commits the
+    // value but the input keeps its focused-state highlight (blue border)
+    // until the user clicks elsewhere. Sized 0×0 so it's invisible; sits
+    // outside the layout so it doesn't claim space.
+    focus_sink := FocusScope { width: 0px; height: 0px; }
+
     height: 28px;
     border-radius: 2px;
-    
+
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 10px;
@@ -478,16 +492,26 @@ component PropRow inherits Rectangle {
                 height: 100%;
                 enabled: root.editable;
                 text: root.value;
+                // Fire `value-changed` on EVERY keystroke so the ECS
+                // component (and therefore the renderer) updates live
+                // as the user types. The drain handler writes TOML on
+                // each call too — small files, sub-millisecond writes,
+                // the recently-written debounce prevents reload loops.
+                // Enter (accepted) re-fires for parity but is a no-op
+                // since each keystroke already committed the same value.
                 edited(text) => {
                     root.focus-changed(true);
+                    root.value-changed(self.text);
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
-                    root.focus-changed(false);
+                    // Drop the LineEdit's focused state so the row no
+                    // longer shows the active-input highlight.
+                    focus_sink.focus();
                 }
             }
         }
-        
+
         if !root.editable: Text {
             horizontal-stretch: 1;
             text: root.value;
@@ -537,10 +561,15 @@ component Vec3Row inherits Rectangle {
     // irrelevant (empty string); the parent reads the clipboard on
     // the Rust side + pushes a value-changed.
     callback paste-vector();
-    
+
+    // Hidden focus sink — see PropRow for rationale. Pressing Enter in
+    // any of the three fields hops focus here so the field defocuses
+    // visually.
+    focus_sink := FocusScope { width: 0px; height: 0px; }
+
     height: 28px;
     border-radius: 2px;
-    
+
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 10px;
@@ -645,7 +674,7 @@ component Vec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(self.text + ", " + y-edit.text + ", " + z-edit.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
             }
@@ -695,7 +724,7 @@ component Vec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(x-edit.text + ", " + self.text + ", " + z-edit.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
             }
@@ -745,7 +774,7 @@ component Vec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(x-edit.text + ", " + y-edit.text + ", " + self.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
             }
@@ -754,10 +783,402 @@ component Vec3Row inherits Rectangle {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Vec2Row — Vector2 of pixel values (e.g. `BillboardGui.SizeOffset`,
+// `Frame.AnchorPoint`). Same layout as `Vec3Row` minus the Z field —
+// X / Y inputs side-by-side with axis-coloured accent bars and a
+// copy button. Roblox-style Vector2 is pure pixels (no Scale column),
+// so neither field carries a "Pixels" sub-label — the row's name
+// ("SizeOffset", "AnchorPoint", …) already communicates the unit
+// without the redundant decoration the legacy text-input variant
+// pulled in from the UDim2 widget.
+// ────────────────────────────────────────────────────────────────────────────
+component Vec2Row inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+    in property <string> x-value: "0";
+    in property <string> y-value: "0";
+
+    out property <bool> has-focus: x-edit.has-focus || y-edit.has-focus;
+    changed has-focus => { root.focus-changed(self.has-focus); }
+    callback value-changed(string);
+    callback open-learn-url(string);
+    callback focus-changed(bool);
+    callback copy-vector(string);
+
+    focus_sink := FocusScope { width: 0px; height: 0px; }
+
+    height: 28px;
+    border-radius: 2px;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 4px;
+
+        HelpIcon {
+            description: root.description;
+            learn-url: root.learn-url;
+            show-help-icons: root.show-help-icons;
+            open-learn-url(url) => { root.open-learn-url(url); }
+        }
+        Text {
+            width: 92px;
+            text: root.label;
+            color: Theme.text-secondary;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            width: 18px; height: 22px;
+            border-radius: 3px;
+            background: copy-touch.has-hover ? Theme.button-hover : transparent;
+            copy-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.copy-vector(x-edit.text + ", " + y-edit.text);
+                }
+            }
+            Image {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: 12px; height: 12px;
+                source: @image-url("../../assets/icons/ui/copy.svg");
+                image-fit: contain;
+                colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+            }
+        }
+
+        // X field
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 60px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #3a2020;
+            Rectangle {
+                x: 0px; y: 0px; width: 3px; height: 100%;
+                background: Theme.gizmo-x;
+            }
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 4px;
+                spacing: 2px;
+                Text {
+                    width: 12px;
+                    text: "X";
+                    color: Theme.gizmo-x;
+                    font-size: 9px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+                x-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.x-value;
+                    input-type: text;
+                    enabled: root.editable;
+                    edited(t) => { root.focus-changed(true); }
+                    accepted(t) => {
+                        root.value-changed(self.text + ", " + y-edit.text);
+                        focus_sink.focus();
+                    }
+                }
+            }
+        }
+
+        // Y field
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 60px;
+            height: 22px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: #203a30;
+            Rectangle {
+                x: 0px; y: 0px; width: 3px; height: 100%;
+                background: Theme.gizmo-y;
+            }
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 4px;
+                spacing: 2px;
+                Text {
+                    width: 12px;
+                    text: "Y";
+                    color: Theme.gizmo-y;
+                    font-size: 9px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+                y-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.y-value;
+                    input-type: text;
+                    enabled: root.editable;
+                    edited(t) => { root.focus-changed(true); }
+                    accepted(t) => {
+                        root.value-changed(x-edit.text + ", " + self.text);
+                        focus_sink.focus();
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Rotation Vec3 row — degrees, supports negative values and +/- step buttons
 // Step buttons use a special "step:X:±1" prefix that Rust's on-property-changed handles
 // by parsing the current value, applying the step, and writing back.
 // Direct text edits send "X, Y, Z" as usual.
+// ────────────────────────────────────────────────────────────────────────────
+// UDim2Row — Roblox-parity 2D layout coordinate (Position / Size).
+// Renders four numeric inputs in a 2×2 grid: rows are X / Y axes,
+// columns are Scale / Pixels (the Roblox `UDim` Offset component
+// is shown as "Pixels" in the UI for clarity — "Offset" is
+// ambiguous next to a position/size widget). Header line carries
+// the property name + copy button. Total height ≈ 76 px (header
+// 24 px + two 24 px field rows with 2 px spacing + 4 px top/bottom
+// padding).
+//
+//   Size                                                       [📋]
+//     X  Scale [ 0   ]   Pixels [ 200 ]
+//     Y  Scale [ 0   ]   Pixels [ 50  ]
+//
+// Roblox-parity semantics:
+//   final_pixels = Scale * parent_resolved_pixels + Pixels
+// So `Scale = 1, Pixels = 0` fills the parent; `Scale = 0, Pixels = 200`
+// is a fixed 200-px region. (For `BillboardGui.Size` specifically, the
+// "parent" is the world stud-to-pixel reference rather than a UI parent
+// — Scale is interpreted as studs.)
+// ────────────────────────────────────────────────────────────────────────────
+component UDim2Row inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> editable: true;
+    in property <string> description: "";
+    in property <string> learn-url: "";
+    in property <bool> show-help-icons: true;
+
+    in property <string> x-scale: "0";
+    in property <string> x-offset: "0";
+    in property <string> y-scale: "0";
+    in property <string> y-offset: "0";
+
+    out property <bool> has-focus:
+        xs.has-focus || xo.has-focus || ys.has-focus || yo.has-focus;
+    changed has-focus => { root.focus-changed(self.has-focus); }
+
+    callback value-changed(string);
+    callback open-learn-url(string);
+    callback focus-changed(bool);
+    callback copy-vector(string);
+
+    // Hidden focus sink — see PropRow for rationale.
+    focus_sink := FocusScope { width: 0px; height: 0px; }
+
+    // Explicit height — header + 2 axis rows + 4px gaps. Slint's
+    // `preferred-height` doesn't propagate through a `for prop[i]`
+    // loop, so the host VerticalLayout uses this fixed height to
+    // allocate the row slot. Drift in any line height below requires
+    // bumping this number.
+    height: 76px;
+    border-radius: 2px;
+
+    VerticalLayout {
+        padding-left: 8px;
+        padding-right: 10px;
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 3px;
+
+        // ── Header: label + copy button ────────────────────────────────
+        Rectangle {
+            height: 22px;
+            HorizontalLayout {
+                spacing: 4px;
+                HelpIcon {
+                    description: root.description;
+                    learn-url: root.learn-url;
+                    show-help-icons: root.show-help-icons;
+                    open-learn-url(url) => { root.open-learn-url(url); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.label;
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: 18px; height: 22px;
+                    border-radius: 3px;
+                    background: copy-touch.has-hover ? Theme.button-hover : transparent;
+                    copy-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.copy-vector(
+                                xs.text + ", " + xo.text + ", " + ys.text + ", " + yo.text
+                            );
+                        }
+                    }
+                    Image {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        width: 12px; height: 12px;
+                        source: @image-url("../../assets/icons/ui/copy.svg");
+                        image-fit: contain;
+                        colorize: copy-touch.has-hover ? Theme.text-primary : Theme.text-disabled;
+                    }
+                }
+            }
+        }
+
+        // ── X-axis row: Scale | Pixels ─────────────────────────────────
+        Rectangle {
+            height: 22px;
+            // Coloured accent strip on the left edge (red = X) matches
+            // the Vec3Row convention so the user can scan rows by axis.
+            Rectangle {
+                x: 0px;
+                y: 1px;
+                width: 3px;
+                height: parent.height - 2px;
+                background: Theme.gizmo-x;
+                border-radius: 1.5px;
+            }
+            HorizontalLayout {
+                padding-left: 10px;
+                spacing: 6px;
+                Text {
+                    text: "X";
+                    color: Theme.gizmo-x;
+                    font-size: 11px;
+                    font-weight: 600;
+                    width: 12px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "Scale";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    width: 36px;
+                    vertical-alignment: center;
+                }
+                xs := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.x-scale;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.focus-changed(true);
+                        root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
+                    }
+                    accepted(t) => {
+                        root.value-changed(t + ", " + xo.text + ", " + ys.text + ", " + yo.text);
+                        focus_sink.focus();
+                    }
+                }
+                Text {
+                    text: "Pixels";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    width: 38px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                xo := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.x-offset;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.focus-changed(true);
+                        root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
+                    }
+                    accepted(t) => {
+                        root.value-changed(xs.text + ", " + t + ", " + ys.text + ", " + yo.text);
+                        focus_sink.focus();
+                    }
+                }
+            }
+        }
+
+        // ── Y-axis row: Scale | Pixels ─────────────────────────────────
+        Rectangle {
+            height: 22px;
+            // Green accent strip — matches the Vec3 Y axis colour.
+            Rectangle {
+                x: 0px;
+                y: 1px;
+                width: 3px;
+                height: parent.height - 2px;
+                background: Theme.gizmo-y;
+                border-radius: 1.5px;
+            }
+            HorizontalLayout {
+                padding-left: 10px;
+                spacing: 6px;
+                Text {
+                    text: "Y";
+                    color: Theme.gizmo-y;
+                    font-size: 11px;
+                    font-weight: 600;
+                    width: 12px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "Scale";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    width: 36px;
+                    vertical-alignment: center;
+                }
+                ys := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.y-scale;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.focus-changed(true);
+                        root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
+                    }
+                    accepted(t) => {
+                        root.value-changed(xs.text + ", " + xo.text + ", " + t + ", " + yo.text);
+                        focus_sink.focus();
+                    }
+                }
+                Text {
+                    text: "Pixels";
+                    color: Theme.text-disabled;
+                    font-size: 10px;
+                    width: 38px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                yo := LineEdit {
+                    horizontal-stretch: 1;
+                    text: root.y-offset;
+                    enabled: root.editable;
+                    edited(t) => {
+                        root.focus-changed(true);
+                        root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
+                    }
+                    accepted(t) => {
+                        root.value-changed(xs.text + ", " + xo.text + ", " + ys.text + ", " + t);
+                        focus_sink.focus();
+                    }
+                }
+            }   // close HorizontalLayout (Y row)
+        }       // close Rectangle wrapper (Y row)
+    }           // close VerticalLayout
+}               // close UDim2Row Rectangle
+
 component RotationVec3Row inherits Rectangle {
     in property <string> label: "";
     in property <string> value: "0, 0, 0";
@@ -783,6 +1204,9 @@ component RotationVec3Row inherits Rectangle {
     // the parent/Rust to read the clipboard and drive a value-changed.
     callback copy-vector(string);
     callback paste-vector();
+
+    // Hidden focus sink — see PropRow for rationale.
+    focus_sink := FocusScope { width: 0px; height: 0px; }
 
     height: 28px;
     border-radius: 2px;
@@ -865,7 +1289,7 @@ component RotationVec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(self.text + ", " + ry-edit.text + ", " + rz-edit.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
 
@@ -917,7 +1341,7 @@ component RotationVec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(rx-edit.text + ", " + self.text + ", " + rz-edit.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
 
@@ -969,7 +1393,7 @@ component RotationVec3Row inherits Rectangle {
                     }
                     accepted(t) => {
                         root.value-changed(rx-edit.text + ", " + ry-edit.text + ", " + self.text);
-                        root.focus-changed(false);
+                        focus_sink.focus();
                     }
                 }
 
@@ -1086,6 +1510,9 @@ component ColorRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
+
+    // Hidden focus sink — see PropRow for rationale.
+    focus_sink := FocusScope { width: 0px; height: 0px; }
 
     // 127-swatch honeycomb palette. Rows pack 7-8-9-10-11-12-13-12-
     // 11-10-9-8-7 so the aggregate outline traces a regular hexagon
@@ -1317,11 +1744,13 @@ component ColorRow inherits Rectangle {
                 }
                 accepted(text) => {
                     root.value-changed(self.text);
-                    root.focus-changed(false);
+                    // Drop the LineEdit's focused state on Enter — see
+                    // PropRow for rationale.
+                    focus_sink.focus();
                 }
             }
         }
-        
+
         if !root.editable: Text {
             horizontal-stretch: 1;
             text: root.value;
@@ -1705,6 +2134,41 @@ export component PropertiesPanel inherits Rectangle {
                         clicked => { root.on-section-toggle(prop.category); }
                     }
                     
+                    // UDim2 property (Roblox-parity 2D layout: Position / Size)
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "udim2": UDim2Row {
+                        label: prop.name;
+                        x-scale: prop.x-scale;
+                        x-offset: prop.x-offset;
+                        y-scale: prop.y-scale;
+                        y-offset: prop.y-offset;
+                        editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        copy-vector(val) => { root.on-copy-property-vector(prop.name, val); }
+                    }
+
+                    // Vec2 property — pure-pixel Vector2 (AnchorPoint, SizeOffset, …).
+                    // Uses the same X/Y accent-bar layout as Vec3Row, just
+                    // without the Z field, so SizeOffset no longer falls
+                    // through to PropRow's ugly comma-string text input.
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type == "vec2": Vec2Row {
+                        label: prop.name;
+                        x-value: prop.x-value;
+                        y-value: prop.y-value;
+                        editable: prop.editable;
+                        description: prop.description;
+                        learn-url: prop.learn-url;
+                        show-help-icons: root.show-help-icons;
+                        value-changed(val) => { root.on-property-changed(prop.name, val); }
+                        open-learn-url(url) => { root.on-open-learn-url(url); }
+                        focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        copy-vector(val) => { root.on-copy-property-vector(prop.name, val); }
+                    }
+
                     // Vec3 property (position, scale)
                     if !prop.is-header && !prop.section-collapsed && prop.property-type == "vec3": Vec3Row {
                         label: prop.name;
@@ -1783,7 +2247,7 @@ export component PropertiesPanel inherits Rectangle {
                     }
 
                     // String / float / int / enum — generic row
-                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool" && prop.property-type != "material": PropRow {
+                    if !prop.is-header && !prop.section-collapsed && prop.property-type != "vec2" && prop.property-type != "vec3" && prop.property-type != "rotation" && prop.property-type != "color" && prop.property-type != "bool" && prop.property-type != "material" && prop.property-type != "udim2": PropRow {
                         label: prop.name;
                         value: prop.value;
                         prop-type: prop.property-type;

@@ -395,13 +395,14 @@ impl ToolHandler for CreateScriptTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "create_script",
-            description: "Create a new Soul script file (.rune by default) in the active Space's SoulService directory. The engine's file watcher picks it up on save.",
+            description: "Create a new script as a folder under SoulService/: <Name>/_instance.toml (class = SoulScript or LuauScript), <Name>/script.<ext> (source code), <Name>/README.md (human summary). The file watcher hot-loads the new entity. Use language=\"rune\" for Soul/Rune (default) or language=\"luau\" for Luau.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Script name without extension" },
-                    "code": { "type": "string", "description": "Script source code" },
-                    "language": { "type": "string", "enum": ["rune", "lua"], "default": "rune" }
+                    "name":     { "type": "string", "description": "Script name (folder name + display name)" },
+                    "code":     { "type": "string", "description": "Script source code" },
+                    "language": { "type": "string", "enum": ["rune", "luau", "lua"], "default": "rune" },
+                    "summary":  { "type": "string", "description": "Optional short markdown summary for README.md (1-3 sentences). Omitted → a placeholder is generated." }
                 },
                 "required": ["name", "code"]
             }),
@@ -427,31 +428,134 @@ impl ToolHandler for CreateScriptTool {
             };
         };
         let language = input.get("language").and_then(|v| v.as_str()).unwrap_or("rune");
-        let ext = match language { "lua" => "lua", _ => "rune" };
+        let summary  = input.get("summary").and_then(|v| v.as_str());
 
+        // Language → (class template, source filename) mapping. Both
+        // class templates already ship in
+        // `common/assets/class_schema/<Class>/_instance.toml`; the
+        // canonical pipeline copies them and we drop the user's code
+        // alongside.
+        let (class_name, ext) = match language {
+            "luau" | "lua" => ("LuauScript", "luau"),
+            _              => ("SoulScript", "rune"),
+        };
+        let source_filename = format!("script.{}", ext);
+
+        // 1. Materialise the script folder via the canonical pipeline.
+        //    Patches `[metadata].name` to the user-supplied name; the
+        //    `[script]` section in the template needs `source` rewritten
+        //    to point at our filename, which is done below by re-reading
+        //    + rewriting the TOML (the helper's overrides don't yet
+        //    cover arbitrary section fields).
         let soul_dir = ctx.space_root.join("SoulService");
-        let _ = std::fs::create_dir_all(&soul_dir);
-        let path = soul_dir.join(format!("{}.{}", name, ext));
-
-        match std::fs::write(&path, code) {
-            Ok(_) => ToolResult {
+        let overrides = eustress_common::instance_create::InstanceOverrides {
+            display_name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let created = match eustress_common::instance_create::create_instance(
+            &soul_dir,
+            class_name,
+            Some(name),
+            overrides,
+        ) {
+            Ok(c) => c,
+            Err(e) => return ToolResult {
                 tool_name: "create_script".to_string(), tool_use_id: String::new(),
-                success: true,
-                content: format!("Wrote {} ({} bytes)", path.display(), code.len()),
-                structured_data: Some(serde_json::json!({
-                    "path": path.to_string_lossy(),
-                    "language": language,
-                    "bytes": code.len(),
-                })),
-                stream_topic: Some("workshop.tool.create_script".to_string()),
-            },
-            Err(e) => ToolResult {
-                tool_name: "create_script".to_string(), tool_use_id: String::new(),
-                success: false, content: format!("Write failed: {}", e),
+                success: false, content: format!("Materialise script folder failed: {}", e),
                 structured_data: None, stream_topic: None,
             },
+        };
+
+        // 2. Patch `[script].source` in the freshly-written
+        //    `_instance.toml` so the file_loader resolves the source
+        //    file we're about to drop next to it.
+        if let Err(e) = patch_script_source(&created.toml_path, &source_filename) {
+            return ToolResult {
+                tool_name: "create_script".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Patch _instance.toml failed: {}", e),
+                structured_data: None, stream_topic: None,
+            };
+        }
+
+        // 3. Write the source code alongside `_instance.toml`.
+        let source_path = created.folder_path.join(&source_filename);
+        if let Err(e) = std::fs::write(&source_path, code) {
+            return ToolResult {
+                tool_name: "create_script".to_string(), tool_use_id: String::new(),
+                success: false, content: format!("Write source failed: {}", e),
+                structured_data: None, stream_topic: None,
+            };
+        }
+
+        // 4. README.md summary — either the caller's text or a sensible
+        //    placeholder. Kept short on purpose: the file is a hand-
+        //    readable cover sheet, not full documentation.
+        let readme_path = created.folder_path.join("README.md");
+        let readme = match summary {
+            Some(s) if !s.trim().is_empty() => format!(
+                "# {}\n\n{}\n\n*Language: {}*\n",
+                created.folder_name, s.trim(), language,
+            ),
+            _ => format!(
+                "# {}\n\n*{} script — describe its purpose here.*\n\n*Language: {}*\n",
+                created.folder_name, class_name, language,
+            ),
+        };
+        if let Err(e) = std::fs::write(&readme_path, readme) {
+            // Non-fatal — the script itself is on disk; missing README
+            // shouldn't fail the tool call.
+            tracing::warn!("create_script: failed to write README.md: {}", e);
+        }
+
+        ToolResult {
+            tool_name: "create_script".to_string(), tool_use_id: String::new(),
+            success: true,
+            content: format!(
+                "Created {} '{}' at {} ({} source bytes, language={})",
+                class_name, created.folder_name,
+                created.folder_path.display(), code.len(), language,
+            ),
+            structured_data: Some(serde_json::json!({
+                "class": class_name,
+                "name": created.folder_name,
+                "folder": created.folder_path.to_string_lossy(),
+                "instance_toml": created.toml_path.to_string_lossy(),
+                "source_file": source_path.to_string_lossy(),
+                "readme": readme_path.to_string_lossy(),
+                "language": language,
+                "bytes": code.len(),
+            })),
+            stream_topic: Some("workshop.tool.create_script".to_string()),
         }
     }
+}
+
+/// Rewrite the `[script].source` field on a freshly-templated script
+/// `_instance.toml` so the file_loader knows which sibling file holds
+/// the source code. Created next to `CreateScriptTool` because no
+/// other surface needs this in-place edit; the canonical instance
+/// pipeline's override struct intentionally doesn't expose arbitrary
+/// section fields.
+fn patch_script_source(toml_path: &std::path::Path, source_filename: &str) -> Result<(), String> {
+    let raw = std::fs::read_to_string(toml_path)
+        .map_err(|e| format!("read {}: {}", toml_path.display(), e))?;
+    let mut doc: toml::Value = raw.parse()
+        .map_err(|e| format!("parse {}: {}", toml_path.display(), e))?;
+    if let Some(root) = doc.as_table_mut() {
+        let script = root.entry("script".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(t) = script.as_table_mut() {
+            t.insert(
+                "source".to_string(),
+                toml::Value::String(source_filename.to_string()),
+            );
+        }
+    }
+    let out = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("serialize {}: {}", toml_path.display(), e))?;
+    std::fs::write(toml_path, out)
+        .map_err(|e| format!("write {}: {}", toml_path.display(), e))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -88,16 +88,6 @@ impl BevyWindowAdapter {
         })
     }
 
-    /// Render the adapter's current component into an RGBA pixel buffer.
-    /// Used by per-billboard rendering (one adapter per BillboardCard).
-    pub(crate) fn render_to_buffer(
-        &self,
-        pixels: &mut [slint::platform::software_renderer::PremultipliedRgbaColor],
-        width: usize,
-    ) {
-        self.software_renderer.render(pixels, width);
-    }
-
     pub(crate) fn resize(&self, new_size: PhysicalSize, scale_factor: f32) {
         self.size.set(new_size);
         self.scale_factor.set(scale_factor);
@@ -109,36 +99,11 @@ impl BevyWindowAdapter {
     }
 }
 
-// Thread-local storage for window adapters created by the platform.
-//
-// Stored as STRONG `Rc` (not `Weak`) because Slint does not durably retain
-// the `Rc<dyn WindowAdapter>` that `create_window_adapter` returns past the
-// initial component-init plumbing — empirically, the strong count drops to
-// zero before our caller can grab the adapter. The `slint_window` inside
-// the adapter only holds a `Weak<BevyWindowAdapter>`, so without an
-// external strong owner the whole adapter would die between `Component::new()`
-// and any later render call.
-//
-// Lifecycle: each `create_window_adapter` push appends a strong Rc; each
-// `take_latest_window_adapter` pops it and transfers ownership to the
-// caller, who is then expected to retain the Rc as long as they want the
-// component to keep rendering. Empty / not-yet-taken state is fine — the
-// Vec just holds the most recent adapter pending hand-off.
+// Thread-local storage for the main StudioWindow adapter.
+// Billboard rendering no longer uses Slint components — it uses tiny-skia
+// directly — so only the main window adapter needs this handoff mechanism.
 thread_local! {
     static SLINT_WINDOWS: RefCell<Vec<Rc<BevyWindowAdapter>>> = RefCell::new(Vec::new());
-}
-
-/// Pop the most recently created `BevyWindowAdapter` and transfer the
-/// strong `Rc` to the caller. Callers instantiate a Slint component
-/// (which causes the platform to create+push an adapter) and immediately
-/// call this to take ownership of the adapter driving that component.
-///
-/// The returned `Rc` MUST be retained — Slint's component holds a `Weak`
-/// to the adapter via `slint_window`, so dropping the returned `Rc`
-/// would let the adapter (and its software renderer state) be freed,
-/// breaking subsequent renders.
-pub(crate) fn take_latest_window_adapter() -> Option<Rc<BevyWindowAdapter>> {
-    SLINT_WINDOWS.with(|w| w.borrow_mut().pop())
 }
 
 /// Custom Slint platform for Bevy integration
@@ -156,12 +121,8 @@ impl slint::platform::Platform for SlintBevyPlatform {
         adapter
             .slint_window
             .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor });
-        // Push a STRONG clone so the adapter survives until the engine
-        // explicitly takes it — Slint itself doesn't keep this alive.
         SLINT_WINDOWS.with(|windows| {
-            let mut w = windows.borrow_mut();
-            w.push(adapter.clone());
-            debug!("🪧 SLINT_WINDOWS push (len now {})", w.len());
+            windows.borrow_mut().push(adapter.clone());
         });
         Ok(adapter)
     }
@@ -1471,7 +1432,10 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_rename_node(move |id, name, node_type| q.push(SlintAction::RenameNode(id, name.to_string(), node_type.to_string())));
     let q = queue.clone();
-    ui.on_reparent_node(move |source, target| q.push(SlintAction::ReparentNode(source, target)));
+    ui.on_reparent_node(move |source, target| {
+        tracing::info!("📂 Slint→Rust: on_reparent_node(source={}, target={})", source, target);
+        q.push(SlintAction::ReparentNode(source, target));
+    });
     let q = queue.clone();
     ui.on_add_service(move || q.push(SlintAction::AddService));
     let q = queue.clone();
@@ -3151,6 +3115,29 @@ struct DrainActionQueries<'w, 's> {
     gui_displays: Query<'w, 's, &'static mut eustress_common::gui::billboard_renderer::GuiElementDisplay>,
     /// All selected entities — used to broadcast boolean physics props to the whole selection.
     selected_entities: Query<'w, 's, Entity, With<crate::selection_box::Selected>>,
+    /// UI class components — Roblox-parity Position/Size source of truth.
+    /// The Properties panel writes UDim2 edits here so the change survives
+    /// a TOML round-trip; `gui_displays` is the renderer's resolved-pixel
+    /// cache that gets refreshed from these on the next frame.
+    ui_text_labels: Query<'w, 's, &'static mut eustress_common::classes::TextLabel>,
+    ui_text_buttons: Query<'w, 's, &'static mut eustress_common::classes::TextButton>,
+    ui_text_boxes: Query<'w, 's, &'static mut eustress_common::classes::TextBox>,
+    ui_frames: Query<'w, 's, &'static mut eustress_common::classes::Frame>,
+    ui_image_labels: Query<'w, 's, &'static mut eustress_common::classes::ImageLabel>,
+    ui_image_buttons: Query<'w, 's, &'static mut eustress_common::classes::ImageButton>,
+    ui_scrolling_frames: Query<'w, 's, &'static mut eustress_common::classes::ScrollingFrame>,
+    /// BillboardGui class component — owns the world-space placement
+    /// (`units_offset`, etc.) and behavior toggles (AlwaysOnTop,
+    /// FaceCamera, …). Edits flow through these so
+    /// `sync_billboard_class_to_marker` re-publishes them to the
+    /// renderer marker on the next frame.
+    ui_billboard_guis: Query<'w, 's, &'static mut eustress_common::classes::BillboardGui>,
+    /// Live ECS `Tags` snapshot — fed into Luau/Rune VMs before each
+    /// script run so `CollectionService:GetTagged(tag)` returns engine
+    /// entities tagged via MCP, file load, or previous script runs.
+    /// Without this, scripts would only see tags placed by their own
+    /// invocation — the per-VM-island bug we're trying to eliminate.
+    entity_tags: Query<'w, 's, (Entity, &'static eustress_common::attributes::Tags)>,
 }
 
 
@@ -3163,8 +3150,42 @@ fn do_reparent_node(
     res: &mut DrainResources,
     commands: &mut Commands,
 ) {
-    let normalize = |p: &std::path::Path| -> std::path::PathBuf {
-        if p.is_dir() { p.to_path_buf() } else { p.parent().unwrap_or(p).to_path_buf() }
+    info!("📂 do_reparent_node FIRED: source_id={} target_id={}", source_id, target_id);
+
+    // Resolve a `LoadedFromFile.path` to:
+    //   (entry_path: the actual file/dir to MOVE,
+    //    parent_dir:  the directory that contains entry_path)
+    //
+    // `lff.path` can be one of:
+    //   - `<dir>/_instance.toml` for folder-form entities → move `<dir>`.
+    //   - `<dir>` (a real directory) for Folders / Models → move `<dir>`.
+    //   - `<Name>.toml` flat-file → move the file itself.
+    let resolve = |p: &std::path::Path| -> (std::path::PathBuf, std::path::PathBuf) {
+        if p.is_dir() {
+            let parent = p.parent().unwrap_or(p).to_path_buf();
+            (p.to_path_buf(), parent)
+        } else {
+            let file_name = p.file_name().unwrap_or_default();
+            if file_name == "_instance.toml" {
+                let dir = p.parent().unwrap_or(p).to_path_buf();
+                let parent = dir.parent().unwrap_or(&dir).to_path_buf();
+                (dir, parent)
+            } else {
+                let parent = p.parent().unwrap_or(p).to_path_buf();
+                (p.to_path_buf(), parent)
+            }
+        }
+    };
+
+    // Target must resolve to a DIRECTORY we can put things into.
+    let target_dir_for = |p: &std::path::Path| -> std::path::PathBuf {
+        if p.is_dir() {
+            p.to_path_buf()
+        } else if p.file_name().and_then(|n| n.to_str()) == Some("_instance.toml") {
+            p.parent().unwrap_or(p).to_path_buf()
+        } else {
+            p.parent().unwrap_or(p).to_path_buf()
+        }
     };
 
     let primary_source = res.explorer_state.as_ref()
@@ -3173,92 +3194,195 @@ fn do_reparent_node(
         .and_then(|es| es.entity_id_cache.get(&target_id).copied());
 
     let all_selected: Vec<Entity> = queries.selected_entities.iter().collect();
-    let source_entities: Vec<Entity> = if all_selected.len() > 1 {
+
+    // Source-resolution fallbacks. The Slint-emitted source_id maps
+    // through `entity_id_cache`, but if the cache rebuilt between
+    // drag-start and drop the ID is stale → cache miss → empty
+    // source_entities → silent return (the "drag does NOTHING" bug).
+    // We try, in order:
+    //   1. cache lookup for `source_id`
+    //   2. multi-selection (Ctrl+drag scenario)
+    //   3. single Selected entity (drag started from selection)
+    let source_entities: Vec<Entity> = if let Some(p) = primary_source {
+        info!("📂 source resolved via entity_id_cache: {:?}", p);
+        if all_selected.len() > 1 && all_selected.iter().any(|e| *e == p) {
+            all_selected
+        } else {
+            vec![p]
+        }
+    } else if !all_selected.is_empty() {
+        info!("📂 source_id={} not in cache; falling back to selection ({} entities)",
+            source_id, all_selected.len());
         all_selected
     } else {
-        primary_source.into_iter().collect()
-    };
-
-    let Some(target) = target_entity else {
-        if let Some(ref mut out) = res.output {
-            out.warn("Reparent: could not find target entity".to_string());
-        }
-        return;
-    };
-    if source_entities.is_empty() {
+        warn!("📂 Reparent ABORT: source_id={} not in entity_id_cache AND nothing selected", source_id);
         if let Some(ref mut out) = res.output {
             out.warn("Reparent: could not find source entity".to_string());
         }
         return;
-    }
+    };
 
-    let Some(tgt_folder) = queries.loaded_from_file.get(target).ok()
-        .map(|(_, lff)| normalize(&lff.path)) else { return };
+    let Some(target) = target_entity else {
+        warn!("📂 Reparent ABORT: target_id={} not in entity_id_cache", target_id);
+        if let Some(ref mut out) = res.output {
+            out.warn(format!("Reparent: could not find target entity (id={})", target_id));
+        }
+        return;
+    };
+    info!("📂 target resolved via entity_id_cache: {:?}", target);
 
+    let Some(tgt_dir) = queries.loaded_from_file.get(target).ok()
+        .map(|(_, lff)| target_dir_for(&lff.path)) else {
+            warn!("📂 Reparent ABORT: target {:?} has no LoadedFromFile component (drop on a service-root or non-file entity)", target);
+            if let Some(ref mut out) = res.output {
+                out.warn("Reparent: target entity has no on-disk folder to receive children".to_string());
+            }
+            return;
+        };
+    info!("📂 tgt_dir={}", tgt_dir.display());
+
+    let source_count = source_entities.len();
+    let mut moved_count = 0u32;
     for source in source_entities {
-        if source == target { continue; }
+        if source == target {
+            info!("📂 skipping: source == target ({:?})", source);
+            continue;
+        }
 
-        let Some(src_folder) = queries.loaded_from_file.get(source).ok()
-            .map(|(_, lff)| normalize(&lff.path)) else { continue };
+        let Some((src_entry, _src_parent_dir)) = queries.loaded_from_file.get(source).ok()
+            .map(|(_, lff)| resolve(&lff.path)) else {
+                warn!("📂 source {:?} has no LoadedFromFile — cannot move on disk; skipping", source);
+                continue;
+            };
+        info!("📂 src_entry={}", src_entry.display());
 
-        if tgt_folder.starts_with(&src_folder) {
+        // Forbid moving an entity into itself or any of its descendants.
+        if tgt_dir == src_entry || tgt_dir.starts_with(&src_entry) {
+            warn!("📂 refusing: target '{}' is inside source '{}'", tgt_dir.display(), src_entry.display());
             if let Some(ref mut out) = res.output {
                 out.warn(format!("Cannot move '{}' into itself or a descendant",
-                    src_folder.file_name().unwrap_or_default().to_string_lossy()));
+                    src_entry.file_name().unwrap_or_default().to_string_lossy()));
             }
             continue;
         }
 
-        let src_name = src_folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let dest = tgt_folder.join(&src_name);
-        if src_folder == dest || dest.exists() { continue; }
-
-        if let Some(ref mut registry) = res.file_registry {
-            registry.rename_in_progress.insert(src_folder.clone());
-            registry.rename_in_progress.insert(src_folder.join("_instance.toml"));
+        let src_name = src_entry.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let dest = tgt_dir.join(&src_name);
+        if src_entry == dest {
+            info!("📂 no-op drop (source already inside target dir): {}", src_entry.display());
+            continue;
+        }
+        if dest.exists() {
+            warn!("📂 refusing: destination '{}' already exists", dest.display());
+            if let Some(ref mut out) = res.output {
+                out.warn(format!(
+                    "Cannot move '{}' — destination '{}' already exists",
+                    src_name, dest.display(),
+                ));
+            }
+            continue;
         }
 
-        match std::fs::rename(&src_folder, &dest) {
+        // Snapshot whether the source was folder-form BEFORE the
+        // rename — once src_entry has moved, `is_dir()` flips to false
+        // even though dest is the same logical folder. We need this for
+        // the post-rename registry rekey.
+        let src_was_dir = src_entry.is_dir();
+
+        // Guard the watcher against seeing the rename as a delete +
+        // create pair (notify on Windows fires both). Cover four paths:
+        // src folder, src/_instance.toml, dest folder, dest/_instance.toml.
+        // The file_watcher's `rename_in_progress.remove(...)` cleans
+        // each one as it processes the events.
+        if let Some(ref mut registry) = res.file_registry {
+            registry.rename_in_progress.insert(src_entry.clone());
+            registry.rename_in_progress.insert(dest.clone());
+            if src_was_dir {
+                registry.rename_in_progress.insert(src_entry.join("_instance.toml"));
+                registry.rename_in_progress.insert(dest.join("_instance.toml"));
+            }
+        }
+
+        info!("📂 attempting std::fs::rename('{}' → '{}')", src_entry.display(), dest.display());
+        match std::fs::rename(&src_entry, &dest) {
             Ok(_) => {
+                moved_count += 1;
                 commands.entity(source).insert(ChildOf(target));
-                info!("📂 Reparented '{}' → '{}'", src_folder.display(), dest.display());
+                info!("✅ Reparented '{}' → '{}'", src_entry.display(), dest.display());
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Moved {} into {}",
-                        src_name, tgt_folder.file_name().unwrap_or_default().to_string_lossy()));
+                        src_name, tgt_dir.file_name().unwrap_or_default().to_string_lossy()));
                 }
-                if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(source) {
-                    if lff.path.is_dir() || lff.path == src_folder {
+                // Update path references on the moved entity AND every
+                // descendant whose backing file lives under the moved
+                // folder. Previously only the source got rebased — the
+                // descendants (e.g. `SimpleBlock/Label/_instance.toml`
+                // when SimpleBlock is moved) kept their pre-move paths,
+                // so later property edits on those descendants tried to
+                // read/write the original (now-empty) location and
+                // logged "file not found".
+                for (e, mut lff) in queries.loaded_from_file.iter_mut() {
+                    if lff.path == src_entry {
                         lff.path = dest.clone();
-                    } else {
-                        let rel = lff.path.strip_prefix(&src_folder)
-                            .unwrap_or(std::path::Path::new("_instance.toml"));
+                    } else if let Ok(rel) = lff.path.strip_prefix(&src_entry) {
                         lff.path = dest.join(rel);
                     }
+                    let _ = e;
                 }
-                if let Ok(mut inst_file) = queries.instance_files.get_mut(source) {
-                    if inst_file.toml_path.starts_with(&src_folder) {
-                        let rel = inst_file.toml_path.strip_prefix(&src_folder)
-                            .unwrap_or(std::path::Path::new("_instance.toml"));
+                // Same for InstanceFile. Iterating the full set is O(N)
+                // per reparent, but reparents are user-initiated and
+                // rare; the simplicity of "rebase everything under the
+                // moved folder" is worth not maintaining a separate
+                // descendant index.
+                for mut inst_file in queries.instance_files.iter_mut() {
+                    if inst_file.toml_path == src_entry {
+                        inst_file.toml_path = dest.clone();
+                    } else if let Ok(rel) = inst_file.toml_path.strip_prefix(&src_entry) {
                         inst_file.toml_path = dest.join(rel);
                     }
                 }
                 if let Some(ref mut registry) = res.file_registry {
-                    let _ = registry.rename_file(
-                        &src_folder.join("_instance.toml"),
-                        dest.join("_instance.toml"),
-                    );
+                    // Folder-form entities are double-registered (see
+                    // file_loader::spawn_folder: both the folder path
+                    // AND `_instance.toml` are registry keys, both
+                    // pointing at the same entity). The file_watcher
+                    // routes Modified/Remove events against the
+                    // `_instance.toml`, the Explorer uses the folder
+                    // path — both keys must be rekeyed or the Explorer
+                    // continues to look the entity up at its old slot
+                    // and shows it under the wrong parent.
+                    if src_was_dir {
+                        let _ = registry.rename_file(&src_entry, dest.clone());
+                        let _ = registry.rename_file(
+                            &src_entry.join("_instance.toml"),
+                            dest.join("_instance.toml"),
+                        );
+                    } else {
+                        let _ = registry.rename_file(&src_entry, dest.clone());
+                    }
                 }
             }
             Err(e) => {
+                error!("❌ std::fs::rename failed: {} → {}: {}", src_entry.display(), dest.display(), e);
                 if let Some(ref mut registry) = res.file_registry {
-                    registry.rename_in_progress.remove(&src_folder);
-                    registry.rename_in_progress.remove(&src_folder.join("_instance.toml"));
+                    registry.rename_in_progress.remove(&src_entry);
+                    registry.rename_in_progress.remove(&dest);
+                    if src_was_dir {
+                        registry.rename_in_progress.remove(&src_entry.join("_instance.toml"));
+                        registry.rename_in_progress.remove(&dest.join("_instance.toml"));
+                    }
                 }
                 if let Some(ref mut out) = res.output {
                     out.error(format!("Move '{}' failed: {}", src_name, e));
                 }
             }
         }
+    }
+
+    if moved_count == 0 {
+        warn!("📂 do_reparent_node finished with 0/{} sources moved", source_count);
+    } else {
+        info!("📂 do_reparent_node moved {}/{} sources", moved_count, source_count);
     }
 
     if let Some(ref mut es) = res.explorer_state {
@@ -5536,79 +5660,130 @@ fn drain_slint_actions(
                                 }
                             }
                         }
-                        // GUI element properties — live-update GuiElementDisplay component
+                        // GUI element properties — write to BOTH the class
+                        // component (TextLabel/TextButton/TextBox/Frame —
+                        // source of truth for TOML round-trip) and the
+                        // renderer-cache `GuiElementDisplay` (immediate
+                        // visual feedback). `sync_*_to_display` systems
+                        // also re-sync display from class on
+                        // `Changed<TheClass>`, so consistency holds even
+                        // when the class is mutated from elsewhere.
                         "FontSize" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Some(v) = parse_finite(&val) {
-                                    gui.font_size = v.max(1.0);
-                                }
+                            if let Some(v) = parse_finite(&val) {
+                                // FontSize bounds: [1, 72] pixels. 1 px is
+                                // the smallest legible (text below that
+                                // anti-aliases into nothing); 72 px is the
+                                // soft cap — anything bigger usually
+                                // overflows a typical billboard canvas at
+                                // ~50 px/m and the user wants `TextScaled`
+                                // for fit-to-fill, not a giant fixed size.
+                                let v = v.clamp(1.0, 72.0);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.font_size = v; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.font_size = v; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.font_size = v; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.font_size = v; }
                             }
                         }
                         "BackgroundColor" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
-                                if parts.len() >= 3 {
-                                    // Input is 0-255 scale
-                                    gui.bg_color = [
-                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
-                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.bg_color[3]),
-                                    ];
+                            // Input is 0-255 scale. Class field
+                            // `background_color3` is 0-1.
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
+                            if parts.len() >= 3 {
+                                let rgb = [parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.background_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.background_color3 = rgb; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.bg_color = [rgb[0], rgb[1], rgb[2],
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.bg_color[3])];
                                 }
                             }
                         }
                         "TextColor" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
-                                if parts.len() >= 3 {
-                                    gui.text_color = [
-                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
-                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.text_color[3]),
-                                    ];
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
+                            if parts.len() >= 3 {
+                                let rgb = [parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.text_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.text_color3 = rgb; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.text_color = [rgb[0], rgb[1], rgb[2],
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.text_color[3])];
                                 }
                             }
                         }
                         "BorderColor" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                                if parts.len() >= 3 {
-                                    gui.border_color = [
-                                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
-                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.border_color[3]),
-                                    ];
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                            if parts.len() >= 3 {
+                                let rgb = [parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.border_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.border_color3 = rgb; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.border_color = [rgb[0], rgb[1], rgb[2],
+                                        parts.get(3).map(|&a| a / 255.0).unwrap_or(gui.border_color[3])];
                                 }
                             }
                         }
                         "BackgroundAlpha" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    gui.bg_color[3] = v.clamp(0.0, 1.0);
-                                }
+                            if let Ok(v) = val.parse::<f32>() {
+                                let a = v.clamp(0.0, 1.0);
+                                let bt = (1.0 - a).clamp(0.0, 1.0);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.background_transparency = bt; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.background_transparency = bt; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.bg_color[3] = a; }
                             }
                         }
                         "BorderAlpha" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    gui.border_color[3] = v.clamp(0.0, 1.0);
-                                }
+                            if let Ok(v) = val.parse::<f32>() {
+                                let a = v.clamp(0.0, 1.0);
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.border_color[3] = a; }
                             }
                         }
                         "TextAlpha" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    gui.text_color[3] = v.clamp(0.0, 1.0);
-                                }
+                            if let Ok(v) = val.parse::<f32>() {
+                                let a = v.clamp(0.0, 1.0);
+                                let tt = (1.0 - a).clamp(0.0, 1.0);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.text_transparency = tt; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_transparency = tt; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.text_transparency = tt; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.text_color[3] = a; }
                             }
                         }
                         "Visible" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                gui.visible = val == "true";
-                            }
+                            let v = val == "true";
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.visible = v; }
+                            else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.visible = v; }
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.visible = v; }
                         }
                         "ZOrder" => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                if let Ok(v) = val.parse::<i32>() {
-                                    gui.z_order = v;
-                                }
+                            if let Ok(v) = val.parse::<i32>() {
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.z_index = v; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.z_order = v; }
                             }
                         }
                         "BorderSize" => {
@@ -5626,25 +5801,61 @@ fn drain_slint_actions(
                             }
                         }
                         "Text" => {
+                            // Write to the class component (source of truth
+                            // for TOML round-trip) AND the renderer-cache
+                            // GuiElementDisplay (for immediate visual
+                            // feedback this frame).
+                            let has_tl = queries.ui_text_labels.get(entity).is_ok();
+                            let has_tb_btn = queries.ui_text_buttons.get(entity).is_ok();
+                            let has_tb_box = queries.ui_text_boxes.get(entity).is_ok();
+                            let has_gui = queries.gui_displays.get(entity).is_ok();
+                            info!("🪧 drain Text on {:?}: val='{}' (TextLabel={} TextButton={} TextBox={} GuiDisplay={})",
+                                entity, val, has_tl, has_tb_btn, has_tb_box, has_gui);
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.text = val.clone(); }
+                            else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text = val.clone(); }
+                            else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.text = val.clone(); }
                             if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
                                 gui.text = val.clone();
                             }
                         }
                         "Position" if queries.gui_displays.get(entity).is_ok() => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                                if parts.len() >= 2 {
-                                    gui.x = parts[0];
-                                    gui.y = parts[1];
+                            // UDim2 4-tuple `scale_x, offset_x, scale_y, offset_y`
+                            // from the Properties panel widget. Write the
+                            // full UDim2 to whichever UI class component
+                            // the entity carries (source of truth for
+                            // TOML round-trip); also update the renderer
+                            // cache's resolved pixels using the Offset
+                            // components so the visual changes immediately.
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                            if parts.len() >= 4 {
+                                let udim = eustress_common::ui_types::UDim2::new(parts[0], parts[1], parts[2], parts[3]);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.position = udim; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.position = udim; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.x = udim.x.offset;
+                                    gui.y = udim.y.offset;
                                 }
                             }
                         }
                         "Size" if queries.gui_displays.get(entity).is_ok() => {
-                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
-                                let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-                                if parts.len() >= 2 {
-                                    gui.width = parts[0];
-                                    gui.height = parts[1];
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                            if parts.len() >= 4 {
+                                let udim = eustress_common::ui_types::UDim2::new(parts[0], parts[1], parts[2], parts[3]);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.size = udim; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.size = udim; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.width = udim.x.offset.max(1.0);
+                                    gui.height = udim.y.offset.max(1.0);
                                 }
                             }
                         }
@@ -5733,6 +5944,47 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                        // BillboardGui's Size is a `UDim2` (4-tuple), not a
+                        // Vec3 — intercept BEFORE the BasePart Size handler
+                        // below or the panel's `0, 200, 0, 50` UDim2 string
+                        // would be mis-parsed as a Vec3 and routed through
+                        // `ResizePartEvent`, writing a near-zero
+                        // `Transform.scale` that makes the billboard quad
+                        // degenerate / invisible.
+                        "Size" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            // DIAGNOSTIC: log every Size edit landing on a
+                            // BillboardGui — confirms the path the
+                            // Properties-panel sends and what gets parsed.
+                            info!("🪧 drain Size→Billboard {:?}: raw='{}' parts={:?}", entity, val, parts);
+                            if parts.len() >= 4 {
+                                let udim = eustress_common::ui_types::UDim2::new(
+                                    parts[0], parts[1], parts[2], parts[3],
+                                );
+                                if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                    bg.size = udim;
+                                    info!("🪧 drain Size→Billboard {:?}: set bg.size = {:?}", entity, udim.as_array());
+                                }
+                                // sync_billboard_class_to_marker re-publishes
+                                // to the marker and rescales the entity
+                                // Transform on the next frame.
+                            }
+                        }
+                        "SizeOffset" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            // Roblox-parity `Vector2` — pixel-only offset
+                            // from the BillboardGui's anchor point. Two
+                            // floats, not the UDim2 4-tuple.
+                            let parts: Vec<f32> = val.split(',')
+                                .filter_map(|s| parse_finite(s.trim()))
+                                .collect();
+                            if parts.len() >= 2 {
+                                if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                    bg.size_offset = [parts[0], parts[1]];
+                                }
+                            }
+                        }
                         "Size" => {
                             // Route through `ResizePartEvent` so the scale-tool's
                             // `apply_size_to_entity` handles mesh regen + cframe
@@ -5778,9 +6030,316 @@ fn drain_slint_actions(
                             }
                         }
                         "CastShadow" => {
-                            // CastShadow is managed via NotShadowCaster component, not a BasePart field.
-                            // TOML persistence handles it via update_toml_property.
+                            // CastShadow is managed via the NotShadowCaster
+                            // component, not a BasePart field. TOML
+                            // persistence is handled by `route_property` /
+                            // `apply_property_to_toml_value` below.
                         }
+
+                        // ── BillboardGui class properties ──────────────────────────
+                        // Edits to these write directly to the
+                        // `BillboardGui` class component. The
+                        // `sync_billboard_class_to_marker` system
+                        // watches `Changed<BillboardGui>` and republishes
+                        // the new values to `BillboardGuiMarker` + the
+                        // entity `Transform` on the next frame, so the
+                        // visual updates live.
+                        "UnitsOffset" | "StudsOffset" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() >= 3 {
+                                    bg.units_offset = [parts[0], parts[1], parts[2]];
+                                }
+                            }
+                        }
+                        "UnitsOffsetWorldSpace" | "StudsOffsetWorldSpace" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() >= 3 {
+                                    bg.units_offset_world_space = [parts[0], parts[1], parts[2]];
+                                }
+                            }
+                        }
+                        "ExtentsOffset" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() >= 3 {
+                                    bg.extents_offset = [parts[0], parts[1], parts[2]];
+                                }
+                            }
+                        }
+                        "ExtentsOffsetWorldSpace" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                let parts: Vec<f32> = val.split(',')
+                                    .filter_map(|s| parse_finite(s.trim()))
+                                    .collect();
+                                if parts.len() >= 3 {
+                                    bg.extents_offset_world_space = [parts[0], parts[1], parts[2]];
+                                }
+                            }
+                        }
+                        "AlwaysOnTop" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.always_on_top = val == "true";
+                            }
+                        }
+                        "FaceCamera" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.face_camera = val == "true";
+                            }
+                        }
+                        "ClipsDescendants" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.clips_descendants = val == "true";
+                            }
+                        }
+                        "Active" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.active = val == "true";
+                            }
+                        }
+                        "Enabled" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.enabled = val == "true";
+                            }
+                        }
+                        "MaxDistance" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.max_distance = v.max(0.0); }
+                            }
+                        }
+                        "DistanceLowerLimit" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.distance_lower_limit = v.max(0.0); }
+                            }
+                        }
+                        "DistanceUpperLimit" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.distance_upper_limit = v.max(0.0); }
+                            }
+                        }
+                        "DistanceStep" => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.distance_step = v.max(0.0); }
+                            }
+                        }
+                        "Brightness" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.brightness = v.max(0.0); }
+                            }
+                        }
+                        "LightInfluence" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Some(v) = parse_finite(&val) { bg.light_influence = v.clamp(0.0, 1.0); }
+                            }
+                        }
+                        "ResetOnSpawn" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.reset_on_spawn = val == "true";
+                            }
+                        }
+                        "StiffnessByDistance" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.stiffness_by_distance = val == "true";
+                            }
+                        }
+                        "ZIndexBehavior" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                bg.z_index_behavior = match val.as_str() {
+                                    "Global" => eustress_common::classes::ZIndexBehavior::Global,
+                                    _        => eustress_common::classes::ZIndexBehavior::Sibling,
+                                };
+                            }
+                        }
+                        "ZIndex" if queries.ui_billboard_guis.get(entity).is_ok() => {
+                            if let Ok(mut bg) = queries.ui_billboard_guis.get_mut(entity) {
+                                if let Ok(v) = val.parse::<i32>() {
+                                    bg.z_index = v;
+                                }
+                            }
+                        }
+
+                        // ── UI-class properties for TextLabel / TextButton / TextBox /
+                        // Frame / ImageLabel / ImageButton / ScrollingFrame.
+                        //
+                        // These match arms mutate the LIVE ECS component for
+                        // immediate visual feedback. Persistence to TOML
+                        // happens after the match block via the unified
+                        // `apply_property_to_toml_value` / `route_property`
+                        // pair — one writer for every class. Earlier the
+                        // drain handler knew only a small subset of keys and
+                        // every other fell through to `_ => unhandled`, the
+                        // ECS component stayed at its old value, the panel re-
+                        // synced from ECS, and the user's typed value visibly
+                        // disappeared. The handlers below mirror the per-class
+                        // field on the live ECS component so the panel-level
+                        // round-trip is complete; `save_text_label_changes`
+                        // (et al.) then persist to TOML via `Changed<T>`.
+                        "ZIndex" => {
+                            if let Ok(v) = val.parse::<i32>() {
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity) { c.z_index = v; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.z_index = v; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.z_order = v; }
+                            }
+                        }
+                        // Font / LineHeight / RichText / TextScaled / TextWrapped
+                        // live ONLY on `TextLabel` in the current class schema.
+                        // TextButton and TextBox don't carry these fields —
+                        // earlier multi-class fall-throughs here would've been
+                        // compile errors. Keep them TextLabel-scoped.
+                        "Font" => {
+                            use eustress_common::classes::Font;
+                            let font = match val.as_str() {
+                                "GothamBold"    => Font::GothamBold,
+                                "GothamLight"   => Font::GothamLight,
+                                "RobotoMono"    => Font::RobotoMono,
+                                "Bangers"       => Font::Bangers,
+                                "Fantasy"       => Font::Fantasy,
+                                "Merriweather"  => Font::Merriweather,
+                                "Nunito"        => Font::Nunito,
+                                "Ubuntu"        => Font::Ubuntu,
+                                _               => Font::default(),
+                            };
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.font = font; }
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                gui.font_weight = match font {
+                                    Font::GothamBold => 700,
+                                    Font::GothamLight => 300,
+                                    _ => 400,
+                                };
+                            }
+                        }
+                        "LineHeight" => {
+                            if let Some(v) = parse_finite(&val) {
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.line_height = v; }
+                            }
+                        }
+                        "RichText" => {
+                            let b = val == "true";
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.rich_text = b; }
+                        }
+                        "TextScaled" => {
+                            let b = val == "true";
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.text_scaled = b; }
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.text_scaled = b; }
+                        }
+                        "TextWrapped" => {
+                            let b = val == "true";
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity) { c.text_wrapped = b; }
+                        }
+                        // 0..1-float color variants emitted by the rich-property
+                        // schema (vs the 0..255 `BackgroundColor` / `TextColor` /
+                        // `BorderColor` handlers further up which use a different
+                        // panel widget). Parse 3 floats in [0, 1].
+                        "TextColor3" => {
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
+                            if parts.len() >= 3 {
+                                let rgb = [parts[0], parts[1], parts[2]];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity)   { c.text_color3 = rgb; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.text_color = [rgb[0], rgb[1], rgb[2], gui.text_color[3]];
+                                }
+                            }
+                        }
+                        // TextStroke* + TextX/YAlignment exist on TextLabel
+                        // and TextButton but NOT on TextBox in the current
+                        // class schema. Frame / Image / ScrollingFrame don't
+                        // carry text props at all.
+                        "TextStrokeColor3" => {
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
+                            if parts.len() >= 3 {
+                                let rgb = [parts[0], parts[1], parts[2]];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_stroke_color3 = rgb; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_stroke_color3 = rgb; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.text_stroke_color = [rgb[0], rgb[1], rgb[2], gui.text_stroke_color[3]];
+                                }
+                            }
+                        }
+                        "TextStrokeTransparency" => {
+                            if let Some(v) = parse_finite(&val) {
+                                let t = v.clamp(0.0, 1.0);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_stroke_transparency = t; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_stroke_transparency = t; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.text_stroke_color[3] = 1.0 - t;
+                                }
+                            }
+                        }
+                        "TextTransparency" => {
+                            // text_transparency exists on all three text classes.
+                            if let Some(v) = parse_finite(&val) {
+                                let t = v.clamp(0.0, 1.0);
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_transparency = t; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_transparency = t; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity)   { c.text_transparency = t; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                    gui.text_color[3] = 1.0 - t;
+                                }
+                            }
+                        }
+                        "TextXAlignment" => {
+                            use eustress_common::classes::TextXAlignment;
+                            let a = match val.as_str() {
+                                "Left"   => TextXAlignment::Left,
+                                "Right"  => TextXAlignment::Right,
+                                _        => TextXAlignment::Center,
+                            };
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_x_alignment = a; }
+                            else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_x_alignment = a; }
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                gui.text_align = match a {
+                                    TextXAlignment::Left   => "Left".to_string(),
+                                    TextXAlignment::Right  => "Right".to_string(),
+                                    TextXAlignment::Center => "Center".to_string(),
+                                };
+                            }
+                        }
+                        "TextYAlignment" => {
+                            use eustress_common::classes::TextYAlignment;
+                            let a = match val.as_str() {
+                                "Top"    => TextYAlignment::Top,
+                                "Bottom" => TextYAlignment::Bottom,
+                                _        => TextYAlignment::Center,
+                            };
+                            if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.text_y_alignment = a; }
+                            else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.text_y_alignment = a; }
+                            if let Ok(mut gui) = queries.gui_displays.get_mut(entity) {
+                                gui.text_y_align = match a {
+                                    TextYAlignment::Top    => "Top".to_string(),
+                                    TextYAlignment::Bottom => "Bottom".to_string(),
+                                    TextYAlignment::Center => "Center".to_string(),
+                                };
+                            }
+                        }
+                        "AnchorPoint" => {
+                            let parts: Vec<f32> = val.split(',').filter_map(|s| parse_finite(s.trim())).collect();
+                            if parts.len() >= 2 {
+                                let ap = [parts[0], parts[1]];
+                                if let Ok(mut c) = queries.ui_text_labels.get_mut(entity)  { c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_text_buttons.get_mut(entity) { c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_text_boxes.get_mut(entity)   { c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_frames.get_mut(entity)       { c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_image_labels.get_mut(entity) { c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_image_buttons.get_mut(entity){ c.anchor_point = ap; }
+                                else if let Ok(mut c) = queries.ui_scrolling_frames.get_mut(entity) { c.anchor_point = ap; }
+                                if let Ok(mut gui) = queries.gui_displays.get_mut(entity) { gui.anchor_point = ap; }
+                            }
+                        }
+
                         _ => {
                             // Unhandled property
                             if let Some(ref mut out) = res.output {
@@ -5790,52 +6349,57 @@ fn drain_slint_actions(
                     }
                     
                     // ══════════════════════════════════════════════════════════
-                    // File-System-First: Write property changes back to TOML
-                    // Supports ALL properties dynamically
+                    // File-System-First: write property to TOML — ONE writer
+                    // for every class.
                     // ══════════════════════════════════════════════════════════
+                    //
+                    // We patch the raw `toml::Value` directly rather than
+                    // round-tripping through `InstanceDefinition` or
+                    // `GuiTomlFile`. Going through a strongly-typed struct
+                    // creates a fork: Part-class TOMLs use `InstanceDefinition`,
+                    // GUI-class TOMLs use `GuiTomlFile`, and the engine ends up
+                    // with two competing writers fighting over the same file
+                    // (this was the root cause of "UnitsOffset doesn't save"
+                    // and the spurious "file not found" toasts).
+                    //
+                    // The `apply_property_to_toml_value` helper carries one
+                    // shared routing table — key → (section, field, kind) — and
+                    // never re-serialises the unrelated half of the schema.
+                    // Adding a new property is one row in the table; no
+                    // class-specific saver, no schema migration.
                     if let Ok(instance_file) = queries.instance_files.get(entity) {
-                        match crate::space::instance_loader::load_instance_definition(&instance_file.toml_path) {
-                            Ok(mut def) => {
-                                // Sync current in-memory transform to the definition before writing,
-                                // so property edits don't overwrite the transform with stale disk values.
-                                if let Ok(t) = queries.transforms.get(entity) {
-                                    def.transform.position = [t.translation.x, t.translation.y, t.translation.z];
-                                    def.transform.rotation = [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w];
-                                    def.transform.scale = [t.scale.x, t.scale.y, t.scale.z];
-                                }
-                                // BasePart.size is stored via transform.scale in the TOML,
-                                // already synced above from Transform component.
-
-                                let changed = update_toml_property(&mut def, &key, &val);
-
-                                if changed {
-                                    def.metadata.last_modified = chrono::Utc::now().to_rfc3339();
-                                    
-                                    if let Err(e) = crate::space::instance_loader::write_instance_definition(
+                        let current_transform = queries.transforms.get(entity).ok().map(|t| (
+                            [t.translation.x, t.translation.y, t.translation.z],
+                            [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                            [t.scale.x, t.scale.y, t.scale.z],
+                        ));
+                        match apply_property_to_toml_value(
+                            &instance_file.toml_path,
+                            &key,
+                            &val,
+                            current_transform,
+                        ) {
+                            Ok(true) => {
+                                if let Some(ref mut out) = res.output {
+                                    let display_name = instance_name_for_log(
+                                        &instance_file.name,
                                         &instance_file.toml_path,
-                                        &def,
-                                    ) {
-                                        if let Some(ref mut out) = res.output {
-                                            out.error(format!("Failed to write TOML: {}", e));
-                                        }
-                                    } else {
-                                        if let Some(ref mut out) = res.output {
-                                            // Use the instance's display name (folder name for
-                                            // folder-based entities, file stem for flat ones) so
-                                            // the Output panel reads "Saved Color to VCell_Housing"
-                                            // instead of the generic "_instance.toml".
-                                            let display_name = instance_name_for_log(
-                                                &instance_file.name,
-                                                &instance_file.toml_path,
-                                            );
-                                            out.info(format!("💾 Saved {} to {}", key, display_name));
-                                        }
-                                    }
+                                    );
+                                    out.info(format!("💾 Saved {} to {}", key, display_name));
                                 }
                             }
+                            Ok(false) => {
+                                // Key not in the routing table — silent. The
+                                // match arm above already mutated the live
+                                // ECS component (real-time effect); the only
+                                // missing piece is persistence, and not every
+                                // property keyed in the panel maps to a TOML
+                                // field (some are derived / read-only).
+                            }
                             Err(e) => {
+                                // Genuine write failure — surface to the user.
                                 if let Some(ref mut out) = res.output {
-                                    out.error(format!("Failed to load TOML for write-back: {}", e));
+                                    out.error(format!("Save {} failed: {}", key, e));
                                 }
                             }
                         }
@@ -6136,19 +6700,46 @@ fn drain_slint_actions(
                 eustress_common::luau::runtime::drain_luau_output();
                 eustress_common::soul::rune_runtime::drain_rune_output();
 
+                // Build a `tag -> [entity_id, ...]` snapshot of live ECS Tags
+                // so scripts' `CollectionService:GetTagged(tag)` returns
+                // entities the engine (or MCP, or earlier script runs)
+                // tagged — not just instances created in this very script.
+                // Cheap walk: one pass over the Tags-bearing entities.
+                let tag_snapshot: std::collections::HashMap<String, Vec<i64>> = {
+                    let mut map: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+                    for (entity, tags) in queries.entity_tags.iter() {
+                        let id = entity.to_bits() as i64;
+                        for tag in tags.0.iter() {
+                            map.entry(tag.clone()).or_default().push(id);
+                        }
+                    }
+                    map
+                };
+
                 // Execute the script
                 let (result, created_instances) = if language == "luau" {
                     match eustress_common::luau::runtime::LuauRuntime::new() {
                         Ok(mut runtime) => {
+                            // Best-effort seed; failures shouldn't block execution.
+                            if let Err(e) = runtime.seed_existing_tags(&tag_snapshot) {
+                                warn!("Failed to seed CollectionService snapshot for Luau: {}", e);
+                            }
                             let r = runtime.execute_chunk(&script, "command_bar");
                             let instances = runtime.drain_created_instances();
+                            let _ = runtime.clear_existing_tags();
                             (r, instances)
                         }
                         Err(e) => (Err(format!("Failed to create Luau runtime: {}", e)), Vec::new()),
                     }
                 } else {
-                    // Rune — execute with ECS module for Instance.new support
+                    // Rune — execute with ECS module for Instance.new support.
+                    // Seed via the thread-local snapshot; clear after to avoid
+                    // leaking across runs.
+                    #[cfg(feature = "realism-scripting")]
+                    crate::soul::rune_ecs_module::seed_existing_tags(tag_snapshot.clone());
                     let r = crate::soul::rune_ecs_module::execute_rune_oneshot(&script);
+                    #[cfg(feature = "realism-scripting")]
+                    crate::soul::rune_ecs_module::clear_existing_tags();
                     match r {
                         Ok(instances) => (Ok(()), instances),
                         Err(e) => (Err(e), Vec::new()),
@@ -6198,19 +6789,29 @@ fn drain_slint_actions(
                     // Two-pass spawn: BillboardGui first (so TextLabel can reference parent entity).
                     // Maps Luau entity_id → spawned Bevy Entity for parent resolution.
                     let mut luau_to_bevy: std::collections::HashMap<i64, Entity> = std::collections::HashMap::new();
+                    // Maps Luau entity_id → on-disk instance directory so child
+                    // entities (TextLabel, Frame, ...) can be persisted INSIDE
+                    // the parent's folder. Without this the children land at
+                    // workspace root and don't reload as descendants of the
+                    // BillboardGui — they vanish from the rebuilt hierarchy.
+                    let mut luau_to_dir: std::collections::HashMap<i64, std::path::PathBuf> = std::collections::HashMap::new();
 
                     // ── Pass 1: BillboardGui ────────────────────────────────────────
                     for inst in &created_instances {
                         if inst.class_name != "BillboardGui" { continue; }
 
                         let offset = inst.units_offset.unwrap_or([0.0, 2.0, 0.0]);
-                        let size = inst.ui_size
-                            .map(|s| [s[1], s[3]])  // offset_x, offset_y as pixel size
-                            .unwrap_or([200.0, 50.0]);
+                        // `inst.ui_size` is the canonical UDim2 4-tuple
+                        // `[scale_x, offset_x, scale_y, offset_y]` from
+                        // the schema. Wrap straight into `UDim2`; fall
+                        // back to a pure-pixel 200×50 default when absent.
+                        let size_udim = inst.ui_size
+                            .map(|s| eustress_common::ui_types::UDim2::new(s[0], s[1], s[2], s[3]))
+                            .unwrap_or_else(|| eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0));
 
                         let billboard = eustress_common::classes::BillboardGui {
                             units_offset: offset,
-                            size,
+                            size: size_udim,
                             always_on_top: inst.always_on_top.unwrap_or(false),
                             max_distance: inst.max_distance.unwrap_or(100.0),
                             ..Default::default()
@@ -6229,6 +6830,15 @@ fn drain_slint_actions(
                         let _ = std::fs::create_dir_all(&instance_dir);
                         let toml_path = instance_dir.join("_instance.toml");
 
+                        // Roblox-parity full save: write every property the
+                        // BillboardGui class carries. `Option<_>` fields are
+                        // skip-serialized when None, so the resulting TOML
+                        // stays clean while still round-tripping any value
+                        // the user has edited.
+                        let zib = match billboard.z_index_behavior {
+                            eustress_common::classes::ZIndexBehavior::Global => "Global",
+                            eustress_common::classes::ZIndexBehavior::Sibling => "Sibling",
+                        }.to_string();
                         let gui_def = crate::space::gui_loader::GuiTomlFile {
                             instance: crate::space::gui_loader::GuiTomlInstance { name: inst.name.clone() },
                             metadata: crate::space::gui_loader::GuiTomlMetadata {
@@ -6236,10 +6846,38 @@ fn drain_slint_actions(
                                 archivable: true,
                             },
                             gui: crate::space::gui_loader::GuiTomlProperties {
-                                position: offset.to_vec(),
-                                size: size.to_vec(),
+                                // BillboardGui's 3D `units_offset` is
+                                // separate from the 2D-canvas
+                                // `position: UDim2`. The canvas position
+                                // defaults to (0,0); the world-space
+                                // offset is carried by `units_offset`
+                                // below.
+                                position: eustress_common::ui_types::UDim2::default(),
+                                size: size_udim,
+                                // Behaviour
+                                active: Some(billboard.active),
+                                enabled: Some(billboard.enabled),
                                 always_on_top: Some(billboard.always_on_top),
+                                clips_descendants: Some(billboard.clips_descendants),
+                                reset_on_spawn: Some(billboard.reset_on_spawn),
+                                stiffness_by_distance: Some(billboard.stiffness_by_distance),
+                                // Distance
                                 max_distance: Some(billboard.max_distance),
+                                distance_lower_limit: Some(billboard.distance_lower_limit),
+                                distance_upper_limit: Some(billboard.distance_upper_limit),
+                                distance_step: Some(billboard.distance_step),
+                                // Appearance
+                                brightness: Some(billboard.brightness),
+                                light_influence: Some(billboard.light_influence),
+                                // Offsets
+                                size_offset: Some(billboard.size_offset),
+                                extents_offset: Some(billboard.extents_offset),
+                                extents_offset_world_space: Some(billboard.extents_offset_world_space),
+                                units_offset: Some(billboard.units_offset),
+                                units_offset_world_space: Some(billboard.units_offset_world_space),
+                                // Sorting
+                                z_index_behavior: Some(zib),
+                                // Adornee
                                 adornee: inst.adornee_name.clone(),
                                 ..Default::default()
                             },
@@ -6247,6 +6885,10 @@ fn drain_slint_actions(
                             asset: None,
                             transform: None,
                             properties: None,
+                            // Script-set CollectionService tags ride through
+                            // here so they end up in the TOML and the ECS
+                            // Tags component (same path as Parts).
+                            tags: inst.tags.clone(),
                         };
 
                         if let Err(e) = crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
@@ -6257,7 +6899,13 @@ fn drain_slint_actions(
                         }
 
                         let entity = crate::spawn::spawn_billboard_gui(&mut commands, bevy_instance, billboard);
+                        if !inst.tags.is_empty() {
+                            commands.entity(entity).insert(
+                                eustress_common::attributes::Tags(inst.tags.clone()),
+                            );
+                        }
                         luau_to_bevy.insert(inst.luau_entity_id, entity);
+                        luau_to_dir.insert(inst.luau_entity_id, instance_dir.clone());
 
                         if let Some(ref mut registry) = res.file_registry {
                             registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
@@ -6283,7 +6931,9 @@ fn drain_slint_actions(
                             text: inst.text.clone().unwrap_or_default(),
                             text_color3: text_color,
                             font_size,
-                            size: [200.0, 50.0],
+                            // Roblox-parity Size as `UDim2`: pure-pixel
+                            // 200×50 (Scale=0).
+                            size: eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0),
                             visible: true,
                             ..Default::default()
                         };
@@ -6295,8 +6945,17 @@ fn drain_slint_actions(
                             ..Default::default()
                         };
 
-                        let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
-                        let instance_dir = workspace_dir.join(&folder_name);
+                        // Persist nested: if this TextLabel's parent (BillboardGui /
+                        // Frame / ScreenGui) was created in the same batch and has
+                        // a known on-disk folder, place the child folder INSIDE
+                        // that one. Otherwise fall back to workspace root (parent
+                        // is the workspace itself).
+                        let parent_dir: std::path::PathBuf = inst
+                            .parent_entity_id
+                            .and_then(|pid| luau_to_dir.get(&pid).cloned())
+                            .unwrap_or_else(|| workspace_dir.clone());
+                        let folder_name = crate::space::instance_loader::unique_entity_name(&parent_dir, &inst.name);
+                        let instance_dir = parent_dir.join(&folder_name);
                         let _ = std::fs::create_dir_all(&instance_dir);
                         let toml_path = instance_dir.join("_instance.toml");
 
@@ -6307,7 +6966,8 @@ fn drain_slint_actions(
                                 archivable: true,
                             },
                             gui: crate::space::gui_loader::GuiTomlProperties {
-                                size: vec![200.0, 50.0],
+                                // Pure-pixel TextLabel canvas (Scale=0).
+                                size: eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0),
                                 ..Default::default()
                             },
                             text: Some(crate::space::gui_loader::GuiTomlText {
@@ -6316,12 +6976,18 @@ fn drain_slint_actions(
                                 font_size,
                                 font: inst.font.clone().unwrap_or_default(),
                                 font_family: String::new(),
-                                text_x_alignment: "center".to_string(),
-                                text_y_alignment: "center".to_string(),
+                                text_x_alignment: "Center".to_string(),
+                                text_y_alignment: "Center".to_string(),
+                                text_scaled: false,
                             }),
                             asset: None,
                             transform: None,
                             properties: None,
+                            // CollectionService tags inherited from the
+                            // script's `CollectionService:AddTag(label, ...)`
+                            // calls — persisted alongside the BillboardGui's
+                            // tags so labels are queryable too.
+                            tags: inst.tags.clone(),
                         };
 
                         if let Err(e) = crate::space::gui_loader::write_gui_toml(&toml_path, &gui_def) {
@@ -6332,6 +6998,11 @@ fn drain_slint_actions(
                         }
 
                         let entity = crate::spawn::spawn_text_label(&mut commands, bevy_instance, label);
+                        if !inst.tags.is_empty() {
+                            commands.entity(entity).insert(
+                                eustress_common::attributes::Tags(inst.tags.clone()),
+                            );
+                        }
 
                         // Parent to BillboardGui entity if available
                         if let Some(parent_id) = inst.parent_entity_id {
@@ -6341,6 +7012,7 @@ fn drain_slint_actions(
                         }
 
                         luau_to_bevy.insert(inst.luau_entity_id, entity);
+                        luau_to_dir.insert(inst.luau_entity_id, instance_dir.clone());
 
                         if let Some(ref mut registry) = res.file_registry {
                             registry.register(toml_path.clone(), entity, crate::space::FileMetadata {
@@ -6413,7 +7085,13 @@ fn drain_slint_actions(
                             electrochemical: None,
                             ui: None,
                             attributes: None,
-                            tags: None,
+                            // Persist CollectionService tags into TOML;
+                            // `instance_loader::spawn_instance` already
+                            // hydrates the ECS `Tags` component from this
+                            // when non-empty, so MCP `get_tagged_entities`
+                            // sees them identically to manually-tagged
+                            // entities.
+                            tags: if inst.tags.is_empty() { None } else { Some(inst.tags.clone()) },
                             parameters: None,
                             extra: std::collections::HashMap::new(),
                         };
@@ -7417,6 +8095,39 @@ fn drain_slint_actions(
                             }
                         };
 
+                        // Resolve a single Entity → its best path string,
+                        // matching the priority documented in `entity_fs_path`.
+                        // Hoisted out so the multi-select branch below can
+                        // map each Selected entity through the same logic
+                        // that single-select uses.
+                        let entity_path_string = |ent: Entity| -> String {
+                            entity_fs_path(ent).unwrap_or_else(|| {
+                                let from_index = res.mention_index.as_ref()
+                                    .and_then(|idx| {
+                                        idx.entries().values()
+                                            .find(|e| e.entity == Some(ent))
+                                            .map(|e| format!("@{}", e.canonical_path))
+                                    });
+                                from_index.unwrap_or_else(|| {
+                                    let space = res.space_root.as_ref()
+                                        .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
+                                        .unwrap_or_default();
+                                    format!("@entity:{}/@ecs/{}", space, ent.index().index())
+                                })
+                            })
+                        };
+
+                        // Snapshot the current `Selected` set. When the user
+                        // has selected MULTIPLE entities in the Explorer,
+                        // Copy Path returns every selected entity's path on
+                        // its own line — newline-separated is the OS-standard
+                        // multi-path clipboard format (Windows/macOS/Linux
+                        // file managers all paste a multi-line list of
+                        // absolute paths). Single-select keeps producing
+                        // exactly one path, no trailing newline, so existing
+                        // workflows are unchanged.
+                        let multi_selected: Vec<Entity> = queries.selected_entities.iter().collect();
+
                         let payload: Option<String> = if let Some(idx) = soul_entity_idx {
                             // Soul Panel right-click → script's filesystem
                             // path (folder containing `_instance.toml`).
@@ -7434,29 +8145,26 @@ fn drain_slint_actions(
                                         .map(|e| format!("@{}", e.canonical_path))
                                 })
                             })
+                        } else if multi_selected.len() > 1 {
+                            // Multi-select path: every selected entity, one
+                            // per line, in `Selected`-iteration order. The
+                            // right-clicked node is part of this set (the
+                            // context-menu trigger select-on-right-click in
+                            // explorer.slint ensures so), so the user's
+                            // mental model — "right-click → Copy Path of
+                            // everything currently highlighted" — holds.
+                            let lines: Vec<String> = multi_selected.iter()
+                                .copied()
+                                .map(entity_path_string)
+                                .collect();
+                            Some(lines.join("\n"))
                         } else if let Some(ref es) = res.explorer_state {
                             match &es.selected {
                                 SelectedItem::File(path) => {
                                     Some(path.to_string_lossy().to_string())
                                 }
                                 SelectedItem::Entity(ent) => {
-                                    entity_fs_path(*ent).or_else(|| {
-                                        // No on-disk backing — fall back to the
-                                        // mention canonical for portability,
-                                        // then to the raw ECS handle.
-                                        let from_index = res.mention_index.as_ref()
-                                            .and_then(|idx| {
-                                                idx.entries().values()
-                                                    .find(|e| e.entity == Some(*ent))
-                                                    .map(|e| format!("@{}", e.canonical_path))
-                                            });
-                                        from_index.or_else(|| {
-                                            let space = res.space_root.as_ref()
-                                                .map(|sr| crate::workshop::mention::space_name_from_root(&sr.0))
-                                                .unwrap_or_default();
-                                            Some(format!("@entity:{}/@ecs/{}", space, ent.index().index()))
-                                        })
-                                    })
+                                    Some(entity_path_string(*ent))
                                 }
                                 SelectedItem::Service(name) => {
                                     let space = res.space_root.as_ref()
@@ -7471,16 +8179,27 @@ fn drain_slint_actions(
                         };
 
                         if let Some(text) = payload {
+                            let line_count = text.lines().count().max(1);
                             #[cfg(feature = "clipboard")]
                             {
                                 use arboard::Clipboard;
                                 if let Ok(mut clipboard) = Clipboard::new() {
                                     let _ = clipboard.set_text(text.clone());
-                                    info!("Copied to clipboard: {}", text);
+                                    if line_count > 1 {
+                                        info!("📋 Copied {} paths to clipboard", line_count);
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Copied {} paths", line_count));
+                                        }
+                                    } else {
+                                        info!("📋 Copied to clipboard: {}", text);
+                                    }
                                 }
                             }
                             #[cfg(not(feature = "clipboard"))]
-                            info!("Clipboard feature not enabled; would copy: {}", text);
+                            {
+                                let _ = line_count;
+                                info!("Clipboard feature not enabled; would copy: {}", text);
+                            }
                         }
                     }
                     "copy-relative-path" => {
@@ -8301,39 +9020,60 @@ fn drain_slint_actions(
                             }
                         }
                     } else {
-                        // Previously-stubbed Insert menu classes. Each
-                        // follows the folder + `_instance.toml`
-                        // convention — the file watcher picks the
-                        // folder up + spawns the entity, so we avoid
-                        // duplicating the ECS-insert plumbing the
-                        // `insert:model` / `insert:folder` handler has.
+                        // Canonical insertion pipeline. Every Insert menu
+                        // / Model ribbon `insert:<class>` action — apart
+                        // from the dedicated Part / Model / Folder / Script
+                        // / GUI handlers above — routes through
+                        // `instance_create::create_instance`. That helper
+                        // copies the class's template folder from
+                        // `common/assets/class_schema/<Class>/`, applies
+                        // overrides (selected-entity-relative position when
+                        // a part is selected), and the file_watcher takes
+                        // it from there. Adding a new class is a single
+                        // template-folder drop in common — no Rust edit.
                         //
-                        // Service mapping mirrors the Roblox engine's
-                        // canonical locations — Tool under StarterPack,
-                        // LocalizationTable under LocalizationService,
-                        // etc. — so generated entities show up in the
-                        // Explorer tree exactly where an author would
-                        // expect.
-                        let stub_insert: Option<(&str, &str)> = match action {
-                            "insert:terrain"           => Some(("Terrain",           "Workspace")),
-                            "insert:tool"              => Some(("Tool",              "StarterPack")),
+                        // Service mapping mirrors Roblox's canonical
+                        // locations so generated entities show up in the
+                        // Explorer where authors expect.
+                        let class_and_service: Option<(&str, &str)> = match action {
+                            // Behaviour / world
+                            "insert:terrain"           => Some(("Terrain",            "Workspace")),
+                            "insert:humanoid"          => Some(("Humanoid",           "Workspace")),
+                            "insert:tool"              => Some(("Tool",               "StarterPack")),
                             "insert:localization"
                             | "insert:localizationtable" => Some(("LocalizationTable", "LocalizationService")),
+                            // Constraints
+                            "insert:attachment"        => Some(("Attachment",          "Workspace")),
+                            "insert:weldconstraint"
+                            | "insert:weld"            => Some(("WeldConstraint",      "Workspace")),
+                            "insert:motor6d"
+                            | "insert:motor"           => Some(("Motor6D",             "Workspace")),
+                            "insert:hingeconstraint"
+                            | "insert:hinge"           => Some(("HingeConstraint",     "Workspace")),
+                            "insert:springconstraint"
+                            | "insert:spring"          => Some(("SpringConstraint",    "Workspace")),
+                            "insert:ropeconstraint"
+                            | "insert:rope"            => Some(("RopeConstraint",      "Workspace")),
+                            "insert:beam"              => Some(("Beam",                "Workspace")),
+                            // Effects
                             "insert:particle"
-                            | "insert:particleemitter" => Some(("ParticleEmitter",   "Workspace")),
-                            "insert:humanoid"          => Some(("Humanoid",          "Workspace")),
-                            "insert:attachment"        => Some(("Attachment",        "Workspace")),
+                            | "insert:particleemitter" => Some(("ParticleEmitter",     "Workspace")),
+                            "insert:decal"             => Some(("Decal",               "Workspace")),
+                            "insert:sound"             => Some(("Sound",               "SoundService")),
+                            // Lighting
+                            "insert:pointlight"        => Some(("PointLight",          "Workspace")),
+                            "insert:spotlight"         => Some(("SpotLight",           "Workspace")),
+                            "insert:surfacelight"      => Some(("SurfaceLight",        "Workspace")),
                             _ => None,
                         };
 
-                        if let Some((class_name, service_name)) = stub_insert {
+                        if let Some((class_name, service_name)) = class_and_service {
                             let space_root = crate::space::default_space_root();
-
-                            // Prefer a currently-selected folder as
-                            // the write dir (so inserting an
-                            // Attachment with a Part selected plants
-                            // it as a child), else fall back to the
-                            // class's canonical service.
+                            // Prefer the selected entity's folder as the
+                            // dest so e.g. inserting an Attachment with a
+                            // Part selected plants it as a child of that
+                            // part. Falls back to the class's canonical
+                            // service when nothing is selected.
                             let selected_entity: Option<Entity> = res.explorer_state
                                 .as_ref()
                                 .and_then(|es| match &es.selected {
@@ -8341,7 +9081,6 @@ fn drain_slint_actions(
                                     _ => None,
                                 });
                             let fallback_dir = space_root.join(service_name);
-                            let _ = std::fs::create_dir_all(&fallback_dir);
                             let write_dir = selected_entity
                                 .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                                 .map(|(_, lff)| {
@@ -8350,45 +9089,23 @@ fn drain_slint_actions(
                                 })
                                 .unwrap_or_else(|| fallback_dir.clone());
 
-                            let dir_name = crate::space::instance_loader::unique_entity_name(&write_dir, class_name);
-                            let dir_path = write_dir.join(&dir_name);
-
-                            match std::fs::create_dir_all(&dir_path) {
-                                Ok(_) => {
-                                    // Display name stays as the bare class
-                                    // ("Attachment") regardless of the
-                                    // hex-suffixed folder ("Attachment-a3f2"),
-                                    // so the Explorer shows the class not
-                                    // the disk suffix. Only emit the
-                                    // override when the folder diverges.
-                                    let name_override = if dir_name != class_name {
-                                        format!("name = \"{}\"\n", class_name)
-                                    } else {
-                                        String::new()
-                                    };
-                                    let instance_toml = format!(
-                                        "[metadata]\nclass_name = \"{}\"\narchivable = true\n{}",
-                                        class_name, name_override,
-                                    );
-                                    match std::fs::write(dir_path.join("_instance.toml"), &instance_toml) {
-                                        Ok(_) => {
-                                            if let Some(ref mut out) = res.output {
-                                                out.info(format!(
-                                                    "Inserted {} '{}' in {}",
-                                                    class_name, dir_name, write_dir.display(),
-                                                ));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Some(ref mut out) = res.output {
-                                                out.error(format!("Failed to write _instance.toml: {}", e));
-                                            }
-                                        }
+                            match crate::space::instance_create::create_instance(
+                                &write_dir,
+                                class_name,
+                                None,
+                                crate::space::instance_create::InstanceOverrides::default(),
+                            ) {
+                                Ok(created) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(format!(
+                                            "Inserted {} '{}' in {}",
+                                            class_name, created.folder_name, write_dir.display(),
+                                        ));
                                     }
                                 }
                                 Err(e) => {
                                     if let Some(ref mut out) = res.output {
-                                        out.error(format!("Failed to create {} folder: {}", class_name, e));
+                                        out.error(format!("Insert {} failed: {}", class_name, e));
                                     }
                                 }
                             }
@@ -8603,14 +9320,27 @@ fn sync_tool_options_bar_to_slint(
         ui.set_tool_options_use_panel(bar_state.use_panel);
     }
 
-    // Nothing else to sync when the bar is hidden; avoids rebuilding
-    // the model every frame while no tool is active.
-    if !bar_state.visible { return; }
+    // Nothing else to sync when the bar is hidden — but DO clear the
+    // tool-id so the ribbon highlight drops back to none. Without this,
+    // the highlighted button stays active-looking after the user cancels
+    // (Esc) because nothing updates the tool-id on hide.
+    if !bar_state.visible {
+        let current_id: String = ui.get_tool_options_tool_id().into();
+        if !current_id.is_empty() {
+            ui.set_tool_options_tool_id("".into());
+        }
+        return;
+    }
 
     // Tool name + step label — cheap string compare, only set on change.
     let current_name: String = ui.get_tool_options_tool_name().into();
     if current_name != bar_state.tool_name {
         ui.set_tool_options_tool_name(bar_state.tool_name.as_str().into());
+    }
+    // Tool ID — drives the ribbon's per-button highlight on the CAD tab.
+    let current_id: String = ui.get_tool_options_tool_id().into();
+    if current_id != bar_state.tool_id {
+        ui.set_tool_options_tool_id(bar_state.tool_id.as_str().into());
     }
     let current_step: String = ui.get_tool_options_step_label().into();
     if current_step != bar_state.step_label {
@@ -11830,6 +12560,22 @@ fn sync_properties_to_slint(
             
             // -- Transform section --
             //
+            // Skipped for UI classes (BillboardGui, ScreenGui, SurfaceGui,
+            // Frame, TextLabel, …). Their placement comes from
+            // class-specific UDim2 / units_offset fields surfaced below
+            // via `PropertyAccess` — surfacing the internal Bevy
+            // Transform alongside duplicates the placement controls and
+            // confuses the user (the gizmo-style Position/Rotation/Scale
+            // don't apply to a 2D canvas or a billboard quad whose scale
+            // is derived from `size`).
+            use eustress_common::classes::ClassName as CN;
+            let is_ui_class_for_transform = matches!(instance.class_name,
+                CN::TextLabel | CN::TextButton | CN::TextBox |
+                CN::Frame     | CN::ImageLabel | CN::ImageButton |
+                CN::ScrollingFrame |
+                CN::BillboardGui | CN::ScreenGui | CN::SurfaceGui
+            );
+
             // Read from the LIVE ECS Transform / BasePart, not the
             // on-disk TOML. The TOML only updates after
             // `write_instance_changes_system` flushes — which can be a
@@ -11868,14 +12614,24 @@ fn sync_properties_to_slint(
                 .map(|bp| bp.size)
                 .or_else(|_| transforms.get(selected_entity).map(|t| t.scale))
                 .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.scale));
-            add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}",
-                live_translation.x, live_translation.y, live_translation.z), "vec3", true);
-            // Convert quaternion → Euler degrees for display
-            let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
-            add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
-                rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
-            add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
-                live_size.x, live_size.y, live_size.z), "vec3", true);
+            if !is_ui_class_for_transform {
+                add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}",
+                    live_translation.x, live_translation.y, live_translation.z), "vec3", true);
+                // Convert quaternion → Euler degrees for display
+                let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
+                add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
+                    rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
+                add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
+                    live_size.x, live_size.y, live_size.z), "vec3", true);
+            } else {
+                // For UI classes the live_*/transform reads still need to
+                // be evaluated so any downstream code that uses them
+                // (gizmo selection, save-back) doesn't get tripped up,
+                // but they don't render as panel rows.
+                let _ = live_translation;
+                let _ = live_rotation;
+                let _ = live_size;
+            }
             
             // ── UI class properties (TextLabel, TextButton, Frame, etc.) ────────
             // If the entity carries a UI ECS component, emit all its properties
@@ -12103,13 +12859,60 @@ fn sync_properties_to_slint(
             }
         }
     } else if let Ok(gui) = gui_display_query.get(selected_entity) {
-        // GUI element with GuiElementDisplay — show gui properties for live editing
+        // GUI element with GuiElementDisplay — show gui properties for live editing.
+        // `gui.class_type` is the renderer-side mirror of `instance.class_name`;
+        // surfacing both as separate rows is redundant — Properties shows
+        // only ClassName, the canonical Roblox-style class identifier.
+        let _ = &gui.class_type;
         add_prop("Data", "Name", instance.name.clone(), "string", true);
         add_prop("Data", "ClassName", format!("{:?}", instance.class_name), "string", false);
-        add_prop("Data", "ClassType", gui.class_type.clone(), "string", false);
 
-        add_prop("Layout", "Position", format!("{:.0}, {:.0}", gui.x, gui.y), "vec3", true);
-        add_prop("Layout", "Size", format!("{:.0}, {:.0}", gui.width, gui.height), "vec3", true);
+        // Position/Size are Roblox-parity `UDim2`. The underlying class
+        // component (TextLabel / Frame / TextButton / …) carries the
+        // canonical scale+offset pair; we query each UI class in turn
+        // to find the live UDim2 values. If no class component matches,
+        // we fall back to the renderer-cache resolved pixels and emit
+        // them as a pure-pixel UDim2 (Scale=0). Both paths emit type
+        // `"udim2"` so the panel renders the grouped 2×2 widget.
+        use eustress_common::classes::PropertyAccess as _;
+        let position_udim: Option<eustress_common::ui_types::UDim2> =
+            ui_queries_flat.p0().get(selected_entity).ok()
+                .and_then(|c| match c.get_property("Position") {
+                    Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u),
+                    _ => None,
+                })
+            .or_else(|| ui_queries_flat.p1().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p2().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p3().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p4().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p5().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p6().get(selected_entity).ok().and_then(|c| match c.get_property("Position") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }));
+
+        let size_udim: Option<eustress_common::ui_types::UDim2> =
+            ui_queries_flat.p0().get(selected_entity).ok()
+                .and_then(|c| match c.get_property("Size") {
+                    Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u),
+                    _ => None,
+                })
+            .or_else(|| ui_queries_flat.p1().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p2().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p3().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p4().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p5().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }))
+            .or_else(|| ui_queries_flat.p6().get(selected_entity).ok().and_then(|c| match c.get_property("Size") { Some(eustress_common::classes::PropertyValue::UDim2(u)) => Some(u), _ => None }));
+
+        let pos = position_udim.unwrap_or_else(|| {
+            eustress_common::ui_types::UDim2::from_pixels(gui.x, gui.y)
+        });
+        let sz = size_udim.unwrap_or_else(|| {
+            eustress_common::ui_types::UDim2::from_pixels(gui.width, gui.height)
+        });
+        add_prop("Layout", "Position",
+            format!("{}, {}, {}, {}", pos.x.scale, pos.x.offset, pos.y.scale, pos.y.offset),
+            "udim2", true);
+        add_prop("Layout", "Size",
+            format!("{}, {}, {}, {}", sz.x.scale, sz.x.offset, sz.y.scale, sz.y.offset),
+            "udim2", true);
         add_prop("Layout", "ZOrder", gui.z_order.to_string(), "int", true);
         add_prop("Layout", "Visible", gui.visible.to_string(), "bool", true);
         add_prop("Layout", "ClipChildren", gui.clip_children.to_string(), "bool", true);
@@ -12271,6 +13074,10 @@ fn sync_properties_to_slint(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            x_scale: slint::SharedString::default(),
+            x_offset: slint::SharedString::default(),
+            y_scale: slint::SharedString::default(),
+            y_offset: slint::SharedString::default(),
             color_value: placeholder_color,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
@@ -12282,11 +13089,25 @@ fn sync_properties_to_slint(
             sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
             for (name, value, prop_type, editable) in sorted_entries {
-                // Parse Vec3/rotation values into x, y, z components
-                let (x_val, y_val, z_val) = if prop_type == "vec3" || prop_type == "rotation" {
+                // Parse Vec3/rotation values into x, y, z components.
+                // Vec2 reuses the same parser (the trailing z parse just
+                // fails for a 2-tuple and stays "", which Vec2Row ignores
+                // since it only binds x/y).
+                let (x_val, y_val, z_val) = if prop_type == "vec3"
+                    || prop_type == "rotation"
+                    || prop_type == "vec2"
+                {
                     parse_vec3_string(&value)
                 } else {
                     (String::new(), String::new(), String::new())
+                };
+
+                // Parse UDim2 4-tuple `scale_x, offset_x, scale_y, offset_y`
+                // into the four sub-fields the Slint UDim2Row binds to.
+                let (xs, xo, ys, yo) = if prop_type == "udim2" {
+                    parse_udim2_string(&value)
+                } else {
+                    (String::new(), String::new(), String::new(), String::new())
                 };
 
                 // Parse the "r, g, b" value string for color rows so the
@@ -12310,6 +13131,10 @@ fn sync_properties_to_slint(
                     x_value: x_val.into(),
                     y_value: y_val.into(),
                     z_value: z_val.into(),
+                    x_scale: xs.into(),
+                    x_offset: xo.into(),
+                    y_scale: ys.into(),
+                    y_offset: yo.into(),
                     color_value,
                     description: slint::SharedString::default(),
                     learn_url: slint::SharedString::default(),
@@ -12361,6 +13186,10 @@ fn sync_properties_to_slint(
         prop.x_value.hash(&mut hasher);
         prop.y_value.hash(&mut hasher);
         prop.z_value.hash(&mut hasher);
+        prop.x_scale.hash(&mut hasher);
+        prop.x_offset.hash(&mut hasher);
+        prop.y_scale.hash(&mut hasher);
+        prop.y_offset.hash(&mut hasher);
     }
     let new_hash = hasher.finish();
     
@@ -12431,274 +13260,334 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
         PropertyValue::Transform(t) => (format!("({:.1}, {:.1}, {:.1})", t.translation.x, t.translation.y, t.translation.z), "string"),
         PropertyValue::Material(m) => (format!("{:?}", m), "material"),
         PropertyValue::Enum(e) => (e.clone(), "enum"),
-        PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "string"),
+        PropertyValue::Vector2(v) => (format!("{:.2}, {:.2}", v[0], v[1]), "vec2"),
+        // UDim2 displays as four comma-separated values in canonical
+        // order — `scale_x, offset_x, scale_y, offset_y`. The "udim2"
+        // type tag tells the Slint Properties row to render with the
+        // dedicated 4-input grouped widget when one exists; until then
+        // the row falls through to a plain text field.
+        PropertyValue::UDim2(u) => (
+            format!("{}, {}, {}, {}",
+                fmt_udim_n(u.x.scale),  fmt_udim_n(u.x.offset),
+                fmt_udim_n(u.y.scale),  fmt_udim_n(u.y.offset)),
+            "udim2",
+        ),
     }
 }
 
-/// Updates a property in the InstanceDefinition based on property name
-/// Returns true if a property was changed
-fn update_toml_property(
-    def: &mut crate::space::instance_loader::InstanceDefinition,
+/// Apply ONE property edit to a TOML file by raw `toml::Value` patching.
+/// Single source of truth for "Properties panel emits a key+value, what
+/// changes on disk." Works for every class (Part, Folder, Model,
+/// BillboardGui, TextLabel, Frame, …) because it mutates only the
+/// targeted section+field — schema sections this writer doesn't know
+/// about (e.g. `[image]` on a Video TOML) are left untouched.
+///
+/// `current_transform`, when present, refreshes `[transform]` from
+/// the live ECS so a Move/Scale gizmo in flight doesn't get clobbered
+/// by stale disk values during the property write.
+///
+/// Returns:
+/// - `Ok(true)`   — key was recognised and the file was rewritten
+/// - `Ok(false)`  — key isn't in the routing table; caller should treat
+///                  as "nothing to persist" (the ECS half of the edit
+///                  already happened in the live match arm).
+/// - `Err(msg)`   — genuine disk failure (read/parse/write).
+pub fn apply_property_to_toml_value(
+    toml_path: &std::path::Path,
     key: &str,
     val: &str,
-) -> bool {
-    match key {
-        // Metadata (Name is derived from filename, not stored in TOML)
-        "Name" => { false } // Name changes require file rename, not TOML edit
-        "Archivable" => { def.metadata.archivable = val == "true"; true }
-        
-        // Asset
-        "Mesh" => {
-            def.asset.get_or_insert_with(|| crate::space::instance_loader::AssetReference {
-                mesh: String::new(), scene: "Scene0".to_string(),
-            }).mesh = val.to_string(); true
-        }
-        "Scene" => {
-            def.asset.get_or_insert_with(|| crate::space::instance_loader::AssetReference {
-                mesh: String::new(), scene: "Scene0".to_string(),
-            }).scene = val.to_string(); true
-        }
-        
-        // Transform
-        "Position" => {
-            if let Some((x, y, z)) = parse_vec3_value(val) {
-                def.transform.position = [x, y, z]; true
-            } else { false }
-        }
-        "Scale" | "Size" => {
-            // `Size` (authoritative BasePart.size) and `Scale`
-            // (Transform.scale) both persist to the same TOML field —
-            // `def.transform.scale` is how the loader rehydrates the
-            // part's dimensions (see `instance_loader::spawn_instance`
-            // where the scale array is read back into `BasePart.size`
-            // for primitives and `Transform.scale` for custom-GLB).
-            if let Some((x, y, z)) = parse_vec3_value(val) {
-                def.transform.scale = [x, y, z]; true
-            } else { false }
-        }
-        "Rotation" => {
-            // Accept Euler degrees Vec3 "x, y, z" and convert to quaternion [x, y, z, w]
-            if let Some((ex, ey, ez)) = parse_vec3_value(val) {
-                let q = bevy::math::Quat::from_euler(
-                    bevy::math::EulerRot::XYZ,
-                    ex.to_radians(),
-                    ey.to_radians(),
-                    ez.to_radians(),
-                );
-                def.transform.rotation = [q.x, q.y, q.z, q.w]; true
-            } else { false }
-        }
-        
-        // Appearance (properties section)
-        "Color" => {
-            // Accept 0-255 integer RGB input from Properties panel, convert to 0.0-1.0 internal
-            let parts: Vec<f32> = val.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-            if parts.len() >= 3 {
-                // Heuristic: if any value > 1.0, treat all as 0-255 integers
-                let is_u8 = parts.iter().any(|&v| v > 1.0);
-                if is_u8 {
-                    def.properties.color = [
-                        parts[0] / 255.0, parts[1] / 255.0, parts[2] / 255.0,
-                        parts.get(3).map(|&a| a / 255.0).unwrap_or(1.0),
-                    ]; true
-                } else {
-                    def.properties.color = [parts[0], parts[1], parts[2], parts.get(3).copied().unwrap_or(1.0)]; true
-                }
-            } else { false }
-        }
-        "Transparency" => { if let Ok(v) = val.parse() { def.properties.transparency = v; true } else { false } }
-        "Reflectance" => { if let Ok(v) = val.parse() { def.properties.reflectance = v; true } else { false } }
-        "CastShadow" => { def.properties.cast_shadow = val == "true"; true }
-        "Material" => { def.properties.material = val.to_string(); true }
-        
-        // Physics (properties section)
-        "Anchored" => { def.properties.anchored = val == "true"; true }
-        "CanCollide" => { def.properties.can_collide = val == "true"; true }
-        "Locked" => { def.properties.locked = val == "true"; true }
-        
-        // Material section (realism)
-        k if k.starts_with("Material.") || is_material_prop(k) => {
-            let mat = def.material.get_or_insert_with(Default::default);
-            update_material_property(mat, k, val)
-        }
-        
-        // Thermodynamic section (realism)
-        k if k.starts_with("Thermodynamic.") || is_thermo_prop(k) => {
-            let thermo = def.thermodynamic.get_or_insert_with(Default::default);
-            update_thermo_property(thermo, k, val)
-        }
-        
-        // Electrochemical section (realism)
-        k if k.starts_with("Electrochemical.") || is_echem_prop(k) => {
-            let echem = def.electrochemical.get_or_insert_with(Default::default);
-            update_echem_property(echem, k, val)
-        }
-        
-        // UI class properties — routed to [ui] section
-        k if is_ui_prop(k) => {
-            let ui = def.ui.get_or_insert_with(Default::default);
-            update_ui_property(ui, k, val)
-        }
-        
-        _ => false
-    }
-}
+    current_transform: Option<([f32; 3], [f32; 4], [f32; 3])>,
+) -> Result<bool, String> {
+    let raw = std::fs::read_to_string(toml_path)
+        .map_err(|e| format!("read {}: {}", toml_path.display(), e))?;
+    let mut doc: toml::Value = raw
+        .parse()
+        .map_err(|e| format!("parse {}: {}", toml_path.display(), e))?;
+    let root = match doc.as_table_mut() {
+        Some(t) => t,
+        None => return Err(format!("{}: top-level is not a table", toml_path.display())),
+    };
 
-fn is_material_prop(k: &str) -> bool {
-    matches!(k, "YoungModulus" | "PoissonRatio" | "YieldStrength" | "UltimateStrength" | 
-        "FractureToughness" | "Hardness" | "ThermalConductivity" | "SpecificHeat" | 
-        "ThermalExpansion" | "MeltingPoint" | "Density" | "FrictionStatic" | 
-        "FrictionKinetic" | "Restitution")
-}
-
-fn is_thermo_prop(k: &str) -> bool {
-    matches!(k, "Temperature" | "Pressure" | "Volume" | "InternalEnergy" | "Entropy" | "Enthalpy" | "Moles")
-}
-
-fn is_echem_prop(k: &str) -> bool {
-    matches!(k, "Voltage" | "TerminalVoltage" | "CapacityAh" | "SOC" | "Current" | 
-        "InternalResistance" | "IonicConductivity" | "CycleCount" | "CRate" | 
-        "CapacityRetention" | "HeatGeneration" | "DendriteRisk")
-}
-
-fn update_material_property(mat: &mut crate::space::instance_loader::TomlMaterialProperties, key: &str, val: &str) -> bool {
-    let k = key.strip_prefix("Material.").unwrap_or(key);
-    match k {
-        "Name" => { mat.name = val.to_string(); true }
-        "YoungModulus" | "young_modulus" => { if let Ok(v) = val.parse() { mat.young_modulus = v; true } else { false } }
-        "PoissonRatio" | "poisson_ratio" => { if let Ok(v) = val.parse() { mat.poisson_ratio = v; true } else { false } }
-        "YieldStrength" | "yield_strength" => { if let Ok(v) = val.parse() { mat.yield_strength = v; true } else { false } }
-        "UltimateStrength" | "ultimate_strength" => { if let Ok(v) = val.parse() { mat.ultimate_strength = v; true } else { false } }
-        "FractureToughness" | "fracture_toughness" => { if let Ok(v) = val.parse() { mat.fracture_toughness = v; true } else { false } }
-        "Hardness" | "hardness" => { if let Ok(v) = val.parse() { mat.hardness = v; true } else { false } }
-        "ThermalConductivity" | "thermal_conductivity" => { if let Ok(v) = val.parse() { mat.thermal_conductivity = v; true } else { false } }
-        "SpecificHeat" | "specific_heat" => { if let Ok(v) = val.parse() { mat.specific_heat = v; true } else { false } }
-        "ThermalExpansion" | "thermal_expansion" => { if let Ok(v) = val.parse() { mat.thermal_expansion = v; true } else { false } }
-        "MeltingPoint" | "melting_point" => { if let Ok(v) = val.parse() { mat.melting_point = v; true } else { false } }
-        "Density" | "density" => { if let Ok(v) = val.parse() { mat.density = v; true } else { false } }
-        "FrictionStatic" | "friction_static" => { if let Ok(v) = val.parse() { mat.friction_static = v; true } else { false } }
-        "FrictionKinetic" | "friction_kinetic" => { if let Ok(v) = val.parse() { mat.friction_kinetic = v; true } else { false } }
-        "Restitution" | "restitution" => { if let Ok(v) = val.parse() { mat.restitution = v; true } else { false } }
-        // Custom properties
-        _ => {
-            if let Ok(f) = val.parse::<f64>() {
-                mat.custom.insert(k.to_string(), toml::Value::Float(f));
-            } else {
-                mat.custom.insert(k.to_string(), toml::Value::String(val.to_string()));
-            }
-            true
+    // Sync the live transform if the caller passed one. Property edits
+    // happening MID-gizmo-drag would otherwise rewind position to the
+    // pre-drag value on disk.
+    if let Some((pos, rot, scale)) = current_transform {
+        let tform = root
+            .entry("transform".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(t) = tform.as_table_mut() {
+            t.insert("position".into(), float_arr(&pos));
+            t.insert("rotation".into(), float_arr(&rot));
+            t.insert("scale".into(),    float_arr(&scale));
         }
     }
-}
 
-fn update_thermo_property(thermo: &mut crate::space::instance_loader::TomlThermodynamicState, key: &str, val: &str) -> bool {
-    let k = key.strip_prefix("Thermodynamic.").unwrap_or(key);
-    match k {
-        "Temperature" | "temperature" => { if let Ok(v) = val.parse() { thermo.temperature = v; true } else { false } }
-        "Pressure" | "pressure" => { if let Ok(v) = val.parse() { thermo.pressure = v; true } else { false } }
-        "Volume" | "volume" => { if let Ok(v) = val.parse() { thermo.volume = v; true } else { false } }
-        "InternalEnergy" | "internal_energy" => { if let Ok(v) = val.parse() { thermo.internal_energy = v; true } else { false } }
-        "Entropy" | "entropy" => { if let Ok(v) = val.parse() { thermo.entropy = v; true } else { false } }
-        "Enthalpy" | "enthalpy" => { if let Ok(v) = val.parse() { thermo.enthalpy = v; true } else { false } }
-        "Moles" | "moles" => { if let Ok(v) = val.parse() { thermo.moles = v; true } else { false } }
-        _ => false
+    // Route the key → (section, field). If route_property returns None
+    // the key isn't persistable through this writer (the live ECS
+    // mutation still happened in the match arm — no harm done).
+    let Some((section, field, value)) = route_property(key, val) else {
+        return Ok(false);
+    };
+
+    let section_tbl = root
+        .entry(section.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let Some(tbl) = section_tbl.as_table_mut() else {
+        return Err(format!("{}: section [{}] is not a table", toml_path.display(), section));
+    };
+    tbl.insert(field.to_string(), value);
+
+    // Stamp last_modified for diff-tool friendliness.
+    let meta = root
+        .entry("metadata".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if let Some(t) = meta.as_table_mut() {
+        t.insert(
+            "last_modified".into(),
+            toml::Value::String(chrono::Utc::now().to_rfc3339()),
+        );
     }
+
+    let serialised = toml::to_string_pretty(&doc)
+        .map_err(|e| format!("serialise: {}", e))?;
+    crate::space::gui_loader::write_atomic(toml_path, serialised.as_bytes())
+        .map_err(|e| format!("write {}: {}", toml_path.display(), e))?;
+    Ok(true)
 }
 
-fn update_echem_property(echem: &mut crate::space::instance_loader::TomlElectrochemicalState, key: &str, val: &str) -> bool {
-    let k = key.strip_prefix("Electrochemical.").unwrap_or(key);
-    match k {
-        "Voltage" | "voltage" => { if let Ok(v) = val.parse() { echem.voltage = v; true } else { false } }
-        "TerminalVoltage" | "terminal_voltage" => { if let Ok(v) = val.parse() { echem.terminal_voltage = v; true } else { false } }
-        "CapacityAh" | "capacity_ah" => { if let Ok(v) = val.parse() { echem.capacity_ah = v; true } else { false } }
-        "SOC" | "soc" => { if let Ok(v) = val.parse() { echem.soc = v; true } else { false } }
-        "Current" | "current" => { if let Ok(v) = val.parse() { echem.current = v; true } else { false } }
-        "InternalResistance" | "internal_resistance" => { if let Ok(v) = val.parse() { echem.internal_resistance = v; true } else { false } }
-        "IonicConductivity" | "ionic_conductivity" => { if let Ok(v) = val.parse() { echem.ionic_conductivity = v; true } else { false } }
-        "CycleCount" | "cycle_count" => { if let Ok(v) = val.parse() { echem.cycle_count = v; true } else { false } }
-        "CRate" | "c_rate" => { if let Ok(v) = val.parse() { echem.c_rate = v; true } else { false } }
-        "CapacityRetention" | "capacity_retention" => { if let Ok(v) = val.parse() { echem.capacity_retention = v; true } else { false } }
-        "HeatGeneration" | "heat_generation" => { if let Ok(v) = val.parse() { echem.heat_generation = v; true } else { false } }
-        "DendriteRisk" | "dendrite_risk" => { if let Ok(v) = val.parse() { echem.dendrite_risk = v; true } else { false } }
-        _ => false
-    }
-}
-
-/// Returns true if the property key belongs to a UI class [ui] section
-fn is_ui_prop(k: &str) -> bool {
-    matches!(k,
-        "Text" | "RichText" | "TextScaled" | "TextWrapped" | "Font" |
-        "FontSize" | "LineHeight" |
-        "TextColor3" | "TextTransparency" | "TextStrokeColor3" | "TextStrokeTransparency" |
-        "TextXAlignment" | "TextYAlignment" |
-        "BackgroundColor3" | "BackgroundTransparency" | "BorderColor3" | "BorderSizePixel" |
-        "BorderMode" | "ClipsDescendants" | "ZIndex" | "LayoutOrder" | "Rotation" |
-        "AnchorPoint" | "PositionScale" | "PositionOffset" | "SizeScale" | "SizeOffset" |
-        "Visible" | "Active" | "AutoButtonColor" |
-        "Image" | "ImageColor3" | "ImageTransparency" | "ScaleType" |
-        "ScrollingEnabled" | "ScrollBarThickness" | "AutomaticSize"
-    )
-}
-
-/// Write a single UI property value into a UiInstanceProperties struct for TOML persistence.
-/// Returns true if the key was recognised and written.
-fn update_ui_property(
-    ui: &mut crate::space::instance_loader::UiInstanceProperties,
-    key: &str,
-    val: &str,
-) -> bool {
-    /// Parse "r, g, b" → [f32; 3]
-    fn parse_color3(s: &str) -> Option<[f32; 3]> {
-        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+/// Routing table: property key → (toml section, field name, value).
+///
+/// Single source of truth for how Properties-panel keys land in the
+/// TOML. Add a new property by adding ONE branch here — no per-class
+/// saver, no schema struct.
+///
+/// The function is intentionally schema-agnostic. It targets the
+/// section a typical `_instance.toml` carries for the given class of
+/// property (Parts use `[properties]`/`[transform]`; GUI elements use
+/// `[gui]`/`[text]`). Unrelated sections on the same file are left
+/// untouched, so a TextLabel embedded inside a Part folder gets its
+/// `[text]` patched without disturbing the parent's `[properties]`.
+fn route_property(key: &str, val: &str) -> Option<(&'static str, &'static str, toml::Value)> {
+    use toml::Value;
+    let parse_finite = |s: &str| -> Option<f64> {
+        s.parse::<f64>().ok().filter(|v| v.is_finite())
+    };
+    let parse_vec3 = |s: &str| -> Option<[f64; 3]> {
+        let p: Vec<f64> = s.split(',').filter_map(|v| parse_finite(v.trim())).collect();
         if p.len() >= 3 { Some([p[0], p[1], p[2]]) } else { None }
-    }
-    /// Parse "x, y" → [f32; 2]
-    fn parse_vec2(s: &str) -> Option<[f32; 2]> {
-        let p: Vec<f32> = s.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        if p.len() >= 2 { Some([p[0], p[1]]) } else { None }
-    }
+    };
+    let color_255_to_01 = |s: &str| -> Option<Value> {
+        let p: Vec<f64> = s.split(',').filter_map(|v| parse_finite(v.trim())).collect();
+        if p.len() >= 3 {
+            Some(Value::Array(vec![
+                Value::Float(p[0] / 255.0),
+                Value::Float(p[1] / 255.0),
+                Value::Float(p[2] / 255.0),
+                Value::Float(p.get(3).copied().unwrap_or(255.0) / 255.0),
+            ]))
+        } else {
+            None
+        }
+    };
+    let color_01 = |s: &str| -> Option<Value> {
+        let p: Vec<f64> = s.split(',').filter_map(|v| parse_finite(v.trim())).collect();
+        if p.len() >= 3 {
+            Some(Value::Array(vec![
+                Value::Float(p[0]),
+                Value::Float(p[1]),
+                Value::Float(p[2]),
+                Value::Float(p.get(3).copied().unwrap_or(1.0)),
+            ]))
+        } else {
+            None
+        }
+    };
+    let bool_value = |s: &str| -> Value { Value::Boolean(s == "true") };
 
     match key {
-        "Text"                   => { ui.text = val.to_string(); true }
-        "RichText"               => { ui.rich_text = val == "true"; true }
-        "TextScaled"             => { ui.text_scaled = val == "true"; true }
-        "TextWrapped"            => { ui.text_wrapped = val == "true"; true }
-        "Font"                   => { ui.font = val.to_string(); true }
-        "FontSize"               => { if let Ok(v) = val.parse::<f32>() { ui.font_size = v.max(1.0); true } else { false } }
-        "LineHeight"             => { if let Ok(v) = val.parse::<f32>() { ui.line_height = v; true } else { false } }
-        "TextColor3"             => { if let Some(c) = parse_color3(val) { ui.text_color3 = c; true } else { false } }
-        "TextTransparency"       => { if let Ok(v) = val.parse::<f32>() { ui.text_transparency = v.clamp(0.0,1.0); true } else { false } }
-        "TextStrokeColor3"       => { if let Some(c) = parse_color3(val) { ui.text_stroke_color3 = c; true } else { false } }
-        "TextStrokeTransparency" => { if let Ok(v) = val.parse::<f32>() { ui.text_stroke_transparency = v.clamp(0.0,1.0); true } else { false } }
-        "TextXAlignment"         => { ui.text_x_alignment = val.to_string(); true }
-        "TextYAlignment"         => { ui.text_y_alignment = val.to_string(); true }
-        "BackgroundColor3"       => { if let Some(c) = parse_color3(val) { ui.background_color3 = c; true } else { false } }
-        "BackgroundTransparency" => { if let Ok(v) = val.parse::<f32>() { ui.background_transparency = v.clamp(0.0,1.0); true } else { false } }
-        "BorderColor3"           => { if let Some(c) = parse_color3(val) { ui.border_color3 = c; true } else { false } }
-        "BorderSizePixel"        => { if let Ok(v) = val.parse::<i32>() { ui.border_size_pixel = v.max(0); true } else { false } }
-        "BorderMode"             => { ui.border_mode = val.to_string(); true }
-        "ClipsDescendants"       => { ui.clips_descendants = val == "true"; true }
-        "ZIndex"                 => { if let Ok(v) = val.parse::<i32>() { ui.z_index = v; true } else { false } }
-        "LayoutOrder"            => { if let Ok(v) = val.parse::<i32>() { ui.layout_order = v; true } else { false } }
-        "Rotation"               => { if let Ok(v) = val.parse::<f32>() { ui.rotation = v; true } else { false } }
-        "AnchorPoint"            => { if let Some(v) = parse_vec2(val) { ui.anchor_point = v; true } else { false } }
-        "PositionScale"          => { if let Some(v) = parse_vec2(val) { ui.position_scale = v; true } else { false } }
-        "PositionOffset"         => { if let Some(v) = parse_vec2(val) { ui.position_offset = v; true } else { false } }
-        "SizeScale"              => { if let Some(v) = parse_vec2(val) { ui.size_scale = v; true } else { false } }
-        "SizeOffset"             => { if let Some(v) = parse_vec2(val) { ui.size_offset = v; true } else { false } }
-        "Visible"                => { ui.visible = val == "true"; true }
-        "Active"                 => { ui.active = val == "true"; true }
-        "AutoButtonColor"        => { ui.auto_button_color = val == "true"; true }
-        "Image"                  => { ui.image = val.to_string(); true }
-        "ImageColor3"            => { if let Some(c) = parse_color3(val) { ui.image_color3 = c; true } else { false } }
-        "ImageTransparency"      => { if let Ok(v) = val.parse::<f32>() { ui.image_transparency = v.clamp(0.0,1.0); true } else { false } }
-        "ScaleType"              => { ui.scale_type = val.to_string(); true }
-        "ScrollingEnabled"       => { ui.scrolling_enabled = val == "true"; true }
-        "ScrollBarThickness"     => { if let Ok(v) = val.parse::<i32>() { ui.scroll_bar_thickness = v.max(0); true } else { false } }
-        "AutomaticSize"          => { ui.automatic_size = val.to_string(); true }
-        _ => false
+        // ── [metadata] ────────────────────────────────────────────────
+        "Archivable"     => Some(("metadata", "archivable", bool_value(val))),
+
+        // ── [asset] ───────────────────────────────────────────────────
+        "Mesh"           => Some(("asset", "mesh", Value::String(val.to_string()))),
+        "Scene"          => Some(("asset", "scene", Value::String(val.to_string()))),
+
+        // ── [transform] (Part/Folder/Model world placement) ──────────
+        // Position and Size share their key names with the GUI UDim2
+        // variants — the panel emits 3 floats for world transforms,
+        // 4 floats for UDim2 (scale_x, offset_x, scale_y, offset_y).
+        // Disambiguate by field count, NOT by parse_vec3 success (a
+        // 4-tuple parses fine as Vec3 too if we don't count).
+        "Position" => {
+            let parts: Vec<f64> = val.split(',').filter_map(|v| parse_finite(v.trim())).collect();
+            match parts.len() {
+                3 => Some(("transform", "position", float_arr_f64(&parts))),
+                4 => Some((
+                    "gui", "position",
+                    Value::Table({
+                        let mut t = toml::map::Map::new();
+                        t.insert("x".into(), udim_pair(parts[0], parts[1]));
+                        t.insert("y".into(), udim_pair(parts[2], parts[3]));
+                        t
+                    }),
+                )),
+                _ => None,
+            }
+        }
+        "Scale"     if parse_vec3(val).is_some()  => parse_vec3(val).map(|v| {
+            ("transform", "scale",    float_arr_f64(&v))
+        }),
+        "Rotation"  if parse_vec3(val).is_some() => parse_vec3(val).map(|euler| {
+            // Euler degrees → quaternion [x, y, z, w].
+            let q = bevy::math::Quat::from_euler(
+                bevy::math::EulerRot::XYZ,
+                (euler[0] as f32).to_radians(),
+                (euler[1] as f32).to_radians(),
+                (euler[2] as f32).to_radians(),
+            );
+            ("transform", "rotation",
+                Value::Array(vec![
+                    Value::Float(q.x as f64), Value::Float(q.y as f64),
+                    Value::Float(q.z as f64), Value::Float(q.w as f64),
+                ]))
+        }),
+
+        // ── [properties] (Part visual + physics) ─────────────────────
+        "Color"          => color_255_to_01(val).map(|v| ("properties", "color", v)),
+        "Material"       => Some(("properties", "material", Value::String(val.to_string()))),
+        "Anchored"       => Some(("properties", "anchored", bool_value(val))),
+        "CanCollide"     => Some(("properties", "can_collide", bool_value(val))),
+        "Transparency"   => parse_finite(val).map(|v| ("properties", "transparency", Value::Float(v))),
+        "Reflectance"    => parse_finite(val).map(|v| ("properties", "reflectance", Value::Float(v))),
+        "Locked"         => Some(("properties", "locked", bool_value(val))),
+        "CastShadow"     => Some(("properties", "cast_shadow", bool_value(val))),
+
+        // ── [gui] (GuiTomlFile shared layout fields) ─────────────────
+        "ZIndex"         => val.parse::<i64>().ok().map(|v| ("gui", "z_index", Value::Integer(v))),
+        "Visible"        => Some(("gui", "visible", bool_value(val))),
+        "ClipsDescendants" | "ClipChildren" => Some(("gui", "clips_descendants", bool_value(val))),
+        "Active"         => Some(("gui", "active", bool_value(val))),
+        "Enabled"        => Some(("gui", "enabled", bool_value(val))),
+        "AlwaysOnTop"    => Some(("gui", "always_on_top", bool_value(val))),
+        "FaceCamera"     => Some(("gui", "face_camera", bool_value(val))),
+        "AnchorPoint"    => {
+            let p: Vec<f64> = val.split(',').filter_map(|v| parse_finite(v.trim())).collect();
+            if p.len() >= 2 {
+                Some(("gui", "anchor_point", Value::Array(vec![
+                    Value::Float(p[0]), Value::Float(p[1]),
+                ])))
+            } else { None }
+        }
+        "BackgroundColor" => color_255_to_01(val).map(|v| ("gui", "background_color", v)),
+        "BackgroundColor3" => color_01(val).map(|v| ("gui", "background_color", v)),
+        "BorderColor"    => color_255_to_01(val).map(|v| ("gui", "border_color", v)),
+        "BorderColor3"   => color_01(val).map(|v| ("gui", "border_color", v)),
+        "BorderSize" | "BorderSizePixel" => parse_finite(val).map(|v| ("gui", "border_size", Value::Float(v))),
+        "CornerRadius"   => parse_finite(val).map(|v| ("gui", "corner_radius", Value::Float(v))),
+
+        // BillboardGui-specific [gui] fields
+        "MaxDistance"            => parse_finite(val).map(|v| ("gui", "max_distance", Value::Float(v))),
+        "DistanceLowerLimit"     => parse_finite(val).map(|v| ("gui", "distance_lower_limit", Value::Float(v))),
+        "DistanceUpperLimit"     => parse_finite(val).map(|v| ("gui", "distance_upper_limit", Value::Float(v))),
+        "DistanceStep"           => parse_finite(val).map(|v| ("gui", "distance_step", Value::Float(v))),
+        "Brightness"             => parse_finite(val).map(|v| ("gui", "brightness", Value::Float(v))),
+        "LightInfluence"         => parse_finite(val).map(|v| ("gui", "light_influence", Value::Float(v))),
+        "ResetOnSpawn"           => Some(("gui", "reset_on_spawn", bool_value(val))),
+        "StiffnessByDistance"    => Some(("gui", "stiffness_by_distance", bool_value(val))),
+        "ZIndexBehavior"         => Some(("gui", "z_index_behavior", Value::String(val.to_string()))),
+        "UnitsOffset"            => parse_vec3(val).map(|v| ("gui", "units_offset", float_arr_f64(&v))),
+        "UnitsOffsetWorldSpace"  => parse_vec3(val).map(|v| ("gui", "units_offset_world_space", float_arr_f64(&v))),
+        "ExtentsOffset"          => parse_vec3(val).map(|v| ("gui", "extents_offset", float_arr_f64(&v))),
+        "ExtentsOffsetWorldSpace"=> parse_vec3(val).map(|v| ("gui", "extents_offset_world_space", float_arr_f64(&v))),
+
+        // `Size` likewise disambiguated by field count: 3-tuple → world
+        // (`[transform].scale`), 4-tuple → UDim2 (`[gui].size`).
+        "Size" => {
+            let parts: Vec<f64> = val.split(',').filter_map(|v| parse_finite(v.trim())).collect();
+            match parts.len() {
+                3 => Some(("transform", "scale", float_arr_f64(&parts))),
+                4 => Some((
+                    "gui", "size",
+                    Value::Table({
+                        let mut t = toml::map::Map::new();
+                        t.insert("x".into(), udim_pair(parts[0], parts[1]));
+                        t.insert("y".into(), udim_pair(parts[2], parts[3]));
+                        t
+                    }),
+                )),
+                _ => None,
+            }
+        }
+
+        // ── [text] (TextLabel / TextButton / TextBox) ─────────────────
+        "Text"           => Some(("text", "text", Value::String(val.to_string()))),
+        "FontSize"       => parse_finite(val).map(|v| {
+            ("text", "font_size", Value::Float(v.clamp(1.0, 72.0)))
+        }),
+        "Font"           => Some(("text", "font", Value::String(val.to_string()))),
+        "LineHeight"     => parse_finite(val).map(|v| ("text", "line_height", Value::Float(v))),
+        "TextScaled"     => Some(("text", "text_scaled", bool_value(val))),
+        "TextWrapped"    => Some(("text", "text_wrapped", bool_value(val))),
+        "RichText"       => Some(("text", "rich_text", bool_value(val))),
+        "TextXAlignment" => Some(("text", "text_x_alignment", Value::String(val.to_string()))),
+        "TextYAlignment" => Some(("text", "text_y_alignment", Value::String(val.to_string()))),
+        // text_color in GuiTomlText is [r,g,b,a]. Apply transparency in
+        // a separate write to keep route_property single-purpose.
+        "TextColor"      => color_255_to_01(val).map(|v| ("text", "text_color", v)),
+        "TextColor3"     => color_01(val).map(|v| ("text", "text_color", v)),
+
+        _ => None,
     }
 }
+
+/// `[f32; N]` → TOML float array helper for the transform sync path.
+fn float_arr<const N: usize>(arr: &[f32; N]) -> toml::Value {
+    toml::Value::Array(arr.iter().map(|&v| toml::Value::Float(v as f64)).collect())
+}
+
+fn float_arr_f64(arr: &[f64]) -> toml::Value {
+    toml::Value::Array(arr.iter().map(|&v| toml::Value::Float(v)).collect())
+}
+
+/// Pack a UDim component (scale, offset) into a `{ scale, offset }` table
+/// for inline TOML — matches what the loader expects for `[gui].position`
+/// and `[gui].size`.
+fn udim_pair(scale: f64, offset: f64) -> toml::Value {
+    let mut t = toml::map::Map::new();
+    t.insert("scale".into(),  toml::Value::Float(scale));
+    t.insert("offset".into(), toml::Value::Float(offset));
+    toml::Value::Table(t)
+}
+
+/// Compact-numeric formatter for UDim2 components: trims trailing zeros
+/// so `0.0` renders as `0` and `200.0` as `200`, while `0.5` keeps the
+/// fraction. Keeps the panel readable at a glance.
+fn fmt_udim_n(v: f32) -> String {
+    if v == v.trunc() {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
+// Removed in the 2026-05-13 properties-write unification:
+//   - `update_toml_property`        (strongly-typed dispatcher)
+//   - `is_material_prop`, `update_material_property`
+//   - `is_thermo_prop`,   `update_thermo_property`
+//   - `is_echem_prop`,    `update_echem_property`
+//   - `is_ui_prop`,       `update_ui_property`
+//
+// All property writes from the Properties panel now flow through the
+// single `apply_property_to_toml_value` / `route_property` pair above,
+// which patches `toml::Value` directly. The strongly-typed
+// per-section helpers were the "one-off" duplicated writer path that
+// fought the GUI-class savers on disk; their routing semantics live
+// inline in `route_property` now (one match arm per key, schema-
+// agnostic). Realism property keys (Material.*, Thermodynamic.*,
+// Electrochemical.*) are queued for re-introduction directly in
+// (Realism property updaters removed in the same pass — see the
+// removal note above. They were only reachable via
+// `update_toml_property`, which `route_property` replaces.)
 
 /// Parses a Vec3 string "x, y, z" into f32 tuple for TOML write-back.
 /// Accepts any comma-separated string with ≥ 3 numeric parts; extras are
@@ -12746,6 +13635,17 @@ fn parse_vec3_string(value: &str) -> (String, String, String) {
         [x] => (x.to_string(), "0".to_string(), "0".to_string()),
         _ => ("0".to_string(), "0".to_string(), "0".to_string()),
     }
+}
+
+/// Parse a UDim2 display string (`scale_x, offset_x, scale_y, offset_y`)
+/// into its four sub-fields. Mirrors the `property_value_to_display`
+/// formatter so the round-trip through the Slint row is lossless.
+/// Missing trailing values default to "0" so an in-progress edit
+/// (e.g. just typing `0.5,`) doesn't clobber the other axes.
+fn parse_udim2_string(value: &str) -> (String, String, String, String) {
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    let g = |i: usize| parts.get(i).map(|s| s.to_string()).unwrap_or_else(|| "0".to_string());
+    (g(0), g(1), g(2), g(3))
 }
 
 /// Pick the user-facing identifier for an instance to display in the
@@ -12843,6 +13743,10 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            x_scale: slint::SharedString::default(),
+            x_offset: slint::SharedString::default(),
+            y_scale: slint::SharedString::default(),
+            y_offset: slint::SharedString::default(),
             color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
@@ -12898,13 +13802,13 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
     ui.set_entity_properties(slint::ModelRc::from(model_rc));
 }
 
-/// Load service properties from TOML definition file
+/// Load service properties from TOML definition file. Reads from common's
+/// canonical asset dir — the engine's sister copy was deleted in the
+/// 2026-05-12 consolidation.
 fn load_service_properties_from_toml(service_name: &str) -> Option<toml::Value> {
-    let toml_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("service_properties")
+    let toml_path = eustress_common::service_properties_dir()
         .join(format!("{}.toml", service_name));
-    
+
     if let Ok(content) = std::fs::read_to_string(&toml_path) {
         toml::from_str(&content).ok()
     } else {
@@ -12940,6 +13844,11 @@ fn build_service_properties(
         } else {
             slint::Color::from_rgb_u8(0x80, 0x80, 0x80)
         };
+        let (xs, xo, ys, yo) = if prop_type == "udim2" {
+            parse_udim2_string(value)
+        } else {
+            (String::new(), String::new(), String::new(), String::new())
+        };
         PropertyData {
             name: name.into(),
             value: value.into(),
@@ -12952,6 +13861,10 @@ fn build_service_properties(
             x_value: slint::SharedString::default(),
             y_value: slint::SharedString::default(),
             z_value: slint::SharedString::default(),
+            x_scale: xs.into(),
+            x_offset: xo.into(),
+            y_scale: ys.into(),
+            y_offset: yo.into(),
             color_value,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),

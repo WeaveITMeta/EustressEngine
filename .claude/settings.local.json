@@ -84,7 +84,30 @@
       "Bash(Select-Object -First 30 FullName)",
       "Bash(ls \"C:/Users/miksu/AppData/Local/Temp/\" 2>/dev/null | grep -iE \"screenshot|paste|claude\" | head -10; ls \"C:/Users/miksu/Pictures/Screenshots/\" 2>/dev/null | tail -5)",
       "Read(//c/Users/miksu/AppData/Local/Temp/**)",
-      "Read(//c/Users/miksu/Pictures/**)"
+      "Read(//c/Users/miksu/Pictures/**)",
+      "Bash(find ~/.cargo/registry/src -name \"mesh_view_bindings.wgsl\" 2>/dev/null | head -3)",
+      "Read(//c/Users/miksu/.cargo/registry/src/**)",
+      "Bash(cat \"c:/Users/miksu/Documents/Eustress/Test123/Spaces/Space1/Workspace/TextLabel/_instance.toml\")",
+      "Read(//c/Users/miksu/Documents/Eustress/Test123/Spaces/Space1/Workspace/TextLabel/**)",
+      "Bash(find \"c:/Users/miksu/Documents/Eustress\" -name \"_instance.toml\" | xargs grep -l \"BillboardGui\" 2>/dev/null | head -5)",
+      "Read(//c/Users/miksu/Documents/Eustress/**)",
+      "Bash(find \"E:\\\\Workspace\\\\EustressEngine\" -name \"file_loader.rs\" 2>nul)",
+      "Bash(cp -rn eustress/crates/engine/assets/service_templates/. eustress/crates/common/assets/service_templates/)",
+      "Bash(cp -rn eustress/crates/engine/assets/service_properties eustress/crates/common/assets/)",
+      "Bash(findstr /n \"ChildOf\" eustress\\\\crates\\\\engine\\\\src\\\\ui\\\\slint_ui.rs)",
+      "Bash(findstr -i \"remove\\\\|reparent\\\\|3257\")",
+      "Bash(ls \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\")",
+      "Bash(grep -r \"GuiElementDisplay\\\\|label_hash\\\\|TextLabel\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\")",
+      "Bash(grep -r \"edit_mode\\\\|text_input\\\\|EditMode\\\\|TextInputState\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\")",
+      "Bash(grep -r \"SlintUIFocus\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\" -A 10)",
+      "Bash(grep -r \"pub struct SlintUIFocus\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\" -A 10)",
+      "Bash(grep -r \"Changed<GuiElementDisplay>\\\\|GuiElementDisplay.*Changed\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\\" --include=\"*.rs\")",
+      "Bash(grep -r \"just_pressed\\\\|pressed_time\\\\|click_time\\\\|frame.*click\\\\|last_click\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\")",
+      "Bash(grep -r \"_instance.toml\\\\|Changed.*Text\\\\|Text.*Changed\\\\|PropertyPanel\\\\|write_back\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\engine\\\\\\\\src\\\\\\\\\" --include=\"*.rs\")",
+      "Bash(grep -r \"pub struct.*TextLabel\\\\|pub text:\" \"e:\\\\\\\\Workspace\\\\\\\\EustressEngine\\\\\\\\eustress\\\\\\\\crates\\\\\\\\common\\\\\\\\src\\\\\\\\\" --include=\"*.rs\" -A 5)"
+    ],
+    "additionalDirectories": [
+      "E:\\Workspace\\EustressEngine"
     ]
   },
   "enableAllProjectMcpServers": true,

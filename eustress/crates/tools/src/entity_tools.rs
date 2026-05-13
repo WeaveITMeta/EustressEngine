@@ -71,17 +71,25 @@ impl ToolHandler for CreateEntityTool {
     }
 
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
-        let class = input.get("class").and_then(|v| v.as_str()).unwrap_or("Part");
+        let class_raw = input.get("class").and_then(|v| v.as_str()).unwrap_or("Part");
         let shape = input.get("shape").and_then(|v| v.as_str()).unwrap_or("block");
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("NewPart");
         let position = parse_vec3(&input, "position", [0.0, 0.0, 0.0]);
         let size = parse_vec3(&input, "size", [1.0, 1.0, 1.0]);
-        let material = input.get("material").and_then(|v| v.as_str()).unwrap_or("Plastic");
+        let material = input.get("material").and_then(|v| v.as_str()).map(str::to_string);
         let color = parse_vec3(&input, "color", [0.639, 0.635, 0.647]);
-        let anchored = input.get("anchored").and_then(|v| v.as_bool()).unwrap_or(true);
-        let can_collide = input.get("can_collide").and_then(|v| v.as_bool()).unwrap_or(true);
+        let anchored = input.get("anchored").and_then(|v| v.as_bool());
+        let can_collide = input.get("can_collide").and_then(|v| v.as_bool());
 
-        let safe_name = name.replace(' ', "_").replace('/', "_");
+        // If `class` is actually a primitive shape name ("Ball",
+        // "Cylinder", …) the caller probably meant `class=Part,
+        // shape=ball` — fold it back so older prompts keep working.
+        let (class, shape) = if primitive_mesh_path(class_raw).is_some() {
+            ("Part", class_raw)
+        } else {
+            (class_raw, shape)
+        };
+
         let workspace_dir = ctx.space_root.join("Workspace");
 
         // Optional parent path: place entity inside a Model folder hierarchy.
@@ -106,72 +114,50 @@ impl ToolHandler for CreateEntityTool {
             workspace_dir.join(parent_path)
         };
 
-        let instance_dir = base_dir.join(&safe_name);
-        let _ = std::fs::create_dir_all(&instance_dir);
-        let filepath = instance_dir.join("_instance.toml");
-
-        // Pick the mesh asset for the class. `Part` + any known
-        // primitive shape gets a real `assets/parts/*.glb` reference.
-        // `Model` / unknown classes skip the `[asset]` section (they
-        // render as folder-containers, not meshes).
-        let asset_section = if class.eq_ignore_ascii_case("Part") {
-            let mesh = primitive_mesh_path(shape)
-                .unwrap_or("assets/parts/block.glb");
-            format!(
-"[asset]\nmesh = \"{mesh}\"\nscene = \"Scene0\"\n\n"
-            )
-        } else if let Some(mesh) = primitive_mesh_path(class) {
-            // Caller passed a shape name as `class` (e.g. "Ball") —
-            // accept it so older prompts keep working.
-            format!(
-"[asset]\nmesh = \"{mesh}\"\nscene = \"Scene0\"\n\n"
-            )
+        // Pick the mesh asset. Only `Part` gets one — `Model` / scripts
+        // / services skip `[asset]` and render as folder-containers.
+        let asset_mesh = if class.eq_ignore_ascii_case("Part") {
+            Some(primitive_mesh_path(shape).unwrap_or("parts/block.glb").to_string())
         } else {
-            String::new()
+            None
         };
 
-        let toml_content = format!(
-r#"[metadata]
-class_name = "{class}"
-name = "{name}"
-archivable = true
+        let has_asset = asset_mesh.is_some();
+        let overrides = eustress_common::instance_create::InstanceOverrides {
+            display_name: Some(name.to_string()),
+            position: Some(position),
+            scale: Some(size),
+            color_rgba: Some([color[0], color[1], color[2], 1.0]),
+            material,
+            anchored,
+            can_collide,
+            asset_mesh,
+            asset_path: None,
+            rotation: None,
+        };
 
-{asset_section}[transform]
-position = [{px}, {py}, {pz}]
-rotation = [0.0, 0.0, 0.0, 1.0]
-scale = [{sx}, {sy}, {sz}]
-
-[properties]
-material = "{material}"
-color = [{cr}, {cg}, {cb}, 1.0]
-transparency = 0.0
-anchored = {anchored}
-can_collide = {can_collide}
-cast_shadow = true
-reflectance = 0.0
-locked = false
-"#,
-            px = position[0], py = position[1], pz = position[2],
-            sx = size[0],     sy = size[1],     sz = size[2],
-            cr = color[0],    cg = color[1],    cb = color[2],
-        );
-
-        match std::fs::write(&filepath, &toml_content) {
-            Ok(_) => ToolResult {
+        match eustress_common::instance_create::create_instance(
+            &base_dir,
+            class,
+            Some(name),
+            overrides,
+        ) {
+            Ok(created) => ToolResult {
                 tool_name: "create_entity".to_string(),
                 tool_use_id: String::new(),
                 success: true,
                 content: format!(
                     "Created {} '{}' at [{:.1}, {:.1}, {:.1}] (shape={}, asset={})",
-                    class, name, position[0], position[1], position[2], shape,
-                    if asset_section.is_empty() { "none" } else { "attached" }
+                    class, created.folder_name,
+                    position[0], position[1], position[2], shape,
+                    if has_asset { "attached" } else { "none" }
                 ),
                 structured_data: Some(serde_json::json!({
                     "class": class,
                     "shape": shape,
-                    "name": name,
-                    "file": filepath.to_string_lossy(),
-                    "has_asset": !asset_section.is_empty(),
+                    "name": created.folder_name,
+                    "file": created.toml_path.to_string_lossy(),
+                    "has_asset": has_asset,
                 })),
                 stream_topic: Some("workshop.tool.create_entity".to_string()),
             },

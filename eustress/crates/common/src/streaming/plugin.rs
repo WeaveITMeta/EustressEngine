@@ -10,7 +10,9 @@
 //! - StreamingActive         — Bevy Component: marks entities in the "moving" MoE fraction
 //!
 //! ## Systems (ordered)
-//! 1. sys_drain_watcher_events  — drain notify events, update grid, fire InstanceReloaded
+//! 1. sys_apply_file_changed    — consume the engine's `FileChanged` broadcast,
+//!                                 invalidate sidecars, refresh the grid record,
+//!                                 fire `InstanceReloaded` for any Active entity
 //! 2. sys_radius_gate           — evaluate hysteresis gate, promote/demote chunks
 //! 3. sys_sync_active_transforms — Changed<Transform> → update InstanceRecord.bin (MoE sparse gate)
 //! 4. sys_rebuild_index         — periodically rebuild the Explorer index from the grid
@@ -32,7 +34,8 @@ use super::chunk_grid::SpatialChunkGrid;
 use super::dirty_flusher::DirtyBitFlusher;
 use super::instance_index::InstanceIndex;
 use super::radius_gate::{GateDecision, GateStats, HysteresisRadiusGate};
-use super::toml_watcher::{TomlWatcher, WatchEvent};
+// `WatchEvent` is referenced via the fully-qualified path in
+// `sys_apply_file_changed` below, so no `use` needed here.
 use super::types::{InstanceBin, InstanceId, InstanceRecord, StreamingConfig, Tier};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -98,8 +101,13 @@ pub struct StreamingState {
     pub gate: HysteresisRadiusGate,
     /// The dirty-bit write-back flusher (background thread).
     pub flusher: Option<DirtyBitFlusher>,
-    /// The TOML file watcher (notify-based).
-    pub watcher: Option<TomlWatcher>,
+    // Note: this used to hold a `TomlWatcher` with its own
+    // `notify::RecommendedWatcher`. That instance was removed in the
+    // 2026-05-12 watcher consolidation — the workspace now has
+    // exactly ONE notify watcher (`engine::space::file_watcher`) and
+    // streaming reacts to its `FileChanged` broadcast via
+    // `sys_apply_file_changed`. See `super::toml_watcher` module
+    // docs for the design rationale.
     /// The flat metadata index for Explorer queries.
     pub index: InstanceIndex,
     /// Streaming configuration.
@@ -140,14 +148,15 @@ impl Plugin for StreamingPlugin {
         // Start the dirty-bit flusher background thread.
         let flusher = DirtyBitFlusher::start(grid.clone(), self.config.clone());
 
-        // Start the TOML file watcher.
-        let watcher = match TomlWatcher::start(&self.instances_dir, grid.clone()) {
-            Ok(w) => Some(w),
-            Err(error) => {
-                tracing::warn!("StreamingPlugin: TomlWatcher failed to start: {error}");
-                None
-            }
-        };
+        // NOTE: no more `TomlWatcher::start` here. The streaming
+        // module used to run its own `notify::RecommendedWatcher`
+        // alongside the engine's `SpaceFileWatcher`, on the same
+        // `Workspace/` tree. Two watchers reading the same files
+        // raced on every write (`os error 32` / "file in use by
+        // another process") and silently dropped user edits. The
+        // workspace now has exactly ONE notify watcher (the engine's)
+        // and this plugin reacts to its `FileChanged` broadcast via
+        // `sys_apply_file_changed` below.
 
         // Build the radius gate.
         let gate = HysteresisRadiusGate::new(&self.config);
@@ -157,7 +166,6 @@ impl Plugin for StreamingPlugin {
             grid,
             gate,
             flusher: Some(flusher),
-            watcher,
             index: InstanceIndex::new(),
             config: self.config.clone(),
             last_index_rebuild: Instant::now(),
@@ -165,10 +173,15 @@ impl Plugin for StreamingPlugin {
             last_gate_stats: GateStats::default(),
         });
 
-        // Register messages (Bevy 0.18 API).
+        // Register downstream payload messages (Bevy 0.18 API).
         app.add_message::<InstanceReloaded>();
         app.add_message::<InstancePromoted>();
         app.add_message::<InstanceDemoted>();
+        // `FileChanged` is registered by the engine's space plugin —
+        // we read it here as a subscriber. If the engine plugin
+        // hasn't run yet (e.g. headless test harness), Bevy auto-
+        // initialises the message storage when our system first
+        // queries it.
 
         // Store the instances dir as a resource so the startup system can access it.
         app.insert_resource(StreamingInstancesDir(self.instances_dir.clone()));
@@ -176,9 +189,12 @@ impl Plugin for StreamingPlugin {
         // Startup: scan existing .toml files from disk into the grid.
         app.add_systems(Startup, sys_initial_disk_scan);
 
-        // Update systems in order.
+        // Update systems in order. `sys_apply_file_changed` replaces
+        // the old `sys_drain_watcher_events` and reads from the
+        // engine's shared `FileChanged` broadcast instead of an
+        // internal channel.
         app.add_systems(Update, (
-            sys_drain_watcher_events,
+            sys_apply_file_changed,
             sys_radius_gate,
             sys_sync_active_transforms,
             sys_rebuild_index,
@@ -373,23 +389,34 @@ struct DiskMetadata {
 fn default_class_name() -> String { "Part".to_string() }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// System 1: Drain watcher events → fire Bevy messages for Active entities
+// System 1: Apply shared FileChanged broadcast → grid + InstanceReloaded
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drain pending filesystem events from the TomlWatcher and fire Bevy messages
-/// for any Active entities that were modified externally.
-fn sys_drain_watcher_events(
+/// React to the engine's single notify-driven `FileChanged` broadcast.
+/// Filters to instance-TOML paths, applies updates to the
+/// `SpatialChunkGrid`, and fires `InstanceReloaded` messages for any
+/// Active entities whose backing TOML was modified.
+///
+/// Replaces the legacy `sys_drain_watcher_events` which read from an
+/// internal channel owned by a redundant `notify::Watcher`. See
+/// `super::toml_watcher` module docs for the consolidation rationale.
+fn sys_apply_file_changed(
     state: Res<StreamingState>,
+    mut reader: MessageReader<crate::file_events::FileChanged>,
     mut reloaded_messages: MessageWriter<InstanceReloaded>,
     query: Query<(Entity, &StreamingInstanceRef)>,
 ) {
-    let Some(watcher) = &state.watcher else { return };
-    let events = watcher.drain_events();
+    for change in reader.read() {
+        let Some(event) = super::toml_watcher::classify_file_change(&change.path, change.kind) else {
+            continue;
+        };
+        // Side-effects: invalidate sidecar + reload grid record from
+        // disk on Modify; Created/Deleted are no-ops at this layer
+        // (the radius gate's index rebuild handles tier transitions).
+        super::toml_watcher::apply_watch_event(&state.grid, &event);
 
-    for event in events {
         match event {
-            WatchEvent::Modified { instance_id, .. } => {
-                // If this instance has an Active entity, fire a reload message.
+            super::toml_watcher::WatchEvent::Modified { instance_id, .. } => {
                 for (entity, inst_ref) in query.iter() {
                     if inst_ref.instance_id == instance_id {
                         reloaded_messages.write(InstanceReloaded {
@@ -400,17 +427,13 @@ fn sys_drain_watcher_events(
                     }
                 }
             }
-            WatchEvent::Created { instance_id, toml_path } => {
+            super::toml_watcher::WatchEvent::Created { instance_id, toml_path } => {
                 tracing::debug!(
                     "StreamingPlugin: new instance {} at {}",
-                    instance_id, toml_path.display()
+                    instance_id, toml_path.display(),
                 );
-                // New instances start in Cold tier — the radius gate will
-                // promote them if they're within range on the next pass.
             }
-            WatchEvent::Deleted { instance_id, .. } => {
-                // Remove from the grid (state is immutable here, so we log
-                // and let the radius gate system handle cleanup via its mutable access).
+            super::toml_watcher::WatchEvent::Deleted { instance_id, .. } => {
                 tracing::debug!("StreamingPlugin: deleted instance {}", instance_id);
             }
         }

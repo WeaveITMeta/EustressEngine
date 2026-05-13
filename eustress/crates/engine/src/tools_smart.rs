@@ -526,14 +526,7 @@ impl ModalTool for PartSwapPositions {
                 kind: ToolOptionKind::Bool { value: self.swap_rotations },
                 advanced: true,
             },
-            ToolOptionControl {
-                id: "hint".to_string(),
-                label: "".to_string(),
-                kind: ToolOptionKind::Label {
-                    text: "Pick two parts to trade world positions. Esc cancels.".to_string(),
-                },
-                advanced: false,
-            },
+            // Hint label dropped — step_label conveys what to do next.
         ]
     }
 
@@ -652,16 +645,9 @@ impl ModalTool for EdgeAlign {
     }
 
     fn options(&self) -> Vec<ToolOptionControl> {
-        vec![
-            ToolOptionControl {
-                id: "hint".to_string(),
-                label: "".to_string(),
-                kind: ToolOptionKind::Label {
-                    text: "Pick source, then target. Source translates to align.".to_string(),
-                },
-                advanced: false,
-            },
-        ]
+        // No options — Edge Align is purely two-click. Step-label
+        // ("pick source part" → "pick target part") is the affordance.
+        Vec::new()
     }
 
     fn on_click(&mut self, hit: &ViewportHit, _ctx: &mut ToolContext) -> ToolStepResult {
@@ -1066,14 +1052,12 @@ impl ModalTool for GapFill {
                 kind: ToolOptionKind::Bool { value: self.preserve_material },
                 advanced: true,
             },
-            ToolOptionControl {
-                id: "hint".to_string(),
-                label: "".to_string(),
-                kind: ToolOptionKind::Label {
-                    text: "Pick two parts — stravant-style wedges fill the gap. Auto picks 2 (flat) or 4 (twisted) based on geometry.".to_string(),
-                },
-                advanced: false,
-            },
+            // Hint text removed — the step_label ("pick first part" →
+            // "pick second part" → "adjust thickness …") already conveys
+            // the next-action affordance. A long static description in
+            // the bar stretched it across the entire viewport for no
+            // additional info. Tooltip on the ribbon button is the
+            // right place for prose explanations.
         ]
     }
 
@@ -1485,14 +1469,7 @@ impl ModalTool for ResizeAlign {
                 kind: ToolOptionKind::Bool { value: self.join_surfaces },
                 advanced: true,
             },
-            ToolOptionControl {
-                id: "hint".to_string(),
-                label: "".to_string(),
-                kind: ToolOptionKind::Label {
-                    text: "Pick source, then target. Source resizes to align.".to_string(),
-                },
-                advanced: false,
-            },
+            // Hint label dropped — step_label already conveys the flow.
         ]
     }
 

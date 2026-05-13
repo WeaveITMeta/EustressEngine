@@ -44,6 +44,20 @@ pub struct ClipboardEntityData2 {
     /// Empty for Workspace entities.
     #[serde(default)]
     pub service_folder: String,
+    /// On-disk folder of the source entity. Set when the entity is
+    /// folder-backed (i.e. `_instance.toml` lives inside its own
+    /// directory, and any descendants live in subdirectories of that
+    /// directory — the file-system-first convention). When this is
+    /// `Some`, paste does a recursive directory copy so the entire
+    /// subtree (BillboardGui → TextLabel, Model → Parts, etc.) is
+    /// duplicated — not just the selected root. Property-only paste
+    /// applies when this is `None` (e.g. flat-file entities or
+    /// in-memory-only instances without an on-disk folder).
+    ///
+    /// Stored as a string for `Serialize`/`Deserialize` friendliness;
+    /// `PathBuf` doesn't carry through serde JSON cleanly on Windows.
+    #[serde(default)]
+    pub source_folder_path: Option<String>,
 }
 
 // ============================================================================
@@ -519,19 +533,47 @@ pub fn handle_copy_event(
     mut clipboard: ResMut<EditorClipboard>,
     mut old_clipboard: ResMut<Clipboard>,
     selection: Option<Res<BevySelectionManager>>,
-    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>, Option<&eustress_common::classes::Part>, Option<&crate::space::instance_loader::InstanceFile>)>,
+    query: Query<(Entity, &Instance, &Transform, Option<&BasePart>, Option<&eustress_common::classes::Part>, Option<&crate::space::instance_loader::InstanceFile>, Option<&crate::space::LoadedFromFile>)>,
     current_scene: Option<Res<CurrentScenePath>>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
 ) {
     let Some(selection) = selection else { return };
     for event in events.read() {
         let selected_ids = selection.0.read().get_selected();
-        
+
         if selected_ids.is_empty() {
             notifications.warning("Nothing selected to copy");
             continue;
         }
-        
+
+        // Cut is destructive — it deletes the source entities on paste.
+        // Core services (Workspace / Lighting / SoulService / …) are
+        // scaffolding for the entire Space; cutting one would orphan
+        // every child. Refuse up front so the user gets a clear toast
+        // instead of a broken state after paste. Plain Copy is harmless
+        // and stays allowed.
+        if event.is_cut {
+            let mut protected_count = 0u32;
+            for (entity, _inst, _t, _bp, _p, inst_file, loaded) in query.iter() {
+                let entity_id = format!("{}v{}", entity.index(), entity.generation());
+                if !selected_ids.contains(&entity_id) { continue; }
+                let path = inst_file.map(|f| f.toml_path.clone())
+                    .or_else(|| loaded.map(|l| l.path.clone()));
+                if let Some(p) = path {
+                    if crate::space::is_protected_service_path(&p) {
+                        protected_count += 1;
+                    }
+                }
+            }
+            if protected_count > 0 {
+                notifications.warning(format!(
+                    "Cut refused: {} core service{} cannot be cut from the Explorer (Workspace, Lighting, SoulService, etc. are protected).",
+                    protected_count, if protected_count == 1 { "" } else { "s" },
+                ));
+                continue;
+            }
+        }
+
         // Clear previous clipboard
         clipboard.clear();
         clipboard.is_cut = event.is_cut;
@@ -550,7 +592,7 @@ pub fn handle_copy_event(
         let mut entity_data_list = Vec::new();
         let mut old_clipboard_entities = Vec::new();
         
-        for (entity, instance, transform, basepart, part, instance_file) in query.iter() {
+        for (entity, instance, transform, basepart, part, instance_file, _loaded) in query.iter() {
             let entity_id = format!("{}v{}", entity.index(), entity.generation());
             
             if !selected_ids.contains(&entity_id) {
@@ -632,6 +674,40 @@ pub fn handle_copy_event(
                 (None, String::new())
             };
 
+            // Record the entity's on-disk folder when it's the
+            // folder-form (`<dir>/_instance.toml`). Paste uses this to
+            // recursively copy the whole subtree so children come
+            // along — selecting a BillboardGui and Ctrl+V now also
+            // brings its TextLabel descendants, matching the user's
+            // mental model of "duplicate this thing and everything
+            // inside it". Flat-file entities (`<Name>.toml` next to
+            // siblings) don't have a private folder, so this stays
+            // `None` and the property-based paste path runs.
+            //
+            // `to_string_lossy()` instead of direct `OsStr == &str`
+            // comparison for cross-platform robustness — Windows
+            // wide-string OsStr can confuse the `PartialEq<str>`
+            // path in some toolchain combos.
+            let source_folder_path = instance_file.and_then(|inst| {
+                let toml = &inst.toml_path;
+                let is_folder_form = toml
+                    .file_name()
+                    .map(|n| n.to_string_lossy() == "_instance.toml")
+                    .unwrap_or(false);
+                if !is_folder_form {
+                    info!(
+                        "📋 copy: '{}' is flat-file form ({}); children will not be cloned",
+                        instance.name, toml.display(),
+                    );
+                    return None;
+                }
+                let parent = toml.parent().map(|p| p.to_string_lossy().to_string());
+                if let Some(ref p) = parent {
+                    info!("📋 copy: '{}' folder-form source captured: {}", instance.name, p);
+                }
+                parent
+            });
+
             let entity_data = ClipboardEntityData2 {
                 id: instance.id,
                 name: instance.name.clone(),
@@ -644,6 +720,7 @@ pub fn handle_copy_event(
                 parameters: None,
                 source_toml,
                 service_folder,
+                source_folder_path,
             };
             
             entity_data_list.push(entity_data);
@@ -889,6 +966,158 @@ pub fn handle_duplicate_event(
 
 /// Spawn a pasted entity by writing a TOML file and using the standard instance loader.
 /// This ensures pasted parts have full parity with inserted parts (InstanceFile, properties, etc.)
+/// Recursively copy `src` directory to `dst`. Used by the folder-form
+/// paste path so child instances (BillboardGui → TextLabel, Model →
+/// Parts, …) ride along with the selected root.
+///
+/// **Order matters.** Files in this directory are copied BEFORE
+/// descending into subdirectories. That way each level's `_instance.toml`
+/// is created on disk before any descendant's `_instance.toml` — the
+/// file_watcher then receives events in parent-first order and the
+/// `ChildOf(parent)` lookup in `process_file_changes` finds the parent
+/// entity already registered. Reversing the order (the naive "iterate
+/// + recurse on dirs first" pattern) creates descendants first,
+/// orphans them at workspace-root, and the user sees Label and TextLabel
+/// as siblings of the duplicated Part instead of nested under it.
+///
+/// Skipped during the walk:
+/// - `.eustress/` — engine-internal state (trash for undo, caches,
+///   per-folder bookkeeping). Without this guard, copying a Part that
+///   had ever been edited+undone would also clone every trashed
+///   subentity from `<source>/.eustress/trash/<*>/_instance.toml`,
+///   and the file_watcher would hot-load each of them as a fresh
+///   workspace-root entity.
+/// - Symlinks — same policy as `ui::file_event_handler::copy_dir_recursive`.
+/// - Other hidden dirs (starting with `.`) — defensive: anything
+///   namespaced with a leading dot is editor metadata, not scene data.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    // Buffer the entries so we can scan twice without re-reading the
+    // directory (cheap — typical instance folder has ≤ 5 entries).
+    let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(src)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Pass 1: copy regular files in this directory. The `_instance.toml`
+    // at the current level lands on disk before any descendant's, so the
+    // file_watcher's parent-lookup succeeds when descendant events fire.
+    //
+    // We copy through a `.tmp` + atomic rename so the destination only
+    // becomes visible to readers as a complete file. External readers
+    // (the `SpaceFileWatcher`'s reload pass, text editors, antivirus
+    // scanners) could hit "os error 32 / file in use by another
+    // process" against a half-written file mid-copy; the rename makes
+    // every read see either the full content or nothing.
+    for entry in &entries {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') { continue; }
+        let ty = entry.file_type()?;
+        if !ty.is_file() { continue; }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        let stem = name.to_string_lossy();
+        let tmp_path = dst.join(format!(".{}.tmp", stem));
+        std::fs::copy(&src_path, &tmp_path)?;
+        // Retry rename a few times on transient Windows share-mode
+        // conflicts. Three attempts is plenty now that the workspace
+        // runs only one notify watcher (the engine's); the retries
+        // are just a guard against external readers like antivirus
+        // or text-editor reload.
+        let mut last_err: Option<std::io::Error> = None;
+        for _ in 0..3u32 {
+            match std::fs::rename(&tmp_path, &dst_path) {
+                Ok(()) => { last_err = None; break; }
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    }
+
+    // Pass 2: recurse into subdirectories. Each child's `_instance.toml`
+    // is created after this level's, satisfying the parent-first invariant
+    // at every depth.
+    for entry in &entries {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') { continue; }
+        let ty = entry.file_type()?;
+        if !ty.is_dir() { continue; }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        copy_dir_recursive(&src_path, &dst_path)?;
+    }
+    // Symlinks fall through unread.
+    Ok(())
+}
+
+/// Patch the root `_instance.toml` of a freshly-pasted folder so the
+/// entity sits at `new_pos` in world space. Only the root needs
+/// adjustment — descendants' transforms are relative to their parent's
+/// local frame and survive the copy untouched. Returns `Ok(())` even
+/// when the TOML lacks a `[transform]` table; failure modes are write
+/// errors only.
+fn apply_offset_to_root_toml(
+    toml_path: &std::path::Path,
+    new_pos: Vec3,
+    display_name: &str,
+) -> std::io::Result<()> {
+    let raw = std::fs::read_to_string(toml_path)?;
+    let mut doc: toml::Value = match raw.parse() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("paste: failed to parse {} as TOML: {}", toml_path.display(), e);
+            return Ok(());
+        }
+    };
+    if let Some(table) = doc.as_table_mut() {
+        let tform = table
+            .entry("transform")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(tform_table) = tform.as_table_mut() {
+            tform_table.insert(
+                "position".to_string(),
+                toml::Value::Array(vec![
+                    toml::Value::Float(new_pos.x as f64),
+                    toml::Value::Float(new_pos.y as f64),
+                    toml::Value::Float(new_pos.z as f64),
+                ]),
+            );
+        }
+
+        // Pin `[metadata].name` to the user-visible base so the Explorer
+        // doesn't surface the disk-safe hex suffix
+        // (`SimpleBlock-810f`). The folder name on disk has to be
+        // unique vs. siblings — we resolve that with a hex tag — but
+        // the entity's display name is read from `metadata.name` first
+        // (instance_loader::spawn_instance), so writing the original
+        // base here gives the duplicate the same label as the source
+        // (`SimpleBlock`/`SimpleBlock`) while the on-disk folder stays
+        // uniquely addressable.
+        let meta = table
+            .entry("metadata")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(meta_table) = meta.as_table_mut() {
+            meta_table.insert(
+                "name".to_string(),
+                toml::Value::String(display_name.to_string()),
+            );
+        }
+    }
+    let serialised = toml::to_string_pretty(&doc)
+        .unwrap_or_else(|_| raw.clone());
+    // Atomic write + retry. The fresh duplicate folder is still being
+    // touched by the engine's file watcher / antivirus / text editors;
+    // a plain write here races with their reads and used to drop the
+    // position/name patch (the duplicate would render at the source's
+    // exact spot with no metadata override).
+    crate::space::gui_loader::write_atomic(toml_path, serialised.as_bytes())?;
+    Ok(())
+}
+
 fn spawn_pasted_entity(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -901,6 +1130,70 @@ fn spawn_pasted_entity(
     file_registry: Option<&mut crate::space::file_loader::SpaceFileRegistry>,
 ) -> Option<String> {
     use crate::spawn::*;
+
+    // ── Folder-form paste ────────────────────────────────────────────────
+    // If the source recorded an on-disk folder, duplicate the whole
+    // directory tree. This is the path that carries CHILDREN — a
+    // BillboardGui's TextLabel, a Model's Parts, etc. The file watcher
+    // will discover the new folder and spawn the entire subtree, so we
+    // skip the property-based spawn below entirely. The selection
+    // doesn't get the new entity ID immediately (file_watcher spawns
+    // asynchronously); the post-paste `set_selected` call deals with
+    // the empty case gracefully.
+    if let Some(src_folder_str) = data.source_folder_path.as_deref() {
+        let src_folder = std::path::PathBuf::from(src_folder_str);
+        info!(
+            "📋 paste: folder-form '{}' src='{}' exists={}",
+            data.name, src_folder.display(), src_folder.exists(),
+        );
+        if src_folder.exists() {
+            let new_pos = Vec3::new(data.position[0], data.position[1], data.position[2]) + offset;
+            let _ = std::fs::create_dir_all(workspace_dir);
+            let folder_name = crate::space::instance_loader::unique_entity_name(
+                workspace_dir, &data.name,
+            );
+            let dst_folder = workspace_dir.join(&folder_name);
+            if let Err(e) = copy_dir_recursive(&src_folder, &dst_folder) {
+                warn!(
+                    "📋 paste: failed to copy folder {} → {}: {}",
+                    src_folder.display(), dst_folder.display(), e
+                );
+                return None;
+            }
+            // Patch root TOML so the duplicate appears at the paste
+            // position instead of overlapping the source. `data.name`
+            // is the original entity's display name — pinning
+            // `metadata.name` to it stops the Explorer from showing
+            // the disk-safe hex suffix (`SimpleBlock-810f`).
+            let dst_root_toml = dst_folder.join("_instance.toml");
+            if let Err(e) = apply_offset_to_root_toml(&dst_root_toml, new_pos, &data.name) {
+                warn!(
+                    "📋 paste: copied folder but failed to patch position in {}: {}",
+                    dst_root_toml.display(), e
+                );
+            }
+            // Folder paste is asynchronous — file_watcher discovers
+            // the new directory next scan and spawns the subtree.
+            // Return `None` so we don't pollute `created_ids` (used
+            // for auto-selection) with synthetic strings that don't
+            // match any live Entity. The notification still reports
+            // the right count because it reads `clipboard.entities.len()`,
+            // not `created_ids.len()`.
+            let _ = (commands, asset_server, materials, material_registry, mesh_cache, file_registry);
+            info!("📋 paste: copied folder {} → {}", src_folder.display(), dst_folder.display());
+            return None;
+        } else {
+            warn!(
+                "📋 paste: source folder {} no longer exists; falling back to property paste",
+                src_folder.display()
+            );
+        }
+    } else {
+        info!(
+            "📋 paste: '{}' has no source_folder_path; property-based paste only (children won't be cloned)",
+            data.name,
+        );
+    }
 
     let class_name = match ClassName::from_str(&data.class) {
         Ok(cn) => cn,

@@ -6,12 +6,6 @@
 
 use bevy::prelude::*;
 use std::path::PathBuf;
-use std::fs;
-
-use crate::space::instance_loader::{
-    InstanceDefinition, AssetReference, TransformData, InstanceProperties, InstanceMetadata,
-    write_instance_definition,
-};
 
 /// Toolbox mesh catalog entry
 #[derive(Debug, Clone)]
@@ -113,56 +107,35 @@ pub fn insert_mesh_instance_with_class(
         .ok_or_else(|| format!("Mesh '{}' not found in catalog", mesh_id))?;
 
     let base_name = instance_name.unwrap_or_else(|| mesh.name.to_string());
-    let now = chrono::Utc::now().to_rfc3339();
 
-    // Generate unique FOLDER NAME within target_dir via the shared
-    // `unique_entity_name` helper — gives the first instance the bare
-    // base name (`Block/`) and subsequent collisions a short hex
-    // suffix (`Block-a3f2/`), matching the convention enforced
-    // everywhere else that creates entities. Display name is always
-    // the original base, so multiple sibling "Block" entities render
-    // identically in the Explorer while staying uniquely addressable
-    // on disk.
-    let folder_name = crate::space::instance_loader::unique_entity_name(target_dir, &base_name);
-    let instance_name = base_name;
-
-    let instance_dir = target_dir.join(&folder_name);
-    fs::create_dir_all(&instance_dir)
-        .map_err(|e| format!("Failed to create directory {:?}: {}", instance_dir, e))?;
-
-    let instance = crate::space::instance_loader::InstanceDefinition {
-        asset: Some(crate::space::instance_loader::AssetReference {
-            mesh: mesh.mesh_path.to_string(),
-            scene: "Scene0".to_string(),
-        }),
-        transform: crate::space::instance_loader::TransformData {
-            position,
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: mesh.default_size,
-        },
-        properties: crate::space::instance_loader::InstanceProperties::default(),
-        metadata: crate::space::instance_loader::InstanceMetadata {
-            class_name: class_name.to_string(),
-            archivable: true,
-            name: if folder_name != instance_name { Some(instance_name.clone()) } else { None },
-            created: now.clone(),
-            last_modified: now,
-            ..Default::default()
-        },
-        material: None,
-        thermodynamic: None,
-        electrochemical: None,
-        ui: None,
-        attributes: None,
-        tags: None,
-        parameters: None,
-        extra: std::collections::HashMap::new(),
+    // Route through the canonical pipeline: copy the class template,
+    // patch transform + asset_mesh from the catalog entry, let the
+    // file_watcher pick it up. The Part template has no `[asset]`
+    // section by default — `asset_mesh` injects one so the toolbox
+    // entry's specific mesh wins over any class-level default.
+    let overrides = eustress_common::instance_create::InstanceOverrides {
+        display_name: Some(base_name.clone()),
+        position: Some(position),
+        scale: Some(mesh.default_size),
+        asset_mesh: Some(mesh.mesh_path.to_string()),
+        ..Default::default()
     };
 
-    let toml_path = instance_dir.join("_instance.toml");
-    crate::space::instance_loader::write_instance_definition(&toml_path, &instance)?;
-    info!("📦 Toolbox: Created instance folder {:?} (display name: {})", instance_dir, instance_name);
-    Ok(toml_path)
+    match eustress_common::instance_create::create_instance(
+        target_dir,
+        class_name,
+        Some(&base_name),
+        overrides,
+    ) {
+        Ok(created) => {
+            info!(
+                "📦 Toolbox: created instance folder {:?} (display name: {})",
+                created.folder_path, base_name,
+            );
+            Ok(created.toml_path)
+        }
+        Err(e) => Err(format!("toolbox create_instance: {}", e)),
+    }
 }
 
 /// Insert a mesh instance by creating a folder with _instance.toml in Workspace

@@ -308,8 +308,8 @@ text_color = [{tr}, {tg}, {tb}, 1.0]
 font_size = {font_size}
 font = "{font}"
 font_family = ""
-text_x_alignment = "center"
-text_y_alignment = "center"
+text_x_alignment = "Center"
+text_y_alignment = "Center"
 "#,
                     name = entity.name,
                     class = entity.class_name,

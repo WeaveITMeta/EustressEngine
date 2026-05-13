@@ -1,9 +1,0 @@
-# Team — Team for grouping players (child of Teams service)
-
-[team]
-team_color = [255, 255, 255]
-auto_assignable = true
-
-[metadata]
-class_name = "Team"
-archivable = true

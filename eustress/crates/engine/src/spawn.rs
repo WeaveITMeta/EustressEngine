@@ -691,11 +691,17 @@ pub fn spawn_billboard_gui(
         // Changed<BillboardGuiMarker> and pushes size/visibility/depth updates
         // each frame, so Properties panel edits are live.
         eustress_common::gui::billboard_renderer::BillboardGuiMarker {
-            size: gui.size,
+            // Marker stores resolved pixels; gui.size is UDim2.
+            // 50 px/m matches PIXELS_PER_METER in billboard_gui.rs.
+            size: {
+                let [w, h] = gui.size.to_pixels(50.0, 50.0);
+                [w.max(1.0), h.max(1.0)]
+            },
             max_distance: gui.max_distance,
             always_on_top: gui.always_on_top,
             face_camera: true,
             visible: true,
+            ..Default::default()
         },
         // Adornee tracking
         BillboardAdornee { target_name: None, target_entity: gui.adornee },
@@ -763,11 +769,18 @@ pub fn spawn_frame(
         frame.clone(),
         Name::new(name),
         // Bevy UI components
+        // Bevy UI uses pixel `Val::Px` for layout. Roblox-parity Position
+        // and Size are `UDim2` — Scale × parent + Offset. Without a
+        // resolved parent size at this spawn site, we use the Offset
+        // component directly (Scale falls through to Bevy's
+        // `Val::Percent` if non-zero, but we emit Px-only to keep
+        // determinism; full Scale support belongs in a sync system that
+        // sees the parent's resolved layout).
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             border: ui::UiRect::all(ui::Val::Px(frame.border_size_pixel as f32)),
             ..default()
         },
@@ -804,10 +817,10 @@ pub fn spawn_scrolling_frame(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             border: ui::UiRect::all(ui::Val::Px(frame.border_size_pixel as f32)),
             overflow: ui::Overflow::scroll(),
             ..default()
@@ -837,11 +850,31 @@ pub fn spawn_text_label(
         eustress_common::classes::Font::GothamLight => 300,
         _ => 400,
     };
+    // UDim2 → resolved pixels for the renderer. With no parent size at
+    // this spawn site, we use Offset only (Scale=0 elements pass through
+    // unchanged; Scale-driven layouts are computed by a sync system that
+    // sees the parent's resolved size).
     let gui_display = eustress_common::gui::billboard_renderer::GuiElementDisplay {
-        x: label.position[0] * label.size[0],  // UDim2 scale → pixels
-        y: label.position[1] * label.size[1],
-        width: label.size[0],
-        height: label.size[1],
+        x: label.position.x.offset,
+        y: label.position.y.offset,
+        width: label.size.x.offset,
+        height: label.size.y.offset,
+        position_udim2: [
+            label.position.x.scale, label.position.x.offset,
+            label.position.y.scale, label.position.y.offset,
+        ],
+        size_udim2: [
+            label.size.x.scale, label.size.x.offset,
+            label.size.y.scale, label.size.y.offset,
+        ],
+        anchor_point: label.anchor_point,
+        text_stroke_color: [
+            label.text_stroke_color3[0],
+            label.text_stroke_color3[1],
+            label.text_stroke_color3[2],
+            (1.0 - label.text_stroke_transparency).clamp(0.0, 1.0),
+        ],
+        text_scaled: label.text_scaled,
         z_order: label.z_index,
         visible: label.visible,
         clip_children: label.clips_descendants,
@@ -870,12 +903,17 @@ pub fn spawn_text_label(
         font_size: label.font_size,
         font_weight,
         text_align: match label.text_x_alignment {
-            crate::classes::TextXAlignment::Left => "left".to_string(),
-            crate::classes::TextXAlignment::Center => "center".to_string(),
-            crate::classes::TextXAlignment::Right => "right".to_string(),
+            crate::classes::TextXAlignment::Left => "Left".to_string(),
+            crate::classes::TextXAlignment::Center => "Center".to_string(),
+            crate::classes::TextXAlignment::Right => "Right".to_string(),
+        },
+        text_y_align: match label.text_y_alignment {
+            crate::classes::TextYAlignment::Top => "Top".to_string(),
+            crate::classes::TextYAlignment::Center => "Center".to_string(),
+            crate::classes::TextYAlignment::Bottom => "Bottom".to_string(),
         },
         image_path: String::new(),
-        class_type: "textlabel".to_string(),
+        class_type: "TextLabel".to_string(),
         mouse_filter: "stop".to_string(),
     };
 
@@ -928,10 +966,11 @@ pub fn spawn_text_label_ui(
         TextLabelMarker,
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(label.size[0]),
-            height: ui::Val::Px(label.size[1]),
-            left: ui::Val::Px(label.position[0]),
-            top: ui::Val::Px(label.position[1]),
+            // UDim2 → Bevy `Val::Px` (offset only at this site).
+            width: ui::Val::Px(label.size.x.offset),
+            height: ui::Val::Px(label.size.y.offset),
+            left: ui::Val::Px(label.position.x.offset),
+            top: ui::Val::Px(label.position.y.offset),
             justify_content: justify,
             align_items: align,
             ..default()
@@ -983,10 +1022,10 @@ pub fn spawn_image_label(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(label.size_offset[0]),
-            height: ui::Val::Px(label.size_offset[1]),
-            left: ui::Val::Px(label.position_offset[0]),
-            top: ui::Val::Px(label.position_offset[1]),
+            width: ui::Val::Px(label.size.x.offset),
+            height: ui::Val::Px(label.size.y.offset),
+            left: ui::Val::Px(label.position.x.offset),
+            top: ui::Val::Px(label.position.y.offset),
             ..default()
         },
         ui::BackgroundColor(bg_color),
@@ -1029,10 +1068,10 @@ pub fn spawn_text_button(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(button.size_offset[0]),
-            height: ui::Val::Px(button.size_offset[1]),
-            left: ui::Val::Px(button.position_offset[0]),
-            top: ui::Val::Px(button.position_offset[1]),
+            width: ui::Val::Px(button.size.x.offset),
+            height: ui::Val::Px(button.size.y.offset),
+            left: ui::Val::Px(button.position.x.offset),
+            top: ui::Val::Px(button.position.y.offset),
             border: ui::UiRect::all(ui::Val::Px(button.border_size_pixel as f32)),
             justify_content: ui::JustifyContent::Center,
             align_items: ui::AlignItems::Center,
@@ -1089,10 +1128,10 @@ pub fn spawn_image_button(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(button.size_offset[0]),
-            height: ui::Val::Px(button.size_offset[1]),
-            left: ui::Val::Px(button.position_offset[0]),
-            top: ui::Val::Px(button.position_offset[1]),
+            width: ui::Val::Px(button.size.x.offset),
+            height: ui::Val::Px(button.size.y.offset),
+            left: ui::Val::Px(button.position.x.offset),
+            top: ui::Val::Px(button.position.y.offset),
             border: ui::UiRect::all(ui::Val::Px(button.border_size_pixel as f32)),
             ..default()
         },
@@ -1140,10 +1179,10 @@ pub fn spawn_text_box(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(text_box.size_offset[0]),
-            height: ui::Val::Px(text_box.size_offset[1]),
-            left: ui::Val::Px(text_box.position_offset[0]),
-            top: ui::Val::Px(text_box.position_offset[1]),
+            width: ui::Val::Px(text_box.size.x.offset),
+            height: ui::Val::Px(text_box.size.y.offset),
+            left: ui::Val::Px(text_box.position.x.offset),
+            top: ui::Val::Px(text_box.position.y.offset),
             border: ui::UiRect::all(ui::Val::Px(text_box.border_size_pixel as f32)),
             padding: ui::UiRect::all(ui::Val::Px(4.0)),
             ..default()
@@ -1190,10 +1229,10 @@ pub fn spawn_viewport_frame(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             ..default()
         },
         ui::BackgroundColor(bg_color),
@@ -1225,10 +1264,10 @@ pub fn spawn_video_frame(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             ..default()
         },
         ui::BackgroundColor(bg_color),
@@ -1265,10 +1304,10 @@ pub fn spawn_document_frame(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             overflow: ui::Overflow::scroll(),
             ..default()
         },
@@ -1305,10 +1344,10 @@ pub fn spawn_web_frame(
         Name::new(name),
         // Bevy UI components
         ui::Node {
-            width: ui::Val::Px(frame.size_offset[0]),
-            height: ui::Val::Px(frame.size_offset[1]),
-            left: ui::Val::Px(frame.position_offset[0]),
-            top: ui::Val::Px(frame.position_offset[1]),
+            width: ui::Val::Px(frame.size.x.offset),
+            height: ui::Val::Px(frame.size.y.offset),
+            left: ui::Val::Px(frame.position.x.offset),
+            top: ui::Val::Px(frame.position.y.offset),
             ..default()
         },
         ui::BackgroundColor(bg_color),

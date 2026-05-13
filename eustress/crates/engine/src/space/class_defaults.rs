@@ -3,16 +3,21 @@
 //! ## Table of Contents
 //!
 //! 1. ClassDefaultsRegistry — Bevy Resource holding per-class default TOML tables
-//! 2. load_class_defaults — Scans class_defaults/ directory and parses all *.defaults.toml files
+//! 2. load_class_defaults — Legacy filesystem scanner (kept for ad-hoc dir loads;
+//!    `startup_load_class_defaults` no longer calls it)
 //! 3. merge_defaults — Deep-merges missing keys from class defaults into a parsed TOML value
 //! 4. color_u8_to_f32 — Converts [u8; 3] (0-255) color arrays to [f32; 3] (0.0-1.0) for Bevy
 //!
 //! ## Architecture
 //!
-//! Class default TOML files live in `crates/engine/assets/class_defaults/ClassName.defaults.toml`.
-//! They follow the same file-system-first philosophy as service_templates — easy to edit
-//! without recompilation. The registry loads them at engine startup, then the instance loader
-//! and GUI loader merge missing fields from the class defaults before deserialization.
+//! Class default TOML files live in `crates/common/assets/class_schema/<Class>.defaults.toml`.
+//! `common/build.rs` bakes them into `eustress_common::class_schema::BUILTIN_TEMPLATES`
+//! (compile-time `include_str!`) so the engine binary carries every default
+//! and `startup_load_class_defaults` just seeds the registry from that slice —
+//! zero runtime filesystem I/O for defaults.
+//!
+//! Adding a new class is a single-file drop into common's class_schema dir;
+//! the next `cargo build` picks it up automatically.
 //!
 //! ## Color Convention
 //!
@@ -247,78 +252,41 @@ pub fn color_f32_to_u8_rgba(rgba: &[f32; 4]) -> [u8; 4] {
 // 5. Startup system — load class defaults at engine init
 // ============================================================================
 
-/// Bevy startup system that loads class defaults from the engine assets directory.
-/// The class_defaults directory is resolved relative to the engine's compiled-in asset path.
+/// Bevy startup system that seeds `ClassDefaultsRegistry` from common's
+/// `BUILTIN_TEMPLATES` — the same compile-time-baked slice the
+/// `ClassSchemaRegistry` uses. The engine no longer ships a sister
+/// `assets/class_defaults/` directory (consolidated into common on
+/// 2026-05-12); deleting it removed ~58 duplicate files.
+///
+/// This means class defaults are now part of the binary, not a runtime
+/// filesystem scan. Adding a new class is a single-file drop into
+/// `common/assets/class_schema/<Class>.defaults.toml` (or its folder-form
+/// successor); `common/build.rs` picks it up automatically.
 pub fn startup_load_class_defaults(mut commands: Commands) {
-    // Resolve the class_defaults directory relative to the engine binary/assets
-    let class_defaults_dir = resolve_class_defaults_dir();
-    let registry = load_class_defaults(&class_defaults_dir);
+    let mut registry = ClassDefaultsRegistry {
+        defaults: HashMap::with_capacity(eustress_common::class_schema::BUILTIN_TEMPLATES.len()),
+        source_dir: eustress_common::class_schema_dir(),
+    };
+
+    for (class_name, body_str) in eustress_common::class_schema::BUILTIN_TEMPLATES {
+        match body_str.parse::<toml::Value>() {
+            Ok(value) => {
+                registry.defaults.insert((*class_name).to_string(), value);
+            }
+            Err(err) => {
+                error!(
+                    "ClassDefaultsRegistry: failed to parse builtin {}: {}",
+                    class_name, err,
+                );
+            }
+        }
+    }
+
     info!(
-        "ClassDefaultsRegistry initialized with {} class defaults",
-        registry.len()
+        "ClassDefaultsRegistry initialized with {} class defaults (from common::BUILTIN_TEMPLATES)",
+        registry.len(),
     );
     commands.insert_resource(registry);
-}
-
-/// Resolve the path to the class_defaults directory.
-/// Checks multiple locations in priority order:
-/// 1. Relative to the executable (for deployed builds)
-/// 2. Cargo manifest dir (for development builds)
-/// 3. Hardcoded fallback
-fn resolve_class_defaults_dir() -> PathBuf {
-    // Development: relative to cargo manifest dir (set by build.rs or env)
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(&manifest_dir)
-            .join("assets")
-            .join("class_defaults");
-        if dev_path.is_dir() {
-            return dev_path;
-        }
-    }
-
-    // Development fallback: OUT_DIR from build.rs
-    if let Ok(out_dir) = std::env::var("OUT_DIR") {
-        // OUT_DIR is typically target/debug/build/crate-hash/out
-        // Walk up to find the workspace root
-        let mut path = PathBuf::from(&out_dir);
-        for _ in 0..8 {
-            let candidate = path.join("crates").join("engine").join("assets").join("class_defaults");
-            if candidate.is_dir() {
-                return candidate;
-            }
-            if !path.pop() {
-                break;
-            }
-        }
-    }
-
-    // Relative to executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let exe_relative = exe_dir.join("assets").join("class_defaults");
-            if exe_relative.is_dir() {
-                return exe_relative;
-            }
-        }
-    }
-
-    // Relative to current directory
-    let cwd_relative = PathBuf::from("crates")
-        .join("engine")
-        .join("assets")
-        .join("class_defaults");
-    if cwd_relative.is_dir() {
-        return cwd_relative;
-    }
-
-    // Absolute fallback for common development layout
-    let fallback = PathBuf::from("assets").join("class_defaults");
-    if fallback.is_dir() {
-        return fallback;
-    }
-
-    warn!("Could not locate class_defaults directory, using empty defaults");
-    PathBuf::from("class_defaults")
 }
 
 // ============================================================================

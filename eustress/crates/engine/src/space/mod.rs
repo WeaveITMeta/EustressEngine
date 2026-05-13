@@ -14,6 +14,7 @@ pub mod class_defaults;
 pub mod file_loader;
 pub mod file_watcher;
 pub mod gui_loader;
+pub mod instance_create;
 pub mod instance_loader;
 pub mod material_loader;
 pub mod service_loader;
@@ -125,6 +126,40 @@ pub fn looks_like_space_root(path: &Path) -> bool {
     path.join(".eustress").join("project.toml").exists()
         || path.join("Workspace").exists()
         || path.join("space.toml").exists()
+}
+
+/// Returns true if `path` resolves to a core service (Workspace,
+/// Lighting, ReplicatedStorage, SoulService, …) — a directory directly
+/// under the Space root with a `_service.toml` inside, or the
+/// `_service.toml` file itself.
+///
+/// Core services are first-class scaffolding: deleting one orphans
+/// every child entity (parts under Workspace, scripts under
+/// SoulService, …) and leaves the file watcher in a broken state
+/// because the service root entity is gone but its folder remains on
+/// disk. This check is the single source of truth used by every
+/// destructive surface (Delete shortcut, Explorer Cut, MCP
+/// `delete_entity`, future bulk-trash flows) to refuse the operation
+/// up front with a clear toast rather than silently corrupting state.
+pub fn is_protected_service_path(path: &Path) -> bool {
+    // Direct `_service.toml` file — services are loaded with
+    // `LoadedFromFile.path = .../<Service>/_service.toml` (see
+    // `service_loader::spawn_service`), so this is the path Delete
+    // sees in the `loaded_from_file_query` fallback branch.
+    if path
+        .file_name()
+        .map(|n| n.eq_ignore_ascii_case("_service.toml"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Folder that contains `_service.toml` — e.g. the Cut path might
+    // hold the service folder path directly. Catches the case where a
+    // future surface passes the directory rather than the toml file.
+    if path.is_dir() && path.join("_service.toml").is_file() {
+        return true;
+    }
+    false
 }
 
 pub fn universe_root_for_path(path: &Path) -> Option<PathBuf> {

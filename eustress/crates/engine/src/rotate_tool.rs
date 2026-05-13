@@ -153,6 +153,7 @@ fn draw_rotation_ring(
 // ============================================================================
 
 fn handle_rotate_interaction(
+    mut commands: Commands,
     mut state: ResMut<RotateToolState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -194,6 +195,10 @@ fn handle_rotate_interaction(
                         bp.cframe.rotation = rot;
                     }
                 }
+            }
+            for ent in state.initial_positions.keys() {
+                commands.entity(*ent)
+                    .remove::<crate::space::instance_loader::BeingDragged>();
             }
             state.dragged_axis = None;
             state.initial_rotations.clear();
@@ -278,6 +283,9 @@ fn handle_rotate_interaction(
             for (entity, pos, rot, _) in &snapshot {
                 state.initial_rotations.insert(*entity, *rot);
                 state.initial_positions.insert(*entity, *pos);
+                commands.entity(*entity).insert(
+                    crate::space::instance_loader::BeingDragged,
+                );
             }
         }
     } else if mouse.pressed(MouseButton::Left) {
@@ -368,6 +376,10 @@ fn handle_rotate_interaction(
             }
         }
 
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.initial_rotations.clear();
         state.initial_positions.clear();
@@ -386,6 +398,7 @@ fn handle_rotate_interaction(
 /// is handled elsewhere — not duplicated here.
 #[allow(clippy::too_many_arguments)]
 fn finalize_numeric_input_on_rotate(
+    mut commands: Commands,
     mut committed: MessageReader<crate::numeric_input::NumericInputCommittedEvent>,
     mut state: ResMut<RotateToolState>,
     mut query: Query<(
@@ -442,6 +455,10 @@ fn finalize_numeric_input_on_rotate(
             undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
         }
 
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.initial_rotations.clear();
         state.initial_positions.clear();

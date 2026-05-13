@@ -1,6 +1,0 @@
-# BindableFunction — In-process request-response (same context)
-# Pure ECS marker, no additional properties
-
-[metadata]
-class_name = "BindableFunction"
-archivable = true

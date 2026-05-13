@@ -48,12 +48,6 @@ import { KeybindingsDialog } from "keybindings.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
-// BillboardCard is instantiated per-entity by the engine's billboard_gui
-// systems, not nested inside StudioWindow. Re-export the combined form so
-// slint-build emits the generated Rust bindings into the module that
-// `include_modules!()` pulls in — a plain `import` alone won't surface
-// the types in the generated Rust.
-export { BillboardCard, BillboardLabelData } from "billboard_card.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
@@ -523,6 +517,10 @@ export component StudioWindow inherits Window {
     // ──────────────────────────────────────────────────────────────────────
     in-out property <bool>   tool-options-visible: false;
     in-out property <string> tool-options-tool-name: "";
+    /// Stable ID of the active modal tool (e.g. `"gap_fill"`, `"linear_array"`).
+    /// The ribbon reads this to highlight which Smart Edit / Pattern / Mirror
+    /// button is currently active. Empty when no modal tool is running.
+    in-out property <string> tool-options-tool-id: "";
     in-out property <string> tool-options-step-label: "";
     in-out property <image>  tool-options-tool-icon;
     in-out property <[ToolOptionControlData]> tool-options-controls: [];
@@ -934,6 +932,10 @@ export component StudioWindow inherits Window {
         // ====================================================================
         Ribbon {
             current-tool: root.current-tool;
+            // Active modal tool (Smart Edit / Pattern / Mirror) — empty
+            // when only a primary tool (Select/Move/etc) is active.
+            // Drives the ribbon's per-button highlight on the CAD tab.
+            active-modal-tool-id: root.tool-options-tool-id;
             transform-mode: root.transform-mode;
             play-state: root.play-state;
             has-unsaved-changes: root.has-unsaved-changes;

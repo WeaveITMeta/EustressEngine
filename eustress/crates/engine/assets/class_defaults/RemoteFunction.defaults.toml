@@ -1,6 +1,0 @@
-# RemoteFunction — Request-response channel (client↔server)
-# Pure ECS marker, no additional properties
-
-[metadata]
-class_name = "RemoteFunction"
-archivable = true

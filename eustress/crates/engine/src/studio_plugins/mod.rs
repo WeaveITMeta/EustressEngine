@@ -254,6 +254,11 @@ fn handle_plugin_action_events(
     loaded_from_file: Query<&crate::space::LoadedFromFile>,
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    // Mark our own writes so the file watcher's debounce skips them.
+    // Without this, MindSpace writes a TOML, the watcher sees the create,
+    // and dispatches a hot-load that spawns a duplicate non-visual entity
+    // alongside the in-memory one we just spawned via spawn_text_label.
+    mut recently_written: ResMut<crate::space::file_watcher::RecentlyWrittenFiles>,
 ) {
     // Log BEFORE the early-return to diagnose whether the system runs at all
     let event_count = events.len();
@@ -385,25 +390,56 @@ fn handle_plugin_action_events(
                     continue;
                 }
 
-                // _instance.toml for BillboardGui
+                // _instance.toml for BillboardGui — Roblox-parity defaults:
+                // 1000-stud distance limit, always-on-top, 200×50 px canvas
+                // 3 studs above the part. Mirror the class struct's
+                // `BillboardGui::default()` values so a fresh
+                // MindSpace-spawned label and a default-class spawn from
+                // any other path produce the same on-disk shape.
+                // Strict UDim2 schema. `position` (canvas-space) stays
+                // at origin; the 3D world-space placement is carried by
+                // `units_offset = [0, 3, 0]`. `size` is a pure-pixel
+                // UDim2: scale=0, offset=200×50.
                 let instance_toml = format!(
-                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nsize = [200.0, 50.0]\nposition = [0.0, 3.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 100.0\n",
+                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 3.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
                     now, now
                 );
-                if let Err(e) = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml) {
+                let bb_toml_path = bb_dir.join("_instance.toml");
+                // Mark BEFORE the write so the file watcher's create event
+                // (fired by the OS the moment the file appears) finds the
+                // entry and skips dispatch — otherwise we race the watcher.
+                recently_written.mark_written(bb_toml_path.clone());
+                if let Err(e) = std::fs::write(&bb_toml_path, &instance_toml) {
                     notifications.error(format!("Failed to write _instance.toml: {}", e));
                     continue;
                 }
 
-                // TextLabel.textlabel.toml — transparent background + border,
-                // bold white text. Matches the billboard-label convention
-                // (floating 3D text readable against any backdrop).
+                // TextLabel — transparent background + border, bold white
+                // text. Matches the billboard-label convention (floating
+                // 3D text readable against any backdrop).
+                //
+                // File-system-first convention (folder + _instance.toml):
+                // a child folder inside the BillboardGui's directory holds
+                // its own `_instance.toml`. The legacy flat
+                // `Label.textlabel.toml` form still loads (the Workspace
+                // arm in `spawns_entity_in_service` accepts it), but new
+                // writes use the folder layout so every saver in the
+                // codebase produces the same on-disk shape.
+                let label_dir = bb_dir.join("TextLabel");
+                if let Err(e) = std::fs::create_dir_all(&label_dir) {
+                    notifications.error(format!("Failed to create TextLabel folder: {}", e));
+                    continue;
+                }
+                // Strict UDim2 schema: position + size are 4-tuples
+                // `[scale_x, offset_x, scale_y, offset_y]`.
                 let label_toml = format!(
-                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [200.0, 50.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
+                    "[instance]\nname = \"TextLabel\"\n\n[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
                     label_text.replace('"', "\\\""), font_size
                 );
-                if let Err(e) = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_name)), &label_toml) {
-                    notifications.error(format!("Failed to write textlabel.toml: {}", e));
+                let label_toml_path = label_dir.join("_instance.toml");
+                recently_written.mark_written(label_toml_path.clone());
+                if let Err(e) = std::fs::write(&label_toml_path, &label_toml) {
+                    notifications.error(format!("Failed to write TextLabel/_instance.toml: {}", e));
                     continue;
                 }
 
@@ -420,7 +456,9 @@ fn handle_plugin_action_events(
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
                 billboard_gui.units_offset = [0.0, 3.0, 0.0];
-                billboard_gui.size = [200.0, 50.0];
+                // Roblox-parity Size is `UDim2`. Pure-pixel canvas
+                // dimensions: Scale=0, Offset=200×50.
+                billboard_gui.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
                 billboard_gui.always_on_top = true;
 
                 let billboard_entity = spawn_billboard_gui(&mut commands, billboard_instance, billboard_gui);
@@ -449,10 +487,11 @@ fn handle_plugin_action_events(
                 text_label.background_color3 = [0.0, 0.0, 0.0];
                 text_label.background_transparency = 1.0;
                 text_label.border_size_pixel = 0;
-                // Fill the parent BillboardGui canvas (200×50) so glyphs
-                // have room to draw; anchored at origin of the card.
-                text_label.size = [200.0, 50.0];
-                text_label.position = [0.0, 0.0];
+                // Fill the parent BillboardGui canvas (200×50 px) so
+                // glyphs have room to draw; anchored at origin of the
+                // card. Roblox-parity Position/Size as `UDim2`.
+                text_label.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
+                text_label.position = eustress_common::ui_types::UDim2::default();
 
                 let text_entity = spawn_text_label(&mut commands, text_instance, text_label);
                 commands.entity(text_entity).insert(bevy::prelude::ChildOf(billboard_entity));
@@ -625,23 +664,40 @@ fn handle_plugin_action_events(
                         continue;
                     }
 
-                    // Write _instance.toml
+                    // Write _instance.toml. Strict UDim2 schema for `size`;
+                    // the 3D world-space placement lives in `units_offset`.
                     let billboard_gui = billboard_query.get(entity);
                     let (size, offset, max_dist, aot) = if let Ok(bg) = billboard_gui {
                         (bg.size, bg.units_offset, bg.max_distance, bg.always_on_top)
                     } else {
-                        ([200.0, 100.0], [0.0, 2.0, 0.0], 100.0, false)
+                        (
+                            eustress_common::ui_types::UDim2::from_pixels(200.0, 100.0),
+                            [0.0, 2.0, 0.0],
+                            100.0,
+                            false,
+                        )
                     };
+                    let s = size.as_array();
 
                     let instance_toml = format!(
-                        "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\n\n[gui]\nsize = [{}, {}]\nposition = [{}, {}, {}]\nvisible = true\nalways_on_top = {}\nmax_distance = {}\n",
-                        size[0], size[1], offset[0], offset[1], offset[2], aot, max_dist
+                        "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [{}, {}, {}, {}]\nunits_offset = [{}, {}, {}]\nvisible = true\nalways_on_top = {}\nmax_distance = {}\n",
+                        s[0], s[1], s[2], s[3],
+                        offset[0], offset[1], offset[2],
+                        aot, max_dist,
                     );
-                    if let Err(e) = std::fs::write(bb_dir.join("_instance.toml"), &instance_toml) {
+                    let bb_toml_path = bb_dir.join("_instance.toml");
+                    recently_written.mark_written(bb_toml_path.clone());
+                    if let Err(e) = std::fs::write(&bb_toml_path, &instance_toml) {
                         warn!("Failed to write _instance.toml for {:?}: {}", bb_dir, e);
                     }
 
-                    // Write child TextLabels as .textlabel.toml files
+                    // Write child TextLabels as folder + _instance.toml.
+                    // Mirrors the right-click Insert path so every save
+                    // path in the codebase produces the same on-disk
+                    // shape; the legacy `<Name>.textlabel.toml` flat-file
+                    // form still loads (Workspace arm in
+                    // `spawns_entity_in_service`) but isn't written here
+                    // anymore.
                     if let Ok(children) = children_query.get(entity) {
                         for child in children.iter() {
                             if let Ok(text_label) = text_label_query.get(child) {
@@ -649,9 +705,18 @@ fn handle_plugin_action_events(
                                 let label_name = child_instance.map(|(_, i)| i.name.clone())
                                     .unwrap_or_else(|_| "Label".to_string());
                                 let safe_label = label_name.replace(' ', "_");
+                                let label_dir = bb_dir.join(&safe_label);
+                                if let Err(e) = std::fs::create_dir_all(&label_dir) {
+                                    warn!("Failed to create {} folder: {}", safe_label, e);
+                                    continue;
+                                }
+                                let pos_arr = text_label.position.as_array();
+                                let size_arr = text_label.size.as_array();
                                 let label_toml = format!(
-                                    "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0]\nsize = [{}, {}]\nbackground_color = [{}, {}, {}, {}]\nborder_size = {}\nvisible = {}\nz_index = {}\n\n[text]\ntext = \"{}\"\ntext_color = [{}, {}, {}, {}]\nfont_size = {}\ntext_x_alignment = \"{}\"\ntext_y_alignment = \"center\"\n",
-                                    text_label.size[0], text_label.size[1],
+                                    "[instance]\nname = \"{}\"\n\n[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [{}, {}, {}, {}]\nsize = [{}, {}, {}, {}]\nbackground_color = [{}, {}, {}, {}]\nborder_size = {}\nvisible = {}\nz_index = {}\n\n[text]\ntext = \"{}\"\ntext_color = [{}, {}, {}, {}]\nfont_size = {}\ntext_x_alignment = \"{}\"\ntext_y_alignment = \"center\"\n",
+                                    label_name.replace('"', "\\\""),
+                                    pos_arr[0], pos_arr[1], pos_arr[2], pos_arr[3],
+                                    size_arr[0], size_arr[1], size_arr[2], size_arr[3],
                                     text_label.background_color3[0], text_label.background_color3[1], text_label.background_color3[2], 1.0 - text_label.background_transparency,
                                     text_label.border_size_pixel,
                                     text_label.visible,
@@ -665,8 +730,10 @@ fn handle_plugin_action_events(
                                         crate::classes::TextXAlignment::Right => "right",
                                     },
                                 );
-                                if let Err(e) = std::fs::write(bb_dir.join(format!("{}.textlabel.toml", safe_label)), &label_toml) {
-                                    warn!("Failed to write {}.textlabel.toml: {}", safe_label, e);
+                                let label_toml_path = label_dir.join("_instance.toml");
+                                recently_written.mark_written(label_toml_path.clone());
+                                if let Err(e) = std::fs::write(&label_toml_path, &label_toml) {
+                                    warn!("Failed to write {}/_instance.toml: {}", safe_label, e);
                                 }
                             }
                         }
@@ -995,7 +1062,8 @@ fn process_plugin_actions(
                     text_color3: [color[0], color[1], color[2]],
                     text_transparency: 1.0 - color[3],
                     background_transparency: 1.0, // Transparent background
-                    size: [200.0, 50.0],
+                    // Pure-pixel canvas (Scale=0).
+                    size: eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0),
                     ..Default::default()
                 };
                 
@@ -1036,10 +1104,13 @@ fn process_plugin_actions(
                                 class_name: ClassName::Frame,
                                 ..Default::default()
                             };
+                            // The Workshop API still describes layout as
+                            // pixel-pair `position_offset` / `size_offset`
+                            // (flat 2-tuples). Wrap as UDim2 with Scale=0.
                             let frame = Frame {
                                 visible: true,
-                                position_offset: *position_offset,
-                                size_offset: *size_offset,
+                                position: eustress_common::ui_types::UDim2::from_pixels(position_offset[0], position_offset[1]),
+                                size: eustress_common::ui_types::UDim2::from_pixels(size_offset[0], size_offset[1]),
                                 background_color3: *background_color,
                                 background_transparency: *background_transparency,
                                 border_color3: *border_color,
@@ -1048,7 +1119,7 @@ fn process_plugin_actions(
                             };
                             let entity = spawn_frame(commands, instance, frame);
                             commands.entity(entity).insert(ChildOf(parent));
-                            
+
                             // Spawn children
                             for child in children {
                                 spawn_element(commands, entity, child);
@@ -1064,8 +1135,8 @@ fn process_plugin_actions(
                                 text: text.clone(),
                                 font_size: *font_size,
                                 text_color3: *text_color,
-                                position: *position_offset,
-                                size: *size_offset,
+                                position: eustress_common::ui_types::UDim2::from_pixels(position_offset[0], position_offset[1]),
+                                size: eustress_common::ui_types::UDim2::from_pixels(size_offset[0], size_offset[1]),
                                 background_transparency: *background_transparency,
                                 ..Default::default()
                             };
@@ -1081,8 +1152,8 @@ fn process_plugin_actions(
                             let text_box = TextBox {
                                 placeholder_text: placeholder.clone(),
                                 font_size: *font_size,
-                                position_offset: *position_offset,
-                                size_offset: *size_offset,
+                                position: eustress_common::ui_types::UDim2::from_pixels(position_offset[0], position_offset[1]),
+                                size: eustress_common::ui_types::UDim2::from_pixels(size_offset[0], size_offset[1]),
                                 text_color3: *text_color,
                                 background_color3: *background_color,
                                 border_color3: *border_color,
@@ -1100,8 +1171,8 @@ fn process_plugin_actions(
                             let button = TextButton {
                                 text: text.clone(),
                                 font_size: *font_size,
-                                position_offset: *position_offset,
-                                size_offset: *size_offset,
+                                position: eustress_common::ui_types::UDim2::from_pixels(position_offset[0], position_offset[1]),
+                                size: eustress_common::ui_types::UDim2::from_pixels(size_offset[0], size_offset[1]),
                                 text_color3: *text_color,
                                 background_color3: *background_color,
                                 ..Default::default()

@@ -314,6 +314,7 @@ fn draw_handle_cube(
 // ============================================================================
 
 fn handle_scale_interaction(
+    mut commands: Commands,
     mut state: ResMut<ScaleToolState>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -360,6 +361,10 @@ fn handle_scale_interaction(
                 if let Some(initial_pos) = state.initial_positions.get(&entity).copied() {
                     transform.translation = initial_pos;
                 }
+            }
+            for ent in state.initial_positions.keys() {
+                commands.entity(*ent)
+                    .remove::<crate::space::instance_loader::BeingDragged>();
             }
             state.dragged_axis = None;
             state.dragged_entity = None;
@@ -444,6 +449,9 @@ fn handle_scale_interaction(
                 let ent_size = bp_opt.as_ref().map(|bp| bp.size).unwrap_or(Vec3::ONE);
                 state.initial_scales.insert(ent, ent_size);
                 state.initial_positions.insert(ent, trans.translation);
+                commands.entity(ent).insert(
+                    crate::space::instance_loader::BeingDragged,
+                );
             }
             state.group_center = group_center;
 
@@ -664,6 +672,10 @@ fn handle_scale_interaction(
             }
         }
 
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.dragged_entity = None;
         state.initial_scales.clear();
@@ -684,6 +696,7 @@ fn handle_scale_interaction(
 /// Matches the existing mouse-release in that it pushes a `ScaleEntities`
 #[allow(clippy::too_many_arguments)]
 fn finalize_numeric_input_on_scale(
+    mut commands: Commands,
     mut committed: MessageReader<crate::numeric_input::NumericInputCommittedEvent>,
     mut state: ResMut<ScaleToolState>,
     mut query: Query<(
@@ -810,6 +823,10 @@ fn finalize_numeric_input_on_scale(
             }
         }
 
+        for ent in state.initial_positions.keys() {
+            commands.entity(*ent)
+                .remove::<crate::space::instance_loader::BeingDragged>();
+        }
         state.dragged_axis = None;
         state.dragged_entity = None;
         state.initial_scales.clear();

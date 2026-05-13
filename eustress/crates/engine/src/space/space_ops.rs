@@ -177,11 +177,11 @@ pub fn scaffold_new_space(
     write_file(&space_root.join("simulation.toml"), &simulation_toml())?;
 
     // ── Service folders ────────────────────────────────────────────────────
-    // Copy _service.toml from assets/service_templates/<Name>/ so all
+    // Copy _service.toml from common/assets/service_templates/<Name>/ so all
     // properties, icons, and descriptions are data-driven from the templates.
-    let svc_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("service_templates");
+    // Common is the canonical asset source — engine no longer ships a sister
+    // copy (see 2026-05-12 consolidation).
+    let svc_template_dir = eustress_common::service_templates_dir();
 
     for svc in SERVICE_FOLDERS {
         let svc_dir = space_root.join(svc.name);
@@ -1067,9 +1067,7 @@ pub fn ensure_space_integrity(space_root: &Path) {
     }
 
     // Ensure all service folders exist with _service.toml
-    let svc_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("service_templates");
+    let svc_template_dir = eustress_common::service_templates_dir();
 
     for svc in SERVICE_FOLDERS {
         let svc_dir = space_root.join(svc.name);

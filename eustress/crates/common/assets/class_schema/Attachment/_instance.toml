@@ -1,0 +1,33 @@
+# Attachment — A point/orientation on a BasePart for joints, lights, particles.
+# Renders as a small Roblox-Studio-style orange Neon visualizer block so it's
+# immediately visible after insert. The actual semantic data lives in the
+# [attachment] section; [asset]+[transform]+[properties] are purely the
+# visualizer.
+
+[attachment]
+visible = false
+axis = [1.0, 0.0, 0.0]
+secondary_axis = [0.0, 1.0, 0.0]
+
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [0.1, 0.1, 0.1]
+
+[properties]
+color = [1.0, 0.6, 0.0, 1.0]
+transparency = 0.0
+anchored = true
+can_collide = false
+cast_shadow = false
+reflectance = 0.0
+material = "Neon"
+locked = false
+
+[metadata]
+class_name = "Attachment"
+archivable = true

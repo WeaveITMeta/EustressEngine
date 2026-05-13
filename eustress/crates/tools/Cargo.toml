@@ -32,6 +32,12 @@ ureq = { version = "2", features = ["json"] }
 # could use this too.
 toml = "0.8"
 
+# Canonical entity-creation pipeline. The `create_entity` MCP tool
+# delegates to `eustress_common::instance_create::create_instance` so
+# the disk shape of an MCP-created entity matches every other surface
+# (Insert menu, Toolbox, Model ribbon).
+eustress-common = { path = "../common" }
+
 # Base64 — `script_tools::ImageToCodeTool` encodes images for Claude's
 # vision API. Kept here so the tool works identically out-of-process.
 base64 = "0.22"
