@@ -146,6 +146,13 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(log_info)?;
     module.function_meta(log_warn)?;
     module.function_meta(log_error)?;
+
+    // Stage 8 — unit conversion helpers. Scripts always see engine-
+    // native meters; these helpers are for explicit display / parse
+    // when the script wants a non-meter representation. Unknown
+    // symbols return the input value unchanged, never raise.
+    module.function_meta(units_from_meters)?;
+    module.function_meta(units_to_meters)?;
     
     // Data types — Roblox-compatible
     module.ty::<Vector3>()?;
@@ -493,6 +500,39 @@ fn write_space_file(relative_path: &str, content: &str) -> bool {
 fn query_material_properties(material_name: &str) -> (f32, f32, f32) {
     let mat = eustress_common::classes::Material::from_string(material_name);
     mat.pbr_params()
+}
+
+// ============================================================================
+// Units — Stage 8
+// ============================================================================
+
+/// Convert an engine-native (meter) value to the named unit. Symbol
+/// accepts both canonical forms (`"m"`, `"ft"`, …) and the lenient
+/// aliases supported by `Unit::from_any` (`"meters"`, `"feet"`, …).
+/// Unknown symbols return the input untouched so a typo in a script
+/// degrades gracefully rather than aborting the run.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn units_from_meters(value: f64, symbol: &str) -> f64 {
+    match eustress_common::units::Unit::from_any(symbol) {
+        Some(u) => eustress_common::units::convert(
+            value, eustress_common::units::ENGINE_NATIVE_UNIT, u,
+        ),
+        None => value,
+    }
+}
+
+/// Convert a value in the named unit to engine-native meters. Inverse
+/// of `units_from_meters`; identical symbol-tolerance behaviour.
+#[cfg(feature = "realism-scripting")]
+#[rune::function]
+fn units_to_meters(value: f64, symbol: &str) -> f64 {
+    match eustress_common::units::Unit::from_any(symbol) {
+        Some(u) => eustress_common::units::convert(
+            value, u, eustress_common::units::ENGINE_NATIVE_UNIT,
+        ),
+        None => value,
+    }
 }
 
 // ============================================================================

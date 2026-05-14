@@ -635,6 +635,42 @@ impl LuauRuntime {
         globals.set("workspace", workspace_table)
             .map_err(|error| format!("Failed to set workspace: {}", error))?;
 
+        // Units namespace — script-facing helpers for explicit unit
+        // conversion. All numeric values seen by scripts (positions,
+        // sizes, raycast distances, gravity, …) are in engine-native
+        // meters; this namespace is the escape hatch for displaying or
+        // parsing values in another unit (e.g. drawing a "5.0 ft"
+        // label on a part whose Position is 1.524 m).
+        //
+        //   Units.from_meters(value, symbol)   meters → unit
+        //   Units.to_meters(value, symbol)     unit  → meters
+        //
+        // Unknown symbols return the input value unchanged plus a
+        // second `false` return so scripts can validate without raising.
+        let units_table = lua.create_table()
+            .map_err(|error| format!("Failed to create Units table: {}", error))?;
+
+        let from_meters = lua.create_function(|_, (value, symbol): (f64, String)| {
+            match crate::units::Unit::from_any(&symbol) {
+                Some(u) => Ok((crate::units::convert(value, crate::units::ENGINE_NATIVE_UNIT, u), true)),
+                None => Ok((value, false)),
+            }
+        }).map_err(|e| format!("Failed to create Units.from_meters: {}", e))?;
+        units_table.set("from_meters", from_meters)
+            .map_err(|e| format!("Failed to set Units.from_meters: {}", e))?;
+
+        let to_meters = lua.create_function(|_, (value, symbol): (f64, String)| {
+            match crate::units::Unit::from_any(&symbol) {
+                Some(u) => Ok((crate::units::convert(value, u, crate::units::ENGINE_NATIVE_UNIT), true)),
+                None => Ok((value, false)),
+            }
+        }).map_err(|e| format!("Failed to create Units.to_meters: {}", e))?;
+        units_table.set("to_meters", to_meters)
+            .map_err(|e| format!("Failed to set Units.to_meters: {}", e))?;
+
+        globals.set("Units", units_table)
+            .map_err(|e| format!("Failed to set Units: {}", e))?;
+
         // tick() — Roblox-compatible time function (seconds since Unix epoch)
         let tick_fn = lua.create_function(|_, ()| {
             let now = std::time::SystemTime::now()

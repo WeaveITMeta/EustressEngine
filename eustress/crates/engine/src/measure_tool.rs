@@ -88,7 +88,7 @@ impl ModalTool for MeasureDistanceTool {
             MeasureMode::Distance => match (self.point_a, self.point_b) {
                 (None, _)           => "click first point".to_string(),
                 (Some(_), None)     => "click second point".to_string(),
-                (Some(a), Some(b))  => format!("{:.3} studs", (b - a).length()),
+                (Some(a), Some(b))  => format!("{:.3} m", (b - a).length()),
             },
             MeasureMode::Angle => match (self.point_a, self.point_b, self.point_c) {
                 (None, _, _)                => "click first leg endpoint".to_string(),
@@ -127,7 +127,7 @@ impl ModalTool for MeasureDistanceTool {
                 (Some(a), Some(b)) => {
                     let d = (b - a).length();
                     let delta = b - a;
-                    format!("{:.3} studs  (Δ {:.3}, {:.3}, {:.3})", d, delta.x.abs(), delta.y.abs(), delta.z.abs())
+                    format!("{:.3} m  (Δ {:.3}, {:.3}, {:.3})", d, delta.x.abs(), delta.y.abs(), delta.z.abs())
                 }
                 _ => "— click two points —".into(),
             },
@@ -288,11 +288,11 @@ impl ModalTool for MeasureDistanceTool {
 
         let msg = match self.mode {
             MeasureMode::Area => format!(
-                "Area: {:.3} studs² across {} parts (AABB surface total)",
+                "Area: {:.3} m² across {} parts (AABB surface total)",
                 surface_total, count
             ),
             MeasureMode::Volume => format!(
-                "Volume: {:.3} studs³ across {} parts",
+                "Volume: {:.3} m³ across {} parts",
                 volume_total, count
             ),
             MeasureMode::Mass => format!(

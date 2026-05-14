@@ -47,6 +47,11 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         user_id: None,
         username: None,
         luau_executor: None,
+        // MCP server runs out-of-process from the engine — it doesn't
+        // observe the engine's `DisplayUnit` resource. Callers passing
+        // sizes via the MCP boundary must declare their `unit` arg
+        // explicitly; Space-default unit then acts as the fallback.
+        display_unit: None,
     })
 }
 

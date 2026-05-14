@@ -239,6 +239,11 @@ fn main() {
         .register_type::<GltfMaterialExtras>()
         // PlayerService for play mode character spawning
         .init_resource::<PlayerService>()
+        // DisplayUnit — user-selected display unit for the Properties
+        // panel, status-bar readout, and Measure tool. Cosmetic only;
+        // ECS / Avian / disk stay in engine-native meters regardless.
+        // Defaults to Meter (see Default impl).
+        .init_resource::<eustress_common::units::DisplayUnit>()
         // Startup args
         .insert_resource(args.clone())
         // NotificationManager resource — always registered. The toast bridge

@@ -311,6 +311,22 @@ impl SpaceFileRegistry {
     pub fn is_loaded(&self, path: &Path) -> bool {
         self.file_to_entity.contains_key(path)
     }
+
+    /// Collect every (file_path, entity) entry whose path is a
+    /// descendant of `ancestor`. Used by the delete handler when a
+    /// parent folder gets renamed to trash so all descendant entities
+    /// can be despawned together AND added to `rename_in_progress` —
+    /// otherwise a child's still-pending save-on-Changed flushes after
+    /// the parent rename, fails (parent dir gone), and can leave the
+    /// engine and disk state subtly inconsistent. Match is strict
+    /// `starts_with` on path components; the ancestor itself is
+    /// included.
+    pub fn descendants_of(&self, ancestor: &Path) -> Vec<(PathBuf, Entity)> {
+        self.file_to_entity.iter()
+            .filter(|(p, _)| p.starts_with(ancestor))
+            .map(|(p, e)| (p.clone(), *e))
+            .collect()
+    }
 }
 
 /// Component marking an entity as loaded from a file
@@ -1976,6 +1992,7 @@ impl Plugin for SpaceFileLoaderPlugin {
                 super::file_watcher::process_file_changes,
                 super::instance_loader::write_instance_changes_system,
                 super::instance_loader::ensure_tags_and_attributes_components,
+                super::instance_loader::ensure_measure_unit,
                 super::instance_loader::save_tags_and_attributes_changes,
                 super::space_ops::apply_space_rescan,
                 super::instance_loader::update_base_part_size_from_mesh,

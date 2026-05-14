@@ -480,8 +480,24 @@ fn dispatch_keyboard_shortcuts(
         return;
     }
 
-    // Delete key only — Backspace is reserved for text editing
-    if keys.just_pressed(KeyCode::Delete) {
+    // Delete key only — Backspace is reserved for text editing.
+    //
+    // Belt-and-braces guard: the early-return above already blocks
+    // shortcuts when Slint's `text_input_focused` is true, but that
+    // signal depends on `changed has-focus` bubbling out of every
+    // LineEdit / dropdown — a chain that's silently broken when a
+    // new property row type forgets to fire `focus-changed`. So we
+    // ALSO require the cursor to be over the 3D viewport. The
+    // Properties panel sits outside the viewport, so this single
+    // condition blocks the entity-delete shortcut while the user is
+    // typing into a property field, regardless of whether the
+    // focus-bubbling chain is healthy. Cursor over viewport with a
+    // selection is still the normal "press Delete to delete entity"
+    // path.
+    let cursor_over_viewport = ui_focus.as_ref()
+        .map(|f| f.has_focus)
+        .unwrap_or(false);
+    if keys.just_pressed(KeyCode::Delete) && cursor_over_viewport {
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         if !ctrl && !alt {
@@ -520,6 +536,27 @@ fn dispatch_keyboard_shortcuts(
 
     for action in actions {
         if bindings.check(action, &keys) {
+            // Destructive shortcuts (Delete, Cut, Duplicate, group ops)
+            // get the same cursor-over-viewport gate as the Delete key
+            // press above. The user-reported sequence — click a
+            // property field, press Backspace to clear it, type a new
+            // value — was silently triggering Action::Delete when the
+            // user had remapped Delete to Backspace (or simply because
+            // the focus-bubbling chain skipped a row). Gating
+            // destructives on cursor position is the durable defense:
+            // typing into a property field with the cursor still over
+            // the Properties panel will never reach the entity-delete
+            // path, regardless of which key was pressed or whether
+            // Slint's `text_input_focused` propagated correctly.
+            let is_destructive = matches!(
+                action,
+                Action::Delete | Action::Cut | Action::Duplicate
+                    | Action::Group | Action::Ungroup,
+            );
+            if is_destructive && !cursor_over_viewport {
+                info!("⌨️ Suppressed {:?} — cursor not over viewport (likely editing a UI field)", action);
+                continue;
+            }
             info!("⌨️ Shortcut: {:?}", action);
             menu_events.write(crate::ui::MenuActionEvent::new(action));
             return;
@@ -858,6 +895,36 @@ fn handle_menu_action_events(
                                 // stays on disk, the entity stays in ECS,
                                 // and the user can retry — better than
                                 // silent permanent loss.
+                                // Before renaming, gather every descendant
+                                // entity registered under this folder. The
+                                // rename moves the whole subtree on disk, but
+                                // descendant ECS entities (e.g. a child
+                                // BillboardGui Label under the deleted Part)
+                                // would otherwise survive and their queued
+                                // save-on-Changed writes flush AFTER the
+                                // rename — failing because the parent dir is
+                                // gone, occasionally racing the save into a
+                                // resurrected file. Despawn them explicitly
+                                // and add their paths to `rename_in_progress`
+                                // so the watcher swallows the cascade of
+                                // delete events without firing redundant
+                                // despawns. The orphan
+                                // `Workspace/Part-aaXX/Label/_instance.toml`
+                                // user-bug 2026-05-13 was this race.
+                                let descendant_paths: Vec<(std::path::PathBuf, Entity)> =
+                                    if is_folder_instance {
+                                        file_registry.as_ref()
+                                            .map(|r| r.descendants_of(&source_path))
+                                            .unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                if let Some(ref mut registry) = file_registry {
+                                    for (path, _) in &descendant_paths {
+                                        registry.rename_in_progress.insert(path.clone());
+                                    }
+                                }
+
                                 let moved = (|| {
                                     let attempts = 5u32;
                                     let mut last_err: Option<std::io::Error> = None;
@@ -870,9 +937,13 @@ fn handle_menu_action_events(
                                                 // `source_path`, not to `_instance.toml`.
                                                 trashed_paths.push((source_path.clone(), trash_path.clone()));
                                                 info!(
-                                                    "🗑️ Moved {:?} to trash{}",
+                                                    "🗑️ Moved {:?} to trash{}{}",
                                                     source_path.file_name().unwrap_or_default(),
                                                     if i > 0 { format!(" (after {} retr{})", i, if i == 1 { "y" } else { "ies" }) } else { String::new() },
+                                                    if descendant_paths.len() > 1 {
+                                                        format!(" + {} descendant{}", descendant_paths.len() - 1,
+                                                            if descendant_paths.len() == 2 { "" } else { "s" })
+                                                    } else { String::new() },
                                                 );
                                                 return true;
                                             }
@@ -896,6 +967,12 @@ fn handle_menu_action_events(
                                     if let Some(ref mut registry) = file_registry {
                                         registry.rename_in_progress.remove(&toml_path);
                                         registry.rename_in_progress.remove(&source_path);
+                                        // Roll back the descendant gating we
+                                        // staged above so the watcher resumes
+                                        // tracking them.
+                                        for (path, _) in &descendant_paths {
+                                            registry.rename_in_progress.remove(path);
+                                        }
                                     }
                                     false
                                 })();
@@ -903,6 +980,20 @@ fn handle_menu_action_events(
                                     // Skip ECS despawn so Explorer stays
                                     // in sync with the still-present file.
                                     continue;
+                                }
+                                // Rename succeeded — despawn every descendant
+                                // entity and clean its registry entry so the
+                                // ECS matches the on-disk subtree we just
+                                // moved to trash. The parent entity itself
+                                // gets despawned below (after the if-let-ok
+                                // closure) via `commands.entity(entity)
+                                // .despawn()`.
+                                for (path, desc_entity) in &descendant_paths {
+                                    if *desc_entity == entity { continue; }
+                                    commands.entity(*desc_entity).despawn();
+                                    if let Some(ref mut registry) = file_registry {
+                                        registry.unregister_file(path);
+                                    }
                                 }
                             }
                             if let Some(ref mut registry) = file_registry {

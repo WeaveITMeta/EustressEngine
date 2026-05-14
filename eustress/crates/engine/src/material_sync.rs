@@ -98,19 +98,31 @@ fn set_material_textures_to_repeat(
     }
 }
 
-/// When MaterialService finishes loading (registry grows), mark all BaseParts as changed
-/// so `sync_basepart_to_material` re-resolves them with the full registry.
+/// When MaterialService finishes loading (registry grows OR shrinks), mark
+/// all BaseParts as changed so `sync_basepart_to_material` re-resolves them
+/// against the current registry.
+///
+/// Detecting size CHANGES (`!=`) rather than only GROWTH (`>`) is critical
+/// after a Space switch: if the new Space has fewer materials than the
+/// previous one, `current_count` is smaller than `last_count` and a
+/// growth-only check never fires — leaving every Part in the new Space
+/// rendered with the default fallback material. The user's "materials
+/// don't load when switching Spaces" report traced to exactly this case.
+/// Also reset `PatchedTextureTracker` so the texture-repeat patcher
+/// re-runs against the new registry's materials.
 fn reapply_materials_on_registry_change(
     material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
     mut tracker: ResMut<MaterialRegistryTracker>,
+    mut patched: ResMut<PatchedTextureTracker>,
     mut base_parts: Query<&mut BasePart>,
 ) {
     let Some(ref registry) = material_registry else { return };
     let current_count = registry.len();
-    if current_count > tracker.last_count {
-        info!("🎨 MaterialRegistry grew ({} → {}), re-applying materials to all parts",
+    if current_count != tracker.last_count {
+        info!("🎨 MaterialRegistry changed ({} → {}), re-applying materials to all parts",
               tracker.last_count, current_count);
         tracker.last_count = current_count;
+        patched.patched_materials.clear();
         // Touch all BaseParts so Changed<BasePart> triggers sync
         for mut bp in base_parts.iter_mut() {
             bp.set_changed();

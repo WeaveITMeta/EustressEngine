@@ -428,12 +428,17 @@ pub mod handlers {
             .and_then(|a| a.user.as_ref().map(|u| (Some(u.id.clone()), Some(u.username.clone()))))
             .unwrap_or((None, None));
 
+        let display_unit_sym = world
+            .get_resource::<eustress_common::units::DisplayUnit>()
+            .map(|d| d.0.symbol().to_string());
+
         let ctx = crate::workshop::tools::ToolContext {
             space_root: space_root_path,
             universe_root,
             user_id,
             username,
             luau_executor: None,
+            display_unit: display_unit_sym,
         };
 
         let Some(registry) =

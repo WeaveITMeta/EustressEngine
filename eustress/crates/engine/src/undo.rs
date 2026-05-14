@@ -838,20 +838,32 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
             }
         }
         Action::TrashEntities { paths } => {
-            // Undo delete: move files back from trash to original location
+            // Undo delete: move files back from trash to original location.
+            // Folder renames are atomic on disk but the platform watcher
+            // emits a single Create event for the destination dir — not
+            // recursive Creates for every restored child file. That left
+            // descendant entities (a child BillboardGui under a restored
+            // Part) unspawned and Ctrl+Z appearing broken. Trigger a
+            // full SpaceRescan once below so the file loader walks every
+            // restored subtree and spawns every entity inside it.
+            let mut any_restored = false;
             for (original_path, trash_path) in paths {
                 if trash_path.exists() {
-                    // Ensure parent directory exists
                     if let Some(parent) = original_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
                     match std::fs::rename(trash_path, original_path) {
-                        Ok(_) => info!("↶ Restored {:?} from trash", original_path.file_name().unwrap_or_default()),
+                        Ok(_) => {
+                            info!("↶ Restored {:?} from trash", original_path.file_name().unwrap_or_default());
+                            any_restored = true;
+                        }
                         Err(e) => warn!("Failed to restore {:?}: {}", original_path, e),
                     }
                 }
             }
-            // The file watcher will detect the restored files and respawn entities
+            if any_restored {
+                world.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
+            }
         }
         Action::SpawnFolders { folders } => {
             // Undo spawn: move the newly-created folders into the trash.

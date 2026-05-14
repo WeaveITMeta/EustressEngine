@@ -114,6 +114,7 @@ impl NewPartDescriptor {
                 last_modified: chrono::Utc::now().to_rfc3339(),
                 created_by: None,
                 modifications: Vec::new(),
+                unit: None,
             },
             material: None,
             thermodynamic: None,
@@ -414,6 +415,14 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
     let Some(transform) = world.get::<Transform>(entity).cloned() else {
         return;
     };
+    // Authored unit of the source file. The on-entity MeasureUnit is
+    // the live source of truth (it tracks any unit changes since load).
+    // Falls back to engine-native meters when the entity has no
+    // MeasureUnit — that means it pre-dates Stage 1 plumbing and the
+    // file is also unit-less, so identity is correct.
+    let authored_unit = world.get::<eustress_common::units::MeasureUnit>(entity)
+        .map(|m| m.0)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
 
     // Load existing def, mutate, write back. Preserves all other fields
     // (color, material, physics, tags, attributes, etc.).
@@ -424,7 +433,12 @@ pub fn persist_transform_to_toml(world: &mut World, entity: Entity) {
             return;
         }
     };
-    def.transform.position = transform.translation.to_array();
+    // Convert engine-native (meter) translation back to the file's
+    // authored unit before serialising. Rotation is angular — never
+    // a length — so it passes through untouched.
+    def.transform.position = eustress_common::units::engine_to_authored_vec3_f32(
+        transform.translation.to_array(), authored_unit,
+    );
     def.transform.rotation = [
         transform.rotation.x, transform.rotation.y,
         transform.rotation.z, transform.rotation.w,
@@ -470,6 +484,7 @@ fn build_fallback_def(position: Vec3, rotation: Quat, size: Vec3) -> InstanceDef
             last_modified: chrono::Utc::now().to_rfc3339(),
             created_by: None,
             modifications: Vec::new(),
+            unit: None,
         },
         material: None,
         thermodynamic: None,
@@ -1713,6 +1728,9 @@ pub fn persist_transform_and_size_to_toml(world: &mut World, entity: Entity, siz
         return;
     };
     let Some(transform) = world.get::<Transform>(entity).cloned() else { return };
+    let authored_unit = world.get::<eustress_common::units::MeasureUnit>(entity)
+        .map(|m| m.0)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
 
     let mut def = match load_instance_definition(&inst_path) {
         Ok(d) => d,
@@ -1721,14 +1739,20 @@ pub fn persist_transform_and_size_to_toml(world: &mut World, entity: Entity, siz
             return;
         }
     };
-    def.transform.position = transform.translation.to_array();
+    // Engine-native (meter) → authored unit on both translation and
+    // size. Rotation passes through.
+    def.transform.position = eustress_common::units::engine_to_authored_vec3_f32(
+        transform.translation.to_array(), authored_unit,
+    );
     def.transform.rotation = [
         transform.rotation.x, transform.rotation.y,
         transform.rotation.z, transform.rotation.w,
     ];
     // `transform.scale` in the TOML is BasePart.size for primitive parts
     // — see the instance_loader docs. Writing the new size here.
-    def.transform.scale = size.to_array();
+    def.transform.scale = eustress_common::units::engine_to_authored_vec3_f32(
+        size.to_array(), authored_unit,
+    );
 
     let stamp = world.get_resource::<crate::auth::AuthState>().and_then(current_stamp);
     if let Err(e) = write_instance_definition_signed(&inst_path, &mut def, stamp.as_ref()) {

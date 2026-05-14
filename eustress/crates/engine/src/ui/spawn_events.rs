@@ -163,11 +163,26 @@ pub fn handle_spawn_part_events(
             if let Some(ref sr) = space_root {
                 let workspace_dir = sr.0.join("Workspace");
                 let mesh_path = crate::spawn::part_type_to_glb_path(&event.part_type);
+                // Stage 7: stamp the Space-default authoring unit into
+                // the new TOML so the file records its provenance. None
+                // when the Space hasn't declared a default — the engine
+                // then treats the entity as engine-native meters.
+                let space_unit = eustress_common::project_manifest::read_space_default_unit(&sr.0);
+                let authored = space_unit.as_deref()
+                    .and_then(eustress_common::units::Unit::from_symbol)
+                    .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                let pos_auth = eustress_common::units::engine_to_authored_vec3_f32(
+                    [actual_position.x, actual_position.y, actual_position.z], authored,
+                );
+                let scale_auth = eustress_common::units::engine_to_authored_vec3_f32(
+                    [size.x, size.y, size.z], authored,
+                );
                 let overrides = eustress_common::instance_create::InstanceOverrides {
                     display_name: Some(part_name.to_string()),
-                    position: Some([actual_position.x, actual_position.y, actual_position.z]),
-                    scale: Some([size.x, size.y, size.z]),
+                    position: Some(pos_auth),
+                    scale: Some(scale_auth),
                     asset_mesh: Some(mesh_path.to_string()),
+                    unit_symbol: space_unit,
                     ..Default::default()
                 };
                 match eustress_common::instance_create::create_instance(

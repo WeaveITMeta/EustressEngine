@@ -327,6 +327,13 @@ export component StudioWindow inherits Window {
     in-out property <string> session-hours: "0h 0m";
     in-out property <string> total-hours: "0h";
     in-out property <[SavedIdentityData]> saved-identities: [];
+
+    // Stage 5 — display unit (cosmetic, session-scoped).
+    // Symbol mirror of the Bevy `DisplayUnit` Resource — pushed by Rust
+    // on init + whenever the resource changes; emitted back via
+    // `set-display-unit` when the user picks a new entry.
+    in-out property <string> display-unit-symbol: "m";
+    callback set-display-unit(string);
     callback switch-identity(string);
     callback remove-identity(string);
 
@@ -947,6 +954,10 @@ export component StudioWindow inherits Window {
             show-assets <=> root.show-assets;
             show-collaboration <=> root.show-collaboration;
             show-command-bar <=> root.show-command-bar;
+
+            // Display unit (Stage 5)
+            display-unit-symbol: root.display-unit-symbol;
+            on-set-display-unit(sym) => { root.set-display-unit(sym); }
 
             // Pipe dynamic keyboard shortcuts into the ribbon subtitles
             shortcut-new: root.shortcut-new;

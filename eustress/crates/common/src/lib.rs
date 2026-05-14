@@ -30,6 +30,10 @@ pub mod events;
 // Cross-crate filesystem-change broadcast — one watcher, many subscribers.
 // See module docs for the architectural rationale.
 pub mod file_events;
+// Dynamic unit system: every dimensional value passes through this module
+// at the disk and display boundaries. ECS / Avian / rendering stay in
+// meters; authoring unit per instance, display unit per session.
+pub mod units;
 pub mod adornments;
 pub mod assets;
 pub mod attributes;

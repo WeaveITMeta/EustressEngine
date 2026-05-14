@@ -121,6 +121,7 @@ pub fn dispatch_chat_request(
     tool_registry: Option<Res<ToolRegistry>>,
     mention_index: Option<Res<super::mention::MentionIndex>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
 ) {
     // Only dispatch in the conversing state, only when we're not already
     // waiting, and only when the user has not gated us behind a tool
@@ -197,8 +198,9 @@ pub fn dispatch_chat_request(
         );
     }
 
-    // Build system prompt: base + active mode fragments.
-    let system_prompt = build_system_prompt(&pipeline.active_modes);
+    // Build system prompt: base + active mode fragments + current
+    // DisplayUnit hint so the model speaks the user's unit naturally.
+    let system_prompt = build_system_prompt(&pipeline.active_modes, display_unit.as_deref());
 
     // Advertise every registered tool to Claude regardless of which
     // modes are currently active. The mode system still drives system-
@@ -352,10 +354,28 @@ Gradio-Hosted Mesh Generation (via run_bash):
   - Set timeout_seconds generously — complex generation can take 5+ minutes.
 "#;
 
-fn build_system_prompt(active_modes: &ActiveModes) -> String {
+fn build_system_prompt(active_modes: &ActiveModes, display_unit: Option<&eustress_common::units::DisplayUnit>) -> String {
     let mut out = String::with_capacity(2048);
     out.push_str(BASE_SYSTEM_PROMPT);
     out.push_str(&active_modes.system_prompt_fragments());
+    // Tell the model which unit the user is currently working in so
+    // its conversational answers ("a 5 ft wall is …") use the same
+    // unit, AND so that `create_entity`/`update_entity` calls without
+    // an explicit `unit` arg default sensibly (the tool's fallback
+    // chain also reads ctx.display_unit, but stating it here keeps
+    // the model from second-guessing the user's frame of reference).
+    if let Some(du) = display_unit {
+        out.push_str(&format!(
+            "\n\nCurrent display unit: {} (\"{}\"). The user's positions, sizes, \
+             distances, and gizmo readouts are all rendered in this unit. When you call \
+             `create_entity` or `update_entity` and the user hasn't explicitly named a unit, \
+             OMIT the `unit` arg — the tool defaults to the current display unit. Only set \
+             `unit` when the user explicitly asks for something in a different unit \
+             (e.g. \"make it 2 m wide\" while the display is \"ft\").\n",
+            du.0.display_name(),
+            du.0.symbol(),
+        ));
+    }
     out
 }
 
@@ -595,6 +615,7 @@ pub fn poll_agentic_responses(
     tool_registry: Option<Res<ToolRegistry>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
+    display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
 ) {
     let mut completed_indices = Vec::new();
 
@@ -621,7 +642,7 @@ pub fn poll_agentic_responses(
 
                 // 2. Emit each tool_use as an Mcp card. Auto-execute when
                 //    the registered definition doesn't require approval.
-                let tool_context = build_tool_context(&space_root, &auth);
+                let tool_context = build_tool_context(&space_root, &auth, &display_unit);
                 let mut any_awaiting_approval = false;
 
                 for tool_use in &agentic.tool_uses {
@@ -717,6 +738,7 @@ pub fn poll_agentic_responses(
 fn build_tool_context(
     space_root: &Option<Res<crate::space::SpaceRoot>>,
     auth: &Option<Res<crate::auth::AuthState>>,
+    display_unit: &Option<Res<eustress_common::units::DisplayUnit>>,
 ) -> Option<super::tools::ToolContext> {
     let sr = space_root.as_ref()?;
     let universe_root = crate::space::universe_root_for_path(&sr.0)
@@ -725,6 +747,8 @@ fn build_tool_context(
         .and_then(|a| a.user.as_ref())
         .map(|u| (Some(u.id.clone()), Some(u.username.clone())))
         .unwrap_or((None, None));
+    let display_unit_sym = display_unit.as_ref()
+        .map(|d| d.0.symbol().to_string());
     // Build a Luau executor that creates a fresh sandboxed runtime per
     // invocation. LuauRuntime is !Send so we can't share one across
     // threads — creating a fresh VM per script is ~1 ms and avoids
@@ -788,6 +812,7 @@ fn build_tool_context(
         user_id,
         username,
         luau_executor,
+        display_unit: display_unit_sym,
     })
 }
 

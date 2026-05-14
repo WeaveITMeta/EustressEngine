@@ -1147,6 +1147,7 @@ fn handle_approve_mcp(
     tool_registry: Option<Res<tools::ToolRegistry>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
+    display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
     mut tasks: ResMut<ToolDispatchTasks>,
 ) {
     for event in events.read() {
@@ -1186,6 +1187,7 @@ fn handle_approve_mcp(
                     user_id,
                     username,
                     luau_executor: None,
+                    display_unit: display_unit.as_deref().map(|d| d.0.symbol().to_string()),
                 }
             }
             _ => {

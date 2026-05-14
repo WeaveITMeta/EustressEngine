@@ -75,6 +75,11 @@ pub struct GuiTomlMetadata {
     pub class_name: String,
     #[serde(default)]
     pub archivable: bool,
+    /// Authored unit symbol (`"m"`, `"cm"`, `"mm"`, `"ft"`, `"in"`,
+    /// `"studs"`). `None` means the file was authored without a unit
+    /// declaration → treat as engine-native meters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 /// [gui] section — shared visual properties
@@ -84,7 +89,7 @@ pub struct GuiTomlMetadata {
 /// The previous `Vec<f32>` accept-anything form has been removed —
 /// older TOML files using `[x, y]` / `[w, h]` will fail to load and
 /// must be migrated to the 4-tuple form.
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct GuiTomlProperties {
     #[serde(default)]
     pub position: eustress_common::ui_types::UDim2,
@@ -287,6 +292,7 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
         metadata: GuiTomlMetadata {
             class_name: class_name.to_string(),
             archivable: true,
+            unit: None,
         },
         gui: GuiTomlProperties {
             position: eustress_common::ui_types::UDim2::default(),
@@ -537,6 +543,42 @@ pub fn spawn_gui_element(
         gui_display_name(path)
     };
 
+    // Parse the authored unit now so it can drive both the
+    // Stage 3 dimensional conversion below (when `units_v1` is on)
+    // AND the MeasureUnit component attached after spawn.
+    let parsed_unit = gui_def.metadata.unit.as_deref()
+        .and_then(eustress_common::units::Unit::from_symbol)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+
+    // Stage 3: convert BillboardGui's 3D dimensional fields from the
+    // authored unit to meters. Pixel-space UDim2 fields (`position`,
+    // `size`, `anchor_point`, `size_offset`) are 2D canvas coordinates
+    // and are intentionally NOT converted. `extents_offset` /
+    // `extents_offset_world_space` are in part-size multipliers (ratio,
+    // not length) so they're also skipped.
+    #[cfg(feature = "units_v1")]
+    let gui_owned: GuiTomlProperties = {
+        let mut g = gui_def.gui.clone();
+        let to_unit = eustress_common::units::ENGINE_NATIVE_UNIT;
+        if parsed_unit != to_unit {
+            if let Some(v) = g.units_offset {
+                g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
+            }
+            if let Some(v) = g.units_offset_world_space {
+                g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
+            }
+            for f in [&mut g.max_distance, &mut g.distance_lower_limit,
+                      &mut g.distance_upper_limit, &mut g.distance_step] {
+                if let Some(v) = *f {
+                    *f = Some(eustress_common::units::convert_f32(v, parsed_unit, to_unit));
+                }
+            }
+        }
+        g
+    };
+    #[cfg(feature = "units_v1")]
+    let gui = &gui_owned;
+    #[cfg(not(feature = "units_v1"))]
     let gui = &gui_def.gui;
     let class_name = match gui_type {
         "ScreenGui" => eustress_common::classes::ClassName::ScreenGui,
@@ -610,6 +652,18 @@ pub fn spawn_gui_element(
         mesh_path: std::path::PathBuf::new(),
         name: display_name_for_inst,
     });
+
+    // Attach MeasureUnit from the unit parsed above. Unknown symbols on
+    // disk warn-once and fall back to engine-native meters rather than
+    // failing the whole GUI load — symbol typos shouldn't black-hole a
+    // ScreenGui tree.
+    if let Some(sym) = gui_def.metadata.unit.as_deref() {
+        if eustress_common::units::Unit::from_symbol(sym).is_none() {
+            warn!("Unknown unit symbol {:?} in {} — using engine-native meters", sym, path.display());
+        }
+    }
+    commands.entity(entity).insert(eustress_common::units::MeasureUnit(parsed_unit));
+
     info!("🪧 spawn_gui_element: {} attached InstanceFile → {}", gui_type, path.display());
 
     // Attach the ECS Tags component so MCP `get_tagged_entities` and other

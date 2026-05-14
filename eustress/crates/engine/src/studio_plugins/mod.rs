@@ -401,7 +401,7 @@ fn handle_plugin_action_events(
                 // `units_offset = [0, 3, 0]`. `size` is a pure-pixel
                 // UDim2: scale=0, offset=200×50.
                 let instance_toml = format!(
-                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 3.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
+                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 0.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
                     now, now
                 );
                 let bb_toml_path = bb_dir.join("_instance.toml");
@@ -455,7 +455,7 @@ fn handle_plugin_action_events(
                 };
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
-                billboard_gui.units_offset = [0.0, 3.0, 0.0];
+                billboard_gui.units_offset = [0.0, 0.0, 0.0];
                 // Roblox-parity Size is `UDim2`. Pure-pixel canvas
                 // dimensions: Scale=0, Offset=200×50.
                 billboard_gui.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
@@ -672,7 +672,7 @@ fn handle_plugin_action_events(
                     } else {
                         (
                             eustress_common::ui_types::UDim2::from_pixels(200.0, 100.0),
-                            [0.0, 2.0, 0.0],
+                            [0.0, 0.0, 0.0],
                             100.0,
                             false,
                         )
@@ -1045,7 +1045,7 @@ fn process_plugin_actions(
                 };
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
-                billboard_gui.units_offset = [0.0, 3.0, 0.0]; // Offset above the part
+                billboard_gui.units_offset = [0.0, 0.0, 0.0];
                 
                 let billboard_entity = spawn_billboard_gui(&mut commands, billboard_instance, billboard_gui);
                 commands.entity(billboard_entity).insert(ChildOf(parent_entity));

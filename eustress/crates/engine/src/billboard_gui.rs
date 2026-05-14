@@ -1595,6 +1595,17 @@ fn apply_billboard_gui_to_toml(
     toml: &mut crate::space::gui_loader::GuiTomlFile,
 ) {
     use eustress_common::classes::ZIndexBehavior;
+    // Stage-4 disk normalisation: read the file's authored unit (from
+    // `[metadata].unit`) and convert engine-native length-typed fields
+    // back to that unit before writing. `extents_offset*` is a part-
+    // size multiplier (ratio, not length) and so passes through
+    // unconverted, matching the load-side rule.
+    let authored = toml.metadata.unit.as_deref()
+        .and_then(eustress_common::units::Unit::from_symbol)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+    let to_authored_vec3 = |v: [f32; 3]| eustress_common::units::engine_to_authored_vec3_f32(v, authored);
+    let to_authored_f32  = |v: f32|       eustress_common::units::engine_to_authored_f32(v, authored);
+
     toml.gui.size = class.size;
     toml.gui.size_offset = Some(class.size_offset);
     toml.gui.active = Some(class.active);
@@ -1603,16 +1614,16 @@ fn apply_billboard_gui_to_toml(
     toml.gui.clips_descendants = Some(class.clips_descendants);
     toml.gui.reset_on_spawn = Some(class.reset_on_spawn);
     toml.gui.stiffness_by_distance = Some(class.stiffness_by_distance);
-    toml.gui.max_distance = Some(class.max_distance);
-    toml.gui.distance_lower_limit = Some(class.distance_lower_limit);
-    toml.gui.distance_upper_limit = Some(class.distance_upper_limit);
-    toml.gui.distance_step = Some(class.distance_step);
+    toml.gui.max_distance = Some(to_authored_f32(class.max_distance));
+    toml.gui.distance_lower_limit = Some(to_authored_f32(class.distance_lower_limit));
+    toml.gui.distance_upper_limit = Some(to_authored_f32(class.distance_upper_limit));
+    toml.gui.distance_step = Some(to_authored_f32(class.distance_step));
     toml.gui.brightness = Some(class.brightness);
     toml.gui.light_influence = Some(class.light_influence);
     toml.gui.extents_offset = Some(class.extents_offset);
     toml.gui.extents_offset_world_space = Some(class.extents_offset_world_space);
-    toml.gui.units_offset = Some(class.units_offset);
-    toml.gui.units_offset_world_space = Some(class.units_offset_world_space);
+    toml.gui.units_offset = Some(to_authored_vec3(class.units_offset));
+    toml.gui.units_offset_world_space = Some(to_authored_vec3(class.units_offset_world_space));
     // ZIndex on BillboardGui is a depth bias (per-billboard, integer),
     // not the GuiObject sort-order ZIndex used by Frame/TextLabel. Map
     // it into the same TOML `z_index` slot — there's no ambiguity per

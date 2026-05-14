@@ -222,6 +222,9 @@ core = [
     # same binary install, no separate download required for external
     # IDEs to get Rune intelligence.
     "lsp",
+    # Dynamic Unit System v1 — convert authored-unit values to engine-
+    # native meters at every load boundary. ON by default 2026-05-13.
+    "units_v1",
 ]
 
 # ── Individual feature gates ──────────────────────────────────────────────────
@@ -264,6 +267,11 @@ lsp = ["dep:tower-lsp"]
 forge = []
 # Bliss node (Bliss token economy integration)
 bliss = []
+# Dynamic Unit System v1 — apply authored-unit → meter conversion at every
+# load boundary (spawn_instance, spawn_gui_element, paste, MCP create). ON
+# by default 2026-05-13 (folded into the `core` build tier). Override with
+# `--no-default-features` if you need to diagnose a unit-conversion bug.
+units_v1 = ["eustress-common/units_v1"]
 
 # ── Build profile toggles ─────────────────────────────────────────────────────
 dev = ["bevy/dynamic_linking"]

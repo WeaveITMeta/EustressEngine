@@ -47,6 +47,12 @@ pub struct MoveToolState {
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
     /// Initial rotations of all selected entities at drag start
     pub initial_rotations: std::collections::HashMap<Entity, Quat>,
+    /// Initial `BillboardGui.units_offset` snapshot for any selected
+    /// entity that carries a BillboardGui component. The move tool
+    /// drags this field instead of `Transform.translation` for
+    /// billboards — they have no meaningful 3D translation of their
+    /// own; their visual position is `parent_world_pos + units_offset`.
+    pub initial_units_offsets: std::collections::HashMap<Entity, Vec3>,
     /// Center of the combined AABB of all selected parts
     pub group_center: Vec3,
     /// Gizmo rotation captured at drag start (World = IDENTITY, Local =
@@ -74,6 +80,7 @@ impl Default for MoveToolState {
             hovered_plane: None,
             initial_positions: std::collections::HashMap::new(),
             initial_rotations: std::collections::HashMap::new(),
+            initial_units_offsets: std::collections::HashMap::new(),
             group_center: Vec3::ZERO,
             drag_rotation: Quat::IDENTITY,
             initial_mouse_world: Vec3::ZERO,
@@ -173,7 +180,7 @@ fn draw_move_gizmos(
     mut gizmos: Gizmos<TransformGizmoGroup>,
     state: Res<MoveToolState>,
     studio_state: Res<crate::ui::StudioState>,
-    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>), With<Selected>>,
+    query: Query<(Entity, &GlobalTransform, Option<&crate::classes::BasePart>, Option<&crate::classes::BillboardGui>), With<Selected>>,
     children_query: Query<&Children>,
     // `Without<bevy::ui::Node>` excludes 2D UI children whose
     // `GlobalTransform` stays at the origin (Bevy's UI layout
@@ -202,8 +209,19 @@ fn draw_move_gizmos(
     let mut bounds_max = Vec3::splat(f32::MIN);
     let mut count = 0;
 
-    for (entity, global_transform, base_part) in &query {
-        let t = global_transform.compute_transform();
+    for (entity, global_transform, base_part, billboard) in &query {
+        let mut t = global_transform.compute_transform();
+        // BillboardGui-aware anchoring: the entity's own Transform is
+        // meaningless for billboards (they don't render at their own
+        // translation). Their visual anchor is `parent_world +
+        // units_offset` — and `global_transform.translation` already
+        // gives us `parent_world` for a billboard whose own Transform
+        // is the canonical zero. Without this branch the gizmo sticks
+        // to world origin while the billboard floats at units_offset
+        // away — the user's reported bug.
+        if let Some(bg) = billboard {
+            t.translation = global_transform.translation() + Vec3::from_array(bg.units_offset);
+        }
         let size = base_part.map(|bp| bp.size).unwrap_or(t.scale);
         let (mn, mx) = calculate_rotated_aabb(t.translation, size * 0.5, t.rotation);
         bounds_min = bounds_min.min(mn);
@@ -226,6 +244,13 @@ fn draw_move_gizmos(
     if count == 0 { return; }
 
     let center = (bounds_min + bounds_max) * 0.5;
+    // Half-extent of the selection AABB — used to keep the gizmo
+    // outside the object body. Without this, dragging a large part
+    // close to the camera produced gizmo arrows visibly shorter than
+    // the part itself ("gizmos do not size up to the object"). We
+    // scale `handle_len` by `max(camera_scale, half_extent * factor)`
+    // so the arrows always poke beyond the selection box.
+    let half_extent = (bounds_max - bounds_min).max_element() * 0.5;
 
     // --- Camera-distance-scaled handle length ---
     let Some((_, cam_gt, projection)) = cameras.iter().find(|(c, _, _)| c.order == 0) else { return };
@@ -234,9 +259,15 @@ fn draw_move_gizmos(
         _ => std::f32::consts::FRAC_PI_4,
     };
     let scale = camera_scale_factor(cam_gt.translation(), center, fov);
-    let handle_len = scale * 1.0;
-    let cone_radius = scale * 0.10;
-    let cone_len    = scale * 0.22;
+    // Handle length must be at least the half-extent + a margin so the
+    // arrow tip sits outside the object's bounding box; the
+    // camera-scale floor keeps very small objects' gizmos visible.
+    let handle_len = scale.max(half_extent * 1.5);
+    // Cone size scales with the handle so the arrowheads stay
+    // proportional whether the gizmo is small (far away) or big
+    // (close + chunky object).
+    let cone_radius = handle_len * 0.10;
+    let cone_len    = handle_len * 0.22;
 
     let yellow = Color::srgb(1.0, 1.0, 0.0);
 
@@ -330,6 +361,12 @@ fn handle_move_interaction(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
+    // BillboardGui-aware drag: gizmo movements on a billboard entity
+    // mutate `units_offset` rather than the (meaningless) `Transform.
+    // translation`. Kept as a parallel query so the main `query` shape
+    // stays unchanged and the drag handler's many iteration sites
+    // don't all need a 5-tuple update.
+    mut billboards: Query<&mut crate::classes::BillboardGui, With<Selected>>,
     children_query: Query<&Children>,
     // See `draw_move_gizmos` — `Without<bevy::ui::Node>` keeps UI
     // children (2D TextLabel, Frame, etc. living inside a
@@ -377,6 +414,13 @@ fn handle_move_interaction(
                 if let Some(rot) = state.initial_rotations.get(&entity).copied() {
                     transform.rotation = rot;
                 }
+                // BillboardGui: restore the original units_offset rather
+                // than the (irrelevant) translation snapshot.
+                if let Some(off) = state.initial_units_offsets.get(&entity).copied() {
+                    if let Ok(mut bg) = billboards.get_mut(entity) {
+                        bg.units_offset = [off.x, off.y, off.z];
+                    }
+                }
                 if let Some(mut bp) = bp_opt {
                     if let Some(pos) = state.initial_positions.get(&entity).copied() {
                         bp.cframe.translation = pos;
@@ -401,6 +445,7 @@ fn handle_move_interaction(
             state.dragged_entity = None;
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_units_offsets.clear();
             return;
         }
     }
@@ -428,7 +473,15 @@ fn handle_move_interaction(
         let mut bmax = Vec3::splat(f32::MIN);
         let mut cnt = 0;
         for (entity, gt, _, bp) in query.iter() {
-            let t = gt.compute_transform();
+            let mut t = gt.compute_transform();
+            // BillboardGui anchor: own Transform is meaningless, so the
+            // gizmo (and therefore the click hit zones below) follows
+            // `parent_world + units_offset`. `gt.translation()` already
+            // resolves to parent_world when the entity's own Transform
+            // is zero, which is the canonical BillboardGui case.
+            if let Ok(bg) = billboards.get(entity) {
+                t.translation = gt.translation() + Vec3::from_array(bg.units_offset);
+            }
             let s = bp.as_ref().map(|b| b.size).unwrap_or(t.scale);
             let (mn, mx) = calculate_rotated_aabb(t.translation, s * 0.5, t.rotation);
             bmin = bmin.min(mn); bmax = bmax.max(mx); cnt += 1;
@@ -450,7 +503,14 @@ fn handle_move_interaction(
             _ => std::f32::consts::FRAC_PI_4,
         };
         let scale = camera_scale_factor(camera_transform.translation(), c, fov);
-        (c, (bmax - bmin).max_element(), scale * 1.0)
+        // Mirror the visual gizmo's size floor so click hit-zones line
+        // up with the drawn arrows. Without this, dragging a large
+        // part would visually show a chunky gizmo but the axis-hit
+        // rect would still be the small camera-distance one, leaving
+        // the visible cones unclickable.
+        let half_extent = (bmax - bmin).max_element() * 0.5;
+        let len = scale.max(half_extent * 1.5);
+        (c, (bmax - bmin).max_element(), len)
     };
 
     // Gizmo rotation for current selection + transform mode. Shared
@@ -492,9 +552,13 @@ fn handle_move_interaction(
 
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_units_offsets.clear();
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
+                if let Ok(bg) = billboards.get(entity) {
+                    state.initial_units_offsets.insert(entity, Vec3::from_array(bg.units_offset));
+                }
                 commands.entity(entity).insert(
                     crate::space::instance_loader::BeingDragged,
                 );
@@ -524,9 +588,13 @@ fn handle_move_interaction(
             // Store initial state for all selected parts
             state.initial_positions.clear();
             state.initial_rotations.clear();
+            state.initial_units_offsets.clear();
             for (entity, _, transform, _) in query.iter() {
                 state.initial_positions.insert(entity, transform.translation);
                 state.initial_rotations.insert(entity, transform.rotation);
+                if let Ok(bg) = billboards.get(entity) {
+                    state.initial_units_offsets.insert(entity, Vec3::from_array(bg.units_offset));
+                }
                 commands.entity(entity).insert(
                     crate::space::instance_loader::BeingDragged,
                 );
@@ -556,9 +624,13 @@ fn handle_move_interaction(
 
                 state.initial_positions.clear();
                 state.initial_rotations.clear();
+                state.initial_units_offsets.clear();
                 for (ent, _, transform, _) in query.iter() {
                     state.initial_positions.insert(ent, transform.translation);
                     state.initial_rotations.insert(ent, transform.rotation);
+                    if let Ok(bg) = billboards.get(ent) {
+                        state.initial_units_offsets.insert(ent, Vec3::from_array(bg.units_offset));
+                    }
                     // Mark each dragged entity so `write_instance_changes_system`
                     // skips disk writes while the gizmo is held. The release
                     // branch below removes the marker AND writes once.
@@ -646,6 +718,19 @@ fn handle_move_interaction(
 
                 for (entity, _, mut transform, base_part_opt) in query.iter_mut() {
                     if is_descendant(entity, &selected_set, &parent_query) { continue; }
+                    // BillboardGui entities: drag mutates `units_offset`,
+                    // not `Transform.translation` — the billboard has no
+                    // meaningful 3D translation of its own. Skip the
+                    // translation write entirely so we don't bake a fake
+                    // offset into the entity's Transform that the
+                    // billboard renderer would then ignore.
+                    if let Some(initial_off) = state.initial_units_offsets.get(&entity) {
+                        if let Ok(mut bg) = billboards.get_mut(entity) {
+                            let new_off = *initial_off + axis_vec * snapped_delta;
+                            bg.units_offset = [new_off.x, new_off.y, new_off.z];
+                        }
+                        continue;
+                    }
                     if let Some(initial_pos) = state.initial_positions.get(&entity) {
                         let raw_pos = *initial_pos + axis_vec * snapped_delta;
                         let new_pos = crate::space::instance_loader::safe_translation(

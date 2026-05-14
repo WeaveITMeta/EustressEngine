@@ -515,6 +515,20 @@ pub struct InstanceMetadata {
     /// chain is kept as training signal for Bliss attribution + AI learning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifications: Vec<CreatorStamp>,
+    /// Authoring unit for this instance's dimensional values
+    /// (`[transform].position`, `[transform].scale`, any `[gui]`
+    /// `*_offset`, `max_distance`, …). The disk symbol comes from
+    /// [`eustress_common::units::Unit::symbol`] (`"m"`, `"cm"`,
+    /// `"mm"`, `"ft"`, `"in"`, `"studs"`). Missing field → engine
+    /// defaults to [`eustress_common::units::Unit::Meter`].
+    ///
+    /// Stored as `Option<String>` rather than the typed `Unit` so an
+    /// unknown unit symbol on disk doesn't fail the whole instance
+    /// load — the deserializer keeps the raw string, the spawn path
+    /// parses it via `Unit::from_symbol` and falls back to the
+    /// engine-native default with a warn! if it can't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 fn default_class_name() -> String {
@@ -531,6 +545,7 @@ impl Default for InstanceMetadata {
             last_modified: String::new(),
             created_by: None,
             modifications: Vec::new(),
+            unit: None,
         }
     }
 }
@@ -1196,6 +1211,26 @@ pub fn spawn_instance(
         &instance.metadata.class_name
     ).unwrap_or(eustress_common::classes::ClassName::Part);
 
+    // Authoring unit — drives the engine's per-entity unit awareness.
+    // Missing or unknown symbol → engine-native default (Meter). A
+    // warn! highlights typos like `unit = "metere"` so they get caught
+    // instead of silently degrading. Stage 3 wires this into the
+    // actual dimensional conversion at load; for now we just stamp
+    // the component so downstream systems can read it.
+    let measure_unit = match instance.metadata.unit.as_deref() {
+        Some(sym) => match eustress_common::units::Unit::from_symbol(sym) {
+            Some(u) => eustress_common::units::MeasureUnit(u),
+            None => {
+                warn!(
+                    "Unknown unit symbol {:?} in {:?} — defaulting to {:?}",
+                    sym, toml_path, eustress_common::units::ENGINE_NATIVE_UNIT,
+                );
+                eustress_common::units::MeasureUnit::default()
+            }
+        },
+        None => eustress_common::units::MeasureUnit::default(),
+    };
+
     // Tags → component. Populated from `instance.tags` in the TOML.
     // Previously the loader always inserted `Tags::new()` (empty),
     // silently dropping any tags the user authored — fixed
@@ -1223,6 +1258,41 @@ pub fn spawn_instance(
             mesh: "parts/block.glb".to_string(),
             scene: default_scene(),
         });
+    }
+
+    // ── Stage 3: authored-unit → meter conversion ──────────────────────
+    //
+    // When `units_v1` is on, every dimensional value on this instance is
+    // converted from the file's authored unit to the engine's native
+    // unit (meters) exactly once, at the load boundary. After this point
+    // every consumer — `Transform`, `BasePart.size`, Avian colliders,
+    // raycasts, gizmo math — speaks meters.
+    //
+    // Identity short-circuit: when the file already declares meters
+    // (the common case while migrating) the conversion is a no-op even
+    // with the feature on, so we pay zero cost for the dominant path.
+    //
+    // The flag is off by default during migration: existing files that
+    // either declare `unit = "m"` or omit the field entirely continue to
+    // load with the same bits they had pre-units_v1, regardless of
+    // whether the build was compiled with the flag.
+    #[cfg(feature = "units_v1")]
+    {
+        let from_unit = measure_unit.0;
+        let to_unit = eustress_common::units::ENGINE_NATIVE_UNIT;
+        if from_unit != to_unit {
+            instance.transform.position = eustress_common::units::convert_vec3_f32(
+                instance.transform.position, from_unit, to_unit,
+            );
+            instance.transform.scale = eustress_common::units::convert_vec3_f32(
+                instance.transform.scale, from_unit, to_unit,
+            );
+            debug!(
+                "📐 Converted {:?} from {} → m (pos={:?}, scale={:?})",
+                toml_path, from_unit.symbol(),
+                instance.transform.position, instance.transform.scale,
+            );
+        }
     }
 
     // ── No mesh: spawn a non-visual Instance entity (Atmosphere, Sky, Moon, Star, etc.) ──
@@ -1275,6 +1345,7 @@ pub fn spawn_instance(
             },
             Name::new(name.clone()),
         )).id();
+        commands.entity(entity).insert(measure_unit);
         info!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
     }
@@ -1444,6 +1515,7 @@ pub fn spawn_instance(
         let part_id = format!("{}v{}", entity.index(), entity.generation());
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
+        ec.insert(measure_unit);
 
         // Only add physics collider when can_collide is true — avoids broadphase
         // overhead for thousands of static decorative parts.
@@ -1535,6 +1607,7 @@ pub fn spawn_instance(
     let part_id = format!("{}v{}", entity.index(), entity.generation());
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
+    ec.insert(measure_unit);
 
     // Only add physics collider when can_collide is true — avoids broadphase
     // overhead for thousands of static decorative parts.
@@ -1794,6 +1867,7 @@ pub fn write_instance_changes_system(
         &Transform,
         &InstanceFile,
         Option<&eustress_common::classes::BasePart>,
+        Option<&eustress_common::units::MeasureUnit>,
     ), (
         Or<(Changed<Transform>, Changed<eustress_common::classes::BasePart>)>,
         // Defer TOML writes for entities currently held by a gizmo drag.
@@ -1829,10 +1903,14 @@ pub fn write_instance_changes_system(
         /// the mesh bounding box and would clobber the user's value with
         /// whatever the mesh happens to measure in scene units).
         is_custom_mesh: bool,
+        /// Authored unit of the file we're writing into. Position and
+        /// scale are converted from engine-native meters to this unit
+        /// at serialisation (identity short-circuit on `Meter`).
+        authored_unit: eustress_common::units::Unit,
     }
     let mut jobs: Vec<WriteJob> = Vec::new();
 
-    for (entity, transform, instance_file, base_part) in instances.iter() {
+    for (entity, transform, instance_file, base_part, measure_unit) in instances.iter() {
         if just_added.contains(&entity) {
             continue;
         }
@@ -1879,6 +1957,9 @@ pub fn write_instance_changes_system(
             !matches!(fname, "block.glb"|"ball.glb"|"cylinder.glb"|"wedge.glb"|"corner_wedge.glb"|"cone.glb")
             && !p.is_empty()
         };
+        let authored_unit = measure_unit
+            .map(|m| m.0)
+            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
         let mut job = WriteJob {
             path: instance_file.toml_path.clone(),
             transform: td.clone(),
@@ -1890,6 +1971,7 @@ pub fn write_instance_changes_system(
             can_collide: None,
             locked: None,
             is_custom_mesh,
+            authored_unit,
         };
         if let Some(bp) = base_part {
             // Same guard for `BasePart.size` — sanitize_size clamps each
@@ -1958,7 +2040,15 @@ pub fn write_instance_changes_system(
                     .as_table_mut()
                     .ok_or("transform is not a table")?;
 
-                let [px, py, pz] = job.transform.position;
+                // Convert engine-native meters back to the file's
+                // authored unit at the very edge. Identity short-circuit
+                // when `authored_unit == Meter`, so meter-authored files
+                // pay zero conversion cost. The conversion mirrors the
+                // load path: any value entering the file is in the
+                // unit symbol the file's `[metadata].unit` declares.
+                let [px, py, pz] = eustress_common::units::engine_to_authored_vec3_f32(
+                    job.transform.position, job.authored_unit,
+                );
                 tf.insert("position".into(), toml::Value::Array(vec![
                     toml::Value::Float(px as f64),
                     toml::Value::Float(py as f64),
@@ -1972,7 +2062,9 @@ pub fn write_instance_changes_system(
                     toml::Value::Float(rw as f64),
                 ]));
                 if !job.is_custom_mesh {
-                    let [sx, sy, sz] = job.transform.scale;
+                    let [sx, sy, sz] = eustress_common::units::engine_to_authored_vec3_f32(
+                        job.transform.scale, job.authored_unit,
+                    );
                     tf.insert("scale".into(), toml::Value::Array(vec![
                         toml::Value::Float(sx as f64),
                         toml::Value::Float(sy as f64),
@@ -2189,6 +2281,44 @@ pub fn ensure_tags_and_attributes_components(
         commands
             .entity(entity)
             .insert(eustress_common::attributes::Attributes::new());
+    }
+}
+
+/// Ensure every entity that carries an `InstanceFile` OR `LoadedFromFile`
+/// has a `MeasureUnit` component. Defaults to `MeasureUnit(Meter)` —
+/// the engine-native unit.
+///
+/// ## Why an auto-attach system instead of editing every spawn site
+///
+/// There are 30+ `commands.spawn` sites across `instance_loader`,
+/// `file_loader`, `gui_loader`, `service_loader`, `file_watcher`,
+/// `spawn`, and `spawn_events`. Threading a `MeasureUnit(...)` into
+/// every bundle invites missing one; missing one means the entity's
+/// future disk writes go through the unit-aware path with `None` and
+/// fall back to engine-native silently. The auto-attach catches every
+/// path uniformly.
+///
+/// ## Stage 2 contract
+///
+/// In Stage 2, the cold/hot-load paths will read `metadata.unit` from
+/// the TOML and insert `MeasureUnit(parsed_unit)` BEFORE this system
+/// runs (or at least before any disk write). The `Without<MeasureUnit>`
+/// filter here means the explicit insert wins; this is the fallback
+/// for entities that genuinely had no authoring info on disk.
+pub fn ensure_measure_unit(
+    mut commands: Commands,
+    needs_unit: Query<
+        Entity,
+        (
+            Or<(Added<InstanceFile>, Added<super::file_loader::LoadedFromFile>)>,
+            Without<eustress_common::units::MeasureUnit>,
+        ),
+    >,
+) {
+    for entity in needs_unit.iter() {
+        commands
+            .entity(entity)
+            .insert(eustress_common::units::MeasureUnit::default());
     }
 }
 

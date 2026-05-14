@@ -242,6 +242,12 @@ pub enum SlintAction {
     ToastUndoClicked,
     ToastUndoDismissed,
 
+    /// Status-bar display unit dropdown picked a new symbol.
+    /// Carries the canonical symbol ("m" / "cm" / "mm" / "ft" / "in" /
+    /// "studs"); the drain handler validates it via `Unit::from_symbol`
+    /// and rejects unknown values so a typo doesn't poison state.
+    SetDisplayUnit(String),
+
     // Play controls
     PlaySolo,
     PlayWithCharacter,
@@ -1130,6 +1136,7 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_numeric_input_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_toast_undo_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_commit_flash_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_display_unit_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain))
@@ -1305,6 +1312,8 @@ fn setup_slint_overlay(world: &mut World) {
     // File operations
     let q = queue.clone();
     ui.on_new_universe(move || q.push(SlintAction::NewUniverse));
+    let q = queue.clone();
+    ui.on_set_display_unit(move |sym| q.push(SlintAction::SetDisplayUnit(sym.to_string())));
     let q = queue.clone();
     ui.on_new_universe_confirmed(move |name| q.push(SlintAction::NewUniverseConfirmed(name.to_string())));
     let q = queue.clone();
@@ -2807,6 +2816,8 @@ struct DrainResources<'w> {
     forge_state: Option<ResMut<'w, crate::forge::ForgeState>>,
     /// Lighting service for real-time property sync
     lighting: Option<ResMut<'w, eustress_common::services::LightingService>>,
+    /// Stage 5 — user-selected display unit (set by status-bar dropdown).
+    display_unit: Option<ResMut<'w, eustress_common::units::DisplayUnit>>,
     /// API Reference filter state (search, category, language, status)
     api_filter: Option<ResMut<'w, ApiFilterState>>,
     /// Toast notification queue (dismiss/push from drain handlers)
@@ -3231,29 +3242,58 @@ fn do_reparent_node(
     };
     info!("📂 target resolved via entity_id_cache: {:?}", target);
 
-    let Some(tgt_dir) = queries.loaded_from_file.get(target).ok()
-        .map(|(_, lff)| target_dir_for(&lff.path)) else {
-            warn!("📂 Reparent ABORT: target {:?} has no LoadedFromFile component (drop on a service-root or non-file entity)", target);
-            if let Some(ref mut out) = res.output {
-                out.warn("Reparent: target entity has no on-disk folder to receive children".to_string());
-            }
-            return;
-        };
+    // Unified path lookup: folder-form entities (Parts, Models) only
+    // carry `InstanceFile` and never get a `LoadedFromFile`; loose
+    // files (scripts, gui leaves, soul scripts) carry the opposite. A
+    // reparent must succeed regardless of which component the entity
+    // holds, so probe both. Pre-resolved as concrete paths (rather
+    // than a closure that re-borrows on each call) because later in
+    // the body we need `queries.loaded_from_file.iter_mut()` and
+    // `queries.instance_files.iter_mut()` — a captured-by-ref closure
+    // would hold the immutable borrow alive across those iter_muts.
+    let resolve_path = |entity: Entity,
+                        instance_files: &Query<&'static mut crate::space::instance_loader::InstanceFile>,
+                        loaded_from_file: &Query<(Entity, &'static mut crate::space::LoadedFromFile)>|
+        -> Option<std::path::PathBuf>
+    {
+        instance_files.get(entity).ok().map(|inst| inst.toml_path.clone())
+            .or_else(|| loaded_from_file.get(entity).ok().map(|(_, lff)| lff.path.clone()))
+    };
+
+    let Some(tgt_path) = resolve_path(target, &queries.instance_files, &queries.loaded_from_file) else {
+        warn!("📂 Reparent ABORT: target {:?} has neither InstanceFile nor LoadedFromFile (drop on a service-root or non-file entity)", target);
+        if let Some(ref mut out) = res.output {
+            out.warn("Reparent: target entity has no on-disk folder to receive children".to_string());
+        }
+        return;
+    };
+    let tgt_dir = target_dir_for(&tgt_path);
     info!("📂 tgt_dir={}", tgt_dir.display());
 
+    // Pre-resolve every source's on-disk path BEFORE entering the loop
+    // body. The body mutates `queries.instance_files` /
+    // `queries.loaded_from_file` via `iter_mut`, so we can't keep an
+    // immutable borrow of either alive across that.
     let source_count = source_entities.len();
-    let mut moved_count = 0u32;
-    for source in source_entities {
-        if source == target {
-            info!("📂 skipping: source == target ({:?})", source);
-            continue;
-        }
+    let resolved_sources: Vec<(Entity, std::path::PathBuf)> = source_entities.iter()
+        .filter_map(|&source| {
+            if source == target {
+                info!("📂 skipping: source == target ({:?})", source);
+                return None;
+            }
+            match resolve_path(source, &queries.instance_files, &queries.loaded_from_file) {
+                Some(p) => Some((source, p)),
+                None => {
+                    warn!("📂 source {:?} has neither InstanceFile nor LoadedFromFile — cannot move on disk; skipping", source);
+                    None
+                }
+            }
+        })
+        .collect();
 
-        let Some((src_entry, _src_parent_dir)) = queries.loaded_from_file.get(source).ok()
-            .map(|(_, lff)| resolve(&lff.path)) else {
-                warn!("📂 source {:?} has no LoadedFromFile — cannot move on disk; skipping", source);
-                continue;
-            };
+    let mut moved_count = 0u32;
+    for (source, src_path) in resolved_sources {
+        let (src_entry, _src_parent_dir) = resolve(&src_path);
         info!("📂 src_entry={}", src_entry.display());
 
         // Forbid moving an entity into itself or any of its descendants.
@@ -3547,6 +3587,34 @@ fn drain_slint_actions(
             }
             SlintAction::ToastUndoDismissed => {
                 events.toast_undo_dismissed.write(crate::toast_undo::ToastUndoDismissedEvent);
+            }
+
+            SlintAction::SetDisplayUnit(sym) => {
+                match eustress_common::units::Unit::from_symbol(&sym) {
+                    Some(u) => {
+                        if let Some(ref mut du) = res.display_unit {
+                            if du.0 != u {
+                                du.0 = u;
+                                info!("📐 Display unit → {} ({})", u.display_name(), u.symbol());
+                                // Force the Properties panel to rebuild
+                                // next frame so the new unit shows up
+                                // without waiting for the 300-frame
+                                // throttle or a selection change. Both
+                                // gates are reset: `frames_since_…`
+                                // unlocks the early-return gate, and
+                                // `last_properties_hash = 0` makes the
+                                // hash diff push the new model to Slint.
+                                if let Some(ref mut state) = res.state {
+                                    state.frames_since_selection_change = 0;
+                                    state.last_properties_hash = 0;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("Ignored display-unit pick {:?} — not a known symbol", sym);
+                    }
+                }
             }
 
             // Play controls → StudioState flags (consumed by play_mode.rs)
@@ -5872,14 +5940,28 @@ fn drain_slint_actions(
                             // other two fields, producing 5+ parts.
                             // Taking first three lets the paste win
                             // without rejecting normal 3-part edits.
+                            //
+                            // Values come from the panel in DisplayUnit
+                            // (whatever the status-bar dropdown is set
+                            // to). Convert to engine-native meters
+                            // before reaching the Transform — otherwise
+                            // typing "5" in ft mode would set the
+                            // translation to 5m, not 1.524m.
                             if let Ok(mut tf) = queries.transforms.get_mut(entity) {
                                 let parts: Vec<f32> = val.split(',')
                                     .filter_map(|s| parse_finite(s.trim()))
                                     .collect();
                                 if parts.len() >= 3 {
-                                    tf.translation.x = parts[0];
-                                    tf.translation.y = parts[1];
-                                    tf.translation.z = parts[2];
+                                    let from = res.display_unit.as_deref()
+                                        .map(|d| d.0)
+                                        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                    let m = eustress_common::units::convert_vec3_f32(
+                                        [parts[0], parts[1], parts[2]],
+                                        from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                    );
+                                    tf.translation.x = m[0];
+                                    tf.translation.y = m[1];
+                                    tf.translation.z = m[2];
                                 }
                             }
                         }
@@ -5908,13 +5990,24 @@ fn drain_slint_actions(
                                 .collect();
                             // `>= 3` — see Position branch rationale.
                             if parts.len() >= 3 {
+                                // DisplayUnit → meters before the
+                                // resize event. Without this, typing
+                                // "5" in ft mode would set the part to
+                                // 5m on each axis rather than 1.524m.
+                                let from = res.display_unit.as_deref()
+                                    .map(|d| d.0)
+                                    .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                let m = eustress_common::units::convert_vec3_f32(
+                                    [parts[0], parts[1], parts[2]],
+                                    from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                );
                                 // Clamp against 0 / negatives — Bevy meshes
                                 // render flipped with negative scale and
                                 // degenerate at 0.
                                 let new_size = Vec3::new(
-                                    parts[0].max(1e-4),
-                                    parts[1].max(1e-4),
-                                    parts[2].max(1e-4),
+                                    m[0].max(1e-4),
+                                    m[1].max(1e-4),
+                                    m[2].max(1e-4),
                                 );
                                 // For Parts (anything with `BasePart`),
                                 // Scale is the SAME concept as Size —
@@ -5991,14 +6084,24 @@ fn drain_slint_actions(
                             // bookkeeping. Apply to ALL selected entities so that
                             // typing a size while several parts are selected resizes
                             // every one of them — not just the primary.
+                            //
+                            // DisplayUnit → meters before reaching the
+                            // resize event (same rationale as Position).
                             let parts: Vec<f32> = val.split(',')
                                 .filter_map(|s| parse_finite(s.trim()))
                                 .collect();
                             if parts.len() >= 3 {
+                                let from = res.display_unit.as_deref()
+                                    .map(|d| d.0)
+                                    .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                let m = eustress_common::units::convert_vec3_f32(
+                                    [parts[0], parts[1], parts[2]],
+                                    from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                );
                                 let new_size = Vec3::new(
-                                    parts[0].max(1e-4),
-                                    parts[1].max(1e-4),
-                                    parts[2].max(1e-4),
+                                    m[0].max(1e-4),
+                                    m[1].max(1e-4),
+                                    m[2].max(1e-4),
                                 );
                                 let all_selected: Vec<Entity> = queries.selected_entities.iter().collect();
                                 let targets = if all_selected.is_empty() {
@@ -6050,7 +6153,14 @@ fn drain_slint_actions(
                                     .filter_map(|s| parse_finite(s.trim()))
                                     .collect();
                                 if parts.len() >= 3 {
-                                    bg.units_offset = [parts[0], parts[1], parts[2]];
+                                    let from = res.display_unit.as_deref()
+                                        .map(|d| d.0)
+                                        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                    let m = eustress_common::units::convert_vec3_f32(
+                                        [parts[0], parts[1], parts[2]],
+                                        from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                    );
+                                    bg.units_offset = m;
                                 }
                             }
                         }
@@ -6060,7 +6170,14 @@ fn drain_slint_actions(
                                     .filter_map(|s| parse_finite(s.trim()))
                                     .collect();
                                 if parts.len() >= 3 {
-                                    bg.units_offset_world_space = [parts[0], parts[1], parts[2]];
+                                    let from = res.display_unit.as_deref()
+                                        .map(|d| d.0)
+                                        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                                    let m = eustress_common::units::convert_vec3_f32(
+                                        [parts[0], parts[1], parts[2]],
+                                        from, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                    );
+                                    bg.units_offset_world_space = m;
                                 }
                             }
                         }
@@ -6373,10 +6490,51 @@ fn drain_slint_actions(
                             [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
                             [t.scale.x, t.scale.y, t.scale.z],
                         ));
+                        // Panel typed values for length-typed keys are
+                        // in DisplayUnit (status-bar dropdown). The TOML
+                        // writer downstream expects engine-native meters
+                        // — convert here so route_property's stored
+                        // f64s and the subsequent meters→authored unit
+                        // conversion both speak the same unit.
+                        let val_in_meters = {
+                            let from = res.display_unit.as_deref()
+                                .map(|d| d.0)
+                                .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+                            let to = eustress_common::units::ENGINE_NATIVE_UNIT;
+                            if from == to {
+                                val.clone()
+                            } else {
+                                let is_vec3_length = matches!(key.as_str(),
+                                    "Position" | "Scale" | "Size"
+                                    | "UnitsOffset" | "UnitsOffsetWorldSpace");
+                                let is_scalar_length = matches!(key.as_str(),
+                                    "MaxDistance" | "DistanceLowerLimit"
+                                    | "DistanceUpperLimit" | "DistanceStep");
+                                if is_vec3_length {
+                                    let parts: Vec<f64> = val.split(',')
+                                        .filter_map(|s| s.trim().parse::<f64>().ok())
+                                        .collect();
+                                    if parts.len() == 3 {
+                                        let m = eustress_common::units::convert_vec3_f64(
+                                            [parts[0], parts[1], parts[2]], from, to,
+                                        );
+                                        format!("{},{},{}", m[0], m[1], m[2])
+                                    } else {
+                                        val.clone()  // UDim2 4-tuple or malformed — leave alone
+                                    }
+                                } else if is_scalar_length {
+                                    val.trim().parse::<f64>()
+                                        .map(|v| eustress_common::units::convert(v, from, to).to_string())
+                                        .unwrap_or_else(|_| val.clone())
+                                } else {
+                                    val.clone()
+                                }
+                            }
+                        };
                         match apply_property_to_toml_value(
                             &instance_file.toml_path,
                             &key,
-                            &val,
+                            &val_in_meters,
                             current_transform,
                         ) {
                             Ok(true) => {
@@ -6844,6 +7002,7 @@ fn drain_slint_actions(
                             metadata: crate::space::gui_loader::GuiTomlMetadata {
                                 class_name: "BillboardGui".to_string(),
                                 archivable: true,
+                                unit: None,
                             },
                             gui: crate::space::gui_loader::GuiTomlProperties {
                                 // BillboardGui's 3D `units_offset` is
@@ -6964,6 +7123,7 @@ fn drain_slint_actions(
                             metadata: crate::space::gui_loader::GuiTomlMetadata {
                                 class_name: "TextLabel".to_string(),
                                 archivable: true,
+                                unit: None,
                             },
                             gui: crate::space::gui_loader::GuiTomlProperties {
                                 // Pure-pixel TextLabel canvas (Scale=0).
@@ -9562,6 +9722,25 @@ fn sync_commit_flash_to_slint(
     let ui = &slint_context.window;
     if (ui.get_commit_flash_progress() - state.progress).abs() > 0.001 {
         ui.set_commit_flash_progress(state.progress);
+    }
+}
+
+/// Push the current `DisplayUnit` Resource symbol into the ribbon's
+/// status badge. Standalone system rather than folded into
+/// `sync_bevy_to_slint` because that function already brushes Bevy's
+/// 16-parameter system limit. Cheap diff so we don't churn the
+/// property every frame.
+fn sync_display_unit_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(display_unit) = display_unit else { return };
+    let ui = &slint_context.window;
+    let symbol = display_unit.0.symbol();
+    let current: String = ui.get_display_unit_symbol().into();
+    if current != symbol {
+        ui.set_display_unit_symbol(symbol.into());
     }
 }
 
@@ -12362,6 +12541,11 @@ fn sync_properties_to_slint(
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
+    // DisplayUnit projects engine-native (meter) length values into the
+    // user's chosen unit at render time. The panel's writer side already
+    // converts user input back to meters via DisplayUnit before reaching
+    // ECS, so the Properties panel speaks the same unit at read and write.
+    display_unit: Res<eustress_common::units::DisplayUnit>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut studio_state) = studio_state else { return };
@@ -12521,6 +12705,7 @@ fn sync_properties_to_slint(
                     last_modified: String::new(),
                     created_by: None,
                     modifications: Vec::new(),
+                    unit: None,
                 },
                 material: None,
                 thermodynamic: None,
@@ -12545,6 +12730,16 @@ fn sync_properties_to_slint(
             add_prop("Metadata", "ClassName", toml_def.metadata.class_name.clone(), "string", false);
             add_prop("Metadata", "Name", instance_file.name.clone(), "string", true);
             add_prop("Metadata", "Archivable", toml_def.metadata.archivable.to_string(), "bool", true);
+            // Per-instance authoring unit. Defaults to the engine-native
+            // unit ("m") for files that omit `metadata.unit`. Rendered
+            // as a dropdown (property-type = "unit") populated below
+            // with the six canonical symbols; route_property's "Unit"
+            // arm validates the picked symbol before patching disk.
+            {
+                let sym = toml_def.metadata.unit.as_deref()
+                    .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT.symbol());
+                add_prop("Metadata", "Unit", sym.to_string(), "unit", true);
+            }
             if !toml_def.metadata.created.is_empty() {
                 add_prop("Metadata", "Created", toml_def.metadata.created.clone(), "string", false);
             }
@@ -12615,14 +12810,27 @@ fn sync_properties_to_slint(
                 .or_else(|_| transforms.get(selected_entity).map(|t| t.scale))
                 .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.scale));
             if !is_ui_class_for_transform {
+                // Project meter values into the user's chosen DisplayUnit
+                // for the panel. The writer side parses these back as
+                // the same unit and converts to meters before reaching
+                // ECS, so the round-trip is symmetric.
+                let du = display_unit.0;
+                let pos_d = eustress_common::units::convert_vec3_f32(
+                    [live_translation.x, live_translation.y, live_translation.z],
+                    eustress_common::units::ENGINE_NATIVE_UNIT, du,
+                );
+                let size_d = eustress_common::units::convert_vec3_f32(
+                    [live_size.x, live_size.y, live_size.z],
+                    eustress_common::units::ENGINE_NATIVE_UNIT, du,
+                );
                 add_prop("Transform", "Position", format!("{:.3}, {:.3}, {:.3}",
-                    live_translation.x, live_translation.y, live_translation.z), "vec3", true);
+                    pos_d[0], pos_d[1], pos_d[2]), "vec3", true);
                 // Convert quaternion → Euler degrees for display
                 let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
                 add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
                     rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
                 add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
-                    live_size.x, live_size.y, live_size.z), "vec3", true);
+                    size_d[0], size_d[1], size_d[2]), "vec3", true);
             } else {
                 // For UI classes the live_*/transform reads still need to
                 // be evaluated so any downstream code that uses them
@@ -12685,7 +12893,38 @@ fn sync_properties_to_slint(
                             .or_else(|| ui_queries_3d.p1().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)))
                             .or_else(|| ui_queries_3d.p2().get(selected_entity).ok().and_then(|c| c.get_property(&desc.name)));
                         if let Some(val) = val_opt {
-                            let (val_str, prop_type) = property_value_to_display(&val);
+                            let (mut val_str, prop_type) = property_value_to_display(&val);
+                            // UI-class length-typed properties (BillboardGui's
+                            // UnitsOffset etc.) get projected through DisplayUnit
+                            // for the panel. ExtentsOffset is a size-multiplier
+                            // ratio, not a length, so it's intentionally excluded.
+                            // Distance fields are scalar lengths.
+                            use eustress_common::classes::PropertyValue;
+                            let is_vec3_length = matches!(desc.name.as_str(),
+                                "UnitsOffset" | "UnitsOffsetWorldSpace");
+                            let is_scalar_length = matches!(desc.name.as_str(),
+                                "MaxDistance" | "DistanceLowerLimit"
+                                | "DistanceUpperLimit" | "DistanceStep");
+                            if display_unit.0 != eustress_common::units::ENGINE_NATIVE_UNIT {
+                                if is_vec3_length {
+                                    if let PropertyValue::Vector3(v) = val {
+                                        let m = eustress_common::units::convert_vec3_f32(
+                                            [v.x, v.y, v.z],
+                                            eustress_common::units::ENGINE_NATIVE_UNIT,
+                                            display_unit.0,
+                                        );
+                                        val_str = format!("{:.2}, {:.2}, {:.2}", m[0], m[1], m[2]);
+                                    }
+                                } else if is_scalar_length {
+                                    if let PropertyValue::Float(f) = val {
+                                        let c = eustress_common::units::convert_f32(
+                                            f, eustress_common::units::ENGINE_NATIVE_UNIT,
+                                            display_unit.0,
+                                        );
+                                        val_str = format!("{:.3}", c);
+                                    }
+                                }
+                            }
                             add_prop(&desc.category, &desc.name, val_str, prop_type, !desc.read_only);
                         }
                     }
@@ -13171,6 +13410,23 @@ fn sync_properties_to_slint(
         }
     }
 
+    // Populate unit dropdown options. Six canonical symbols matching
+    // `eustress_common::units::Unit::symbol`; the panel's writer side
+    // re-validates via `Unit::from_symbol` before any disk write, so
+    // a stale model can't corrupt state.
+    {
+        let unit_options: Vec<slint::SharedString> = vec![
+            "m".into(), "cm".into(), "mm".into(),
+            "ft".into(), "in".into(), "studs".into(),
+        ];
+        let options_model = slint::ModelRc::new(slint::VecModel::from(unit_options));
+        for prop in &mut flat_props {
+            if prop.property_type.as_str() == "unit" {
+                prop.options = options_model.clone();
+            }
+        }
+    }
+
     // Hash-based change detection: only push to Slint when the model data actually
     // changes. Re-pushing an identical model destroys and recreates all `for` loop
     // items in Slint, which resets hover state and causes visible flickering.
@@ -13292,6 +13548,43 @@ fn property_value_to_display(value: &eustress_common::classes::PropertyValue) ->
 ///                  as "nothing to persist" (the ECS half of the edit
 ///                  already happened in the live match arm).
 /// - `Err(msg)`   — genuine disk failure (read/parse/write).
+///
+/// Helpers — convert a `toml::Value` of the shape `[f, f, f]` from
+/// engine-native meters to the authored unit. Used by the disk
+/// writer to round-trip length-typed fields. No-op when
+/// `authored == Meter`. Tolerant of non-Array / wrong-length inputs;
+/// returns the value untouched so a malformed routing entry never
+/// blocks the broader disk write.
+fn convert_toml_vec3_engine_to_authored(
+    v: toml::Value, authored: eustress_common::units::Unit,
+) -> toml::Value {
+    if authored == eustress_common::units::ENGINE_NATIVE_UNIT { return v; }
+    let toml::Value::Array(arr) = &v else { return v };
+    if arr.len() != 3 { return v; }
+    let nums: Option<Vec<f64>> = arr.iter().map(|x| x.as_float()).collect();
+    let Some(nums) = nums else { return v };
+    let converted = eustress_common::units::convert_vec3_f64(
+        [nums[0], nums[1], nums[2]],
+        eustress_common::units::ENGINE_NATIVE_UNIT, authored,
+    );
+    toml::Value::Array(vec![
+        toml::Value::Float(converted[0]),
+        toml::Value::Float(converted[1]),
+        toml::Value::Float(converted[2]),
+    ])
+}
+
+fn convert_toml_f64_engine_to_authored(
+    v: toml::Value, authored: eustress_common::units::Unit,
+) -> toml::Value {
+    if authored == eustress_common::units::ENGINE_NATIVE_UNIT { return v; }
+    let Some(n) = v.as_float() else { return v };
+    let c = eustress_common::units::convert(
+        n, eustress_common::units::ENGINE_NATIVE_UNIT, authored,
+    );
+    toml::Value::Float(c)
+}
+
 pub fn apply_property_to_toml_value(
     toml_path: &std::path::Path,
     key: &str,
@@ -13308,17 +13601,100 @@ pub fn apply_property_to_toml_value(
         None => return Err(format!("{}: top-level is not a table", toml_path.display())),
     };
 
+    // Authored unit for this file. Read from `[metadata].unit` and
+    // fall back to engine-native meters when absent — preserves the
+    // pre-Stage-2 behaviour for files that haven't been touched since.
+    let authored_unit: eustress_common::units::Unit = root.get("metadata")
+        .and_then(|m| m.as_table())
+        .and_then(|m| m.get("unit"))
+        .and_then(|v| v.as_str())
+        .and_then(eustress_common::units::Unit::from_symbol)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+
     // Sync the live transform if the caller passed one. Property edits
     // happening MID-gizmo-drag would otherwise rewind position to the
-    // pre-drag value on disk.
+    // pre-drag value on disk. `current_transform` is supplied in
+    // engine-native meters (the caller reads it from the entity's
+    // Bevy Transform), so we convert both translation and scale to
+    // the file's authored unit before writing. Rotation is angular
+    // and passes through.
     if let Some((pos, rot, scale)) = current_transform {
+        let pos_auth = eustress_common::units::engine_to_authored_vec3_f32(pos, authored_unit);
+        let scale_auth = eustress_common::units::engine_to_authored_vec3_f32(scale, authored_unit);
         let tform = root
             .entry("transform".to_string())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
         if let Some(t) = tform.as_table_mut() {
-            t.insert("position".into(), float_arr(&pos));
+            t.insert("position".into(), float_arr(&pos_auth));
             t.insert("rotation".into(), float_arr(&rot));
-            t.insert("scale".into(),    float_arr(&scale));
+            t.insert("scale".into(),    float_arr(&scale_auth));
+        }
+    }
+
+    // Special path: changing the authored unit. Reinterpret every
+    // dimensional value in the file so the entity stays the same
+    // physical size after the symbol changes — otherwise re-labelling
+    // a `5 m` part as `ft` would silently triple its physical scale.
+    // Reads each length-typed field in the OLD authored unit, converts
+    // to engine-native meters, then to the NEW unit. Falls through to
+    // the standard route_property arm at the end to stamp the symbol.
+    if key == "Unit" {
+        let Some(new_unit) = eustress_common::units::Unit::from_symbol(val) else {
+            // Reject unknown symbols early; don't touch any other field.
+            return Ok(false);
+        };
+        if new_unit != authored_unit {
+            // Convert `[transform].position` and `[transform].scale`.
+            if let Some(tf) = root.get_mut("transform").and_then(|v| v.as_table_mut()) {
+                for key in ["position", "scale"] {
+                    if let Some(arr) = tf.get(key).cloned() {
+                        // Same shape as convert_toml_vec3_engine_to_authored
+                        // but from `authored_unit` rather than ENGINE_NATIVE.
+                        if let toml::Value::Array(items) = &arr {
+                            if items.len() == 3 {
+                                if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                                    let converted = eustress_common::units::convert_vec3_f64(
+                                        [nums[0], nums[1], nums[2]], authored_unit, new_unit,
+                                    );
+                                    tf.insert(key.into(), toml::Value::Array(vec![
+                                        toml::Value::Float(converted[0]),
+                                        toml::Value::Float(converted[1]),
+                                        toml::Value::Float(converted[2]),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Convert BillboardGui length-typed `[gui]` fields too. Pixel
+            // and ratio fields stay untouched (same skip list as the
+            // load-side Stage 3 conversion).
+            if let Some(g) = root.get_mut("gui").and_then(|v| v.as_table_mut()) {
+                for key in ["units_offset", "units_offset_world_space"] {
+                    if let Some(toml::Value::Array(items)) = g.get(key).cloned() {
+                        if items.len() == 3 {
+                            if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                                let converted = eustress_common::units::convert_vec3_f64(
+                                    [nums[0], nums[1], nums[2]], authored_unit, new_unit,
+                                );
+                                g.insert(key.into(), toml::Value::Array(vec![
+                                    toml::Value::Float(converted[0]),
+                                    toml::Value::Float(converted[1]),
+                                    toml::Value::Float(converted[2]),
+                                ]));
+                            }
+                        }
+                    }
+                }
+                for key in ["max_distance", "distance_lower_limit",
+                            "distance_upper_limit", "distance_step"] {
+                    if let Some(n) = g.get(key).and_then(|v| v.as_float()) {
+                        let c = eustress_common::units::convert(n, authored_unit, new_unit);
+                        g.insert(key.into(), toml::Value::Float(c));
+                    }
+                }
+            }
         }
     }
 
@@ -13327,6 +13703,23 @@ pub fn apply_property_to_toml_value(
     // mutation still happened in the match arm — no harm done).
     let Some((section, field, value)) = route_property(key, val) else {
         return Ok(false);
+    };
+
+    // Convert engine-native (meter) values to the file's authored
+    // unit for the length-typed fields. The list mirrors the loader
+    // side's Stage 3 conversion set so the round-trip is symmetric.
+    // UDim2 / pixel / ratio / boolean / colour fields land in the
+    // catch-all and pass through untouched.
+    let value = match (section, field) {
+        ("transform", "position") | ("transform", "scale") |
+        ("gui", "units_offset") | ("gui", "units_offset_world_space") => {
+            convert_toml_vec3_engine_to_authored(value, authored_unit)
+        }
+        ("gui", "max_distance") | ("gui", "distance_lower_limit") |
+        ("gui", "distance_upper_limit") | ("gui", "distance_step") => {
+            convert_toml_f64_engine_to_authored(value, authored_unit)
+        }
+        _ => value,
     };
 
     let section_tbl = root
@@ -13407,6 +13800,13 @@ fn route_property(key: &str, val: &str) -> Option<(&'static str, &'static str, t
     match key {
         // ── [metadata] ────────────────────────────────────────────────
         "Archivable"     => Some(("metadata", "archivable", bool_value(val))),
+        // `Unit` is the authored-unit symbol (m / cm / mm / ft / in /
+        // studs). Validated against `Unit::from_symbol` so the disk
+        // never sees a typo like "meters" or "feet"; unknown symbols
+        // are rejected (the route returns None → caller no-ops the
+        // write, panel keeps the previous value).
+        "Unit"           => eustress_common::units::Unit::from_symbol(val)
+            .map(|u| ("metadata", "unit", Value::String(u.symbol().to_string()))),
 
         // ── [asset] ───────────────────────────────────────────────────
         "Mesh"           => Some(("asset", "mesh", Value::String(val.to_string()))),

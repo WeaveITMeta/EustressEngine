@@ -53,6 +53,15 @@ pub struct EditorSettings {
     pub snap_enabled: bool,
     pub snap_size: f32,
     pub theme: String,
+    /// Default authoring unit for new instances spawned inside this
+    /// Space. Stamped into each new `_instance.toml`'s `metadata.unit`
+    /// when no explicit unit was specified at create time (Insert
+    /// menu, paste, MCP `create_entity`). Falls back to
+    /// [`crate::units::ENGINE_NATIVE_UNIT`] (`"m"`) when absent.
+    /// Stored as a symbol string for forward-compatibility — unknown
+    /// values warn at use site instead of failing manifest load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_unit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +288,26 @@ pub struct PublishCheckpoint {
     pub updated_at: String,
 }
 
+/// Read the Space's project settings (`<space>/_project/settings.toml`)
+/// and extract the configured `default_unit` symbol. Returns `None` if
+/// the file is missing, can't be parsed, or doesn't declare a unit —
+/// callers should fall back to [`crate::units::ENGINE_NATIVE_UNIT`]
+/// in that case. Silent on errors (file I/O failures aren't fatal for
+/// instance creation; we just lose the override). The lookup goes via
+/// `toml::Value` instead of full struct deserialisation so a missing
+/// `default_unit` field doesn't fail the load and an evolving schema
+/// stays forward-compatible.
+pub fn read_space_default_unit(space_root: &Path) -> Option<String> {
+    let settings_path = space_root.join("_project").join("settings.toml");
+    let raw = std::fs::read_to_string(&settings_path).ok()?;
+    let doc: toml::Value = raw.parse().ok()?;
+    doc.get("editor")?
+        .as_table()?
+        .get("default_unit")?
+        .as_str()
+        .map(str::to_string)
+}
+
 impl ProjectManifest {
     pub fn new(space_name: &str, author: &str, now: &str) -> Self {
         Self {
@@ -307,6 +336,7 @@ impl Default for ProjectSettingsManifest {
                 snap_enabled: true,
                 snap_size: 1.0,
                 theme: "dark".to_string(),
+                default_unit: None,
             },
             camera: CameraSettings {
                 fov: 70.0,

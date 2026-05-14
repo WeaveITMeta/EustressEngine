@@ -33,6 +33,7 @@ pub struct InstanceOverrides {
     pub can_collide: Option<bool>,
     pub asset_mesh: Option<String>,
     pub asset_path: Option<String>,
+    pub unit_symbol: Option<String>,
 }
 
 impl From<InstanceOverrides> for eustress_common::instance_create::InstanceOverrides {
@@ -48,6 +49,7 @@ impl From<InstanceOverrides> for eustress_common::instance_create::InstanceOverr
             can_collide: value.can_collide,
             asset_mesh: value.asset_mesh,
             asset_path: value.asset_path,
+            unit_symbol: value.unit_symbol,
         }
     }
 }

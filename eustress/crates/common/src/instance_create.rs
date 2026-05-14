@@ -57,6 +57,13 @@ pub struct InstanceOverrides {
     /// import path sets this after copying the source media into the
     /// Universe's `assets/<kind>/` directory.
     pub asset_path: Option<String>,
+    /// Authoring unit symbol for this instance — stamped into
+    /// `metadata.unit`. When `None`, the field is omitted from the
+    /// TOML and the engine treats the entity as engine-native meters
+    /// on the next load. Callers (Insert menu, paste, MCP create) pass
+    /// the Space-default unit here so the file records its provenance
+    /// instead of relying on the implicit default.
+    pub unit_symbol: Option<String>,
 }
 
 /// Outcome of a successful [`create_instance`] call.
@@ -202,6 +209,23 @@ fn apply_overrides(
             meta_table.insert(
                 "name".to_string(),
                 toml::Value::String(display.to_string()),
+            );
+        }
+    }
+
+    // Authoring-unit override — Stage 7. Only stamped when the caller
+    // specifies a unit (so legacy templates without a unit field stay
+    // implicitly meter-native instead of getting a spurious `"m"`
+    // sprinkled in). The symbol is validated by the caller; this
+    // function trusts the value and writes it verbatim.
+    if let Some(sym) = overrides.unit_symbol.as_deref() {
+        let meta = root
+            .entry("metadata".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(meta_table) = meta.as_table_mut() {
+            meta_table.insert(
+                "unit".to_string(),
+                toml::Value::String(sym.to_string()),
             );
         }
     }

@@ -171,6 +171,14 @@ pub struct ToolContext {
     /// folders. When `None`, the tool only writes the script file for
     /// later hot-reload.
     pub luau_executor: Option<LuauExecutor>,
+    /// User-selected display unit symbol — what the user is currently
+    /// working in (status-bar dropdown). Workshop/Soul/MCP callers use
+    /// it as the fallback when their `unit` arg is omitted, so an AI
+    /// that says "make a 5 ft cube" while the user is working in feet
+    /// gets a 5-ft cube even if it forgets to specify the unit
+    /// explicitly. Canonical symbol form (`"m"`, `"cm"`, …, `"studs"`)
+    /// or `None` to indicate engine-native meters.
+    pub display_unit: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -60,7 +60,11 @@ impl ToolHandler for CreateEntityTool {
                         "description": "Path relative to Workspace/ where this entity should be created. Use this to place Parts inside a Model folder. Example: 'MyProduct/V2' creates at Workspace/MyProduct/V2/{name}/. Omit or empty to place directly in Workspace/."
                     },
                     "anchored":     { "type": "boolean", "description": "Prevents physics from moving the part (default true)" },
-                    "can_collide":  { "type": "boolean", "description": "Whether the part participates in collisions (default true)" }
+                    "can_collide":  { "type": "boolean", "description": "Whether the part participates in collisions (default true)" },
+                    "unit": {
+                        "type": "string",
+                        "description": "Authoring unit for `position` and `size`. Accepts canonical symbols (m, cm, mm, ft, in, studs) and lenient aliases (meters, feet, ...). When provided, position/size are interpreted in this unit and converted to engine-native meters before writing. Stamped into `metadata.unit` so the round-trip is symmetric. Defaults to the Space-default unit, or meters if none."
+                    }
                 },
                 "required": ["name"]
             }),
@@ -123,6 +127,34 @@ impl ToolHandler for CreateEntityTool {
         };
 
         let has_asset = asset_mesh.is_some();
+
+        // Stage 9 — unit handling. Priority order:
+        //   1. caller-supplied `unit` arg (most specific)
+        //   2. user-selected DisplayUnit from `ctx.display_unit` (what
+        //      the user is currently working in — Workshop should
+        //      default to this so the AI's "5 ft cube" actually lands
+        //      as 5 ft when the user is editing in feet)
+        //   3. Space-default unit from `_project/settings.toml`
+        //   4. engine-native meters (no unit field stamped)
+        // Position and size are reinterpreted FROM the resolved unit
+        // BACK to engine-native meters before the file is written —
+        // because Stage 4's create-time unit_symbol path stores values
+        // verbatim, so caller-supplied "5 ft" must be converted before
+        // the file is written.
+        let space_unit = eustress_common::project_manifest::read_space_default_unit(&ctx.space_root);
+        let unit_arg = input.get("unit").and_then(|v| v.as_str());
+        let (unit_symbol, authored) = match unit_arg.and_then(eustress_common::units::Unit::from_any)
+            .or_else(|| ctx.display_unit.as_deref().and_then(eustress_common::units::Unit::from_any))
+            .or_else(|| space_unit.as_deref().and_then(eustress_common::units::Unit::from_any)) {
+            Some(u) => (Some(u.symbol().to_string()), u),
+            None => (None, eustress_common::units::ENGINE_NATIVE_UNIT),
+        };
+        // The caller's numbers are in `authored` units; the file
+        // wants them in `authored` units too (so the round-trip is
+        // identity at load). No conversion needed for the file value,
+        // BUT the engine's runtime spawn will apply the Stage-3 load
+        // conversion which assumes "file values are in authored unit"
+        // — that's exactly what we're writing, so behaviour lines up.
         let overrides = eustress_common::instance_create::InstanceOverrides {
             display_name: Some(name.to_string()),
             position: Some(position),
@@ -134,7 +166,11 @@ impl ToolHandler for CreateEntityTool {
             asset_mesh,
             asset_path: None,
             rotation: None,
+            unit_symbol,
         };
+        // Silence unused-binding warning when units_v1 is off and the
+        // load-time conversion is identity.
+        let _ = authored;
 
         match eustress_common::instance_create::create_instance(
             &base_dir,
@@ -295,7 +331,11 @@ impl ToolHandler for UpdateEntityTool {
                     "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] new color (0-1)" },
                     "transparency": { "type": "number", "description": "Transparency (0.0 = opaque, 1.0 = invisible)" },
                     "anchored": { "type": "boolean", "description": "Whether the entity is anchored (immovable)" },
-                    "can_collide": { "type": "boolean", "description": "Whether the entity participates in collision" }
+                    "can_collide": { "type": "boolean", "description": "Whether the entity participates in collision" },
+                    "unit": {
+                        "type": "string",
+                        "description": "Unit `position` and `size` are expressed in (m, cm, mm, ft, in, studs or aliases). Defaults to engine-native meters. The value is converted to the file's authored unit (from metadata.unit) before writing — so the round-trip stays symmetric regardless of which unit the caller speaks."
+                    }
                 },
                 "required": ["name"]
             }),
@@ -347,10 +387,35 @@ impl ToolHandler for UpdateEntityTool {
 
         let mut changes = Vec::new();
 
+        // Stage 9 — resolve caller's input unit and the file's
+        // authored unit. We convert caller→authored at write time so
+        // the on-disk values stay consistent with `metadata.unit`.
+        // Input unit priority: explicit `unit` arg → current
+        // DisplayUnit (what the user is working in) → engine-native
+        // meters. Same chain as create_entity so the AI doesn't need
+        // to know the unit explicitly when the user has already
+        // declared it via the status-bar dropdown.
+        let authored_unit: eustress_common::units::Unit = doc.get("metadata")
+            .and_then(|m| m.as_table())
+            .and_then(|m| m.get("unit"))
+            .and_then(|v| v.as_str())
+            .and_then(eustress_common::units::Unit::from_symbol)
+            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+        let input_unit: eustress_common::units::Unit = input.get("unit")
+            .and_then(|v| v.as_str())
+            .and_then(eustress_common::units::Unit::from_any)
+            .or_else(|| ctx.display_unit.as_deref().and_then(eustress_common::units::Unit::from_any))
+            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+
         // Apply position
         if let Some(pos) = input.get("position").and_then(|v| v.as_array()) {
             if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
-                let arr: Vec<toml::Value> = pos.iter().map(|v| toml::Value::Float(v.as_f64().unwrap_or(0.0))).collect();
+                let arr: Vec<toml::Value> = pos.iter().map(|v| {
+                    let m = eustress_common::units::convert(
+                        v.as_f64().unwrap_or(0.0), input_unit, authored_unit,
+                    );
+                    toml::Value::Float(m)
+                }).collect();
                 transform.insert("position".to_string(), toml::Value::Array(arr));
                 changes.push("position");
             }
@@ -359,7 +424,11 @@ impl ToolHandler for UpdateEntityTool {
         // Apply size (stored as scale in transform)
         if let Some(size) = input.get("size").and_then(|v| v.as_array()) {
             if let Some(transform) = doc.get_mut("transform").and_then(|t| t.as_table_mut()) {
-                let arr: Vec<toml::Value> = size.iter().map(|v| toml::Value::Float(v.as_f64().unwrap_or(1.0))).collect();
+                let arr: Vec<toml::Value> = size.iter().map(|v| {
+                    toml::Value::Float(eustress_common::units::convert(
+                        v.as_f64().unwrap_or(1.0), input_unit, authored_unit,
+                    ))
+                }).collect();
                 transform.insert("scale".to_string(), toml::Value::Array(arr));
                 changes.push("size");
             }

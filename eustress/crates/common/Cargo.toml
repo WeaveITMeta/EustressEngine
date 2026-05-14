@@ -117,7 +117,7 @@ ureq = { version = "2.10", optional = true }
 base64 = { version = "0.22", optional = true }
 
 [features]
-default = ["model-import", "geotiff", "streaming"]
+default = ["model-import", "geotiff", "streaming", "units_v1"]
 # Enable physics for terrain collisions
 physics = ["avian3d"]
 # Enable async asset loading (HTTP, IPFS, etc.)
@@ -157,3 +157,8 @@ realism-full = ["realism-symbolic", "realism-scripting", "realism-spatial", "rea
 luau = ["mlua", "ureq"]
 # Enable Slint-based in-game GUI rendering (ScreenGui, BillboardGui, SurfaceGui)
 gui = ["dep:slint"]
+# Dynamic Unit System v1 — convert authored-unit values to engine-native
+# meters at every load boundary. ON by default 2026-05-13 after Stages
+# 0-11 shipped. When OFF the engine reads values verbatim (legacy
+# behaviour preserved as an escape hatch for diagnosing regressions).
+units_v1 = []
