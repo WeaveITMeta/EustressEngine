@@ -7,6 +7,7 @@
 
 use bevy::prelude::*;
 use bevy::camera::primitives::MeshAabb;
+use bevy::camera::visibility::VisibilityRange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

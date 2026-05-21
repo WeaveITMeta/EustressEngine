@@ -93,14 +93,36 @@ pub fn decode_transform(bytes: &[u8]) -> crate::error::Result<ArchTransform> {
 /// ordering ambiguity). `Datetime` is the RFC3339 string form (TOML
 /// datetimes are rare in the world model; text keeps it rkyv-friendly).
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq)]
+// Recursive type: `Array`/`Table` hold `EusValue`s. rkyv's derive would
+// otherwise emit a per-field `where EusValue: Archive` bound that
+// recurses forever (E0275 "overflow evaluating the requirement"). Fix is
+// the canonical rkyv-0.8 recursive-type pattern: `omit_bounds` on the
+// recursive fields drops the self-referential auto-bound, and the
+// container restates the MINIMAL bounds each derived impl actually needs
+// (Vec serialization wants a Writer+Allocator; validation wants an
+// ArchiveContext). The concrete recursion then resolves structurally at
+// monomorphization. Same shape as rkyv's own recursive-JSON example.
+#[rkyv(
+    serialize_bounds(
+        __S: rkyv::ser::Writer + rkyv::ser::Allocator,
+        __S::Error: rkyv::rancor::Source,
+    ),
+    deserialize_bounds(__D::Error: rkyv::rancor::Source),
+    bytecheck(
+        bounds(
+            __C: rkyv::validation::ArchiveContext,
+            __C::Error: rkyv::rancor::Source,
+        )
+    )
+)]
 pub enum EusValue {
     String(String),
     Int(i64),
     Float(f64),
     Bool(bool),
     Datetime(String),
-    Array(Vec<EusValue>),
-    Table(Vec<(String, EusValue)>),
+    Array(#[rkyv(omit_bounds)] Vec<EusValue>),
+    Table(#[rkyv(omit_bounds)] Vec<(String, EusValue)>),
 }
 
 /// Encode an [`EusValue`] to a tagged rkyv archive (same tag scheme as

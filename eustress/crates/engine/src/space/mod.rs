@@ -25,6 +25,8 @@ pub mod space_ops;
 pub mod space_source;
 pub mod universe_registry;
 #[cfg(feature = "world-db")]
+pub mod arch_instance;
+#[cfg(feature = "world-db")]
 pub mod auto_convert;
 #[cfg(feature = "world-db")]
 pub mod world_db_plugin;
