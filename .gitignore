@@ -98,3 +98,9 @@ incremental/
 **/deps/*.rlib
 **/deps/*.rmeta
 infrastructure/cloudflare/api/.wrangler/
+
+# Local-only: founder/ops planning + one-off recovery tooling.
+# This repo is PUBLIC — these must never be pushed.
+LAUNCH_PLAN.md
+WEEK_PLAN.md
+recover_trashed_spaces.ps1
