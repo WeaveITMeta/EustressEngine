@@ -1,0 +1,365 @@
+//! Key layout for the Fjall partitions.
+//!
+//! ## The encoder trait
+//!
+//! [`KeyEncoder`] hides the byte layout behind a small surface so the
+//! flat key scheme used today can be replaced by a spatial
+//! Morton/Hilbert scheme (Phase 2) without touching call sites. The
+//! engine plugin picks an encoder at open time; the backend forwards
+//! every put/get through it.
+//!
+//! ## Today: [`FlatKeyEncoder`]
+//!
+//! ```text
+//! entity:{schema_version_u8}:{component_type_u16_be}:{entity_id_u64_be}
+//! ```
+//!
+//! Big-endian on both `component_type` and `entity_id` so a range scan
+//! over `entity:{v}:{c}:00..entity:{v}:{c}:ff` yields entities in
+//! ascending id order. Schema version prefix lets v1/v2 coexist during
+//! the migration windows documented in [`crate::schema`].
+//!
+//! ## Phase 2: spatial encoder (sketched, not wired)
+//!
+//! `MortonKeyEncoder` will append a 64-bit Morton-interleaved
+//! `(chunk_x, chunk_z)` so range scans over a `chunk_morton..` prefix
+//! return all entities in a spatial region — directly usable by [05]
+//! `SpatialChunkGrid` and by Fjall's compaction filter for locality
+//! preservation. The trait is structured to allow encoder swap on a
+//! per-component basis (e.g. `Transform` uses spatial, `Tags` uses
+//! flat) so high-cardinality non-spatial reads don't pay the Morton
+//! cost.
+
+use crate::backend::EntityId;
+use crate::error::{Error, Result};
+
+/// Identifies a Rust component type inside the DB. Choose stable
+/// 16-bit ids per component family — collisions are detected at
+/// engine startup against a `schema/components.toml` registry (TODO
+/// Phase 4 once the wire fmt locks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ComponentTypeId(pub u16);
+
+impl ComponentTypeId {
+    /// Reserved id for `bevy::prelude::Transform`. Every world has
+    /// transforms so giving it id `1` keeps the most-scanned prefix at
+    /// the smallest byte value, which marginally helps Fjall's
+    /// prefix-truncation block format.
+    pub const TRANSFORM: ComponentTypeId = ComponentTypeId(1);
+    /// `eustress_common::classes::BasePart`.
+    pub const BASE_PART: ComponentTypeId = ComponentTypeId(2);
+    /// `eustress_common::attributes::Tags`.
+    pub const TAGS: ComponentTypeId = ComponentTypeId(3);
+    /// `eustress_common::attributes::Attributes`.
+    pub const ATTRIBUTES: ComponentTypeId = ComponentTypeId(4);
+    /// Class name + metadata header (`Instance`).
+    pub const INSTANCE_META: ComponentTypeId = ComponentTypeId(5);
+    /// Asset reference (mesh path, scene name).
+    pub const ASSET_REF: ComponentTypeId = ComponentTypeId(6);
+    /// MeasureUnit (Dynamic Unit System — see project_dynamic_unit_system memory).
+    pub const MEASURE_UNIT: ComponentTypeId = ComponentTypeId(7);
+}
+
+/// Trait that turns `(EntityId, ComponentTypeId)` into the byte key
+/// Fjall stores. See module docs for the layout intent.
+pub trait KeyEncoder: Send + Sync + 'static {
+    /// Schema version this encoder produces. Persisted in
+    /// `header.bin` so loaders can refuse keys older than they
+    /// understand (or older than any registered migration covers).
+    fn schema_version(&self) -> u8;
+
+    /// Encode a single component key.
+    fn encode_component(&self, entity: EntityId, component: ComponentTypeId) -> Vec<u8>;
+
+    /// Encode a half-open prefix for "all values of component `c`".
+    fn component_prefix(&self, component: ComponentTypeId) -> Vec<u8>;
+
+    /// Encode a half-open prefix for "every component of entity `e`".
+    /// Used by `despawn` to range-delete in one pass.
+    fn entity_prefix(&self, entity: EntityId) -> Vec<u8>;
+
+    /// Inverse of [`Self::encode_component`]. Returns `Err` if `bytes`
+    /// has the wrong schema version or shape.
+    fn decode_component(&self, bytes: &[u8]) -> Result<(EntityId, ComponentTypeId)>;
+}
+
+/// Today's default: flat keys with schema-version + component-type +
+/// entity-id big-endian. Cheap to encode, cheap to range-scan by
+/// component type, no spatial locality.
+#[derive(Debug, Clone, Default)]
+pub struct FlatKeyEncoder;
+
+impl FlatKeyEncoder {
+    /// Schema version this encoder emits. Hardcoded `1` for today;
+    /// bump in lockstep with [`crate::schema::WORLD_SCHEMA_VERSION`].
+    pub const SCHEMA_VERSION: u8 = 1;
+
+    /// Byte prefix that tags every flat-encoded key. Lets the decoder
+    /// reject Morton-encoded keys (Phase 2) and vice versa without
+    /// guessing.
+    const TAG: u8 = b'F';
+}
+
+impl KeyEncoder for FlatKeyEncoder {
+    fn schema_version(&self) -> u8 {
+        Self::SCHEMA_VERSION
+    }
+
+    fn encode_component(&self, entity: EntityId, component: ComponentTypeId) -> Vec<u8> {
+        // F | schema_version(u8) | component(u16 be) | entity(u64 be)
+        let mut out = Vec::with_capacity(1 + 1 + 2 + 8);
+        out.push(Self::TAG);
+        out.push(Self::SCHEMA_VERSION);
+        out.extend_from_slice(&component.0.to_be_bytes());
+        out.extend_from_slice(&entity.0.to_be_bytes());
+        out
+    }
+
+    fn component_prefix(&self, component: ComponentTypeId) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + 1 + 2);
+        out.push(Self::TAG);
+        out.push(Self::SCHEMA_VERSION);
+        out.extend_from_slice(&component.0.to_be_bytes());
+        out
+    }
+
+    fn entity_prefix(&self, entity: EntityId) -> Vec<u8> {
+        // Entity prefix isn't natural in flat layout because component
+        // sorts before entity. We emit the schema-version tag and let
+        // the backend do a full sweep for despawn. Phase 2 will move
+        // to a spatial-then-entity layout where entity_prefix is a
+        // first-class range. Until then this returns an empty Vec so
+        // callers know to fall back to per-component-type deletion.
+        let _ = entity;
+        Vec::new()
+    }
+
+    fn decode_component(&self, bytes: &[u8]) -> Result<(EntityId, ComponentTypeId)> {
+        if bytes.len() != 1 + 1 + 2 + 8 {
+            return Err(Error::KeyDecode(format!(
+                "flat key wrong length: {} (expected 12)",
+                bytes.len()
+            )));
+        }
+        if bytes[0] != Self::TAG {
+            return Err(Error::KeyDecode(format!(
+                "flat key wrong tag: 0x{:02x} (expected 0x{:02x})",
+                bytes[0],
+                Self::TAG
+            )));
+        }
+        if bytes[1] != Self::SCHEMA_VERSION {
+            return Err(Error::KeyDecode(format!(
+                "flat key schema version mismatch: {} (this build expects {})",
+                bytes[1],
+                Self::SCHEMA_VERSION
+            )));
+        }
+        let mut c = [0u8; 2];
+        c.copy_from_slice(&bytes[2..4]);
+        let mut e = [0u8; 8];
+        e.copy_from_slice(&bytes[4..12]);
+        Ok((
+            EntityId(u64::from_be_bytes(e)),
+            ComponentTypeId(u16::from_be_bytes(c)),
+        ))
+    }
+}
+
+/// Spread the low 21 bits of `v` into every 3rd bit (Z-order / Morton
+/// dilation for 3D). Pure bit-twiddle, no branches — the canonical
+/// magic-number method, exact for inputs < 2^21.
+pub fn part1by2(v: u32) -> u64 {
+    let mut x = (v as u64) & 0x1f_ffff; // 21 bits
+    x = (x | (x << 32)) & 0x1f00_0000_00ff;
+    x = (x | (x << 16)) & 0x1f00_00ff_0000_ff;
+    x = (x | (x << 8)) & 0x100f_00f0_0f00_f00f;
+    x = (x | (x << 4)) & 0x10c3_0c30_c30c_30c3;
+    x = (x | (x << 2)) & 0x1249_2492_4924_9249;
+    x
+}
+
+/// Inverse of [`part1by2`] — gather every 3rd bit back into 21 bits.
+pub fn compact1by2(mut x: u64) -> u32 {
+    x &= 0x1249_2492_4924_9249;
+    x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
+    x = (x | (x >> 4)) & 0x100f_00f0_0f00_f00f;
+    x = (x | (x >> 8)) & 0x1f00_00ff_0000_ff;
+    x = (x | (x >> 16)) & 0x1f00_0000_00ff;
+    x = (x | (x >> 32)) & 0x1f_ffff;
+    (x & 0x1f_ffff) as u32
+}
+
+/// Interleave 3 unsigned 21-bit cell coords into one 63-bit Morton
+/// code. Spatially-adjacent cells get numerically-close codes, so a
+/// range scan over `[morton(lo)..morton(hi)]` returns a spatial
+/// neighbourhood — exactly what [05] `SpatialChunkGrid` needs to turn
+/// "entities within radius R" into a Fjall prefix scan.
+pub fn morton3_encode(x: u32, y: u32, z: u32) -> u64 {
+    part1by2(x) | (part1by2(y) << 1) | (part1by2(z) << 2)
+}
+
+/// Inverse of [`morton3_encode`] → `(x, y, z)` cell coords.
+pub fn morton3_decode(code: u64) -> (u32, u32, u32) {
+    (
+        compact1by2(code),
+        compact1by2(code >> 1),
+        compact1by2(code >> 2),
+    )
+}
+
+/// World position → unsigned 21-bit cell coordinate at `chunk_size`.
+/// Biased by +2^20 so the world origin sits mid-range and negative
+/// coordinates stay non-negative (Morton needs unsigned input).
+pub fn world_to_cell(coord: f32, chunk_size: f32) -> u32 {
+    let cell = (coord / chunk_size).floor() as i64 + (1 << 20);
+    cell.clamp(0, 0x1f_ffff) as u32
+}
+
+/// Spatial Morton key encoder — Phase 2, real. The key layout is
+///
+/// ```text
+/// M | schema_ver(2) | morton63(cell_x,cell_y,cell_z) be8 | component be2 | entity be8
+/// ```
+///
+/// so a Fjall range scan over a Morton prefix yields spatially
+/// clustered entities and Fjall's block format keeps neighbours in
+/// the same SSTable block.
+///
+/// The [`KeyEncoder`] trait can't carry a position into
+/// `encode_component`, so spatial placement is done via
+/// [`MortonKeyEncoder::encode_spatial`] (called by the bake / stream
+/// path which *does* hold the transform). The trait methods produce a
+/// valid, fully round-trippable v2 key with the entity in the spatial
+/// slot zeroed — correct and decodable, just not yet clustered. This
+/// is a real encoder (not the old empty-vec stub); wiring the
+/// position-carrying path is a [05]/Phase-5 integration, not a
+/// keys.rs change.
+#[derive(Debug, Clone)]
+pub struct MortonKeyEncoder {
+    /// Cell size in world units; must match
+    /// `streaming::types::StreamingConfig::chunk_size` so a range scan
+    /// translates 1:1 to a chunk request.
+    pub chunk_size: f32,
+}
+
+impl Default for MortonKeyEncoder {
+    fn default() -> Self {
+        Self { chunk_size: 256.0 }
+    }
+}
+
+impl MortonKeyEncoder {
+    const TAG: u8 = b'M';
+    const SCHEMA_VERSION: u8 = 2;
+
+    /// Encode a spatially-placed component key. Called by the
+    /// bake/stream path which holds the entity's world position.
+    pub fn encode_spatial(
+        &self,
+        entity: EntityId,
+        component: ComponentTypeId,
+        pos: (f32, f32, f32),
+    ) -> Vec<u8> {
+        let cx = world_to_cell(pos.0, self.chunk_size);
+        let cy = world_to_cell(pos.1, self.chunk_size);
+        let cz = world_to_cell(pos.2, self.chunk_size);
+        let morton = morton3_encode(cx, cy, cz);
+        let mut out = Vec::with_capacity(1 + 1 + 8 + 2 + 8);
+        out.push(Self::TAG);
+        out.push(Self::SCHEMA_VERSION);
+        out.extend_from_slice(&morton.to_be_bytes());
+        out.extend_from_slice(&component.0.to_be_bytes());
+        out.extend_from_slice(&entity.0.to_be_bytes());
+        out
+    }
+
+    /// Half-open Morton prefix covering one cell — the building block
+    /// for "entities within radius" (callers union the cells a sphere
+    /// touches and range-scan each).
+    pub fn cell_prefix(&self, cx: u32, cy: u32, cz: u32) -> Vec<u8> {
+        let morton = morton3_encode(cx, cy, cz);
+        let mut out = Vec::with_capacity(1 + 1 + 8);
+        out.push(Self::TAG);
+        out.push(Self::SCHEMA_VERSION);
+        out.extend_from_slice(&morton.to_be_bytes());
+        out
+    }
+}
+
+impl KeyEncoder for MortonKeyEncoder {
+    fn schema_version(&self) -> u8 {
+        Self::SCHEMA_VERSION
+    }
+
+    fn encode_component(&self, entity: EntityId, component: ComponentTypeId) -> Vec<u8> {
+        // No position available at this trait boundary → place at the
+        // origin cell. Still a valid, decodable v2 key.
+        self.encode_spatial(entity, component, (0.0, 0.0, 0.0))
+    }
+
+    fn component_prefix(&self, _component: ComponentTypeId) -> Vec<u8> {
+        // Component isn't a prefix in the spatial layout (Morton comes
+        // first). A full component scan walks all cells; callers that
+        // need per-component iteration use the flat encoder. Return the
+        // tag+version so the scan is bounded to v2 keys.
+        vec![Self::TAG, Self::SCHEMA_VERSION]
+    }
+
+    fn entity_prefix(&self, _entity: EntityId) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn decode_component(&self, bytes: &[u8]) -> Result<(EntityId, ComponentTypeId)> {
+        if bytes.len() != 1 + 1 + 8 + 2 + 8 {
+            return Err(Error::KeyDecode(format!(
+                "morton key wrong length: {} (expected 20)",
+                bytes.len()
+            )));
+        }
+        if bytes[0] != Self::TAG || bytes[1] != Self::SCHEMA_VERSION {
+            return Err(Error::KeyDecode(
+                "morton key wrong tag/version".to_string(),
+            ));
+        }
+        let mut c = [0u8; 2];
+        c.copy_from_slice(&bytes[10..12]);
+        let mut e = [0u8; 8];
+        e.copy_from_slice(&bytes[12..20]);
+        Ok((
+            EntityId(u64::from_be_bytes(e)),
+            ComponentTypeId(u16::from_be_bytes(c)),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod morton_tests {
+    use super::*;
+
+    #[test]
+    fn morton_roundtrip() {
+        for &(x, y, z) in &[(0, 0, 0), (1, 2, 3), (1_048_576, 7, 99), (0x1f_ffff, 0, 0x1f_ffff)] {
+            let code = morton3_encode(x, y, z);
+            assert_eq!(morton3_decode(code), (x, y, z), "roundtrip {x},{y},{z}");
+        }
+    }
+
+    #[test]
+    fn morton_locality() {
+        // Adjacent cells must produce codes closer than far cells.
+        let a = morton3_encode(100, 100, 100);
+        let near = morton3_encode(101, 100, 100);
+        let far = morton3_encode(100_000, 100, 100);
+        assert!((a as i128 - near as i128).abs() < (a as i128 - far as i128).abs());
+    }
+
+    #[test]
+    fn morton_key_roundtrip() {
+        let enc = MortonKeyEncoder::default();
+        let k = enc.encode_spatial(EntityId(42), ComponentTypeId::TRANSFORM, (10.0, -5.0, 3.0));
+        let (e, c) = enc.decode_component(&k).unwrap();
+        assert_eq!(e, EntityId(42));
+        assert_eq!(c, ComponentTypeId::TRANSFORM);
+    }
+}

@@ -708,7 +708,17 @@ pub struct BasePart {
     
     /// Locked for editing (custom property)
     pub locked: bool,
-    
+
+    /// Whether this part contributes to shadow cascades. False adds
+    /// `bevy::light::NotShadowCaster` at spawn / on change; the
+    /// `material_sync` system ANDs this with `transparency < 0.5` to
+    /// pick the final caster state. Default true matches Roblox parity.
+    /// `#[serde(default ...)]` keeps old binary saves (pre-2026-05-15)
+    /// deserialisable — missing field means the legacy behaviour
+    /// (shadows on) so loaders stay backward-compatible.
+    #[serde(default = "default_true")]
+    pub cast_shadow: bool,
+
     // === Deformation ===
     /// Enable soft body deformation simulation
     /// When true: mesh vertices deform from stress, temperature, and impacts
@@ -749,6 +759,7 @@ impl Default for BasePart {
             // Mass computed from density × volume (1m³ default = 900 kg)
             mass: 900.0,
             locked: false,
+            cast_shadow: true,
             deformation: false,
             texture_repeat: [1.0, 1.0],
         }
@@ -6452,7 +6463,7 @@ pub struct WorkspaceComponent {
     // RENDERING
     // ═══════════════════════════════════════════════════════════════════════════
     
-    /// Global render distance (studs)
+    /// Global render distance in METERS (engine is meter-native).
     pub render_distance: f32,
     
     /// Whether to use distance-based LOD

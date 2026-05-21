@@ -295,42 +295,109 @@ impl FiniteOr for f32 {
 ///
 /// Runs in `Update` — Avian's `assert_components_finite` runs in its
 /// physics schedule which kicks AFTER `Update`, so cleaning up here
-/// reaches the assertion with finite values. Costs ≪1 ms even for
-/// tens of thousands of static parts because the body is just a
-/// finite-check + maybe-clamp; no allocations, no transcendentals.
+/// reaches the assertion with finite values.
+///
+/// **Read-then-fix split.** The hot path (no degenerate transforms)
+/// uses `Ref<Transform>` so iteration is strictly read-only. Only
+/// entities that need a fix are collected into a small buffer; the
+/// second query takes `&mut Transform` and patches them. This keeps
+/// the per-frame cost on a 50k-anchored-statics world a pure finite
+/// check with zero write-locking and zero change-tick activity for
+/// the common case where everything is already valid.
 pub fn sanitize_part_transforms_safety_net(
-    mut q: Query<&mut Transform, With<avian3d::prelude::RigidBody>>,
+    mut params: ParamSet<(
+        Query<(Entity, Ref<Transform>), With<avian3d::prelude::RigidBody>>,
+        Query<&mut Transform>,
+    )>,
 ) {
-    for mut t in &mut q {
-        let pos = t.translation;
-        let pos_bad = !pos.is_finite()
-            || pos.x.abs() > MAX_WORLD_EXTENT
-            || pos.y.abs() > MAX_WORLD_EXTENT
-            || pos.z.abs() > MAX_WORLD_EXTENT;
-        if pos_bad {
-            let clamped = safe_translation(pos, Vec3::ZERO);
-            tracing::warn!(
-                "🛡️ Sanitized part Transform.translation: {:?} → {:?}",
-                pos, clamped
-            );
-            t.translation = clamped;
-        }
+    struct Fix {
+        entity: Entity,
+        translation: Option<Vec3>,
+        rotation: Option<Quat>,
+        scale: Option<Vec3>,
+    }
 
-        let rot = t.rotation;
-        let rot_bad = !(rot.x.is_finite()
-            && rot.y.is_finite()
-            && rot.z.is_finite()
-            && rot.w.is_finite())
-            || rot.length_squared() < 1e-8;
-        if rot_bad {
-            tracing::warn!("🛡️ Sanitized part Transform.rotation (was {:?})", rot);
-            t.rotation = Quat::IDENTITY;
-        }
+    let mut fixes: Vec<Fix> = Vec::new();
 
-        let scale = t.scale;
-        if !scale.is_finite() {
-            tracing::warn!("🛡️ Sanitized part Transform.scale (was {:?})", scale);
-            t.scale = Vec3::ONE;
+    {
+        let reader = params.p0();
+        for (entity, t) in reader.iter() {
+            // Only inspect transforms WRITTEN this frame. A value
+            // cannot become NaN / out-of-range without the Transform
+            // being changed; `Ref::is_changed()` is true on add (so a
+            // freshly-loaded part is still validated once) and on every
+            // physics/tool write (so degenerate writes are still
+            // caught) — but the stable majority is skipped. This turns
+            // a per-frame scan of EVERY rigid body into work
+            // proportional to what actually moved: the exact "no
+            // continuous checks that destroy FPS at scale" requirement.
+            if !t.is_changed() {
+                continue;
+            }
+            let pos = t.translation;
+            let pos_bad = !pos.is_finite()
+                || pos.x.abs() > MAX_WORLD_EXTENT
+                || pos.y.abs() > MAX_WORLD_EXTENT
+                || pos.z.abs() > MAX_WORLD_EXTENT;
+            let new_translation = if pos_bad {
+                let clamped = safe_translation(pos, Vec3::ZERO);
+                tracing::warn!(
+                    "🛡️ Sanitized part Transform.translation: {:?} → {:?}",
+                    pos, clamped
+                );
+                Some(clamped)
+            } else {
+                None
+            };
+
+            let rot = t.rotation;
+            let rot_bad = !(rot.x.is_finite()
+                && rot.y.is_finite()
+                && rot.z.is_finite()
+                && rot.w.is_finite())
+                || rot.length_squared() < 1e-8;
+            let new_rotation = if rot_bad {
+                tracing::warn!("🛡️ Sanitized part Transform.rotation (was {:?})", rot);
+                Some(Quat::IDENTITY)
+            } else {
+                None
+            };
+
+            let scale = t.scale;
+            let new_scale = if !scale.is_finite() {
+                tracing::warn!("🛡️ Sanitized part Transform.scale (was {:?})", scale);
+                Some(Vec3::ONE)
+            } else {
+                None
+            };
+
+            if new_translation.is_some() || new_rotation.is_some() || new_scale.is_some() {
+                fixes.push(Fix {
+                    entity,
+                    translation: new_translation,
+                    rotation: new_rotation,
+                    scale: new_scale,
+                });
+            }
+        }
+    }
+
+    if fixes.is_empty() {
+        return;
+    }
+
+    let mut writer = params.p1();
+    for fix in fixes {
+        if let Ok(mut t) = writer.get_mut(fix.entity) {
+            if let Some(v) = fix.translation {
+                t.translation = v;
+            }
+            if let Some(v) = fix.rotation {
+                t.rotation = v;
+            }
+            if let Some(v) = fix.scale {
+                t.scale = v;
+            }
         }
     }
 }
@@ -948,6 +1015,16 @@ pub struct NeedsMeshSize;
 /// the extras list (for `ExtraSectionRegistry` dispatch) should use
 /// [`load_instance_definition_with_extras`] below.
 pub fn load_instance_definition(toml_path: &Path) -> Result<InstanceDefinition, String> {
+    // DB-first (the full conversion): a converted Space serves the
+    // binary ECS record straight from Fjall — zero disk, no TOML
+    // parse. This single redirect covers every edit/tool/hot-reload
+    // call site (~25) because they all funnel through here. Falls
+    // through to the disk TOML pipeline only for a legacy world that
+    // has no active Fjall DB yet (un-converted), so existing disk
+    // worlds keep working until `convert-to-eustress` migrates them.
+    if let Some(def) = crate::space::active_db::get_instance(toml_path) {
+        return Ok(def);
+    }
     load_instance_definition_with_extras(toml_path).map(|(def, _extras)| def)
 }
 
@@ -997,11 +1074,68 @@ pub fn load_instance_definition_with_defaults(
     load_instance_definition(toml_path)
 }
 
-/// Write instance definition to .glb.toml file
+/// Parse + heal an instance from TOML *content* (no disk read). The
+/// WorldDb cold-load path uses this to materialise entities from
+/// `INSTANCE_META` bytes stored in Fjall, reusing the exact same
+/// schema-heal + template-merge pipeline as the path-based loader so
+/// a Fjall-sourced entity is byte-for-byte equivalent to a
+/// TOML-sourced one.
+pub fn load_instance_definition_from_str(
+    content: &str,
+) -> Result<InstanceDefinition, String> {
+    let registry = eustress_common::class_schema::ClassSchemaRegistry::from_builtin();
+    let healed = eustress_common::class_schema::heal_instance_from_str(content, &registry)
+        .map_err(|e| format!("schema heal (from str): {}", e))?;
+    let instance: InstanceDefinition = healed
+        .value
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("deserialize merged (from str): {}", e))?;
+    Ok(instance)
+}
+
+/// Spawn one entity from TOML content held in memory (Fjall cold-load
+/// path). `synthetic_toml_path` is the path the entity *would* live at
+/// on disk — used only for the display-name fallback and the
+/// `InstanceFile` component so a later TOML write-back (when the
+/// `toml` feature is on) targets the right location. Nothing is read
+/// from that path.
+pub fn spawn_instance_from_toml_str(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    material_registry: &mut super::material_loader::MaterialRegistry,
+    mesh_cache: &mut PrimitiveMeshCache,
+    synthetic_toml_path: PathBuf,
+    content: &str,
+) -> Result<Entity, String> {
+    let instance = load_instance_definition_from_str(content)?;
+    Ok(spawn_instance(
+        commands,
+        asset_server,
+        materials,
+        material_registry,
+        mesh_cache,
+        synthetic_toml_path,
+        instance,
+    ))
+}
+
+/// Persist an instance definition.
+///
+/// DB-first: a converted Space writes the binary ECS record into
+/// Fjall — no disk, no TOML serialise (disk write speed is precisely
+/// the bottleneck the pivot exists to remove). Disk-TOML write happens
+/// ONLY when there is no active Fjall DB, i.e. a legacy un-converted
+/// world that still persists as files until `convert-to-eustress`
+/// migrates it — at which point this path stops writing disk entirely.
 pub fn write_instance_definition(
     toml_path: &Path,
     instance: &InstanceDefinition,
 ) -> Result<(), String> {
+    if crate::space::active_db::put_instance(toml_path, instance) {
+        return Ok(());
+    }
+
     let toml_str = toml::to_string_pretty(instance)
         .map_err(|e| format!("Failed to serialize instance: {}", e))?;
 
@@ -1181,6 +1315,77 @@ impl PrimitiveMeshCache {
 ///   file's parent directory and loaded as a GLTF scene via AssetServer
 ///
 /// Scale from [transform] sets the entity size via Transform.scale.
+/// Live mirror of the **customizable Workspace `RenderDistance`
+/// property** (`WorkspaceComponent.render_distance`, exposed via
+/// `PropertyAccess`). Metres; integer precision is ample for a cull
+/// radius and sidesteps any const-fn float-bits concern. Seeded to
+/// `WorkspaceComponent::default().render_distance` (5000). The
+/// Workspace-property apply path calls [`set_workspace_render_distance`]
+/// so editing the property in the Properties panel drives every part's
+/// `VisibilityRange`. NOT a hardcoded constant — it is the Workspace
+/// property's value at runtime.
+static WORKSPACE_RENDER_DISTANCE_M: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(5000);
+
+/// Push the Workspace `RenderDistance` property value into the live
+/// mirror. Call this wherever `WorkspaceComponent` is applied / when
+/// the property is edited; newly-spawned parts use it immediately, and
+/// a `Changed<WorkspaceComponent>` system can re-stamp existing parts'
+/// `VisibilityRange` by calling [`part_visibility_range`].
+pub fn set_workspace_render_distance(meters: f32) {
+    let m = meters.clamp(1.0, 1_000_000.0) as u32;
+    WORKSPACE_RENDER_DISTANCE_M.store(m, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Distance-cull component applied to every spawned part, driven by the
+/// customizable Workspace `RenderDistance`. Zero-width margins == a
+/// hard cut (no crossfade); `use_aabb: false` measures to the entity
+/// origin (cheap; parts are small). HONEST SCOPE: a built-in,
+/// zero-rewrite frame-rate lever that wins on large worlds /
+/// walk-throughs / the 2.1M case; it does NOT help a camera centred
+/// inside a grid smaller than the render distance (the 50k benchmark
+/// at default 5000 m) — that still needs streaming-primary.
+pub fn part_visibility_range() -> VisibilityRange {
+    let far = WORKSPACE_RENDER_DISTANCE_M.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    VisibilityRange {
+        start_margin: 0.0..0.0,
+        end_margin: far..far,
+        use_aabb: false,
+    }
+}
+
+/// Live propagation of the customizable Workspace `render_distance`
+/// property. Mirrors the proven `sync_service_properties_to_lighting`
+/// precedent exactly: the Properties panel writes service edits into
+/// the Workspace entity's `ServiceComponent.properties` map; this
+/// `Changed<ServiceComponent>`-gated system reads `render_distance` for
+/// the `Workspace` service, pushes it into the runtime mirror, and
+/// re-stamps `VisibilityRange` on every already-spawned part so the
+/// edit takes effect immediately. Changed-gated → does nothing on a
+/// frame where no service property was edited (honours "nothing per
+/// frame"); the one-time part re-stamp on a deliberate edit is fine.
+pub fn sync_workspace_render_distance(
+    mut commands: Commands,
+    service_q: Query<
+        &crate::space::service_loader::ServiceComponent,
+        Changed<crate::space::service_loader::ServiceComponent>,
+    >,
+    parts_q: Query<Entity, With<eustress_common::classes::Part>>,
+) {
+    use crate::space::service_loader::PropertyValue;
+    for svc in service_q.iter() {
+        if svc.class_name != "Workspace" {
+            continue;
+        }
+        if let Some(PropertyValue::Float(v)) = svc.properties.get("render_distance") {
+            set_workspace_render_distance(*v as f32);
+            for e in parts_q.iter() {
+                commands.entity(e).insert(part_visibility_range());
+            }
+        }
+    }
+}
+
 pub fn spawn_instance(
     commands: &mut Commands,
     asset_server: &AssetServer,
@@ -1346,7 +1551,8 @@ pub fn spawn_instance(
             Name::new(name.clone()),
         )).id();
         commands.entity(entity).insert(measure_unit);
-        info!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
+        // DEBUG: per-entity; an INFO here is a log-I/O stall at scale.
+        debug!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
         return entity;
     }
 
@@ -1441,6 +1647,7 @@ pub fn spawn_instance(
         anchored: instance.properties.anchored,
         can_collide: instance.properties.can_collide,
         locked: instance.properties.locked,
+        cast_shadow: instance.properties.cast_shadow,
         material: eustress_common::classes::Material::from_string(&instance.properties.material),
         material_name: instance.properties.material.clone(),
         cframe: Transform::from(safe_instance_transform.clone()),
@@ -1516,6 +1723,7 @@ pub fn spawn_instance(
         let mut ec = commands.entity(entity);
         ec.insert(PartEntity { part_id });
         ec.insert(measure_unit);
+        ec.insert(part_visibility_range());
 
         // Only add physics collider when can_collide is true — avoids broadphase
         // overhead for thousands of static decorative parts.
@@ -1608,6 +1816,7 @@ pub fn spawn_instance(
     let mut ec = commands.entity(entity);
     ec.insert(PartEntity { part_id });
     ec.insert(measure_unit);
+    ec.insert(part_visibility_range());
 
     // Only add physics collider when can_collide is true — avoids broadphase
     // overhead for thousands of static decorative parts.
@@ -1877,7 +2086,19 @@ pub fn write_instance_changes_system(
     )>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
+    load_in_progress: Res<super::file_loader::LoadInProgress>,
 ) {
+    // Gate every disk write while the cold-load / rescan path is still
+    // settling. Without this, mesh-handle resolution and class-default
+    // backfill mark BasePart as Changed for every just-loaded entity,
+    // and the writer rewrites all 50k TOMLs we just read from disk —
+    // ~53 s of background I/O for zero useful work. The
+    // `Added<Transform>` HashSet below catches the same-frame spawn;
+    // this guard catches the long tail across the load-settle window.
+    if load_in_progress.active {
+        return;
+    }
+
     // Collect entities that were just added this tick — skip them entirely.
     // Bevy marks newly-inserted components as Changed, so without this check
     // ALL 10K entities would trigger 20K disk I/O ops on their first frame.
@@ -2345,7 +2566,15 @@ pub fn save_tags_and_attributes_changes(
     added_tags: Query<Entity, Added<eustress_common::attributes::Tags>>,
     added_attrs: Query<Entity, Added<eustress_common::attributes::Attributes>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
+    load_in_progress: Res<super::file_loader::LoadInProgress>,
 ) {
+    // Mirror the gate on `write_instance_changes_system`: tag /
+    // attribute Changed flags fire during cold-load schema healing
+    // and would re-write 50k TOMLs we just read.
+    if load_in_progress.active {
+        return;
+    }
+
     // Just-added entities had their components inserted this tick (cold
     // load). Skipping them avoids a 1-per-entity TOML write on every
     // Space open — the data already matches what's on disk.

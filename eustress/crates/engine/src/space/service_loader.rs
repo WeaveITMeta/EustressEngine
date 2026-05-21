@@ -140,14 +140,21 @@ impl Default for ServiceComponent {
 pub fn load_service_definition(path: &Path) -> Result<ServiceDefinition, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    load_service_definition_from_str(&content)
+}
 
+/// In-memory twin — parse a service `_service.toml` from content the
+/// caller already sourced through `SpaceSource` (Fjall tree or disk).
+/// No `std::fs`, so a Fjall-authoritative world loads services with
+/// zero disk reads.
+pub fn load_service_definition_from_str(content: &str) -> Result<ServiceDefinition, String> {
     let mut value: toml::Value = content
         .parse()
-        .map_err(|e: toml::de::Error| format!("Failed to parse {}: {}", path.display(), e))?;
+        .map_err(|e: toml::de::Error| format!("Failed to parse service TOML: {}", e))?;
     eustress_common::class_schema::normalise_keys(&mut value);
     value
         .try_into()
-        .map_err(|e: toml::de::Error| format!("Failed to deserialize {}: {}", path.display(), e))
+        .map_err(|e: toml::de::Error| format!("Failed to deserialize service TOML: {}", e))
 }
 
 /// Convert a toml::Value to a PropertyValue

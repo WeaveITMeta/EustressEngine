@@ -251,8 +251,12 @@ fn sync_basepart_to_material(
             }
         }
 
-        // Shadow casting threshold: >= 50% transparency = no shadow
-        let should_cast_shadow = basepart.transparency < 0.5;
+        // Shadow casting: respect the explicit `cast_shadow` property AND
+        // the >= 50% transparency threshold. Either condition opts the
+        // entity out of shadow cascades. At 50k+ anchored static parts the
+        // shadow pass is the dominant render cost, so honouring the TOML
+        // `cast_shadow = false` is a first-class perf knob, not a nice-to-have.
+        let should_cast_shadow = basepart.cast_shadow && basepart.transparency < 0.5;
         if should_cast_shadow {
             if has_no_shadow.is_some() {
                 commands.entity(entity).remove::<NotShadowCaster>();

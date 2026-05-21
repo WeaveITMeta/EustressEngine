@@ -29,6 +29,27 @@ use eustress_common::{
     SyncManifest, save_toml_file,
 };
 
+/// True when `space_root` is a fully-converted `.eustress` world —
+/// `header.bin` carries a `migrated_at` stamp, so `world.fjalldb/` is
+/// authoritative and there are deliberately no loose service trees on
+/// disk. Every disk-regenerating / disk-detecting path checks this and
+/// stands down so a migrated world stays clean and DB-sourced.
+///
+/// Without the `world-db` feature there is no DB and no migration
+/// concept, so this is always `false` (legacy disk behaviour intact).
+#[cfg(feature = "world-db")]
+pub fn space_is_migrated(space_root: &Path) -> bool {
+    matches!(
+        eustress_worlddb::header::WorldHeader::read(space_root),
+        Ok(Some(h)) if h.is_migrated()
+    )
+}
+
+#[cfg(not(feature = "world-db"))]
+pub fn space_is_migrated(_space_root: &Path) -> bool {
+    false
+}
+
 // ============================================================================
 // 1. Service Manifest — EEP service folders created for every new Space
 // ============================================================================
@@ -638,15 +659,51 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     // via Lighting/*.instance.toml files; the file loader + the
     // hydrate_lighting_entities system re-create them with proper
     // DirectionalLight / marker components from the new Space's TOMLs.
-    let to_despawn: Vec<Entity> = {
-        let mut q = world.query_filtered::<Entity, With<eustress_common::classes::Instance>>();
+    // Discard any frame-budget spill from the OUTGOING world FIRST.
+    // Otherwise `drain_pending_spawns` could spawn those queued
+    // children moments later, parented to entities we are about to
+    // despawn — a flood of dead-`ChildOf` orphans (the 47k-warning
+    // storm) and parts detached from their folder.
+    crate::space::file_loader::discard_pending_spawns();
+
+    // Despawn children-FIRST, roots last. A flat despawn over all
+    // `Instance`s in arbitrary query order despawns a parent (e.g. the
+    // Workspace folder, entity 1287) before its 50k benchpart
+    // children; Bevy then fires an invalid-`ChildOf` warn+strip for
+    // EVERY orphaned child — tens of thousands of WARN lines in one
+    // frame plus needless relationship churn. Two passes — entities
+    // that HAVE a `ChildOf` (children) before those that don't (roots)
+    // — means each child is gone before its parent, so the orphan
+    // window never opens. (The benchmark tree is flat: Workspace root →
+    // 50k leaf benchparts, so two passes fully eliminate it.)
+    let children: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            Entity,
+            (
+                With<eustress_common::classes::Instance>,
+                With<bevy::prelude::ChildOf>,
+            ),
+        >();
         q.iter(world).collect()
     };
-    let count = to_despawn.len();
-    for entity in to_despawn {
+    let roots: Vec<Entity> = {
+        let mut q = world.query_filtered::<
+            Entity,
+            (
+                With<eustress_common::classes::Instance>,
+                Without<bevy::prelude::ChildOf>,
+            ),
+        >();
+        q.iter(world).collect()
+    };
+    let count = children.len() + roots.len();
+    for entity in children {
         world.despawn(entity);
     }
-    info!("🗑️ Cleared {} existing entities", count);
+    for entity in roots {
+        world.despawn(entity);
+    }
+    info!("🗑️ Cleared {} existing entities (children-first, no orphan storm)", count);
 
     if let Some(mut registry) = world.get_resource_mut::<crate::space::SpaceFileRegistry>() {
         *registry = crate::space::SpaceFileRegistry::default();
@@ -675,6 +732,13 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     if let Some(mut deferred) = world.get_resource_mut::<crate::space::file_loader::DeferredServiceLoader>() {
         deferred.pending.clear();
         deferred.priority_done = false;
+    }
+    // Re-gate write-back: the upcoming rescan re-spawns every entity and
+    // re-fires the same mesh-resolve / class-default churn the cold-load
+    // path triggers. Without this, switching universes mid-session would
+    // race the write-storm bug it was meant to avoid.
+    if let Some(mut load) = world.get_resource_mut::<crate::space::file_loader::LoadInProgress>() {
+        load.begin();
     }
 
     world.insert_resource(crate::space::SpaceRoot(space_path.to_path_buf()));
@@ -733,6 +797,8 @@ pub fn apply_space_rescan(
     class_defaults: Option<Res<crate::space::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<crate::space::file_loader::DeferredServiceLoader>,
     gen: Res<crate::space::file_loader::SpaceLoadGeneration>,
+    mut load_in_progress: ResMut<crate::space::file_loader::LoadInProgress>,
+    active_source: Res<crate::space::space_source::ActiveSpaceSource>,
 ) {
     if !rescan.0 { return; }
     rescan.0 = false;
@@ -743,10 +809,22 @@ pub fn apply_space_rescan(
         return;
     }
 
-    info!("🔄 Re-scanning Space at {:?}", space_path);
+    warn!(
+        target: "eustress_engine::world_db",
+        space = %space_path.display(),
+        "🔄 apply_space_rescan FIRED — full Space re-scan. If this recurs on a fixed interval it IS the periodic ~2.67s stutter. Now frame-budgeted (streams via drain_pending_spawns) instead of a synchronous 50k freeze."
+    );
+    // Gate write-back through the rescan's mesh-resolve / class-default churn.
+    load_in_progress.begin();
+    // Same frame-budget arming as the initial load — without this the
+    // rescan re-ran the entire 50k scan+spawn synchronously in one
+    // frame (the periodic multi-second stutter the user observed).
+    crate::space::file_loader::begin_budgeted_load(gen.0);
 
     use crate::space::file_loader::{scan_space_directory, FileType, PRIORITY_SERVICES};
-    let entries = scan_space_directory(space_path);
+    let source_arc = active_source.0.clone();
+    let source = source_arc.as_ref();
+    let entries = scan_space_directory(source, space_path);
     info!("🔍 Discovered {} top-level entries", entries.len());
 
     let cd_ref = class_defaults.as_deref();
@@ -756,19 +834,20 @@ pub fn apply_space_rescan(
     for entry in entries {
         let is_priority = PRIORITY_SERVICES.iter().any(|s| entry.name == *s);
         if is_priority {
+            crate::space::file_loader::rearm_priority_budget();
             match entry.file_type {
                 FileType::Directory => {
                     crate::space::file_loader::spawn_directory_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
                         &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                        cd_ref,
+                        cd_ref, source,
                     );
                 }
                 _ => {
                     crate::space::file_loader::spawn_file_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
                         &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                        cd_ref,
+                        cd_ref, source,
                     );
                 }
             }
@@ -1046,6 +1125,21 @@ pub fn new_space(world: &mut World) {
 /// Verify Space has all required service folders, .eustress dirs, and knowledge.
 /// Creates any that are missing — non-destructive (never deletes or overwrites).
 pub fn ensure_space_integrity(space_root: &Path) {
+    // A fully-converted `.eustress` world is DB-authoritative: the
+    // service trees, lighting children, materials, `space.toml` and
+    // `simulation.toml` all live inside `world.fjalldb/`. Regenerating
+    // them on disk here would resurrect exactly the loose files the
+    // conversion removed (and they'd come back every load). When the
+    // header marks the world migrated, the DB owns integrity — do
+    // nothing on disk.
+    if space_is_migrated(space_root) {
+        debug!(
+            "ensure_space_integrity: skipped for migrated .eustress {:?} (DB authoritative, no disk regen)",
+            space_root
+        );
+        return;
+    }
+
     let mut repaired = 0;
 
     // Ensure .eustress subdirectories

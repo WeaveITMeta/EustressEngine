@@ -1,0 +1,51 @@
+[package]
+name = "eustress-worlddb"
+version = "0.1.0"
+edition = "2021"
+description = "Fjall-backed authoritative ECS persistence for Eustress worlds."
+
+[features]
+default = []
+# Enables the in-process bridge that emits change-stream commit deltas
+# into the engine's broker. Wired by the engine plugin; off by default
+# so the crate stays usable as a pure storage layer in tooling / CLI
+# binaries that don't link the broker.
+streams-bridge = []
+
+[dependencies]
+# Storage substrate. Held behind the `WorldDb` trait so the version can
+# move with measurement (see project_eustress_binary_pivot memory).
+fjall = { workspace = true }
+
+# The owned Fjall substrate fork. `eustress-fjall` re-exports `fjall`
+# and adds the multiplexing + concurrency + per-store replication-feed
+# layer multiplayer/distributed worlds need. WorldDb depends on the
+# fork as the owned substrate; migrating `FjallWorldDb`'s partitions
+# onto the multiplexer + its change-stream onto the replication feed
+# is the next incremental step (the direct `fjall` dep above stays
+# during that migration so the build never breaks).
+eustress-fjall = { path = "../eustress-fjall" }
+
+# Zero-copy value layer for hot ECS components — Tier 1 #2 of the
+# Fjall fork value zones. Components archive to bytes that Fjall stores
+# verbatim; reads cast straight through `Archived<C>`.
+rkyv = { workspace = true, features = ["std"] }
+
+# Tracing hooks → inferno flamegraphs (Tier 1 #3).
+tracing = "0.1"
+
+# Per-commit change-stream API (Tier 1 #4). Bounded channels here give
+# subscribers backpressure without locking the committer.
+crossbeam-channel = "0.5"
+
+# Shared utilities.
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+toml = "0.8"
+# Deterministic per-chunk content hashing for `.echk` bake → R2 delta
+# uploads (Phase 5). Same major the engine already uses.
+blake3 = "1"

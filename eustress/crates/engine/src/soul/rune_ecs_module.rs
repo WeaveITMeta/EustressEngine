@@ -141,6 +141,11 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     module.function_meta(read_space_file)?;
     module.function_meta(write_space_file)?;
     module.function_meta(query_material_properties)?;
+
+    // WS-1b DataStore: backed via the pre-existing `DataStoreRune` /
+    // `with_datastore_service` binding (registered elsewhere in this
+    // module). No parallel functions registered here — see the note
+    // where the removed flat block used to live.
     
     // Logging
     module.function_meta(log_info)?;
@@ -470,6 +475,16 @@ pub fn set_space_root(path: std::path::PathBuf) {
 pub fn clear_space_root() {
     SPACE_ROOT.with(|r| *r.borrow_mut() = None);
 }
+
+// NOTE: An earlier WS-1b attempt added a parallel flat `datastore_*`
+// Rune API here. It collided with the engine's pre-existing
+// `DataStoreRune` OO binding (`datastore_get(store: &DataStoreRune, ...)`
+// + `with_datastore_service`, ~line 2580) which is already backed by
+// `eustress_common::scripting::DataStoreService`. The correct Phase 8
+// integration is to back THAT existing service with the Fjall
+// `eustress_worlddb::DataStoreService` (via its pluggable backend),
+// NOT to add a second API. The parallel block was removed; see
+// memory `worlddb-remaining-plan` WS-1b for the corrected approach.
 
 /// Write a file to the Space directory.
 /// Path is relative to Space root. Rejects `..` traversal.

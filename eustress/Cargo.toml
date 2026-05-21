@@ -28,6 +28,8 @@ members = [
     "crates/stream-node",
     "crates/functions",
     "crates/identity",
+    "crates/eustress-fjall",
+    "crates/worlddb",
     "benches/instance-capacity"
 ]
 
@@ -83,6 +85,17 @@ bytes = "1.7"
 # Zero-copy serialization for ECS scene deltas (rkyv 0.8)
 rkyv = { version = "0.8", features = ["std"] }
 
+# Fjall LSM key-value store — authoritative ECS persistence (Phase 1+ of
+# the 2026-05-15 binary pivot, see memory project_eustress_binary_pivot).
+# 3.1 brings MVCC snapshot reads, compaction filters, and the
+# forwards-compatible disk format the WorldDb layer relies on.
+fjall = "2"
+
+# Flamegraph rendering from `tracing` collapsed-stack output.
+# Wired into `eustress-worlddb::tracing_hooks` so per-frame DB cost feeds
+# the engine diagnostics overlay without going through a separate profiler.
+inferno = "0.11"
+
 # CAD BRep kernel — `truck` is a pure-Rust parametric modeler (curves /
 # surfaces / topology / CSG / meshing / STEP I/O). Underpins the
 # eustress-cad crate; unblocks parametric Gap Fill + Resize Align
@@ -121,6 +134,15 @@ opt-level = 3
 # Patch gpu-allocator to use windows 0.58 (matches wgpu-hal's windows version)
 [patch.crates-io]
 gpu-allocator = { path = ".patches/gpu-allocator-fresh" }
+# Vendored Fjall + lsm-tree (2026-05-16). This IS the fork: the engine
+# now builds the database substrate from workspace-owned source, so the
+# deep internal differentiators (memory-mapped .eustress I/O fusion,
+# 3D-locality-preserving compaction, frame-budgeted compaction) can be
+# modified in-tree. `eustress-fjall` re-exports this; the rest of the
+# workspace is unaffected. Versions match the previously-resolved
+# crates.io releases so the patch resolves cleanly.
+fjall = { path = "vendor/fjall" }
+lsm-tree = { path = "vendor/lsm-tree" }
 
 [profile.release]
 opt-level = 3

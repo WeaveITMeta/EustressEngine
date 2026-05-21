@@ -33,8 +33,6 @@ Last cross-checked: 2026-05-04 against `roblox_binary_strings.md` + `roblox_ida_
 
 ### BasePart properties (complete list)
 - [x] Name, ClassName, Parent, Anchored, Color, Material, Size, CFrame, Position, Rotation
-- [ ] `BackSurface/FrontSurface/LeftSurface/RightSurface/TopSurface/BottomSurface` — SurfaceType per face
-- [ ] `BackSurfaceInput/FrontSurfaceInput/…` — surface input types
 - [ ] `BrickColor` — legacy color system (maps to Color3)
 - [ ] `CastShadow` toggle
 - [ ] `CollisionGroupId` — physics collision group index

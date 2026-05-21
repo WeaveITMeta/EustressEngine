@@ -238,7 +238,9 @@ fn do_open_space(world: &mut World) {
 /// Load a Space from an explicit path (recent files, CLI flag, etc.).
 /// Validates that the directory is a legitimate Eustress Space before loading:
 /// - Must be a directory
-/// - Must contain at least one of: `.eustress/project.toml`, `Workspace/`, `space.toml`
+/// - Must contain at least one of: `.eustress/project.toml`, `Workspace/`,
+///   `space.toml`, `header.bin`, or `world.fjalldb/` (the last two are a
+///   migrated `.eustress` world that has no loose files)
 fn do_open_space_path(world: &mut World, path: PathBuf) {
     if !path.exists() || !path.is_dir() {
         let msg = format!("Not a valid directory: {}", path.display());
@@ -249,11 +251,16 @@ fn do_open_space_path(world: &mut World, path: PathBuf) {
         return;
     }
 
-    // Basic validation: is this actually a Space folder?
+    // Basic validation: is this actually a Space folder? A fully
+    // converted `.eustress` world has NO loose `Workspace/` or
+    // `space.toml` on disk — `header.bin` + `world.fjalldb/` are the
+    // canonical markers, so accept those too.
     let looks_like_space =
         path.join(".eustress").join("project.toml").exists()
         || path.join("Workspace").exists()
-        || path.join("space.toml").exists();
+        || path.join("space.toml").exists()
+        || path.join("header.bin").exists()
+        || path.join("world.fjalldb").exists();
 
     if !looks_like_space {
         // Warn but still allow — user might be opening an older/partial Space
@@ -287,10 +294,15 @@ fn do_save_space(world: &mut World) {
         .map(|r| r.0.clone());
 
     if let Some(ref sr) = space_path {
-        let sim_toml = sr.join("simulation.toml");
-        if !sim_toml.exists() {
-            if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
-                warn!("Could not write simulation.toml: {}", e);
+        // A migrated `.eustress` world keeps `simulation.toml` inside
+        // `world.fjalldb/`, not on disk — writing it here would
+        // resurrect a loose file the conversion deliberately removed.
+        if !crate::space::space_ops::space_is_migrated(sr) {
+            let sim_toml = sr.join("simulation.toml");
+            if !sim_toml.exists() {
+                if let Err(e) = std::fs::write(&sim_toml, crate::space::space_ops::default_simulation_toml()) {
+                    warn!("Could not write simulation.toml: {}", e);
+                }
             }
         }
     }

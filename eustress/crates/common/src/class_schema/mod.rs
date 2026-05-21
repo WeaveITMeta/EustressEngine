@@ -549,6 +549,70 @@ pub fn load_and_heal_instance(
     })
 }
 
+/// In-memory twin of [`load_and_heal_instance`] for callers that hold
+/// the TOML *content* rather than a path — primarily the WorldDb
+/// cold-load path, which replays `INSTANCE_META` bytes out of Fjall.
+///
+/// Identical key-normalise + template-merge + extras computation as
+/// the path-based function, but performs **no disk IO**: it never
+/// reads a file and never self-heals (`rewrote_disk` is always
+/// `false`). The canonicalisation step is therefore skipped entirely
+/// — the caller owns persistence (it writes back to Fjall, not to a
+/// `_instance.toml`).
+///
+/// Keep this in lockstep with [`load_and_heal_instance`]'s in-memory
+/// stages — the two are intentionally duplicated rather than sharing
+/// an extracted core, because the path-based function is on the hot
+/// legacy load path and a shared-core refactor would change its call
+/// graph across every existing caller (engine, MCP server,
+/// attribute-tag migration). Foundation-first: add alongside, don't
+/// rewire.
+pub fn heal_instance_from_str(
+    content: &str,
+    registry: &ClassSchemaRegistry,
+) -> Result<HealResult, String> {
+    let mut parsed: toml::Value = content
+        .parse()
+        .map_err(|e: toml::de::Error| format!("parse instance bytes: {}", e))?;
+
+    normalise_keys(&mut parsed);
+
+    let class_name: Option<String> = parsed
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(ref name) = class_name {
+        if let Some(template) = registry.template(name) {
+            merge_template_into(&mut parsed, &template.body);
+        }
+    }
+
+    let template_sections: std::collections::HashSet<String> = class_name
+        .as_deref()
+        .and_then(|n| registry.template(n))
+        .and_then(|t| t.body.as_table())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    let extras: Vec<String> = parsed
+        .as_table()
+        .map(|t| {
+            t.iter()
+                .filter(|(_, v)| v.is_table())
+                .map(|(k, _)| k.clone())
+                .filter(|k| !template_sections.contains(k))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(HealResult {
+        value: parsed,
+        extras,
+        rewrote_disk: false,
+    })
+}
+
 // ============================================================================
 // Extra-section claim registry
 // ============================================================================

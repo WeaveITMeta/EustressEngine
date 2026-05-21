@@ -1541,12 +1541,30 @@ impl PropertyAccess for Lighting {
 
 impl PropertyAccess for WorkspaceComponent {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
-        match name { "Gravity" => Some(PropertyValue::Float(self.gravity)), "PhysicsEnabled" => Some(PropertyValue::Bool(self.physics_enabled)), _ => None }
+        match name {
+            "Gravity" => Some(PropertyValue::Float(self.gravity)),
+            "PhysicsEnabled" => Some(PropertyValue::Bool(self.physics_enabled)),
+            // The customizable per-part distance cull (`VisibilityRange`).
+            // A part farther than this from the camera is skipped by
+            // Bevy entirely (visibility + extract + draw).
+            "RenderDistance" => Some(PropertyValue::Float(self.render_distance)),
+            _ => None,
+        }
     }
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) { ("Gravity", PropertyValue::Float(f)) => { self.gravity = f; Ok(()) }, ("PhysicsEnabled", PropertyValue::Bool(b)) => { self.physics_enabled = b; Ok(()) }, _ => Err(format!("Unknown: {}", name)) }
+        match (name, value) {
+            ("Gravity", PropertyValue::Float(f)) => { self.gravity = f; Ok(()) },
+            ("PhysicsEnabled", PropertyValue::Bool(b)) => { self.physics_enabled = b; Ok(()) },
+            ("RenderDistance", PropertyValue::Float(f)) => { self.render_distance = f; Ok(()) },
+            _ => Err(format!("Unknown: {}", name)),
+        }
     }
-    fn list_properties(&self) -> Vec<PropertyDescriptor> { vec![PropertyDescriptor { name: "Gravity".to_string(), property_type: "float".to_string(), read_only: false, category: "Physics".to_string() }] }
+    fn list_properties(&self) -> Vec<PropertyDescriptor> {
+        vec![
+            PropertyDescriptor { name: "Gravity".to_string(), property_type: "float".to_string(), read_only: false, category: "Physics".to_string() },
+            PropertyDescriptor { name: "RenderDistance".to_string(), property_type: "float".to_string(), read_only: false, category: "Rendering".to_string() },
+        ]
+    }
 }
 
 impl PropertyAccess for SpawnLocation {

@@ -141,12 +141,43 @@ impl UniverseWatcher {
         )
         .map_err(|e| format!("UniverseWatcher: {e}"))?;
 
+        // Non-recursive on the workspace root catches new/removed universe
+        // dirs. A recursive watch here registers OS handles for every nested
+        // folder — at 50k+ part folders inside `<Universe>/Spaces/<Space>/
+        // Workspace/` (benchmark grids) that's tens of thousands of handles
+        // and a measurable per-event cost. The 5 s `periodic_scan` is the
+        // safety net for events the per-universe watches don't catch.
         debouncer
             .watcher()
-            .watch(workspace, RecursiveMode::Recursive)
-            .map_err(|e| format!("UniverseWatcher watch: {e}"))?;
+            .watch(workspace, RecursiveMode::NonRecursive)
+            .map_err(|e| format!("UniverseWatcher watch workspace: {e}"))?;
 
-        info!("UniverseWatcher: watching {:?}", workspace);
+        // Add a non-recursive watch per existing universe directory so
+        // `project.toml` create/remove/modify still fires promptly. New
+        // universes added after startup are picked up by `periodic_scan`.
+        if let Ok(entries) = std::fs::read_dir(workspace) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().starts_with('.'))
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                if let Err(e) = debouncer
+                    .watcher()
+                    .watch(&path, RecursiveMode::NonRecursive)
+                {
+                    warn!("UniverseWatcher: skip {:?} ({e})", path);
+                }
+            }
+        }
+
+        info!("UniverseWatcher: watching {:?} (non-recursive)", workspace);
         Ok(Self { _debouncer: debouncer, receiver: rx })
     }
 

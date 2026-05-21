@@ -1,0 +1,18 @@
+[package]
+name = "eustress-fjall"
+version = "0.1.0"
+edition = "2021"
+description = "Eustress's owned Fjall substrate fork — multiplexed, concurrent, replication-aware key-value storage for multiplayer and distributed worlds. Wraps and re-exports fjall + lsm-tree; engine-specific concurrency/multiplexing/replication added on top. Per the fork strategy: start by wrapping, add engine features incrementally, internal patches land here."
+
+[dependencies]
+# The upstream substrate. `eustress-fjall` re-exports it so the rest of
+# the workspace depends on this crate as the single database surface
+# ("publish as eustress-fjall for easy internal use"). When a real
+# internal patch to fjall/lsm-tree is needed, this is where a
+# [patch.crates-io] / vendored fork is pointed.
+fjall = { workspace = true }
+
+parking_lot = { workspace = true }
+crossbeam-channel = "0.5"
+thiserror = { workspace = true }
+tracing = "0.1"

@@ -128,11 +128,29 @@ impl slint::platform::Platform for SlintBevyPlatform {
     }
 
     fn clipboard_text(&self, _clipboard: slint::platform::Clipboard) -> Option<String> {
-        clipboard_win::get_clipboard_string().ok()
+        // Cross-platform clipboard via `arboard` (replaces the
+        // Windows-only `clipboard-win`, which broke macOS/Linux builds).
+        // Gated on the `clipboard` feature like every other arboard
+        // call site so headless builds still compile.
+        #[cfg(feature = "clipboard")]
+        {
+            arboard::Clipboard::new()
+                .ok()
+                .and_then(|mut c| c.get_text().ok())
+        }
+        #[cfg(not(feature = "clipboard"))]
+        {
+            None
+        }
     }
 
-    fn set_clipboard_text(&self, text: &str, _clipboard: slint::platform::Clipboard) {
-        let _ = clipboard_win::set_clipboard_string(text);
+    fn set_clipboard_text(&self, _text: &str, _clipboard: slint::platform::Clipboard) {
+        #[cfg(feature = "clipboard")]
+        {
+            if let Ok(mut c) = arboard::Clipboard::new() {
+                let _ = c.set_text(_text.to_string());
+            }
+        }
     }
 }
 
@@ -9377,69 +9395,43 @@ fn drain_slint_actions(
             SlintAction::OpenSpacePath(path) => {
                 let space_path = std::path::PathBuf::from(&path);
                 if crate::space::looks_like_space_root(&space_path) {
-                    info!("UniverseBrowser: switching to space {:?}", space_path);
+                    info!("UniverseBrowser: switching to space {:?} (canonical open_space — full unload→load)", space_path);
 
-                    // Bump load generation so deferred loaders discard stale entries
-                    if let Some(ref mut gen) = res.space_load_gen {
-                        gen.0 += 1;
-                    }
-                    // Clear deferred service queue so old-space services don't load into new space
-                    if let Some(ref mut deferred) = res.deferred_service_loader {
-                        deferred.pending.clear();
-                        deferred.priority_done = false;
-                    }
-                    // Clear material registry so old materials don't bleed into new space
-                    if let Some(ref mut mr) = res.material_registry {
-                        **mr = crate::space::material_loader::MaterialRegistry::default();
-                    }
-
-                    // Despawn all entities loaded from files (full data model clear)
-                    let loaded_entities: Vec<Entity> = queries.loaded_from_file
-                        .iter()
-                        .map(|(e, _)| e)
-                        .collect();
-                    let count = loaded_entities.len();
-                    for entity in loaded_entities {
-                        commands.queue(move |world: &mut World| {
-                            if world.get_entity(entity).is_ok() {
-                                world.despawn(entity);
-                            }
-                        });
-                    }
-                    info!("Despawned {} file-loaded entities", count);
-
-                    // Clear file registry
-                    if let Some(ref mut registry) = res.file_registry {
-                        registry.clear();
-                    }
-
-                    // Clear selection so properties panel doesn't show stale data
+                    // Clear UI-facing state immediately so the panel
+                    // doesn't render stale selection/explorer rows
+                    // pointing at entities the queued teardown despawns.
                     if let Some(ref sm) = res.selection_manager {
                         sm.0.write().clear();
                     }
-
-                    // Clear explorer state
                     if let Some(ref mut es) = res.explorer_state {
                         es.entity_id_cache.clear();
                         es.expanded_entities.clear();
                         es.dirty = true;
                         es.needs_immediate_sync = true;
                     }
-
-                    // Set new space root and trigger rescan
-                    commands.insert_resource(crate::space::SpaceRoot(space_path.clone()));
-                    commands.insert_resource(crate::space::space_ops::SpaceRescanNeeded(true));
-
-                    // Save last space path so it restores on next launch
                     if let Some(ref mut settings) = res.editor_settings {
                         settings.last_space_path = Some(space_path.to_string_lossy().to_string());
                     }
 
-                    // Reset file watcher for new space
-                    // (will be re-created on next file watcher tick)
+                    // ONE space-switch path. `space_ops::open_space` is
+                    // the complete, correct unload-then-load: children-
+                    // first despawn of ALL Instance entities,
+                    // SpaceFileRegistry + MaterialRegistry reset,
+                    // SpaceLoadGeneration bump, deferred-queue + frame-
+                    // budget spill discard, ensure-integrity, SpaceRoot
+                    // set + rescan, and (via the world-db plugin)
+                    // auto-convert of the new Space. The previous
+                    // hand-rolled block here despawned ONLY
+                    // `LoadedFromFile` entities and skipped the rest —
+                    // that was the "switching merges the two worlds"
+                    // bug. Queued because `open_space` needs `&mut World`.
+                    let target = space_path.clone();
+                    commands.queue(move |world: &mut World| {
+                        crate::space::space_ops::open_space(world, &target);
+                    });
 
                     if let Some(ref mut out) = res.output {
-                        out.info(format!("Switched to space (cleared {} entities)", count));
+                        out.info(format!("Switching space → {} (full unload/load)", space_path.display()));
                     }
                 } else {
                     warn!("UniverseBrowser: {:?} is not a valid Space root", space_path);

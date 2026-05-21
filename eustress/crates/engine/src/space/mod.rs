@@ -10,7 +10,9 @@
 use bevy::prelude::*;
 use std::path::{Path, PathBuf};
 
+pub mod active_db;
 pub mod class_defaults;
+pub mod launch;
 pub mod file_loader;
 pub mod file_watcher;
 pub mod gui_loader;
@@ -20,7 +22,12 @@ pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;
 pub mod space_ops;
+pub mod space_source;
 pub mod universe_registry;
+#[cfg(feature = "world-db")]
+pub mod auto_convert;
+#[cfg(feature = "world-db")]
+pub mod world_db_plugin;
 
 /// Resource holding the current Space root path
 #[derive(Resource, Debug, Clone)]
@@ -38,6 +45,7 @@ pub fn workspace_root() -> PathBuf {
     //      and CI. Wins regardless of platform.
     //   2. Platform default (see `default_documents_root`).
     //   3. Current working directory as last resort.
+    // 1. `EUSTRESS_WORKSPACE` override (CI / power users) — wins.
     if let Ok(env_path) = std::env::var("EUSTRESS_WORKSPACE") {
         let root = PathBuf::from(env_path);
         let _ = std::fs::create_dir_all(&root);
@@ -47,11 +55,18 @@ pub fn workspace_root() -> PathBuf {
         return root;
     }
 
+    // 2. Canonical store: the **Documents** `Eustress/` Universe
+    //    hierarchy (DIRECTION CHANGE 2026-05-17). The human-editable
+    //    TOML hierarchy lives here alongside each Space's `.eustress`
+    //    binary container; TOML and binary coexist and the TOML is an
+    //    honored import source at runtime. (The earlier %LOCALAPPDATA%
+    //    relocation was reverted — the user wants the hierarchy in
+    //    Documents.)
     if let Some(docs) = default_documents_root() {
         let root = docs.join("Eustress");
         let _ = std::fs::create_dir_all(&root);
 
-        // First-launch: scaffold default Universe + Space if Eustress dir is empty
+        // First-launch: scaffold default Universe + Space if empty.
         if is_dir_empty(&root) {
             scaffold_default_universe(&root);
         }
@@ -126,6 +141,11 @@ pub fn looks_like_space_root(path: &Path) -> bool {
     path.join(".eustress").join("project.toml").exists()
         || path.join("Workspace").exists()
         || path.join("space.toml").exists()
+        // A fully-converted `.eustress` world has no loose `Workspace/`
+        // or `space.toml` — `header.bin` + `world.fjalldb/` are the
+        // canonical container markers.
+        || path.join("header.bin").exists()
+        || path.join("world.fjalldb").exists()
 }
 
 /// Returns true if `path` resolves to a core service (Workspace,

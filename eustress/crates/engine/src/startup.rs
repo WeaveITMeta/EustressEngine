@@ -92,6 +92,22 @@ impl StartupArgs {
                         result.universe_dir = Some(PathBuf::from(&args[i]));
                     }
                 }
+                "--open" => {
+                    // Open a `.eustress` launch pointer (or a Space
+                    // directory). Resolves to the Space container and
+                    // reuses the existing `space_dir` → SpaceRoot path.
+                    i += 1;
+                    if i < args.len() {
+                        if let Some(dir) = crate::space::launch::resolve_open_target(&args[i]) {
+                            result.space_dir = Some(dir);
+                        } else {
+                            eprintln!(
+                                "Warning: --open: not a Space directory or valid .eustress launch file: {}",
+                                args[i]
+                            );
+                        }
+                    }
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -100,7 +116,12 @@ impl StartupArgs {
                     // Check if it's a file path
                     if !arg.starts_with('-') {
                         let path = PathBuf::from(arg);
-                        if is_scene_file(&path) {
+                        // OS double-click path: a `.eustress` launch
+                        // pointer or a Space directory opens that Space
+                        // (resolved → SpaceRoot via space_dir).
+                        if let Some(dir) = crate::space::launch::resolve_open_target(arg) {
+                            result.space_dir = Some(dir);
+                        } else if is_scene_file(&path) {
                             result.scene_file = Some(path);
                         } else {
                             eprintln!("Warning: Unknown argument or unsupported file: {}", arg);
@@ -143,6 +164,7 @@ OPTIONS:
     -p, --play              Start in play mode immediately
     -s, --server            Start as headless server
     -v, --verbose           Enable verbose logging
+        --open <FILE>       Open a `.eustress` launch pointer (or a Space directory)
         --space <PATH>      Open a specific Space directory directly
         --universe <PATH>   Open the first Space found inside a Universe directory
 

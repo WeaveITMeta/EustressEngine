@@ -213,6 +213,23 @@ impl FileType {
     }
 }
 
+/// Read a file's text through the active [`SpaceSource`], deriving the
+/// Space-relative key from the absolute `abs_path` the loader still
+/// carries for identity. Falls back to a direct `std::fs` read if the
+/// path can't be made relative (defensive — should not happen for
+/// in-Space content). This is the single seam every loader read site
+/// goes through so Disk vs Fjall is one decision, not 18.
+fn src_read_string(
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    abs_path: &Path,
+) -> std::io::Result<String> {
+    match super::space_source::rel_from_root(space_root, abs_path) {
+        Some(rel) => source.read_to_string(&rel),
+        None => std::fs::read_to_string(abs_path),
+    }
+}
+
 /// Metadata extracted from a file or directory
 #[derive(Debug, Clone)]
 pub struct FileMetadata {
@@ -339,38 +356,48 @@ pub struct LoadedFromFile {
 
 /// Scan a single directory level, returning file entries and Directory entries
 /// (each Directory entry carries its own children recursively).
-fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
+/// Recursively scan a directory's entries via [`SpaceSource`] rather
+/// than `std::fs`. `rel_dir` is the Space-relative forward-slash path
+/// of the directory being scanned; `space_root` reconstitutes the
+/// absolute `FileMetadata.path` so the registry / file-watcher / undo
+/// (all keyed on absolute paths) keep working unchanged — only the
+/// *content + listing* moves to the source (Disk or Fjall).
+fn scan_dir_entries(
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+    rel_dir: &str,
+    service: &str,
+) -> Vec<FileMetadata> {
     let mut entries: Vec<FileMetadata> = Vec::new();
-    let Ok(read_dir) = std::fs::read_dir(dir_path) else { return entries };
+    let Ok(listing) = source.list(rel_dir) else { return entries };
 
-    for entry in read_dir.flatten() {
-        let path = entry.path();
+    for ent in listing {
+        let name = ent.name.clone();
+        let rel = ent.rel_path.clone();
+        // Absolute path kept for registry/watcher/undo identity.
+        let path = {
+            let mut p = space_root.to_path_buf();
+            for seg in rel.split('/') {
+                if !seg.is_empty() {
+                    p.push(seg);
+                }
+            }
+            p
+        };
 
-        if path.is_dir() {
-            let name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown")
-                .to_string();
-
+        if ent.is_dir {
             // Skip hidden/system directories (.eustress, .git, node_modules, target, trash)
             if name.starts_with('.') || name == "node_modules" || name == "target" || name == "trash" {
                 continue;
             }
             // EEP reserved names — `_instance.toml` and `_service.toml`
             // are MARKER FILE names, never valid as directory names.
-            // The file branch below already skips these when they're
-            // files; applying the same rule to directories means a
-            // directory that happens to share one of these names is
-            // ignored rather than spawned as a phantom child entity.
-            // This isn't self-healing — it's respecting the EEP
-            // convention that the name is reserved for a marker,
-            // regardless of which filesystem node-type backs it.
             if name == "_instance.toml" || name == "_service.toml" {
                 continue;
             }
-            let children = scan_dir_entries(&path, service);
+            let children = scan_dir_entries(source, space_root, &rel, service);
             entries.push(FileMetadata {
-                path: path.clone(),
+                path,
                 file_type: FileType::Directory,
                 service: service.to_string(),
                 name,
@@ -379,16 +406,16 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
                 children,
             });
         } else {
-            // Regular file
-
             // Skip EEP marker files — these define folder types, not entities
-            let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if fname == "_instance.toml" || fname == "_service.toml" {
+            if name == "_instance.toml" || name == "_service.toml" {
                 continue;
             }
 
             let Some(file_type) = FileType::from_path(&path) else { continue };
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            // Size from the source (Fjall has no mtime; modified is
+            // only consulted by the disk file-watcher, which is moot
+            // for Fjall-sourced loads). Use byte length for size.
+            let size = source.read(&rel).map(|b| b.len() as u64).unwrap_or(0);
             let name = path.file_stem()
                 .and_then(|n| n.to_str())
                 .unwrap_or("Unknown")
@@ -398,8 +425,8 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
                 file_type,
                 service: service.to_string(),
                 name,
-                size: meta.len(),
-                modified: meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                size,
+                modified: std::time::SystemTime::UNIX_EPOCH,
                 children: Vec::new(),
             });
         }
@@ -412,20 +439,23 @@ fn scan_dir_entries(dir_path: &Path, service: &str) -> Vec<FileMetadata> {
 /// 
 /// Services are discovered from the filesystem by looking for directories
 /// containing `_service.toml` marker files (EEP-compliant, no hardcoding).
-pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
+pub fn scan_space_directory(
+    source: &dyn super::space_source::SpaceSource,
+    space_root: &Path,
+) -> Vec<FileMetadata> {
     let mut entries = Vec::new();
-    
-    // Discover services from filesystem - look for directories with _service.toml
-    // This replaces the hardcoded service list with EEP-compliant discovery
-    let services = discover_services(space_path);
-    
+
+    // EEP-compliant service discovery, via the active source (Disk or
+    // Fjall) — no `std::fs` so a migrated world reconstructs the full
+    // service tree straight from the DB.
+    let services = discover_services(source);
+
     for service_name in &services {
-        let service_path = space_path.join(service_name);
-        if !service_path.exists() { continue; }
-        
-        // Return the service directory as a Directory entry with its contents as children
-        // This ensures files inside services (like materials) get parented to the service entity
-        let children = scan_dir_entries(&service_path, service_name);
+        if !source.exists(service_name) {
+            continue;
+        }
+        let service_path = space_root.join(service_name);
+        let children = scan_dir_entries(source, space_root, service_name, service_name);
         entries.push(FileMetadata {
             path: service_path,
             file_type: FileType::Directory,
@@ -436,7 +466,7 @@ pub fn scan_space_directory(space_path: &Path) -> Vec<FileMetadata> {
             children,
         });
     }
-    
+
     entries
 }
 
@@ -450,26 +480,24 @@ const KNOWN_SERVICE_NAMES: &[&str] = &[
     "ServerStorage", "ServerScriptService", "SoundService", "Teams", "Chat",
 ];
 
-fn discover_services(space_path: &Path) -> Vec<String> {
+fn discover_services(source: &dyn super::space_source::SpaceSource) -> Vec<String> {
     let mut services = Vec::new();
 
-    let entries = match std::fs::read_dir(space_path) {
+    let entries = match source.list("") {
         Ok(entries) => entries,
         Err(e) => {
-            warn!("Failed to read Space directory {:?}: {}", space_path, e);
+            warn!("Failed to list Space root via source: {}", e);
             return services;
         }
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() { continue; }
-
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+    for ent in entries {
+        if !ent.is_dir { continue; }
+        let name = ent.name.as_str();
 
         // Discover via _service.toml marker OR well-known service name
-        let service_marker = path.join("_service.toml");
-        if service_marker.exists() || KNOWN_SERVICE_NAMES.contains(&name) {
+        let service_marker = format!("{}/_service.toml", ent.rel_path);
+        if source.exists(&service_marker) || KNOWN_SERVICE_NAMES.contains(&name) {
             services.push(name.to_string());
             debug!("Discovered service: {}", name);
         }
@@ -500,6 +528,7 @@ pub fn spawn_file_entry(
     file_meta: &FileMetadata,
     parent_entity: Option<Entity>,
     class_defaults: Option<&super::class_defaults::ClassDefaultsRegistry>,
+    source: &dyn super::space_source::SpaceSource,
 ) -> Option<Entity> {
     // Skip if already loaded
     if registry.is_loaded(&file_meta.path) {
@@ -537,8 +566,12 @@ pub fn spawn_file_entry(
                 .unwrap_or(false);
             
             if is_service {
-                // Load as service entity
-                match super::service_loader::load_service_definition(&file_meta.path) {
+                // Load as service entity — sourced through SpaceSource
+                // (Fjall when migrated) then parsed in memory.
+                match src_read_string(source, space_path, &file_meta.path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|c| super::service_loader::load_service_definition_from_str(&c))
+                {
                     Ok(service_def) => {
                         let e = super::service_loader::spawn_service(
                             commands,
@@ -554,8 +587,19 @@ pub fn spawn_file_entry(
                     }
                 }
             } else {
-                // Load as instance entity
-                match super::instance_loader::load_instance_definition_with_defaults(&file_meta.path, class_defaults) {
+                // Load as instance entity — sourced through SpaceSource
+                // (Fjall when migrated, Disk otherwise) then healed/
+                // parsed in memory. This is the flat-file twin of the
+                // Part-folder branch: no `std::fs`, and crucially no
+                // schema self-heal write-back (the in-memory
+                // `*_from_str` path never rewrites the file), so a
+                // migrated/DB-authoritative world spawns instances with
+                // zero disk reads and zero loose-file resurrection.
+                let _ = class_defaults; // schema is the common-crate source of truth now
+                match src_read_string(source, space_path, &file_meta.path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|c| super::instance_loader::load_instance_definition_from_str(&c))
+                {
                     Ok(instance) => {
                         let e = super::instance_loader::spawn_instance(
                             commands,
@@ -628,7 +672,7 @@ pub fn spawn_file_entry(
         }
 
         FileType::Soul => {
-            match std::fs::read_to_string(&file_meta.path) {
+            match src_read_string(source, space_path, &file_meta.path) {
                 Ok(markdown_source) => {
                     let e = commands.spawn((
                         eustress_common::classes::Instance {
@@ -668,7 +712,7 @@ pub fn spawn_file_entry(
 
         FileType::Rune => {
             // Load .rune files as SoulScript entities (Rune is the scripting language)
-            match std::fs::read_to_string(&file_meta.path) {
+            match src_read_string(source, space_path, &file_meta.path) {
                 Ok(rune_source) => {
                     let e = commands.spawn((
                         eustress_common::classes::Instance {
@@ -711,7 +755,7 @@ pub fn spawn_file_entry(
             // same SoulScriptData component as Rune so `compile_scripts_on_play`
             // picks them up alongside .rune files; `run_context = Luau` routes
             // execution through `execute_chunk` instead of the Rune VM.
-            match std::fs::read_to_string(&file_meta.path) {
+            match src_read_string(source, space_path, &file_meta.path) {
                 Ok(lua_source) => {
                     let e = commands.spawn((
                         eustress_common::classes::Instance {
@@ -754,7 +798,15 @@ pub fn spawn_file_entry(
             // Parses the TOML file for visual properties (position, size, colors, text)
             // and spawns with proper Bevy UI components (Node, BackgroundColor, Text, etc.)
             // so they render visually in the viewport.
-            match super::gui_loader::load_gui_definition(&file_meta.path) {
+            //
+            // Sourced through SpaceSource (Fjall when migrated, Disk
+            // otherwise) then parsed in memory — the flat-file twin of
+            // the directory GUI branches, so a DB-authoritative world
+            // loads GUI elements with zero disk reads.
+            match src_read_string(source, space_path, &file_meta.path)
+                .map_err(|e| e.to_string())
+                .and_then(|c| super::gui_loader::load_gui_definition_from_str(&c))
+            {
                 Ok(gui_def) => {
                     let display_name = super::gui_loader::gui_display_name(&file_meta.path);
                     let gui_type = super::gui_loader::gui_class_from_extension(&file_meta.path);
@@ -764,7 +816,8 @@ pub fn spawn_file_entry(
                         &gui_def,
                     );
                     registry.register(file_meta.path.clone(), e, file_meta.clone());
-                    info!("🖼️ Loaded GUI element {} ({}) from {:?}", display_name, gui_type, file_meta.path);
+                    // DEBUG: per-GUI-element; bulk-load hot path at scale.
+                    debug!("🖼️ Loaded GUI element {} ({}) from {:?}", display_name, gui_type, file_meta.path);
                     e
                 }
                 Err(err) => {
@@ -775,8 +828,12 @@ pub fn spawn_file_entry(
         }
 
         FileType::Material => {
-            // Load .mat.toml files into MaterialRegistry and spawn Explorer entity
-            match super::material_loader::load_material_definition(&file_meta.path) {
+            // Load .mat.toml via SpaceSource (Fjall when migrated) then
+            // parse in memory — zero disk on an authoritative world.
+            match src_read_string(source, space_path, &file_meta.path)
+                .map_err(|e| e.to_string())
+                .and_then(|c| super::material_loader::load_material_definition_from_str(&c))
+            {
                 Ok(definition) => {
                     let mat_name = if definition.material.name.is_empty() {
                         super::material_loader::material_name_from_path(&file_meta.path)
@@ -886,6 +943,7 @@ pub fn spawn_directory_entry(
     dir_meta: &FileMetadata,
     parent_entity: Option<Entity>,
     class_defaults: Option<&super::class_defaults::ClassDefaultsRegistry>,
+    source: &dyn super::space_source::SpaceSource,
 ) {
     // Skip if this directory path already has an entity registered
     if registry.is_loaded(&dir_meta.path) {
@@ -900,11 +958,17 @@ pub fn spawn_directory_entry(
 
     // Check for service directory — either has _service.toml or is a well-known service name
     let service_toml_path = dir_meta.path.join("_service.toml");
+    let service_toml_rel =
+        super::space_source::rel_from_root(space_path, &service_toml_path).unwrap_or_default();
+    let has_service_toml = source.exists(&service_toml_rel);
     let is_known_service = KNOWN_SERVICE_NAMES.contains(&dir_meta.name.as_str());
-    if service_toml_path.exists() || is_known_service {
+    if has_service_toml || is_known_service {
         // Load service definition from _service.toml, or create a default for known services
-        let service_def = if service_toml_path.exists() {
-            match super::service_loader::load_service_definition(&service_toml_path) {
+        let service_def = if has_service_toml {
+            match src_read_string(source, space_path, &service_toml_path)
+                .map_err(|e| e.to_string())
+                .and_then(|c| super::service_loader::load_service_definition_from_str(&c))
+            {
                 Ok(def) => def,
                 Err(err) => {
                     error!("Failed to load service {:?}: {}", service_toml_path, err);
@@ -944,14 +1008,14 @@ pub fn spawn_directory_entry(
                     spawn_directory_entry(
                         commands, asset_server, meshes, materials, registry,
                         material_registry, mesh_cache, space_path, child, Some(service_entity),
-                        class_defaults,
+                        class_defaults, source,
                     );
                 }
                 _ => {
                     spawn_file_entry(
                         commands, asset_server, meshes, materials, registry,
                         material_registry, mesh_cache, space_path, child, Some(service_entity),
-                        class_defaults,
+                        class_defaults, source,
                     );
                 }
             }
@@ -969,8 +1033,10 @@ pub fn spawn_directory_entry(
     // variant + one from_str arm in `common/classes.rs`, no changes
     // here. Legacy `"Script"` alias routes to `SoulScript`.
     let instance_toml_path = dir_meta.path.join("_instance.toml");
-    let class_name = if instance_toml_path.exists() {
-        std::fs::read_to_string(&instance_toml_path)
+    let instance_toml_rel = super::space_source::rel_from_root(space_path, &instance_toml_path)
+        .unwrap_or_default();
+    let class_name = if source.exists(&instance_toml_rel) {
+        src_read_string(source, space_path, &instance_toml_path)
             .ok()
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .and_then(|v| {
@@ -1000,7 +1066,7 @@ pub fn spawn_directory_entry(
     let folder_entity = if is_screen_gui {
         // ScreenGui: fullscreen UI root — read enabled/visible from _instance.toml
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let screen_gui_visible = if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+        let screen_gui_visible = if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
             gui_def.gui.visible
         } else {
             true // default: visible
@@ -1049,7 +1115,7 @@ pub fn spawn_directory_entry(
         // Frame/ScrollingFrame directory — load GUI properties from _instance.toml
         // and attach GuiElementDisplay so it renders through Slint overlay
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let gui_display = if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+        let gui_display = if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
             let class_str = format!("{:?}", class_name).to_lowercase();
             super::gui_loader::gui_display_from_props(&gui_def.gui, gui_def.text.as_ref(), &class_str)
         } else {
@@ -1106,7 +1172,7 @@ pub fn spawn_directory_entry(
         // component after spawn (lives outside the `if let Ok` scope).
         let mut bb_tags: Vec<String> = Vec::new();
 
-        if let Ok(gui_def) = super::gui_loader::load_gui_definition(&instance_toml) {
+        if let Ok(gui_def) = src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
             bb_tags = gui_def.tags.clone();
             let g = &gui_def.gui;
 
@@ -1237,9 +1303,10 @@ pub fn spawn_directory_entry(
         // Video, a mid-grey placeholder material until the decoder
         // integration lands.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let toml_value: Option<toml::Value> = std::fs::read_to_string(&instance_toml)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok());
+        let toml_value: Option<toml::Value> =
+            src_read_string(source, space_path, &instance_toml)
+                .ok()
+                .and_then(|s| toml::from_str(&s).ok());
 
         // Universe-relative asset path stored in `[asset].path`. The
         // engine-runtime path is `<Universe>/<asset_path>`.
@@ -1402,7 +1469,7 @@ pub fn spawn_directory_entry(
         let instance_toml = dir_meta.path.join("_instance.toml");
         // Read the "source" field from _instance.toml to find the script filename,
         // or scan the folder for the first .rune/.luau/.soul file.
-        let source_file = std::fs::read_to_string(&instance_toml)
+        let source_file = src_read_string(source, space_path, &instance_toml)
             .ok()
             .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
             .and_then(|v| {
@@ -1414,17 +1481,35 @@ pub fn spawn_directory_entry(
             })
             .map(|rel| dir_meta.path.join(rel))
             .or_else(|| {
-                // Fallback: scan folder for first script file
-                std::fs::read_dir(&dir_meta.path).ok()
-                    .and_then(|entries| entries.flatten().find(|e| {
-                        let n = e.file_name().to_string_lossy().to_string();
-                        n.ends_with(".rune") || n.ends_with(".luau") || n.ends_with(".soul") || n.ends_with(".lua")
-                    }))
-                    .map(|e| e.path())
+                // Fallback: scan the folder via the source for the first
+                // script file. `dir_meta.path` is absolute; derive the
+                // Space-relative dir so Fjall-sourced worlds resolve it.
+                let dir_rel = super::space_source::rel_from_root(space_path, &dir_meta.path)
+                    .unwrap_or_default();
+                source.list(&dir_rel).ok().and_then(|entries| {
+                    entries
+                        .into_iter()
+                        .find(|e| {
+                            !e.is_dir
+                                && (e.name.ends_with(".rune")
+                                    || e.name.ends_with(".luau")
+                                    || e.name.ends_with(".soul")
+                                    || e.name.ends_with(".lua"))
+                        })
+                        .map(|e| {
+                            let mut p = space_path.to_path_buf();
+                            for seg in e.rel_path.split('/') {
+                                if !seg.is_empty() {
+                                    p.push(seg);
+                                }
+                            }
+                            p
+                        })
+                })
             });
 
         if let Some(ref src_path) = source_file {
-            if let Ok(source) = std::fs::read_to_string(src_path) {
+            if let Ok(script_src) = src_read_string(source, space_path, src_path) {
                 let script_name = dir_meta.name.clone();
                 commands.spawn((
                     eustress_common::classes::Instance {
@@ -1433,7 +1518,7 @@ pub fn spawn_directory_entry(
                         archivable: true, id: 0, ai: false, uuid: String::new(),
                     },
                     crate::soul::SoulScriptData {
-                        source,
+                        source: script_src,
                         dirty: false,
                         ast: None,
                         generated_code: None,
@@ -1492,7 +1577,17 @@ pub fn spawn_directory_entry(
         // typed fields and `spawn_instance` attaches the matching ECS
         // components when present, with no subclass required.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        match super::instance_loader::load_instance_definition(&instance_toml) {
+        // Source the TOML through the active SpaceSource (Fjall when
+        // migrated, Disk otherwise) then heal/parse in memory — no
+        // `std::fs` so a Fjall-authoritative world spawns Parts with
+        // zero disk reads. `instance_toml` (absolute) is still handed
+        // to `spawn_instance` for InstanceFile identity / write-back.
+        let parsed = src_read_string(source, space_path, &instance_toml)
+            .map_err(|e| e.to_string())
+            .and_then(|content| {
+                super::instance_loader::load_instance_definition_from_str(&content)
+            });
+        match parsed {
             Ok(instance_def) => {
                 // spawn_instance attaches InstanceFile internally with the toml_path
                 super::instance_loader::spawn_instance(
@@ -1544,7 +1639,7 @@ pub fn spawn_directory_entry(
         // `spawn_gui_element` resolves the right class without any
         // extra parameter threading here.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        match super::gui_loader::load_gui_definition(&instance_toml) {
+        match src_read_string(source, space_path, &instance_toml).map_err(|e| e.to_string()).and_then(|c| super::gui_loader::load_gui_definition_from_str(&c)) {
             Ok(gui_def) => {
                 super::gui_loader::spawn_gui_element(commands, &instance_toml, &gui_def)
             }
@@ -1631,7 +1726,13 @@ pub fn spawn_directory_entry(
     if instance_marker.is_file() {
         registry.register(instance_marker, folder_entity, dir_meta.clone());
     }
-    info!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
+    // DEBUG, not INFO: this fires once per directory ENTITY. At 50k
+    // (the benchmark) an INFO here is 50k synchronous stderr writes
+    // under a lock — ~3-4ms each ≈ minutes of pure logging that
+    // throttles the entire load (a log-I/O stall, the same class of
+    // bug as the old 53s write storm). Keep it for single-entity
+    // debugging only; never on the bulk-load hot path.
+    debug!("📁 Spawned Folder '{}' ({} items)", dir_meta.name, dir_meta.children.len());
 
     // SoulScript folders are full leaves — their children are source +
     // build artefacts (`.rune`, `Summary.md`), never scene entities.
@@ -1649,14 +1750,35 @@ pub fn spawn_directory_entry(
     // session — the TOML on disk was correct but the loader never saw it.
     let part_subfolders_only = matches!(class_name, eustress_common::classes::ClassName::Part);
 
-    // Spawn all children parented to this folder
-    for child in &dir_meta.children {
+    // Spawn all children parented to this folder, frame-budgeted.
+    for (idx, child) in dir_meta.children.iter().enumerate() {
+        // Once the per-frame budget is spent, spill the REMAINING
+        // children (each carries this just-spawned folder as its
+        // parent, so linkage is preserved) to the streaming queue and
+        // stop. `drain_pending_spawns` continues them over subsequent
+        // frames — a 50k subtree never blocks a single frame again.
+        // `fetch_sub` returns the value BEFORE decrement, so exactly
+        // `budget` children are processed before the first spill; with
+        // the `i64::MAX` default (unbudgeted paths) this never trips.
+        if SPAWN_BUDGET.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) <= 0 {
+            // This subtree is bigger than a whole frame's budget — by
+            // definition a dense scene. Engage adaptive material-color
+            // quantization so its (potentially all-unique) colors
+            // collapse into a few batched GPU materials instead of one
+            // draw call per part. No-op for any scene that never spills.
+            super::material_loader::set_dense_material_mode(true);
+            let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+            for rest in &dir_meta.children[idx..] {
+                q.push((rest.clone(), Some(folder_entity)));
+            }
+            break;
+        }
         match child.file_type {
             FileType::Directory => {
                 spawn_directory_entry(
                     commands, asset_server, meshes, materials, registry,
                     material_registry, mesh_cache, space_path, child, Some(folder_entity),
-                    class_defaults,
+                    class_defaults, source,
                 );
             }
             _ => {
@@ -1668,11 +1790,85 @@ pub fn spawn_directory_entry(
                 spawn_file_entry(
                     commands, asset_server, meshes, materials, registry,
                     material_registry, mesh_cache, space_path, child, Some(folder_entity),
-                    class_defaults,
+                    class_defaults, source,
                 );
             }
         }
     }
+}
+
+/// Per-frame cap on synchronous entity spawns during Space load.
+///
+/// A service subtree with this many nodes or fewer loads FULLY in one
+/// frame, byte-for-byte as before (normal scenes / the MegaTower city
+/// are unchanged — zero regression). Only a larger subtree (the 50k
+/// benchmark) spills its overflow to [`SPILL`] and streams over later
+/// frames via [`drain_pending_spawns`], eliminating the multi-second
+/// single-frame freeze that was the verified 4-FPS root cause
+/// (`Workspace ∈ PRIORITY_SERVICES` → entire subtree recursed
+/// synchronously in one frame).
+const SPAWN_BUDGET_PER_FRAME: i64 = 4096;
+
+/// Remaining spawn budget for the current frame. `i64::MAX` ==
+/// "unbudgeted": any spawn path NOT driven by the budgeted loader
+/// (hot-reload, single-entity create, MCP) is completely unaffected.
+/// The budgeted systems store a finite value before recursing.
+static SPAWN_BUDGET: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MAX);
+
+/// Overflow queue of `(node, parent)` pairs deferred past the frame
+/// budget. `Vec` (not `VecDeque`) so the `static` initializer uses the
+/// long-stable const `Vec::new()`; drained as a front batch per frame.
+static SPILL: std::sync::Mutex<Vec<(FileMetadata, Option<Entity>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// `SpaceLoadGeneration` the current [`SPILL`] belongs to. A genuine
+/// Space switch bumps the generation and the drain discards stale
+/// spill instead of spawning it into the wrong Space.
+static SPILL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Arm the per-frame spawn budget for a fresh FULL load — both the
+/// initial `load_space_files_system` AND `apply_space_rescan` (the
+/// rescan was a second un-budgeted full-50k path: it re-ran the whole
+/// scan+spawn synchronously every time `SpaceRescanNeeded` fired, which
+/// is the periodic multi-second stutter). Discards prior spill, tags
+/// the generation, gives this frame a full budget.
+pub(crate) fn begin_budgeted_load(generation: u64) {
+    {
+        let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+        q.clear();
+    }
+    SPILL_GEN.store(generation, std::sync::atomic::Ordering::Relaxed);
+    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
+    // Every fresh load starts assuming a normal-sized scene: lossless
+    // material keys (zero visual change). The first frame-budget spill
+    // below re-engages dense color quantization for huge scenes only.
+    super::material_loader::set_dense_material_mode(false);
+}
+
+/// Drop every queued spilled spawn. Called by the Space teardown
+/// BEFORE it despawns the outgoing world's entities, so
+/// `drain_pending_spawns` can't spawn an old world's children parented
+/// to entities that are about to be destroyed (the dead-`ChildOf`
+/// orphan storm). The next load's `begin_budgeted_load` re-arms a
+/// fresh generation.
+pub(crate) fn discard_pending_spawns() {
+    let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+    let n = q.len();
+    q.clear();
+    if n > 0 {
+        warn!(
+            target: "eustress_engine::world_db",
+            "🧹 Discarded {} queued spilled spawns on Space teardown (prevents dead-ChildOf orphan storm)",
+            n
+        );
+    }
+}
+
+/// Re-arm the budget before each priority service so a small one
+/// (`Lighting`) still loads instantly even after a huge one spilled.
+pub(crate) fn rearm_priority_budget() {
+    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Priority services loaded immediately at startup (the 3D scene).
@@ -1697,6 +1893,70 @@ pub struct DeferredServiceLoader {
     /// Compared against `SpaceLoadGeneration` each frame; mismatch
     /// means a Space switch happened mid-load and the queue is stale.
     pub generation: u64,
+}
+
+/// Gate that suppresses `write_instance_changes_system` while the
+/// loader is materialising entities from disk. Without it, downstream
+/// systems that fire on first-load (mesh-handle resolve →
+/// `update_base_part_size_from_mesh`, class-default backfill, material
+/// registry resolve) mark `BasePart` as `Changed`, which the writer
+/// then persists straight back to disk — at 50k entities that costs
+/// ~53 s of background TOML writes for zero useful work.
+///
+/// Lifecycle:
+/// - `load_space_files_system` (Startup) sets `active = true`.
+/// - `apply_space_rescan` (Update) sets `active = true` on every rescan.
+/// - `open_space` (in `space_ops`) sets `active = true` on Space switch.
+/// - `tick_load_in_progress` (Update, runs after `load_deferred_services`)
+///   increments `frames_since_quiescent` each frame the deferred queue is
+///   empty and `priority_done`. Once the count reaches
+///   `QUIESCENT_THRESHOLD`, `active` flips to false and live writes
+///   resume.
+#[derive(Resource, Debug, Default)]
+pub struct LoadInProgress {
+    pub active: bool,
+    pub frames_since_quiescent: u32,
+}
+
+impl LoadInProgress {
+    /// Frames the deferred queue must stay empty before declaring the
+    /// load truly settled. Sized to absorb the async mesh-handle
+    /// resolution + BasePart-size sync that runs for several frames
+    /// after the last entity is spawned.
+    pub const QUIESCENT_THRESHOLD: u32 = 60;
+
+    /// Mark loading as active. Called by the load entry-points so the
+    /// quiescent counter restarts whenever a fresh load begins.
+    pub fn begin(&mut self) {
+        self.active = true;
+        self.frames_since_quiescent = 0;
+    }
+}
+
+/// Update system: advances the quiescent counter when the deferred
+/// queue is empty + priority_done, and flips `active` off once the
+/// settle threshold passes. Any frame with pending work resets the
+/// counter so a Space switch (or partial rescan) keeps writes gated
+/// until the new load also settles.
+pub fn tick_load_in_progress(
+    deferred: Res<DeferredServiceLoader>,
+    mut load: ResMut<LoadInProgress>,
+) {
+    if !load.active {
+        return;
+    }
+    if deferred.priority_done && deferred.pending.is_empty() {
+        load.frames_since_quiescent = load.frames_since_quiescent.saturating_add(1);
+        if load.frames_since_quiescent >= LoadInProgress::QUIESCENT_THRESHOLD {
+            load.active = false;
+            info!(
+                "🟢 Load settled — TOML write-back enabled after {} quiescent frames",
+                load.frames_since_quiescent
+            );
+        }
+    } else {
+        load.frames_since_quiescent = 0;
+    }
 }
 
 /// Startup system: load only Workspace + Lighting immediately.
@@ -1815,13 +2075,21 @@ pub fn load_space_files_system(
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
     gen: Res<SpaceLoadGeneration>,
+    mut load_in_progress: ResMut<LoadInProgress>,
+    active_source: Res<super::space_source::ActiveSpaceSource>,
 ) {
     let space_path = &space_root.0;
+    let source = active_source.0.clone();
+    let source = source.as_ref();
 
     if !space_path.exists() {
         warn!("Space path does not exist: {:?}", space_path);
         return;
     }
+
+    // Gate TOML write-back until the load settles (see LoadInProgress
+    // docstring for the failure mode this prevents).
+    load_in_progress.begin();
 
     // Ensure the Space has all required service folders and lighting TOMLs.
     // This covers the initial-startup path where SpaceRoot is inserted
@@ -1836,42 +2104,82 @@ pub fn load_space_files_system(
     // filename for a folder name. Idempotent — does nothing on a
     // clean tree. Runs before `scan_space_directory` so the loader
     // sees the healed structure.
-    let healed = repair_reserved_name_corruption(space_path);
-    if healed > 0 {
-        warn!(
-            "🛠 Repaired {} corrupt _instance.toml folder(s) under {:?}",
-            healed, space_path
-        );
+    //
+    // Skipped for a migrated `.eustress` world: there are no loose
+    // instance folders on disk to repair (they live in
+    // `world.fjalldb/`), so this would only be a wasted full-tree
+    // `std::fs` walk on every load.
+    if !super::space_ops::space_is_migrated(space_path) {
+        let healed = repair_reserved_name_corruption(space_path);
+        if healed > 0 {
+            warn!(
+                "🛠 Repaired {} corrupt _instance.toml folder(s) under {:?}",
+                healed, space_path
+            );
+        }
     }
 
-    let entries = scan_space_directory(space_path);
-    info!("🔍 Discovered {} top-level entries in Space", entries.len());
+    let scan_t0 = std::time::Instant::now();
+    let entries = scan_space_directory(source, space_path);
+    info!(
+        target: "eustress_engine::world_db",
+        "🔍 Discovered {} top-level entries in Space (scan took {:?})",
+        entries.len(),
+        scan_t0.elapsed()
+    );
 
     let cd_ref = class_defaults.as_deref();
     let mut deferred_entries = Vec::new();
+
+    // New Space load → discard any spill left from a previous Space and
+    // tag the spill generation so a later switch can discard ours.
+    {
+        let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+        q.clear();
+    }
+    SPILL_GEN.store(gen.0, std::sync::atomic::Ordering::Relaxed);
 
     for entry in entries {
         let is_priority = PRIORITY_SERVICES.iter().any(|s| entry.name == *s);
 
         if is_priority {
-            // Load immediately — this is the 3D scene
+            // Load immediately — this is the 3D scene. Frame-budgeted:
+            // each priority service gets a fresh budget so a huge one
+            // (`Workspace` with the 50k grid) spawns up to
+            // SPAWN_BUDGET_PER_FRAME this frame and SPILLS the rest to
+            // stream over later frames — no multi-second freeze — while
+            // a small one (`Lighting`) still loads fully and instantly.
+            // `prio_t0` elapsed should now be small even at 50k.
+            let prio_t0 = std::time::Instant::now();
+            SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, std::sync::atomic::Ordering::Relaxed);
             match entry.file_type {
                 FileType::Directory => {
                     spawn_directory_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
                         &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                        cd_ref,
+                        cd_ref, source,
                     );
                 }
                 _ => {
                     spawn_file_entry(
                         &mut commands, &asset_server, &mut meshes, &mut materials,
                         &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                        cd_ref,
+                        cd_ref, source,
                     );
                 }
             }
-            info!("⚡ Priority loaded: {}", entry.name);
+            let prio_elapsed = prio_t0.elapsed();
+            // Always WARN-level so it is visible without RUST_LOG. With
+            // the frame budget this should read SMALL even at 50k (only
+            // SPAWN_BUDGET_PER_FRAME spawned this frame, rest spilled).
+            // A multi-second value here means the budget is NOT being
+            // applied on this path.
+            warn!(
+                target: "eustress_engine::world_db",
+                service = %entry.name,
+                "⚡ Priority '{}' spawned in {:?} (frame-budgeted — small == fix working; multi-second == budget not applied)",
+                entry.name, prio_elapsed
+            );
         } else {
             deferred_entries.push(entry);
         }
@@ -1898,6 +2206,7 @@ pub fn load_deferred_services(
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
     mut deferred: ResMut<DeferredServiceLoader>,
     gen: Res<SpaceLoadGeneration>,
+    active_source: Res<super::space_source::ActiveSpaceSource>,
 ) {
     if deferred.pending.is_empty() { return; }
 
@@ -1917,25 +2226,112 @@ pub fn load_deferred_services(
     let space_path = &space_root.0;
     let cd_ref = class_defaults.as_deref();
     let remaining = deferred.pending.len();
+    let source = active_source.0.clone();
+    let source = source.as_ref();
 
     match entry.file_type {
         FileType::Directory => {
             spawn_directory_entry(
                 &mut commands, &asset_server, &mut meshes, &mut materials,
                 &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                cd_ref,
+                cd_ref, source,
             );
         }
         _ => {
             spawn_file_entry(
                 &mut commands, &asset_server, &mut meshes, &mut materials,
                 &mut registry, &mut material_registry, &mut mesh_cache, space_path, &entry, None,
-                cd_ref,
+                cd_ref, source,
             );
         }
     }
 
     info!("📦 Loaded service: {} ({} remaining)", entry.name, remaining);
+}
+
+/// Update system: streams the frame-budget overflow. Each frame it
+/// spawns up to [`SPAWN_BUDGET_PER_FRAME`] of the `(node, parent)`
+/// pairs that [`spawn_directory_entry`] spilled, so a huge subtree (the
+/// 50k benchmark) loads progressively over ~a dozen frames instead of
+/// freezing one frame for seconds. Params mirror
+/// [`load_deferred_services`] plus `LoadInProgress` (kept armed while
+/// streaming so persistence/quiescence don't fire mid-load).
+pub fn drain_pending_spawns(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut registry: ResMut<SpaceFileRegistry>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    space_root: Res<super::SpaceRoot>,
+    class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
+    gen: Res<SpaceLoadGeneration>,
+    active_source: Res<super::space_source::ActiveSpaceSource>,
+    mut load_in_progress: ResMut<LoadInProgress>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // Space switch while spill is pending → discard it (it belongs to
+    // the previous Space; spawning it now would corrupt the new one).
+    if SPILL_GEN.load(Relaxed) != gen.0 {
+        let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+        if !q.is_empty() {
+            info!("🗑️ Discarded {} stale spilled spawns (Space switch)", q.len());
+            q.clear();
+        }
+        return;
+    }
+
+    // Fresh per-frame budget for any recursion the drained nodes do.
+    SPAWN_BUDGET.store(SPAWN_BUDGET_PER_FRAME, Relaxed);
+
+    let batch: Vec<(FileMetadata, Option<Entity>)> = {
+        let mut q = SPILL.lock().unwrap_or_else(|e| e.into_inner());
+        if q.is_empty() {
+            return;
+        }
+        let n = q.len().min(SPAWN_BUDGET_PER_FRAME as usize);
+        q.drain(..n).collect()
+    };
+
+    // Still loading — keep persistence + the LoadInProgress quiescence
+    // window armed until the spill is fully drained.
+    load_in_progress.begin();
+
+    let space_path = &space_root.0;
+    let cd_ref = class_defaults.as_deref();
+    let source = active_source.0.clone();
+    let source = source.as_ref();
+    let count = batch.len();
+
+    for (meta, parent) in batch {
+        match meta.file_type {
+            FileType::Directory => {
+                spawn_directory_entry(
+                    &mut commands, &asset_server, &mut meshes, &mut materials,
+                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, &meta, parent,
+                    cd_ref, source,
+                );
+            }
+            _ => {
+                spawn_file_entry(
+                    &mut commands, &asset_server, &mut meshes, &mut materials,
+                    &mut registry, &mut material_registry, &mut mesh_cache, space_path, &meta, parent,
+                    cd_ref, source,
+                );
+            }
+        }
+    }
+
+    let remaining = SPILL.lock().unwrap_or_else(|e| e.into_inner()).len();
+    warn!(
+        target: "eustress_engine::world_db",
+        unique_materials = material_registry.dedup_cache_len(),
+        dense_quant = super::material_loader::dense_material_mode(),
+        "🧩 Streamed {} spilled spawns ({} remaining). unique_materials is the draw-call batch count — if it's ~50k the render ceiling stands; with dense_quant=true it should be only a few thousand (≈12× fewer draws).",
+        count, remaining
+    );
 }
 
 /// Plugin for dynamic file loading
@@ -1954,6 +2350,12 @@ impl Plugin for SpaceFileLoaderPlugin {
             .init_resource::<super::file_watcher::RecentlyWrittenFiles>()
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .init_resource::<DeferredServiceLoader>()
+            .init_resource::<LoadInProgress>()
+            // Content source for the loader — Disk by default; the
+            // world-db plugin swaps it to Fjall on Space open once the
+            // tree is seeded. Registered here (not behind the feature)
+            // so loader systems can always read through it.
+            .init_resource::<super::space_source::ActiveSpaceSource>()
             // Class schema — common-crate source of truth for every
             // `_instance.toml`. Embedded templates normalise to PascalCase,
             // `load_and_heal_instance` fills missing fields + self-heals
@@ -1989,11 +2391,14 @@ impl Plugin for SpaceFileLoaderPlugin {
             ))
             .add_systems(Update, (
                 load_deferred_services,
+                drain_pending_spawns.after(load_deferred_services),
+                tick_load_in_progress.after(drain_pending_spawns),
                 super::file_watcher::process_file_changes,
-                super::instance_loader::write_instance_changes_system,
                 super::instance_loader::ensure_tags_and_attributes_components,
                 super::instance_loader::ensure_measure_unit,
-                super::instance_loader::save_tags_and_attributes_changes,
+                // Live: edited Workspace `render_distance` service
+                // property → part VisibilityRange. Changed-gated.
+                super::instance_loader::sync_workspace_render_distance,
                 super::space_ops::apply_space_rescan,
                 super::instance_loader::update_base_part_size_from_mesh,
                 // Per-frame safety net: clamp NaN/Inf and sky-distance
@@ -2010,6 +2415,23 @@ impl Plugin for SpaceFileLoaderPlugin {
                 // removes the component.
                 eustress_common::class_schema::dispatch_pending_extras,
             ));
+
+        // Legacy TOML write-back — only when the `toml` feature is on.
+        // Default build (ECS+DB authoritative, 2026-05-15 pivot) does
+        // NOT register these: runtime edits persist to `world.fjalldb/`
+        // via `world_db_plugin`, not to `_instance.toml`. The TOML
+        // *read* path above stays compiled regardless — it's the
+        // first-run Fjall seed + recovery loader.
+        #[cfg(feature = "toml")]
+        {
+            app.add_systems(
+                Update,
+                (
+                    super::instance_loader::write_instance_changes_system,
+                    super::instance_loader::save_tags_and_attributes_changes,
+                ),
+            );
+        }
     }
 }
 

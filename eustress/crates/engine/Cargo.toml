@@ -19,6 +19,14 @@ path = "src/main.rs"
 name = "generate-benchmark-map"
 path = "src/bin/generate_benchmark_map.rs"
 
+# One-shot: finish the disk→Fjall pivot for a Space so its directory is
+# the canonical `.eustress` container (verified import + reversible
+# relocation of the loose service trees). Safe by default — only the
+# `--yes` form mutates the Space, and only after a byte-for-byte verify.
+[[bin]]
+name = "convert-to-eustress"
+path = "src/bin/convert_to_eustress.rs"
+
 # Language Server Protocol stdio bin for external editors (Windsurf /
 # VS Code / Zed / Neovim). Guarded by the `lsp` feature so the main
 # engine build doesn't pull in tower-lsp when you don't need it.
@@ -31,13 +39,12 @@ required-features = ["lsp"]
 
 
 [dependencies]
-# System clipboard for Slint platform (Ctrl+V paste in LineEdit/TextInput)
-clipboard-win = "5"
-# Cross-platform clipboard used by Explorer "Copy Path" + the Vec3
-# copy/paste icons in the Properties panel. The `#[cfg(feature =
-# "clipboard")]` gates around these usages are kept so headless /
-# server-side builds can opt out by turning the feature off — for
-# interactive editor builds the `core` tier enables it.
+# Cross-platform clipboard (arboard). Backs the Slint platform clipboard
+# (Ctrl+V paste in LineEdit/TextInput), Explorer "Copy Path", and the
+# Vec3 copy/paste icons. Replaces the old Windows-only `clipboard-win`,
+# which broke macOS/Linux builds. All usages are `#[cfg(feature =
+# "clipboard")]`-gated so headless / server builds can opt out; the
+# interactive `core` tier enables it.
 arboard = { version = "3", optional = true }
 
 # Workspace members
@@ -127,6 +134,12 @@ crossbeam = "0.8"
 tracing = "0.1"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 eustress-forge-sdk = { path = "../forge-sdk" }
+# WorldDb — Fjall-backed authoritative ECS persistence. Optional today;
+# wired by the `world-db` feature. When on, the Bevy plugin in
+# `space::world_db_plugin` opens `<universe>/<space>/world.fjalldb/`
+# on Space switch and mirrors Transform/BasePart writes alongside the
+# legacy TOML write path.
+eustress-worlddb = { path = "../worlddb", optional = true }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
 
@@ -225,6 +238,13 @@ core = [
     # Dynamic Unit System v1 — convert authored-unit values to engine-
     # native meters at every load boundary. ON by default 2026-05-13.
     "units_v1",
+    # WorldDb — Fjall-backed authoritative ECS store. ON by default
+    # 2026-05-15 (binary pivot). The mirror path is ADDITIVE: TOML
+    # stays authoritative, Fjall is written alongside, so a Fjall
+    # fault degrades to a logged warning rather than data loss.
+    # Override with `--no-default-features` (+ re-add needed tiers) to
+    # diagnose a WorldDb issue in isolation.
+    "world-db",
 ]
 
 # ── Individual feature gates ──────────────────────────────────────────────────
@@ -272,6 +292,22 @@ bliss = []
 # by default 2026-05-13 (folded into the `core` build tier). Override with
 # `--no-default-features` if you need to diagnose a unit-conversion bug.
 units_v1 = ["eustress-common/units_v1"]
+# WorldDb — Fjall-backed live ECS store (2026-05-15 binary pivot,
+# memory project_eustress_binary_pivot). IN `core` since 2026-05-15:
+# the engine is ECS+DB-authoritative by default. The plugin opens
+# `<space>/world.fjalldb/`, seeds it from TOML on first open, then
+# cold-loads from Fjall and persists runtime edits to Fjall.
+world-db = ["dep:eustress-worlddb"]
+# Legacy TOML write-back authoring path. OPT-IN since 2026-05-15 —
+# the default build no longer writes `_instance.toml` on edit;
+# persistence goes to `world.fjalldb/`. Turn this on to restore the
+# file-system-first authoring loop (dual-write: TOML + Fjall) — the
+# recommended path for existing hierarchical universes (Universe1,
+# ARC-AGI-3) until the faithful TOML→Fjall importer lands, because
+# today's importer is a FLAT scaffold (no service/parent-child
+# hierarchy). The TOML *read* path is always compiled regardless of
+# this flag — it's the first-run seed + recovery loader, not gated.
+toml = []
 
 # ── Build profile toggles ─────────────────────────────────────────────────────
 dev = ["bevy/dynamic_linking"]

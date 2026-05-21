@@ -318,8 +318,15 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
     }
 }
 
-/// Write a GUI TOML definition to disk
+/// Persist a GUI definition.
+///
+/// DB-first (full conversion): a converted Space writes the binary GUI
+/// record into Fjall — no disk, no TOML serialise. Disk-TOML write
+/// happens ONLY for a legacy un-converted world (no active Fjall DB).
 pub fn write_gui_toml(path: &Path, gui_def: &GuiTomlFile) -> Result<(), String> {
+    if crate::space::active_db::put_gui(path, gui_def) {
+        return Ok(());
+    }
     let content = toml::to_string_pretty(gui_def)
         .map_err(|e| format!("Failed to serialize GUI TOML: {}", e))?;
     if let Some(parent) = path.parent() {
@@ -416,8 +423,31 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 // 3. load_gui_definition — parse from disk
 // ============================================================================
 
+/// In-memory twin of [`load_gui_definition`] — parses GUI TOML from
+/// content the caller already sourced (Fjall tree or disk), identical
+/// key-normalise + strict deserialize, no `std::fs`. The
+/// SpaceSource-threaded loader uses this so GUI entities load from a
+/// Fjall-authoritative world with zero disk reads.
+pub fn load_gui_definition_from_str(content: &str) -> Result<GuiTomlFile, String> {
+    let mut value: toml::Value = content
+        .parse()
+        .map_err(|e: toml::de::Error| format!("Failed to parse GUI TOML: {}", e))?;
+    eustress_common::class_schema::normalise_keys(&mut value);
+    let parsed: GuiTomlFile = value
+        .try_into()
+        .map_err(|e: toml::de::Error| format!("Failed to deserialize GUI TOML: {}", e))?;
+    Ok(parsed)
+}
+
 /// Load and parse a GUI TOML file from disk
 pub fn load_gui_definition(path: &Path) -> Result<GuiTomlFile, String> {
+    // DB-first (full conversion): a converted Space serves the binary
+    // GUI record from Fjall — zero disk. Every billboard/slint/tool
+    // call site funnels through here. Disk read only for a legacy
+    // un-converted world (no active Fjall DB).
+    if let Some(def) = crate::space::active_db::get_gui(path) {
+        return Ok(def);
+    }
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read GUI file {:?}: {}", path, e))?;
     // Parse to a generic `toml::Value` first and run the shared key
@@ -468,15 +498,25 @@ pub fn gui_class_from_extension(path: &Path) -> &'static str {
     // currently threads this into other `&'static str` lookups) free
     // of lifetime plumbing.
     if path_str.ends_with("_instance.toml") {
-        if let Ok(doc) = std::fs::read_to_string(path)
-            .and_then(|s| toml::from_str::<toml::Value>(&s)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
-        {
-            if let Some(cn) = eustress_common::class_schema::get_section_insensitive(&doc, "metadata")
-                .and_then(|m| eustress_common::class_schema::get_section_insensitive(m, "class_name"))
-                .and_then(|c| c.as_str())
+        // DB-first: peek `[metadata] class_name` from the binary/tree
+        // record (no disk). Fall back to a raw disk read only for a
+        // legacy un-converted world (no active Fjall DB).
+        let class_name: Option<String> = crate::space::active_db::peek_class_name(path).or_else(|| {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+                .and_then(|doc| {
+                    eustress_common::class_schema::get_section_insensitive(&doc, "metadata")
+                        .and_then(|m| {
+                            eustress_common::class_schema::get_section_insensitive(m, "class_name")
+                        })
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string())
+                })
+        });
+        if let Some(cn) = class_name {
             {
-                return match cn {
+                return match cn.as_str() {
                     "ScreenGui"      => "ScreenGui",
                     "TextLabel"      => "TextLabel",
                     "TextButton"     => "TextButton",

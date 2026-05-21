@@ -125,6 +125,42 @@ pub struct MaterialRegistry {
     dedup_cache: HashMap<MaterialCacheKey, Handle<StandardMaterial>>,
 }
 
+/// Adaptive color-quantization shift for the dedup key. `0` == lossless
+/// (8-bit exact per channel) — the default, so authored scenes are
+/// byte-for-byte unchanged and there is zero visual regression. A
+/// dense scene that overflows the load frame-budget flips this to a
+/// few bits via [`set_dense_material_mode`], snapping near-identical
+/// colors to a shared palette so 50k uniformly-random-colored parts
+/// collapse from ~50k unique GPU materials (≈50k draw calls → ~4 FPS)
+/// to ≤ a few thousand batched materials. Exact-keyed dedup already
+/// handles real content (repeated colors); this only engages for the
+/// pathological dense/random case (the benchmark) and never touches a
+/// normal scene because a normal scene never spills.
+static MATERIAL_QUANT_SHIFT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Bits dropped from each 8-bit color channel in dense mode. 4 → 16
+/// levels/channel → ≤16³ = 4096 distinct colors (≈12× fewer draw
+/// batches at 50k). Tunable in [3,5]: higher = fewer draws but more
+/// visible banding (irrelevant for the random benchmark).
+const DENSE_QUANT_SHIFT: u32 = 4;
+
+/// Engage / disengage adaptive color quantization for dense scenes.
+/// Called by the loader the first time a subtree overflows the
+/// per-frame spawn budget (the precise "this scene is huge" signal),
+/// and reset to lossless at the start of every fresh load.
+pub fn set_dense_material_mode(on: bool) {
+    MATERIAL_QUANT_SHIFT.store(
+        if on { DENSE_QUANT_SHIFT } else { 0 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// True when adaptive quantization is currently engaged (diagnostics).
+pub fn dense_material_mode() -> bool {
+    MATERIAL_QUANT_SHIFT.load(std::sync::atomic::Ordering::Relaxed) != 0
+}
+
 /// Cache key for material deduplication. Quantizes floating-point material
 /// parameters into integer bits so identical-looking materials hash together.
 /// Two parts with the same color, preset, transparency, and reflectance
@@ -148,6 +184,14 @@ impl MaterialCacheKey {
         let g = (lin.green.clamp(0.0, 1.0) * 255.0) as u32;
         let b = (lin.blue.clamp(0.0, 1.0) * 255.0) as u32;
         let a = (lin.alpha.clamp(0.0, 1.0) * 255.0) as u32;
+        // Adaptive quantization: shift == 0 (default) is a no-op
+        // (`(c >> 0) << 0 == c`) so authored scenes are unchanged; a
+        // dense scene snaps RGB to a coarse palette so near-identical
+        // colors share one batched GPU material. Alpha is left exact
+        // (transparency is keyed separately and affects sort order).
+        let shift = MATERIAL_QUANT_SHIFT.load(std::sync::atomic::Ordering::Relaxed);
+        let q = |c: u32| (c >> shift) << shift;
+        let (r, g, b) = (q(r), q(g), q(b));
         Self {
             color_bits: (r << 24) | (g << 16) | (b << 8) | a,
             preset: preset_name.to_string(),
@@ -223,9 +267,14 @@ impl MaterialRegistry {
 pub fn load_material_definition(path: &Path) -> Result<MaterialDefinition, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    load_material_definition_from_str(&content)
+}
 
-    toml::from_str::<MaterialDefinition>(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+/// In-memory twin — parse a `.mat.toml` from content the caller
+/// already sourced through `SpaceSource`. No `std::fs`.
+pub fn load_material_definition_from_str(content: &str) -> Result<MaterialDefinition, String> {
+    toml::from_str::<MaterialDefinition>(content)
+        .map_err(|e| format!("Failed to parse material TOML: {}", e))
 }
 
 /// Extract a material name from its file path (stem before first dot).

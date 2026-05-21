@@ -522,6 +522,14 @@ fn main() {
         .add_plugins(studio_plugins::StudioPluginSystem)
         // Frame diagnostics to identify stutters
         .add_plugins(frame_diagnostics::FrameDiagnosticsPlugin);
+
+    // WorldDb — Fjall-backed authoritative ECS store (2026-05-15 binary
+    // pivot; memory project_eustress_binary_pivot). Gated by the
+    // `world-db` feature so the engine still boots on TOML when the
+    // feature is off. The plugin opens `<SpaceRoot>/world.fjalldb/`
+    // and mirrors Transform writes alongside the legacy TOML path.
+    #[cfg(feature = "world-db")]
+    app.add_plugins(space::world_db_plugin::WorldDbPlugin);
         
     // Left-click part selection with raycasting
     #[cfg(not(target_arch = "wasm32"))]

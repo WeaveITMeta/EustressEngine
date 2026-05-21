@@ -2038,23 +2038,6 @@ impl Plugin for BillboardGuiPlugin {
                     upload_atlas_to_gpu.after(update_and_render_billboards),
                 ),
             )
-            // ── UI-class TOML persistence ─────────────────────────────────
-            // Each Changed<UiClass> writes the entity's GuiTomlFile back
-            // to disk so Property-panel edits, script edits, MCP edits all
-            // survive a process restart. The systems share Added<>-skipping,
-            // BeingDragged filtering, and `recently_written` debounce —
-            // their bodies follow `apply_*_to_toml` helpers so the same
-            // serialisation runs from any caller.
-            .add_systems(
-                Update,
-                (
-                    save_billboard_gui_changes,
-                    save_text_label_changes,
-                    save_frame_changes,
-                    save_text_button_changes,
-                    save_text_box_changes,
-                ),
-            )
             // ── In-viewport TextLabel editing ─────────────────────────────
             // Double-click on a part with a BillboardGui descendant enters
             // edit mode on the first TextLabel found. While editing,
@@ -2069,6 +2052,28 @@ impl Plugin for BillboardGuiPlugin {
                         .after(enter_billboard_edit_on_double_click),
                 ),
             );
+
+        // ── UI-class TOML write-back ──────────────────────────────────
+        // GuiTomlFile-to-disk persistence for Property-panel / script /
+        // MCP edits. Gated behind the `toml` feature for the same reason
+        // `write_instance_changes_system` is (2026-05-15 ECS+DB pivot):
+        // in the default build persistence is the WorldDb, not
+        // `_instance.toml`, so these systems must NOT run — they also
+        // require `RecentlyWrittenFiles`, which is part of the legacy
+        // TOML write path. Re-enabled with `--features toml`.
+        #[cfg(feature = "toml")]
+        {
+            app.add_systems(
+                Update,
+                (
+                    save_billboard_gui_changes,
+                    save_text_label_changes,
+                    save_frame_changes,
+                    save_text_button_changes,
+                    save_text_box_changes,
+                ),
+            );
+        }
     }
 }
 

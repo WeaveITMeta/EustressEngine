@@ -219,8 +219,50 @@ fn sys_initial_disk_scan(
     instances_dir: Res<StreamingInstancesDir>,
 ) {
     let dir = &instances_dir.0;
+
+    // A fully-converted `.eustress` world is DB-authoritative: the
+    // Space root (parent of the instances dir) carries `header.bin` /
+    // `world.fjalldb/` and there are deliberately NO loose instance
+    // files on disk. The scene loader sources and renders those from
+    // the DB. This std::fs scan would therefore find nothing and only
+    // emit a misleading "0 loaded" warning, so stand down cleanly.
+    //
+    // NOTE: feeding this spatial/LOD grid itself from the DB (so the
+    // radius gate can stream a migrated world) is a separate
+    // cross-crate item — `eustress_common` cannot depend on the
+    // engine's `WorldDb`; it needs a common-side source trait. Tracked,
+    // not faked: today the scene loader is what renders migrated worlds.
+    if let Some(space_root) = dir.parent() {
+        if space_root.join("header.bin").exists()
+            || space_root.join("world.fjalldb").exists()
+        {
+            tracing::info!(
+                target: "eustress_common::streaming",
+                space = %space_root.display(),
+                "StreamingPlugin: migrated .eustress world — streaming disk \
+                 scan intentionally idle (scene loader renders from the DB). \
+                 DB-fed streaming grid is a tracked separate item."
+            );
+            return;
+        }
+    }
+
+    tracing::warn!(
+        target: "eustress_common::streaming",
+        instances_dir = %dir.display(),
+        exists = dir.exists(),
+        "StreamingPlugin DISK SCAN starting — this is the RENDER pipeline \
+         and it reads std::fs ONLY. It does NOT read the Fjall tree. Any \
+         instance that exists only in world.fjalldb (e.g. generated \
+         direct-to-DB) is INVISIBLE to this scan, so the radius gate will \
+         spawn/render zero of them no matter where the camera is."
+    );
     if !dir.exists() {
-        tracing::info!("StreamingPlugin: instances dir {} does not exist — nothing to scan", dir.display());
+        tracing::warn!(
+            target: "eustress_common::streaming",
+            dir = %dir.display(),
+            "StreamingPlugin: instances dir does not exist — render grid will be EMPTY, nothing renders"
+        );
         return;
     }
 
@@ -229,6 +271,20 @@ fn sys_initial_disk_scan(
     let mut errors = 0usize;
 
     scan_directory_recursive(dir, &state.grid, &mut loaded, &mut errors);
+
+    if loaded == 0 {
+        tracing::warn!(
+            target: "eustress_common::streaming",
+            dir = %dir.display(),
+            chunks = state.grid.chunk_count(),
+            "StreamingPlugin: disk scan loaded 0 instances into the render \
+             grid. If the scene loader log shows a non-zero Fjall \
+             'tree_instance_files' count, THIS is the load-but-no-render \
+             bug: the world is Fjall-primary but the streaming/render \
+             pipeline is still disk-fed and was never converted to read \
+             through ActiveSpaceSource/FjallSource."
+        );
+    }
 
     // Build the initial Explorer index from what we loaded.
     // (sys_rebuild_index runs on a timer, so we do a one-time build here)

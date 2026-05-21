@@ -21,6 +21,9 @@ ColorCorrection_Saturation = { type = "float", value = 0.0, description = "Color
 ColorCorrection_Contrast = { type = "float", value = 0.0, description = "Color contrast adjustment" }
 ColorCorrection_Brightness = { type = "float", value = 0.0, description = "Color brightness adjustment" }
 
+[Rendering]
+RenderDistance = { type = "float", value = 5000.0, description = "Per-part distance cull in METERS. A part farther than this from the camera is skipped entirely (visibility + draw). Drives VisibilityRange on every part; edit live in this panel." }
+
 
 [Simulation]
 SignalBehavior = { type = "enum", value = "Default", options = ["Default", "Immediate", "Deferred"], description = "Signal firing behavior" }
