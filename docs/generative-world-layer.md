@@ -149,6 +149,60 @@ territory; mesh providers and `NeuralSimulator` extend the world ahead of
 the camera in real time; the recording captures the generated terrain as if
 it had always been there.
 
+## Prior art and positioning
+
+Eustress is not the first engine to integrate generative AI. The shape of the
+integration is what differs. Five points of comparison:
+
+**Unity + ML-Agents / Inworld / Convai.** ML-Agents is reinforcement-learning
+training, not generative content — different problem. Inworld and Convai are
+LLM-driven NPC behavior plugins. They sit as sidebar features and do not
+share Unity's editor tool surface. The agent has its own controls. Generation
+is not exposed to the editor and the editor is not exposed to the agent.
+
+**Unreal MetaHuman + Niagara + Nanite.** MetaHuman is a character authoring
+pipeline producing assets you import. It is not in-engine and not
+conversational. Nanite + Niagara are rendering pipelines, not generation.
+Differentiator: hand-off model rather than live agent loop.
+
+**NVIDIA Omniverse + Picasso + Audio2Face + GANverse3D.** The closest
+competitor. Omniverse offers in-engine AI services (Picasso for text-to-image
+and text-to-3D, Audio2Face for facial animation), USD-based scene graphs,
+and recording. It is enterprise-focused around USD pipelines and
+CAD/visualization workflows. Differentiator: Omniverse is centered on USD
+interchange and enterprise tooling. Eustress is centered on a conversational
+agent loop with a shared MCP registry, addressable from chat, IDE, or script
+with identical surface. Different user shape — Omniverse for enterprise viz,
+Eustress for story-driven simulation authoring.
+
+**Roblox AI Studio Tools.** Roblox Studio has generative tools for textures
+and meshes. Closed platform; generation tools are not agent-driven; no
+conversational surface; no MCP. Differentiator: open source, agent-as-peer,
+MCP-addressable controls.
+
+**Bevy community AI plugins.** Several plugins for AI-driven generation
+exist for Bevy. Most are one-shot generation utilities. None wire MCP
+cinematography into an agent loop end-to-end; none integrate with a
+recording pipeline driven by play-mode lifecycle. Differentiator: end-to-end
+agent + cinematography + recording designed as peers, not as a stack of
+plugins.
+
+**Honest summary.**
+
+This layer is not "first to generate 3D and record" — Unity, Unreal,
+Omniverse variants can do that. It is not "first agentic AI in an engine" —
+Omniverse has agentic services. The differentiator is the **shape**: one MCP
+tool registry shared between the agent loop, the editor UI, external IDEs,
+and remote clients; recording bound to the play-mode state machine;
+cinematography surfaced as conversational; generators slotted in as
+`ContentProvider` impls indistinguishable from each other at the trait
+boundary. Same tools, same registry, same events for human and LLM. That is
+the bet.
+
+For enterprise visualization pipelines and USD-centric workflows, Omniverse
+remains stronger. For agent-driven simulation authoring with iterative
+cutscene refinement, this layer has a clearer story.
+
 ## Architecture overview
 
 ### Crate layout
@@ -310,6 +364,114 @@ Veo is content for the scene, not state of the scene — it shines in cutscene
 authoring, skyboxes, and looped material animation. Claude is the strategist
 that composes the others.
 
+### Determinism and audio sync
+
+**Determinism — honest position.**
+
+Replay of a recording from a scene + input log is **not** bit-exact
+reproducible in v1. Three sources of non-determinism:
+
+- `avian3d` 0.6 physics runs a parallel solver by default. System ordering
+  across threads is non-deterministic.
+- Bevy ECS schedules systems in parallel where possible. Same-tick
+  observable state can vary between runs.
+- Generative outputs (Imagen, Veo, mesh providers, LLM-driven NPC behavior
+  at temperature > 0) are stochastic. Same prompt, different output.
+
+This is acceptable for the v1 use case: recordings are **observations of the
+simulation that happened**, not reproducible records. If the user re-runs
+from the same starting state, they may get a different recording. The
+recording itself is exact (encoded MP4 of what was rendered) but the
+simulated content that produced it is not reproducible.
+
+**Path to optional determinism (v2 hook, not v1):**
+
+A `RecordingConfig.deterministic_mode: bool` flag, when set, will:
+
+- Pin RNG seeds engine-wide (one seed; sub-seeds derived).
+- Force `avian3d`'s single-threaded solver (already supported via Avian
+  feature).
+- Force Bevy's single-threaded scheduler for the relevant systems (via
+  system-set ordering constraints).
+- Cache every generative call's output to
+  `<universe>/.eustress/genworld_cache/` and replay from cache instead of
+  re-calling the provider during a re-run.
+
+`deterministic_mode` is performance-costly (single-threaded physics,
+single-threaded scheduling). v1 ships without it. v2 (Phase 9 cache + a
+configuration knob) adds the flag.
+
+**Audio sync.**
+
+Video frames at the configured fps (default 60). Audio sampled at PCM 48 kHz,
+captured at the `bevy_audio` → `cpal` output boundary via a tap that does
+not affect playback.
+
+Recording pipeline:
+
+- Video frames arrive on a `crossbeam_channel` from the readback path
+  (Recording readback path subsection below).
+- Audio samples arrive on a second channel from the audio tap.
+- An ffmpeg-sidecar subprocess receives both streams over stdin pipes with
+  matching `pts` values.
+- ffmpeg muxes; drift correction via PTS adjustment for sub-frame drift;
+  warning logged if drift > 40 ms.
+
+Pause behavior under `follow_sim_time = true`:
+
+- Video frame channel pauses (no frames sent during sim pause).
+- Audio channel pauses (no samples sent — the audio tap returns silence
+  frames marked as pause, which ffmpeg drops).
+- On resume, both channels resume with continuous PTS. The MP4 has no
+  frozen-frame artifact and no audio gap.
+
+Pause behavior under `follow_sim_time = false`:
+
+- Video frame channel continues (camera moves over frozen scene are
+  captured).
+- Audio channel feeds silence or a configurable ambient track. v1 ships
+  silence; configurable ambient is a v2 add.
+
+### Recording readback path
+
+The continuous viewport-to-encoder path commits to a specific Bevy 0.18
+approach for per-frame GPU readback:
+
+- A dedicated `Camera` rendering into a `RenderTarget::Image` (Bevy 0.18's
+  `Image` asset backed by a wgpu texture).
+- A staging buffer pool of three `wgpu::Buffer` objects in `MAP_READ |
+  COPY_DST` usage, rotated each frame so readback runs N−1 frames behind
+  without stalling the render queue.
+- A render-graph node added via `RenderApp`'s `RenderGraph` that schedules
+  `command_encoder.copy_texture_to_buffer(...)` immediately after the
+  camera's main pass.
+- An `AsyncComputeTaskPool` task per ready buffer that calls
+  `buffer.slice(..).map_async(MapMode::Read, callback)`, copies pixels into
+  a `Vec<u8>` shaped to RGBA8, then pushes to a
+  `crossbeam_channel::Sender<FrameBytes>` consumed by the encoder thread.
+
+The per-frame `Screenshot` entity fallback the spec previously hand-waved is
+**removed**. The dedicated camera + ring-buffer approach is the committed
+path.
+
+**Benchmark plan (Phase 5 acceptance gate):**
+
+- Test scene: 1080p, 60 fps, 600 frames, deterministic camera dolly,
+  scene-cycle of cubes + skybox + 10k particles (representative load).
+- Measurements: render time per frame, readback latency from frame submit
+  to bytes available, GPU memory overhead of staging pool, dropped frames
+  (frame-arrival jitter > 16.67ms).
+- Targets: average readback overhead < 2 ms/frame; staging pool < 100 MB at
+  1080p; zero dropped frames at 1080p/60fps on Apple M-series and NVIDIA
+  RTX 3060 reference hardware. 4K targets: readback < 5 ms/frame, < 400 MB
+  staging, max 1 dropped frame per 60 s.
+- Pass condition: all targets met on both reference platforms. Fail
+  condition: either platform misses any target → escalate to a profiling
+  spike before Phase 5 acceptance.
+
+This is the v1 path. v2 may add `BC1`/`BC7` compression in the GPU copy step
+to cut readback bandwidth ~4x, if 4K recording adoption warrants it.
+
 ### Recording — `engine::recording`
 
 [engine::video](../eustress/crates/engine/src/video/mod.rs) is the existing
@@ -328,17 +490,9 @@ playback module (mp4 + openh264 decode). Recording is a separate module,
 - `RecordingConfig` resource: `{ auto_record_on_play: bool,
   follow_sim_time: bool, default_fps: u32, output_root: PathBuf }`.
 - `RecordingState` resource: `Idle` | `Recording { job }` | `Suspended { job }`.
-- A per-frame readback system that runs after rendering.
-
-The starting point for GPU readback is the screenshot pattern already in use
-at
-[eustress/crates/engine/src/ui/file_event_handler.rs:547](../eustress/crates/engine/src/ui/file_event_handler.rs#L547),
-which uses `bevy::render::view::screenshot::Screenshot::primary_window()`
-with an observer on `ScreenshotCaptured`. That is a single-frame helper.
-Continuous recording uses a dedicated `Camera` rendering into
-`RenderTarget::Image` with per-frame readback of the GPU image; the exact
-Bevy 0.18 surface is wired in Phase 5. The per-frame `Screenshot` entity is
-the documented fallback if continuous readback proves costly to wire.
+- A per-frame readback system that runs after rendering. The implementation
+  details of the readback path are specified in the *Recording readback
+  path* subsection above.
 
 Encoder backend lives behind a Cargo feature flag `video-export`:
 
@@ -537,6 +691,88 @@ The tools are exposed across three callers:
   ([eustress/crates/engine/src/engine_bridge/](../eustress/crates/engine/src/engine_bridge/)),
   which exposes a localhost TCP transport for the same tool list.
 
+#### Canonical MCP tool — `record_start`
+
+`record_start` is the worked example for the Phase 6 tool surface. Every
+other tool in Phase 6 follows the same conventions.
+
+```json
+{
+  "name": "record_start",
+  "description": "Begin a recording from the active named camera. Returns once the recording pipeline confirms RecordingState::Running or fails on a pre-condition. The output MP4 lands under <universe>/SoulService/Recordings/.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "output_name": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_\\-]{1,64}$",
+        "description": "Filename without extension. Defaults to ISO-8601 timestamp if omitted."
+      },
+      "fps": {
+        "type": "integer",
+        "minimum": 24,
+        "maximum": 120,
+        "description": "Frames per second. Defaults to RecordingConfig.default_fps (60)."
+      },
+      "camera": {
+        "type": "string",
+        "description": "Optional NamedCamera to bind. Defaults to ActiveCameraName."
+      },
+      "overwrite": {
+        "type": "boolean",
+        "default": false,
+        "description": "If true, overwrites an existing file with the same output_name."
+      }
+    },
+    "additionalProperties": false
+  }
+}
+```
+
+**Error contract** (`ToolError` shape returned by every tool in this layer):
+
+```json
+{
+  "code": "recording_already_active | camera_not_found | output_path_unwritable | output_path_exists | invalid_fps | timeout",
+  "message": "Human-readable explanation. Never contains an API key or credential.",
+  "recoverable": true,
+  "remediation": "Optional one-line suggestion the agent can act on (e.g. 'call record_stop first', 'pass overwrite=true', 'spawn a camera first')."
+}
+```
+
+**Completion contract:**
+
+1. Handler validates input against the schema.
+2. Handler checks pre-conditions (active camera exists, output path is
+   writable, no recording in flight) and returns synchronously with the
+   matching `code` if any fail.
+3. Handler emits `StartRecording { camera: resolved_entity, output_path:
+   resolved_path, fps: resolved_fps }`.
+4. Handler subscribes to `RecordingState` changes and polls with 100ms tick
+   until either `RecordingState::Running` (success) or 5s timeout (timeout
+   error).
+5. Returns success payload `{ job_id: UUID, output_path: String, started_at:
+   ISO-8601 }`.
+
+**Idempotency:**
+
+- `record_start` while recording → `recording_already_active`. No state
+  change.
+- `record_start` with `output_name` matching an existing file and
+  `overwrite: false` → `output_path_exists`.
+- Network/IO retry of an already-submitted call (same `job_id`) →
+  idempotent return of the original response.
+
+**Audit:** Every invocation writes one line to
+`<universe>/.eustress/genworld_audit.log` with timestamp, tool name, input
+(redacted of any key fields), output, error.
+
+Every other tool in Phase 6 conforms to the same conventions
+(`input_schema` with `additionalProperties: false`, the same `ToolError`
+shape, a documented completion contract, idempotency rules, audit log).
+Detailed schemas for the remaining tools are deferred to Phase 6
+implementation against this template.
+
 #### Workshop conversational dispatch
 
 [engine::workshop](../eustress/crates/engine/src/workshop/) already runs a
@@ -561,6 +797,58 @@ chat with approval gates per the existing MCP approval flow. The MP4 lands
 under `<universe>/SoulService/Recordings/<timestamp>.mp4`. The synchronous
 handler contract guarantees that step 4 returns only after `RecordingState`
 is `Recording`, so step 5 cannot race the recording open.
+
+#### Agentic reliability patterns
+
+Agentic LLM loops in practice exhibit failure patterns that pure tool-API
+design does not address. Three categories:
+
+1. **State drift.** Across long sessions, the model can forget it has called
+   `record_start` or which camera is active.
+2. **Ordering failure.** The model can call `record_stop` before its
+   `record_start` has confirmed running.
+3. **Inconsistent error recovery.** Without explicit guidance, the model may
+   not call compensating actions after a tool failure.
+
+The v1 patterns that address these:
+
+- **Queryable state.** `record_status`, `sim_status`, `camera_list` are
+  first-class tools. The Workshop system prompt instructs Claude to call
+  these when it is unsure of state, especially before destructive
+  operations.
+- **Idempotency everywhere.** Every tool is either idempotent or fails fast
+  with a clear `recoverable: true` error. `sim_pause` while paused returns
+  success no-op. `record_start` while recording fails with
+  `recording_already_active` and a `remediation` field telling Claude to
+  call `record_stop` first.
+- **Synchronous completion.** Every tool returns only after its
+  post-condition is met or times out (see the *Canonical MCP tool* section).
+  No fire-and-forget. The model can chain tools without manual sleep /
+  poll logic.
+- **Compensating actions on failure.** The Workshop system prompt
+  enumerates inverse actions: failed mid-cutscene → `record_stop` +
+  `camera_set_active("editor")`. Failed mesh gen → no action needed (no
+  entity was spawned). Failed cutscene definition → discard local state, do
+  not attempt to record. These are not encoded in the engine — they are a
+  *prompt convention* surfaced in the Workshop system prompt, which is the
+  right place for behavior policies.
+- **Composite tools over multi-step.** `cutscene_record` is a single tool
+  that internally drives the camera switches, pauses, and recording timing.
+  Claude does not orchestrate the inner steps. This shrinks the surface
+  where ordering bugs can occur.
+- **Audit log.** Every tool call writes to
+  `<universe>/.eustress/genworld_audit.log`. After a failed conversation,
+  the log is the source of truth for what was attempted in what order.
+
+**What this does not solve:**
+
+- Tool-call hallucinations (Claude invents a tool name that does not
+  exist). The MCP registry returns `tool_not_found`; the system prompt
+  instructs Claude to consult `tool_list` (a meta-tool) when unsure.
+- Long-context drift on multi-hour sessions. Workshop's existing
+  context-pruning policy applies; if the session exceeds context window, an
+  explicit "session summary" tool round is inserted by the Workshop
+  conversation manager. Out of scope for this layer.
 
 #### Cutscene composition
 
@@ -652,6 +940,46 @@ V-JEPA, World Labs). The natural caller when an impl lands is
 iterate-and-verify loop is already shaped like a neural simulator step
 (registration sits at `eustress/crates/engine/src/main.rs:506`).
 
+## Performance budgets
+
+Every phase has both qualitative acceptance (already in each phase section)
+and quantitative targets listed here. The phase-level `**Performance
+budgets.**` paragraph references this table for detail.
+
+| Phase | Metric                                        | Target                                                                 |
+| ----- | --------------------------------------------- | ---------------------------------------------------------------------- |
+| 1     | Build time impact                             | < 30 s incremental on warm cache                                       |
+| 1     | New transitive deps with C build deps         | 0                                                                      |
+| 1     | MockProvider response latency                 | < 5 ms                                                                 |
+| 2     | Imagen request round-trip                     | p50 < 3 s, p95 < 8 s at 1024×1024 PNG                                  |
+| 2     | Veo job submit                                | < 500 ms                                                               |
+| 2     | Veo status poll latency                       | < 300 ms                                                               |
+| 2     | Per-request cost logging                      | Every call emits an audit-log entry with token usage and provider cost |
+| 3     | Mesh provider round-trip                      | p50 < 30 s, p95 < 60 s for a "stylized prop"-class prompt              |
+| 3     | Generated GLB size                            | < 5 MB default, configurable up to 25 MB                               |
+| 4     | `SetActiveCameraEvent` apply latency          | < 16 ms (one 60 fps frame)                                             |
+| 4     | 500 ms camera transition                      | Zero dropped frames at 1080p/60fps                                     |
+| 5     | Readback overhead                             | < 2 ms/frame at 1080p, < 5 ms/frame at 4K                              |
+| 5     | Encoder overhead (ffmpeg-sidecar)             | < 8 ms/frame at 1080p H.264                                            |
+| 5     | Frame drops at 1080p/60fps                    | 0                                                                      |
+| 6     | MCP tool latency, ECS-only tools              | < 50 ms (event emit → completion poll satisfied)                       |
+| 6     | MCP tool latency, filesystem-touching tools   | < 200 ms                                                               |
+| 6     | Default tool-call timeout                     | 30 s, per-tool overridable                                             |
+| 7     | Slint panel paint                             | < 8 ms                                                                 |
+| 7     | Camera dropdown refresh on `camera_list` event| < 16 ms                                                                |
+| 8     | Deprecation pass                              | No measured perf impact (annotation only)                              |
+
+**Cost & budget guardrails.**
+
+Per-session and per-day API spend is tracked by `GenSettings::cost_tracker`
+and surfaced in Workshop and the Slint panel. Default daily caps: $5 for
+Imagen, $20 for Veo, $5 for mesh provider. Configurable in
+`<universe>/genworld_policy.toml` (introduced in Phase 15 as scope,
+populated with cost caps in Phase 2). Reaching a cap surfaces a toast and
+disables the relevant `gen_*` MCP tool until the cap resets at local
+midnight, with a `force=true` override per tool call available to Workshop
+after explicit user approval.
+
 ## Configuration & secrets
 
 Env vars are loaded once at `GenWorldPlugin` startup via `std::env::var`,
@@ -706,6 +1034,85 @@ User-facing behavior in the Slint generation panel and MCP tool surface:
 | MCP tool timeout (post-condition never met within the per-tool budget)               | Tool returns timeout error; the underlying Bevy event may still process, but the tool reports failure to Claude with the elapsed wait.            |
 | Duplicate `camera_spawn` name                                                        | Tool returns error naming the existing camera; no entity spawned.                                                                                 |
 | `camera_delete` targeting the active camera                                          | Tool refuses with "Switch active camera before deleting." No deletion.                                                                            |
+
+## Threat model
+
+The MCP tool surface introduced in Phase 6 exposes engine controls (cameras,
+simulation, recording, generation) over a programmatic API. External MCP
+clients can reach this API. Trust boundary is `crates/mcp-server`, which
+serves stdio or TCP. The threat model below names what could go wrong and
+the v1 defenses.
+
+**Attack surface table:**
+
+| Surface                            | Reachable from                          | Sensitive operations                                                      |
+| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------- |
+| Workshop conversational tool calls | User chat (with approval gates)         | All tools                                                                 |
+| External MCP clients (stdio)       | Locally-launched IDEs (Claude Desktop, Cursor, Windsurf) | All tools                                                                 |
+| External MCP clients (TCP)         | localhost only by default; remote opt-in | All tools                                                                 |
+| `engine_bridge` JSON-RPC           | localhost only                          | Read mostly, some write                                                   |
+
+**Threats and v1 defenses:**
+
+1. **Path traversal via `output_name` / `save_path`.** Defense: all output
+   paths resolved through `safe_join(<universe>/SoulService/Recordings/,
+   normalize(input))` which rejects `..`, absolute paths, and symlink
+   escapes. Same for `<universe>/assets/...` outputs. Reject and return
+   `output_path_unwritable`.
+
+2. **API budget burn via gen-loop.** A malicious or buggy agent calls
+   `gen_video_submit` repeatedly. Defense: per-tool concurrency caps (e.g.
+   max 3 in-flight Veo jobs, 5 in-flight Imagen requests), per-day spend
+   caps in `genworld_policy.toml` (see *Performance budgets*), and a
+   circuit breaker that disables the tool after 5 consecutive provider
+   errors within 60 s.
+
+3. **Generation of harmful content.** Defense: relies on provider TOS-level
+   moderation (Imagen/Veo, Meshy/Tripo). Spec notes engine does no
+   client-side filtering in v1; v2 may add a prompt-side allow/deny list
+   configurable in `genworld_policy.toml`.
+
+4. **Simulation control thrash.** A flood of `sim_pause`/`sim_resume`
+   calls. Defense: tools are idempotent (no state change after first call
+   when already in target state). No-op fast path. Audit log still records.
+
+5. **Mesh import of malformed GLB.** Defense: `mesh_import` already
+   validates with `gltf-rs`; malformed GLB is logged and not spawned. The
+   provider response is preserved on disk for inspection.
+
+6. **MCP server bound to a non-localhost interface.** Defense: TCP binding
+   defaults to `127.0.0.1`. Binding to `0.0.0.0` requires explicit
+   `MCP_BIND_ALL=1` env var **and** logs a clear warning at startup that
+   the engine is exposing controls externally.
+
+7. **API key leakage via error messages.** Defense: `GenError::Display`
+   redacts any string matching common key shapes (`AIza...` for Google,
+   `sk-...` for Anthropic, opaque tokens > 32 chars). Audit log never
+   records the key, only a hash prefix.
+
+8. **Tool-call replay / forgery on the TCP channel.** Out of scope for v1
+   — the TCP channel is localhost-only and unauthenticated. v2 (or sooner
+   if remote opt-in is added) introduces a per-session shared secret in
+   `<universe>/.eustress/engine.mcp.secret` and an `Authorization` header
+   check on each call.
+
+9. **Recording-pipeline DoS via repeated start/stop.** Defense: encoder
+   spawn rate-limited to 1/sec; second `record_start` within the window
+   queues with a "starting" status rather than spawning a second encoder.
+
+10. **Workshop conversation injection.** A user pastes an instruction
+    designed to override the Workshop system prompt. Defense: the existing
+    Workshop MCP approval flow gates every tool call; injection can only
+    proceed if the user approves the resulting tool call. Spec recommends
+    keeping approval default on for `gen_*` and `record_*` tools.
+
+**Out of v1 threat-model scope:**
+
+- Defense against a malicious Bevy plugin loaded into the engine (full
+  code trust assumed).
+- Defense against an attacker with shell access to the user's machine
+  (game over).
+- Defense against quantum-era key compromise.
 
 ## Non-goals (out of scope at every horizon)
 
@@ -795,9 +1202,60 @@ User-facing behavior in the Slint generation panel and MCP tool surface:
   use a lighter Goal / What it adds / Depends on / Risks template. The
   endgame is described as a set of capabilities, not numbered phases.
 
+## Migration from the Python pipeline
+
+The previous client-side enhancement pipeline
+(`client::plugins::enhancement_plugin`, `client::systems::enhancement_*`,
+and the Python `generation_server.py` / `generation_server_production.py`
+scripts at the repo root) is deprecated in v1 Phase 6 and removed in v2
+Phase 11. This section is the migration path for any workflow currently
+depending on it.
+
+**What the Python pipeline did:**
+
+- Watched scene nodes annotated with a prompt + category + detail level.
+- SHA256-keyed the prompt and called a local HTTP server
+  (`http://127.0.0.1:8001`) that ran FLUX (textures) and TripoSR (meshes)
+  on the user's GPU.
+- Replaced placeholder primitives with the returned GLBs.
+- Documented in
+  [`docs/architecture/ENHANCEMENT_PIPELINE.md`](architecture/ENHANCEMENT_PIPELINE.md)
+  and
+  [`THE_LAST_GAME_ENGINE.md`](architecture/THE_LAST_GAME_ENGINE.md), both
+  being marked superseded in Phase 6.
+
+**Mapping table:**
+
+| Old behavior                                          | New equivalent                                                                                                  |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Annotate node with prompt, get GLB on demand           | Call `gen_mesh(prompt)` MCP tool. GLB lands in `<universe>/assets/meshes/`. `mesh_import` spawns it.            |
+| Texture replacement on a material                      | `gen_image(prompt)` MCP tool. PNG lands in `<universe>/assets/images/`. Bind to material in script or properties. |
+| Distance-based generation trigger                      | Not directly replicated in v1. User scripts can call `gen_mesh` themselves from a Bevy system; auto-distance triggers slated for v3 hybrid routing (Phase 15) policy. |
+| `EUSTRESS_CACHE_URL` env (Python remote cache)         | Removed. Cache moves to `<universe>/.eustress/genworld_cache/` (Phase 9, v2).                                    |
+| SHA256 cache key                                       | Same shape, reimplemented in Rust in Phase 9.                                                                    |
+| Local GPU model inference                              | Returns in Phase 14 (v3 local inference adapter). Until v3, generation requires a Gemini key.                    |
+
+**Timeline:**
+
+- v1 Phase 6 (current): annotations on the Python modules, banner on the
+  old docs. Python server keeps working if the user keeps it running.
+- v2 Phase 11: Python modules removed from the client crate. Old docs
+  deleted or rewritten. Migration window closes.
+
+**What gets lost:**
+
+- Offline local-GPU generation (until Phase 14 in v3).
+- The SHA256 cache (until Phase 9 in v2).
+
+Both are scheduled back in. Document this so users on the Python path can
+plan.
+
 # ────────────────────────────────────────────────────────────────────
 # v1 — Local generative loop + cinematography
 # ────────────────────────────────────────────────────────────────────
+
+**Tier: Scoped.** Every phase ships with full Scope / Out of scope /
+Deliverables / Acceptance / Dependencies / Performance budgets.
 
 v1 stands up the trait surface, the Gemini and mesh providers, the recording
 pipeline, the multi-camera system, the full MCP cinematography tool set, the
@@ -847,6 +1305,10 @@ deprecation of the legacy Python path.
 prints a `MeshGenerated`/`ImageGenerated`/`VideoGenerated` sequence using
 `MockProvider`. Engine binary builds and starts; nothing visible changes
 in-app yet.
+
+**Performance budgets.** See the *Performance budgets* table for Phase 1
+targets: incremental build impact < 30 s on warm cache, zero new
+transitive deps with C build deps, `MockProvider` response latency < 5 ms.
 
 **Dependencies.** None.
 
@@ -898,6 +1360,11 @@ returns a real Imagen PNG and writes it to
 passes with no live key. Local `cargo clippy --workspace -- -D warnings`
 clean.
 
+**Performance budgets.** See the *Performance budgets* table for Phase 2
+targets: Imagen request p50 < 3 s and p95 < 8 s at 1024×1024 PNG, Veo job
+submit < 500 ms, Veo status poll < 300 ms, and every provider call emits
+an audit-log entry with token usage and cost.
+
 **Dependencies.** Phase 1.
 
 ## Phase 3: Mesh provider
@@ -932,6 +1399,10 @@ real GLB on disk, and the engine binary auto-spawns it as an Instance
 entity through the existing mesh-import watcher. Without the key,
 `MockProvider`'s cube GLB still works. `cargo test -p genworld` passes
 without a live key.
+
+**Performance budgets.** See the *Performance budgets* table for Phase 3
+targets: mesh provider p50 < 30 s and p95 < 60 s for a "stylized prop"-class
+prompt, generated GLB size < 5 MB default and configurable up to 25 MB.
 
 **Dependencies.** Phase 1.
 
@@ -979,6 +1450,10 @@ window's render target reflects the swap on the next frame. A second test
 exercises a non-zero `CameraTransition` and confirms pose interpolation
 completes within the requested duration. `cargo check --workspace` clean.
 
+**Performance budgets.** See the *Performance budgets* table for Phase 4
+targets: `SetActiveCameraEvent` apply latency < 16 ms (one 60 fps frame),
+500 ms camera transition with zero dropped frames at 1080p/60fps.
+
 **Dependencies.** None on `genworld`; can land in parallel with Phases 2
 or 3.
 
@@ -1004,11 +1479,12 @@ output. MCP tools (Phase 6). Slint UI surface (Phase 7).
   overview*; `output_root` defaults to
   `<universe>/SoulService/Recordings/`), `RecordingState`,
   `StartRecording`, `StopRecording`, `RecordCutMarker`.
-- Per-frame readback system. Starting point is the
-  `Screenshot::primary_window()` pattern at
-  [eustress/crates/engine/src/ui/file_event_handler.rs:547](../eustress/crates/engine/src/ui/file_event_handler.rs#L547);
-  the continuous variant uses a dedicated `Camera` with
-  `RenderTarget::Image` and per-frame readback. The exact Bevy 0.18
+- Per-frame readback system implementing the *Recording readback path*
+  subsection: dedicated `Camera` into `RenderTarget::Image`, three-buffer
+  `wgpu::Buffer` staging pool, render-graph node copying
+  texture-to-buffer after the camera's main pass, and
+  `AsyncComputeTaskPool` tasks mapping each ready buffer and pushing
+  bytes to a `crossbeam_channel`. The exact Bevy 0.18 render-graph
   symbols are wired against the live API at impl time.
 - Active-camera binding: the readback system resolves the entity
   referenced by `ActiveCameraName` each frame, so mid-recording switches
@@ -1041,7 +1517,14 @@ the frame timestamps in the MP4 stop advancing; F6 again resumes and the
 MP4 continues; F8 returns to `Editor` and the MP4 is finalized and plays
 back in a standard player. Without the feature, the engine builds and
 runs as before. Frame-drop logging surfaces in `engine::frame_diagnostics`
-when the GPU readback queue overruns.
+when the GPU readback queue overruns. The readback benchmark plan
+documented in *Recording readback path* runs as the acceptance gate; all
+listed targets must be met on both reference platforms.
+
+**Performance budgets.** See the *Performance budgets* table for Phase 5
+targets: readback overhead < 2 ms/frame at 1080p and < 5 ms/frame at 4K,
+ffmpeg-sidecar encoder overhead < 8 ms/frame at 1080p H.264, zero dropped
+frames at 1080p/60fps on the reference platforms.
 
 **Dependencies.** Phase 4 (`ActiveCameraName` must exist before recording
 can bind to it).
@@ -1071,6 +1554,10 @@ through the existing `eustress::workshop::tools::ToolRegistry` delegation.
   in the *MCP tool registration* table (recording, camera, simulation,
   generative, cutscene groups). Each module defines a `ToolDefinition`
   with name, description, and JSON schema, plus a synchronous handler.
+  Schemas conform to the *Canonical MCP tool — `record_start`* template:
+  `additionalProperties: false`, shared `ToolError` shape, documented
+  completion contract, idempotency rules, audit-log entry on every
+  invocation.
 - All tools registered through
   [eustress-tools::register_all_tools](../eustress/crates/tools/src/lib.rs#L63).
 - Cutscene runtime: `Cutscene` / `Shot` / `ShotAction` types per
@@ -1091,6 +1578,11 @@ issued from an external MCP client through `crates/mcp-server`, produces
 an equivalent MP4. A `cutscene_record` call against a TOML-defined
 cutscene under `<universe>/Cutscenes/` executes the shot list and records
 a single MP4 with cut markers between shots.
+
+**Performance budgets.** See the *Performance budgets* table for Phase 6
+targets: ECS-only tool latency < 50 ms (event emit → completion poll
+satisfied), filesystem-touching tool latency < 200 ms, default tool-call
+timeout 30 s with per-tool overrides.
 
 **Dependencies.** Phases 4 (cameras) and 5 (recording). Phases 2 and 3
 add the generative providers but are not blockers for the recording /
@@ -1141,6 +1633,10 @@ under `<universe>/SoulService/Recordings/`, the dropdown reflects all
 named cameras and switching swaps the render target, and clicking Run on
 a listed cutscene produces a recorded MP4 matching the cutscene's shots.
 
+**Performance budgets.** See the *Performance budgets* table for Phase 7
+targets: Slint panel paint < 8 ms, camera dropdown refresh on
+`camera_list` event < 16 ms.
+
 **Dependencies.** Phases 1, 2, 3, 4, 5, 6.
 
 ## Phase 8: Python pipeline deprecation
@@ -1173,11 +1669,18 @@ errors, and only fire when the deprecated items are referenced). The
 doc banners render in any markdown viewer. The Python files still run
 for anyone with the existing setup.
 
+**Performance budgets.** See the *Performance budgets* table for Phase 8
+targets: no measured perf impact (annotation only).
+
 **Dependencies.** Phases 1, 2, 3, 4, 5, 6, 7.
 
 # ────────────────────────────────────────────────────────────────────
 # v2 — Production polish
 # ────────────────────────────────────────────────────────────────────
+
+**Tier: Scoped.** Every phase has full Goal / What it adds / Depends on /
+Risks. Some sub-decisions (audio backend, cache eviction policy) finalized
+at phase entry.
 
 v2 turns the v1 loop into something a user runs every day. A persistent
 on-disk cache keyed by prompt+params hash means repeated prompts no longer
@@ -1343,6 +1846,10 @@ bogus bytes) is mitigated by recomputing the hash on receive.
 # v3 — Local inference and hybrid routing
 # ────────────────────────────────────────────────────────────────────
 
+**Tier: Mixed.** Phase 14 (local inference adapter) is scoped — depends on
+candle or burn maturity which is verifiable at phase entry. Phases 15–17
+are directional — designs hardened when entering scope.
+
 v3 takes the layer off the cloud dependency. A `LocalProvider` runs models
 on the user's machine through candle or burn. A `HybridProvider` composes
 local and cloud providers behind a per-request routing policy so the user
@@ -1416,6 +1923,20 @@ TOML schema needs to stay readable. The current decision is a small set
 of well-named fields with sensible defaults rather than a full
 expression language.
 
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- Exact policy DSL: full TOML schema definition, choice between a
+  free-form expression language vs. a fixed schema with enumerated
+  fields, and hot-reload semantics (atomic swap vs. in-flight request
+  draining).
+- Cost-vs-quality dimensions to track per request: which axes the policy
+  reads (latency, dollar cost, output resolution, output token budget,
+  privacy flag) and how the policy combines them.
+- Fallback chain on provider failure: ordering, retry-with-different-
+  provider semantics, and when to surface failure to the caller rather
+  than silently re-route.
+
 ## Phase 16: Quality refinement passes
 
 **Goal.** Mesh generation produces higher-quality output through a
@@ -1446,6 +1967,18 @@ provider for cross-provider composition), Phase 15 (routing).
 **Risks / open questions.** Cumulative latency — a four-stage pipeline
 adds up quickly; per-stage timeouts and partial-result returns are the
 mitigation.
+
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- Which stages, how many, in what order: definitive sequence (rough →
+  texture → retopo → LOD vs. an alternative ordering), with each stage's
+  inputs and outputs typed.
+- Output formats per stage: GLB, USD, OBJ, or intermediate
+  pipeline-private formats between stages.
+- Caching of intermediate stages: whether the cache stores only the final
+  output or every intermediate so a re-run with a tweak to the last
+  stage can reuse the earlier work.
 
 ## Phase 17: Third-party provider plugins
 
@@ -1483,9 +2016,27 @@ dynamic loading of Rust code is notoriously fragile. The mitigation is
 to define the plugin ABI through a stable C surface (function pointers,
 opaque types) even though both sides are written in Rust.
 
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- C-ABI surface: definitive list of functions, struct layouts, and an
+  ABI version negotiation handshake so older plugins fail loudly against
+  newer hosts rather than silently corrupting state.
+- Sandboxing model: in-process trust (current default) vs. subprocess
+  isolation vs. WASM, and the resulting capability boundaries.
+- Discovery mechanism: filesystem scan order, plugin pinning, signature
+  verification of plugin binaries, and per-Universe enable/disable.
+- Key isolation between plugins: storage layout in the BYOK store,
+  per-plugin scoped accessors, and audit-log entries when a plugin reads
+  a secret.
+
 # ────────────────────────────────────────────────────────────────────
 # v4 — Predictive and generative world systems
 # ────────────────────────────────────────────────────────────────────
+
+**Tier: Directional.** Outcomes specified, designs to be hardened when
+entering scope. Each phase explicitly depends on outside research / API
+availability beyond engine control.
 
 v4 takes the layer past content generation into world-state generation.
 The `NeuralSimulator` trait scaffolded in v1 gets its first concrete
@@ -1525,6 +2076,23 @@ surface).
 exposed to "no provider exists yet." The fallback is a `LocalProvider`
 impl backed by V-JEPA-class research weights when callable APIs lag.
 
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- Vendor + API choice: no public Genie API exists at time of writing —
+  phase entry depends on availability. Backstop is V-JEPA-class research
+  weights driven through `LocalProvider`.
+- Frame context window: how many past (frame, action) pairs the impl
+  ingests per step, and whether the window is fixed or variable.
+- Sampling parameters: temperature, top-k, classifier-free guidance
+  scale where applicable, and how they map to the
+  `NeuralSimulator::step` arguments.
+- Carry-over state shape: how the impl threads latent state between
+  steps so generation is coherent across a long predicted sequence.
+- Cost model: per-step dollar / compute cost reporting so the routing
+  policy in Phase 15 has the data it needs to decide whether to invoke
+  the simulator.
+
 ## Phase 19: Predictive replay
 
 **Goal.** A recorded MP4 can be extended past the actual playthrough
@@ -1553,6 +2121,19 @@ to surface the affordance), Phase 5 (recording encoder reuse).
 **Risks / open questions.** Frame coherence at the predicted/real
 boundary — a hard cut between real and predicted footage looks bad; a
 short crossfade is the planned mitigation.
+
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- How many frames forward is acceptable quality: defining the prediction
+  horizon empirically per chosen NeuralSimulator vendor, and surfacing a
+  "confidence" indicator to the UI.
+- Determinism story: replay of a replay — given the same recording tail
+  and the same final action, does the impl reproduce the same predicted
+  frames? Need a seed/temperature contract.
+- UI for "this segment is predicted, not actually played": timeline
+  styling, sidecar JSON shape, and whether the MP4 itself carries a
+  metadata tag.
 
 ## Phase 20: Training data export
 
@@ -1585,6 +2166,19 @@ trainers that consume the export).
 **Risks / open questions.** Bundle size — full per-frame state at 60 fps
 is heavy; the format's compression has to earn its keep. A coarser
 keyframe-plus-delta layout is the backup if the naive shape is too big.
+
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- Format finalization: zstd-CBOR vs. Arrow IPC vs. another efficient
+  binary container, with decode complexity and ecosystem support as the
+  tiebreakers.
+- Labeling schema for entity state: which entity components are exported,
+  how transforms are encoded (full pose vs. deltas), and how component
+  schema evolution is versioned.
+- Sensitive-data redaction: which strings (entity names, prompt
+  histories, file paths) get redacted by default and which require an
+  explicit opt-in to export.
 
 ## Phase 21: Generative NPC behavior
 
@@ -1619,6 +2213,21 @@ on a per-NPC-per-second basis pressure cost and frame rate; the
 mitigation is a routing policy that prefers local providers for
 behavior beats and reserves cloud providers for narrative-critical
 moments.
+
+**Open design questions.** Concrete items to resolve before this phase
+lifts from directional to scoped:
+
+- Behavior model choice: which LLM or multi-modal model family is the
+  default (Claude / Gemini / a local open-weights model), and what
+  prompt template feeds it the NPC's local context.
+- Per-tick inference cost: dollar and compute budgets per decision beat,
+  with a fallback policy when the budget is exceeded.
+- Latency budget for in-loop calls: maximum wall-clock per decision and
+  the behavior when the model misses (cached previous action, default
+  no-op, scripted fallback).
+- Determinism story: how the `seed` field interacts with model
+  temperature, and whether re-records reproduce exact action sequences
+  or only approximate behavior.
 
 ## Endgame — What the layer enables
 
