@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "EustressEngine - Desktop 3D Editor"
 authors = ["EustressEngine Contributors"]
 edition = "2021"
+# Plain `cargo run -p eustress-engine` resolves to the editor binary even
+# though the package ships several helper bins (generate-benchmark-map,
+# convert-to-eustress, reseed-space-subtree, eustress-lsp). Without this,
+# cargo errors "could not determine which binary to run".
+default-run = "eustress-engine"
 
 [package.metadata.winres]
 OriginalFilename = "eustress-engine.exe"
@@ -26,6 +31,16 @@ path = "src/bin/generate_benchmark_map.rs"
 [[bin]]
 name = "convert-to-eustress"
 path = "src/bin/convert_to_eustress.rs"
+
+# Recovery: reseed a Space subtree's TOMLs disk→Fjall `tree` partition and
+# drop their stale `#bin` caches, WITHOUT touching the `datastore`
+# partition. Needed when a closed-engine disk edit / `git restore` must
+# propagate to a non-migrated Space's tree (e.g. the V-Cell mesh recovery).
+# Run: cargo run -p eustress-engine --bin reseed-space-subtree -- --subdir Workspace/V-Cell
+[[bin]]
+name = "reseed-space-subtree"
+path = "src/bin/reseed_space_subtree.rs"
+required-features = ["world-db"]
 
 # Language Server Protocol stdio bin for external editors (Windsurf /
 # VS Code / Zed / Neovim). Guarded by the `lsp` feature so the main

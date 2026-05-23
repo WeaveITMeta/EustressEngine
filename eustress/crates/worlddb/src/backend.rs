@@ -284,6 +284,44 @@ pub trait WorldDb: Send + Sync + 'static {
         value: &[u8],
         sort: i64,
     ) -> Result<()>;
+
+    // ── Binary-ECS instance core — Morton-keyed scalable entity store ──
+    //
+    // The "binary ECS" home for file-less, scalable entities (the
+    // representation router's BinaryEcs side): a whole entity's rkyv
+    // `ArchInstanceCore` stored as ONE component
+    // ([`ComponentTypeId::INSTANCE_CORE`]), keyed by world position via
+    // the Morton spatial encoder so a region scan returns a spatial
+    // neighbourhood. File-bearing entities never live here — they stay in
+    // the `tree` partition. The default impls let non-Fjall test backends
+    // compile; `FjallWorldDb` overrides all three.
+
+    /// Store an entity's `ArchInstanceCore` bytes, Morton-keyed by `pos`
+    /// (the entity's translation — the same value encoded inside the
+    /// core). Overwrites the record at that exact position+entity.
+    fn put_instance_core(&self, entity: EntityId, pos: (f32, f32, f32), core: &[u8]) -> Result<()> {
+        let _ = (entity, pos, core);
+        Err(crate::error::Error::Other(
+            "put_instance_core not supported by this backend".into(),
+        ))
+    }
+
+    /// Remove a stored `ArchInstanceCore`. `pos` MUST be the position the
+    /// record was last written at — its Morton key is position-derived,
+    /// so a *move* deletes at the OLD position before putting at the new
+    /// one (the engine tracks last-written position to supply it).
+    fn delete_instance_core(&self, entity: EntityId, pos: (f32, f32, f32)) -> Result<()> {
+        let _ = (entity, pos);
+        Ok(())
+    }
+
+    /// Eagerly collect every stored `ArchInstanceCore` as
+    /// `(EntityId, core_bytes)` — the binary-ECS boot-load path. Eager
+    /// (not a borrowed iterator) so the engine scene-spawner can consume
+    /// it across a Bevy system boundary.
+    fn iter_instance_cores(&self) -> Result<Vec<(EntityId, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// One entry returned by [`WorldDb::list_dir`] — a file or an

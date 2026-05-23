@@ -20,7 +20,51 @@ use std::sync::OnceLock;
 static REGISTRY: OnceLock<ToolRegistry> = OnceLock::new();
 
 fn registry() -> &'static ToolRegistry {
-    REGISTRY.get_or_init(|| eustress_tools::default_registry())
+    REGISTRY.get_or_init(|| {
+        let mut r = eustress_tools::default_registry();
+        // Live-engine tools (MCP-server-local): these drive the RUNNING
+        // engine over the TCP bridge rather than writing files. They
+        // live in this crate because the bridge client is local to the
+        // MCP server — the engine reaches its own ECS in-process, with
+        // no TCP client of itself. Registered on top of the shared
+        // baseline so they flow through `tools/list` + `tools/call`
+        // exactly like the filesystem tools.
+        r.register(crate::bridge_tools::InspectSceneTool);
+        r.register(crate::bridge_tools::EquipToolTool);
+        r.register(crate::bridge_tools::SelectEntityTool);
+        r.register(crate::bridge_tools::GetEditorStateTool);
+        r.register(crate::bridge_tools::InvokeActionTool);
+        r.register(crate::bridge_tools::CaptureViewportTool);
+        // Independent AI camera — the AI's own off-screen eyes.
+        r.register(crate::bridge_tools::AiCameraSetPoseTool);
+        r.register(crate::bridge_tools::AiCameraOrbitTool);
+        r.register(crate::bridge_tools::AiCameraFrameTool);
+        r.register(crate::bridge_tools::AiCameraCaptureTool);
+        r
+    })
+}
+
+/// Names of the live-engine ("bridge") tools registered above. These reach
+/// the RUNNING engine over its TCP bridge, so they must target the Universe
+/// that actually has a live `engine.port` — not the server's nominal default
+/// Universe. The dispatcher uses this to pick
+/// [`crate::universe::find_live_engine_universe`] for these tools only.
+pub const BRIDGE_TOOL_NAMES: &[&str] = &[
+    "inspect_scene",
+    "equip_tool",
+    "select_entity",
+    "get_editor_state",
+    "invoke_action",
+    "capture_viewport",
+    "ai_camera_set_pose",
+    "ai_camera_orbit",
+    "ai_camera_frame",
+    "ai_camera_capture",
+];
+
+/// True if `name` is one of the live-engine bridge tools.
+pub fn is_bridge_tool(name: &str) -> bool {
+    BRIDGE_TOOL_NAMES.contains(&name)
 }
 
 /// Build a `ToolContext` from the server's current Universe. When no

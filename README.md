@@ -1,6 +1,6 @@
 # Eustress Engine - Monorepo
 
-A batteries-included Rust game engine and editor built with **Bevy** + **egui**.
+A batteries-included Rust game engine and editor built with **Bevy** + **Slint**.
 
 ## What's Inside
 
@@ -59,13 +59,13 @@ Binaries output to: `eustress/target/release/`
 ## Architecture
 
 - **Engine**: Bevy 0.14
-- **UI**: egui (immediate-mode GUI)
+- **UI**: Slint (declarative GUI)
 - **Language**: 100% Rust
 - **Platform**: Desktop only (Windows, macOS, Linux)
 
 ## Features
 
-- **Integrated 3D Viewport**: Native Bevy rendering with egui overlay
+- **Integrated 3D Viewport**: Native Bevy rendering with Slint overlay
 - **Scene Hierarchy**: Explorer panel with part tree
 - **Properties Editor**: Real-time entity property editing
 - **Transform Tools**: Move, Rotate, Scale with visual gizmos
@@ -89,7 +89,7 @@ eustress/                     # Workspace root
 │   ├── engine/              # Desktop editor/studio
 │   │   ├── src/
 │   │   │   ├── main.rs     # Entry point
-│   │   │   ├── ui/         # egui panels
+│   │   │   ├── ui/         # Slint panels
 │   │   │   ├── parts.rs    # Part management
 │   │   │   └── rendering.rs
 │   │   └── Cargo.toml

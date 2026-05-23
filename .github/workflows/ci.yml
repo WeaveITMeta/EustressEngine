@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
           components: rustfmt, clippy
@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
 
@@ -161,13 +161,19 @@ jobs:
   shader-validate:
     name: WGSL Validation (naga)
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('**/*.wgsl') != '' }}
+    # No job-level `if` here. `hashFiles()` is NOT available in the
+    # `jobs.<id>.if` context (it needs the checked-out workspace, which
+    # doesn't exist when the job condition is evaluated), so the previous
+    # `if: ${{ hashFiles('**/*.wgsl') != '' }}` was an invalid expression.
+    # The "Validate WGSL" step below already exits 0 cleanly when there
+    # are no .wgsl files, so the "skip when no shaders" behaviour is
+    # handled there instead.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
 

@@ -470,6 +470,24 @@ pub fn discover_universes(roots: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
+/// Find the Universe whose engine bridge is live — the one holding an
+/// `.eustress/engine.port` file (written by a running engine). Scans the
+/// search roots' Universes and returns the first live one.
+///
+/// This is how the live-engine ("bridge") tools locate the running engine
+/// *deterministically*, even when several Universes exist on disk and the
+/// "default" is ambiguous: there is exactly one running engine, and it
+/// advertises itself with exactly one port file. Naming/sorting/`.default_
+/// universe` don't enter into it — we follow the port file to the engine.
+pub fn find_live_engine_universe(roots: &[PathBuf]) -> Option<PathBuf> {
+    for u in discover_universes(roots) {
+        if u.join(".eustress").join("engine.port").is_file() {
+            return Some(u);
+        }
+    }
+    None
+}
+
 /// Parse `EUSTRESS_UNIVERSES_PATH` (OS path-separator delimited).
 pub fn parse_search_roots(env_val: Option<&str>) -> Vec<PathBuf> {
     if let Some(raw) = env_val {

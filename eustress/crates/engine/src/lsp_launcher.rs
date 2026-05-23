@@ -222,10 +222,28 @@ fn maybe_spawn_lsp_child(
     let mut cmd = Command::new(&binary);
     cmd.arg("--tcp").arg("--port-file").arg(&port_file);
     // Detach stdio — the launcher doesn't read from the child; external
-    // IDEs read the port file. Pipe stderr so LSP warnings surface.
+    // IDEs read the port file. Headless (no window) but not blind:
+    // redirect the LSP's stderr to a log file so its warnings are still
+    // captured (sibling to the launcher diag log in temp).
+    let lsp_log = std::env::temp_dir().join("eustress-lsp.log");
+    let stderr_sink = std::fs::File::create(&lsp_log)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
     cmd.stdin(Stdio::null())
        .stdout(Stdio::null())
-       .stderr(Stdio::inherit());
+       .stderr(stderr_sink);
+
+    // Windows: `eustress-lsp` is a console-subsystem binary, so spawning
+    // it from the (GUI-subsystem) release Studio exe pops a separate
+    // console window. CREATE_NO_WINDOW runs it headless — still alive,
+    // still listening on its TCP port (external IDEs reach it via the
+    // port file), just no terminal. No-op on other platforms.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     match cmd.spawn() {
         Ok(child) => {

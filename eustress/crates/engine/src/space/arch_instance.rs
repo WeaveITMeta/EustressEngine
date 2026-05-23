@@ -30,8 +30,9 @@
 //! Nothing calls these functions on the live load/save path yet, so this
 //! module cannot break the running engine. The next K2 increments wire
 //! it in: (1) `active_db` swaps its bincode `#bin` codec for
-//! `encode_instance_core`; (2) the loader reads `access_instance_core`
-//! zero-copy. Both land with the build loop.
+//! `encode_instance_core`; (2) the loader reads `decode_instance_core`
+//! (copy past the tag into an aligned buffer, then validate +
+//! deserialize). Both land with the build loop.
 
 use std::collections::HashMap;
 

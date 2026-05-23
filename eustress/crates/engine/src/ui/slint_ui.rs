@@ -2491,6 +2491,11 @@ pub fn update_slint_ui_focus(
             let w = &ctx.window;
             w.get_any_input_has_focus()
                 || w.get_command_bar_has_focus()
+                // Explorer inline rename (F2): a TreeItem TextInput has
+                // keyboard focus while the node id is >= 0. Without this
+                // the rename field types into the void and WASD leaks to
+                // the camera ("F2 moves me around" — 2026-05-22).
+                || w.get_explorer_renaming_node_id() >= 0
                 // Dialogs — every one must be listed here.
                 || w.get_show_settings_dialog()
                 || w.get_show_exit_confirmation()
@@ -5068,7 +5073,27 @@ fn drain_slint_actions(
                         .and_then(|es| es.file_path_cache.get(&id).cloned());
                     if let Some(path) = file_path {
                         if path.is_file() {
-                            if let Some(ref mut mgr) = res.tab_manager {
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                            if super::file_icons::opens_externally(ext) {
+                                // Documents / presentations / spreadsheets /
+                                // media / archives / binaries (and unknown
+                                // types) — hand off to the OS default app
+                                // (PowerPoint, Word, a PDF viewer, …) rather
+                                // than the in-engine text editor.
+                                match open::that(&path) {
+                                    Ok(_) => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.info(format!("Opened in default app: {}", path.display()));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.error(format!("Could not open {}: {}", path.display(), e));
+                                        }
+                                    }
+                                }
+                            } else if let Some(ref mut mgr) = res.tab_manager {
+                                // Editable text / code / config → in-engine tab editor.
                                 let idx = mgr.open_file(&path);
                                 if let Some(ref mut out) = res.output {
                                     out.info(format!("Opened: {} (tab {})", path.display(), idx));

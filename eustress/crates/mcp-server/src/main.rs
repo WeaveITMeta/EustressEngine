@@ -11,6 +11,8 @@
 // infrastructure/mcp/server/. Same installer, same protocol surface, a
 // fraction of the binary size.
 
+mod bridge_client;
+mod bridge_tools;
 mod resources;
 mod shared_registry;
 mod tools;
@@ -320,8 +322,11 @@ async fn dispatch(
                 return Ok(result.to_json());
             }
 
-            // Fall through to the shared registry.
-            let universe = state.lock().unwrap().current_universe.clone();
+            // Fall through to the shared registry. Resolve the Universe with
+            // bridge-tool awareness: live-engine tools target the running
+            // engine's Universe (via its port file), everything else uses the
+            // explicit `universe` arg or the server default.
+            let universe = resolve_shared_universe(name, &args, state);
             if let Some(result) = shared_registry::try_dispatch(name, &args, universe.as_ref()) {
                 return Ok(shared_registry::to_mcp_json(result));
             }
@@ -456,6 +461,40 @@ fn ensure_universe(
         return Some(first.clone());
     }
     None
+}
+
+/// Resolve the Universe for a shared-registry tool call.
+///
+/// Precedence:
+///   1. An explicit `universe` arg (absolute path) — caller knows best.
+///   2. For live-engine **bridge** tools: the Universe with a live
+///      `engine.port` (the running engine). This is what makes
+///      `inspect_scene` / `capture_viewport` / … "just work" without the
+///      client first calling `set_active_universe` — they follow the port
+///      file to wherever the engine is actually running.
+///   3. The server's current default Universe.
+///   4. A walk up from the current working directory.
+fn resolve_shared_universe(
+    name: &str,
+    args: &Value,
+    state: &Arc<Mutex<ServerState>>,
+) -> Option<PathBuf> {
+    if let Some(u) = args.get("universe").and_then(|v| v.as_str()) {
+        let t = u.trim();
+        if !t.is_empty() {
+            return Some(PathBuf::from(t));
+        }
+    }
+    if shared_registry::is_bridge_tool(name) {
+        let roots = state.lock().unwrap().search_roots.clone();
+        if let Some(live) = crate::universe::find_live_engine_universe(&roots) {
+            return Some(live);
+        }
+    }
+    if let Some(u) = state.lock().unwrap().current_universe.clone() {
+        return Some(u);
+    }
+    find_universe_root(&std::env::current_dir().ok()?)
 }
 
 async fn write_response(

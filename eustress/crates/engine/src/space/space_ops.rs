@@ -410,31 +410,12 @@ pub fn save_space(world: &mut World) {
             };
 
             let t = *local_tf;
-            let mesh = part.map(|p| {
-                match p.shape {
-                    eustress_common::classes::PartType::Block => "parts/block.glb",
-                    eustress_common::classes::PartType::Ball => "parts/ball.glb",
-                    eustress_common::classes::PartType::Cylinder => "parts/cylinder.glb",
-                    eustress_common::classes::PartType::Wedge => "parts/wedge.glb",
-                    eustress_common::classes::PartType::CornerWedge => "parts/corner_wedge.glb",
-                    eustress_common::classes::PartType::Cone => "parts/cone.glb",
-                }
-            }).unwrap_or("parts/block.glb").to_string();
-
-            let class_name = format!("{:?}", instance.class_name)
-                .trim_start_matches("ClassName::")
-                .to_string();
+            let authoritative_size = base_part.size;
 
             // Preserve the display-name override when the folder name
             // and instance name don't match — e.g. a second sibling
             // "Block" lives in `Block-a3f2/` with `name = "Block"` in
             // the TOML so the Explorer still renders it as "Block".
-            // Writing `name: None` unconditionally (as this path did
-            // previously) clobbered that override on every save, so
-            // after one Save the Explorer would start showing the hex
-            // suffix. Reading back the folder-stem lets us detect the
-            // mismatch without plumbing the original `InstanceFile`
-            // metadata through every save site.
             let folder_stem = toml_path.parent()
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str())
@@ -444,62 +425,115 @@ pub fn save_space(world: &mut World) {
                 _ => None,
             };
 
-            // **TOML scale = BasePart.size, NOT Transform.scale.**
-            //
-            // Rationale: the scale-tool has two internal paths:
-            //   * "mesh-source" parts write size into Transform.scale
-            //     and leave the unit-scale GLB mesh alone
-            //   * "legacy inline" parts keep Transform.scale = ONE
-            //     and regenerate the mesh at the new size
-            // Both paths update `BasePart.size` to the authoritative
-            // dimensions. Reading Transform.scale here was silently
-            // wrong for the legacy branch — after every save, scale
-            // was pinned at [1, 1, 1] because that's what
-            // Transform.scale had stayed at. `BasePart.size` is the
-            // one field that's correct in both branches, so the TOML
-            // round-trip now uses it as the source of truth for
-            // dimensions. (User caught the bug 2026-04-23 — parts
-            // reverted to 1×1×1 on reload.)
-            let authoritative_size = base_part.size;
-            let def = InstanceDefinition {
-                asset: Some(AssetReference {
-                    mesh,
-                    scene: "Scene0".to_string(),
-                }),
-                transform: TransformData {
-                    position: [t.translation.x, t.translation.y, t.translation.z],
-                    rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
-                    scale: [authoritative_size.x, authoritative_size.y, authoritative_size.z],
-                },
-                properties: InstanceProperties {
-                    color: {
-                        let c = base_part.color.to_srgba();
-                        [c.red, c.green, c.blue, c.alpha]
+            // Component-authoritative fields (the only ones the ECS owns).
+            // TOML scale = BasePart.size (correct in both scale-tool
+            // branches; Transform.scale alone pinned legacy parts at 1×1×1).
+            let live_transform = TransformData {
+                position: [t.translation.x, t.translation.y, t.translation.z],
+                rotation: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                scale: [authoritative_size.x, authoritative_size.y, authoritative_size.z],
+            };
+            let live_color = {
+                let c = base_part.color.to_srgba();
+                [c.red, c.green, c.blue, c.alpha]
+            };
+            // Prefer the live material NAME (preserves custom MaterialService
+            // names + Material-Flip edits); fall back to the enum.
+            let live_material = if base_part.material_name.is_empty() {
+                format!("{:?}", base_part.material)
+            } else {
+                base_part.material_name.clone()
+            };
+
+            // ── LOAD-MERGE (2026-05-22) ─────────────────────────────────
+            // Start from the EXISTING on-disk definition and overwrite only
+            // the component-authoritative fields. Rebuilding the whole
+            // `InstanceDefinition` from components alone (what this path did
+            // before) silently dropped every field the ECS does not carry:
+            //   * the custom `asset.mesh` — it was re-derived from the
+            //     primitive `Part.shape`, so a custom-mesh part (V-Cell)
+            //     came back as `parts/block.glb` and rendered as a block;
+            //   * the realism `[material]` / `[thermodynamic]` /
+            //     `[electrochemical]` sections (V-Cell's Titanium material);
+            //   * the metadata audit chain, `attributes`, `tags`, `ui`,
+            //     `[extra]`.
+            // That was the V-Cell "renders as blocks, lost its material"
+            // data loss. Read DISK directly (`load_instance_definition_with_extras`,
+            // NOT the active_db funnel) so the merge base is the on-disk
+            // TOML, never a stale binary `#bin` cache; the write below then
+            // refreshes that cache from the corrected merge.
+            let existing = if instance_file.is_some() {
+                crate::space::instance_loader::load_instance_definition_with_extras(&toml_path)
+                    .map(|(d, _)| d)
+                    .ok()
+            } else {
+                None
+            };
+
+            let def = if let Some(mut d) = existing {
+                d.transform = live_transform;
+                d.properties.color = live_color;
+                d.properties.transparency = base_part.transparency;
+                d.properties.anchored = base_part.anchored;
+                d.properties.can_collide = base_part.can_collide;
+                d.properties.cast_shadow = base_part.cast_shadow;
+                d.properties.reflectance = base_part.reflectance;
+                d.properties.locked = base_part.locked;
+                d.properties.material = live_material;
+                d.metadata.name = name_override;
+                d.metadata.last_modified = now.clone();
+                d
+            } else {
+                // New entity (no on-disk TOML) or unreadable file — build
+                // from components. New parts spawned here are primitives, so
+                // deriving the mesh from `Part.shape` is correct for them.
+                let mesh = part
+                    .map(|p| match p.shape {
+                        eustress_common::classes::PartType::Block => "parts/block.glb",
+                        eustress_common::classes::PartType::Ball => "parts/ball.glb",
+                        eustress_common::classes::PartType::Cylinder => "parts/cylinder.glb",
+                        eustress_common::classes::PartType::Wedge => "parts/wedge.glb",
+                        eustress_common::classes::PartType::CornerWedge => "parts/corner_wedge.glb",
+                        eustress_common::classes::PartType::Cone => "parts/cone.glb",
+                    })
+                    .unwrap_or("parts/block.glb")
+                    .to_string();
+                let class_name = format!("{:?}", instance.class_name)
+                    .trim_start_matches("ClassName::")
+                    .to_string();
+                InstanceDefinition {
+                    asset: Some(AssetReference {
+                        mesh,
+                        scene: "Scene0".to_string(),
+                    }),
+                    transform: live_transform,
+                    properties: InstanceProperties {
+                        color: live_color,
+                        material: live_material,
+                        transparency: base_part.transparency,
+                        anchored: base_part.anchored,
+                        can_collide: base_part.can_collide,
+                        cast_shadow: base_part.cast_shadow,
+                        reflectance: base_part.reflectance,
+                        locked: base_part.locked,
                     },
-                    material: format!("{:?}", base_part.material),
-                    transparency: base_part.transparency,
-                    anchored: base_part.anchored,
-                    can_collide: base_part.can_collide,
-                    cast_shadow: true,
-                    reflectance: base_part.reflectance,
-                    locked: base_part.locked,
-                },
-                metadata: InstanceMetadata {
-                    class_name,
-                    archivable: instance.archivable,
-                    name: name_override,
-                    created: String::new(),
-                    last_modified: now.clone(),
-                    ..Default::default()
-                },
-                material: None,
-                thermodynamic: None,
-                electrochemical: None,
-                ui: None,
-                attributes: None,
-                tags: None,
-                parameters: None,
-                extra: std::collections::HashMap::new(),
+                    metadata: InstanceMetadata {
+                        class_name,
+                        archivable: instance.archivable,
+                        name: name_override,
+                        created: String::new(),
+                        last_modified: now.clone(),
+                        ..Default::default()
+                    },
+                    material: None,
+                    thermodynamic: None,
+                    electrochemical: None,
+                    ui: None,
+                    attributes: None,
+                    tags: None,
+                    parameters: None,
+                    extra: std::collections::HashMap::new(),
+                }
             };
 
             to_save.push((instance.name.clone(), toml_path, def));

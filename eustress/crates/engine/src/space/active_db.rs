@@ -204,6 +204,73 @@ mod imp {
         }
     }
 
+    // ── Binary-ECS instance cores (entities partition, Morton-keyed) ──
+    //
+    // These are the PURE binary-ECS representation: a rkyv
+    // `ArchInstanceCore` keyed by spatial Morton position in the
+    // `entities` partition, with NO disk path and NO `tree` entry. They
+    // are the scalable Insert-menu default (a bare Part). The funnel
+    // mirrors the `#bin` helpers above but lives behind these free
+    // functions so non-feature-gated call sites (the Insert handler in
+    // `slint_ui`) can reach the store without plumbing a `WorldDbHandle`
+    // resource or `#[cfg]`-ing every call site — the same reason
+    // `get_instance` / `put_instance` exist.
+    //
+    // `stored_id` is the STABLE persistence id, NOT the live Bevy
+    // `Entity::to_bits()` (those are not stable across sessions). The
+    // engine mints it once at create time and preserves it across load.
+
+    /// Persist a binary-ECS core (rkyv `ArchInstanceCore` bytes),
+    /// Morton-keyed by `pos`. `false` when no DB is active or the write
+    /// failed (caller keeps the in-memory entity; the save mirror retries
+    /// on the next change).
+    pub fn put_instance_core(stored_id: u64, pos: [f32; 3], core: &[u8]) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        a.db
+            .put_instance_core(
+                eustress_worlddb::EntityId(stored_id),
+                (pos[0], pos[1], pos[2]),
+                core,
+            )
+            .is_ok()
+    }
+
+    /// Delete a binary-ECS core at the position its Morton key was last
+    /// computed from. A *move* deletes at the OLD position before putting
+    /// at the new one (the key is position-derived).
+    pub fn delete_instance_core(stored_id: u64, pos: [f32; 3]) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        a.db
+            .delete_instance_core(eustress_worlddb::EntityId(stored_id), (pos[0], pos[1], pos[2]))
+            .is_ok()
+    }
+
+    /// Eager snapshot of every binary-ECS core in the active Space's
+    /// `entities` partition — the boot-load path. Empty when no DB is
+    /// active or the partition holds no cores (the common legacy case).
+    pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {
+        let Ok(g) = ACTIVE.read() else {
+            return Vec::new();
+        };
+        let Some(a) = g.as_ref() else {
+            return Vec::new();
+        };
+        a.db
+            .iter_instance_cores()
+            .map(|v| v.into_iter().map(|(e, b)| (e.0, b)).collect())
+            .unwrap_or_default()
+    }
+
     /// GUI definition twin of [`get_instance`].
     pub fn get_gui(abs: &Path) -> Option<GuiTomlFile> {
         let g = ACTIVE.read().ok()?;
@@ -286,6 +353,15 @@ mod imp {
     }
     pub fn put_instance(_abs: &Path, _def: &InstanceDefinition) -> bool {
         false
+    }
+    pub fn put_instance_core(_stored_id: u64, _pos: [f32; 3], _core: &[u8]) -> bool {
+        false
+    }
+    pub fn delete_instance_core(_stored_id: u64, _pos: [f32; 3]) -> bool {
+        false
+    }
+    pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
     }
     pub fn get_gui(_abs: &Path) -> Option<GuiTomlFile> {
         None

@@ -15,6 +15,40 @@ impl Plugin for DefaultScenePlugin {
     }
 }
 
+/// Canonical Studio 3D camera bundle — the **single source of truth** for how a
+/// Studio camera is built. Both the editor camera and the off-screen AI camera
+/// are created from this, so they are identical by construction.
+///
+/// Why this matters: `SharedLightingPlugin` auto-attaches Skybox / Atmosphere /
+/// EnvironmentMapLight to *every* `Camera3d`. If two cameras drift in their
+/// view features (tonemapping, MSAA, projection, …) they end up with different
+/// `mesh_view_bind_group` shapes against a shared layout → a wgpu validation
+/// panic ("N bindings != M bindings"). Building every Studio camera here keeps
+/// them in lockstep. Callers add only what's genuinely camera-specific:
+/// `EustressCamera` (editor controls) or `AiCamera` + a `RenderTarget::Image`
+/// (the off-screen AI camera).
+pub fn studio_camera_bundle(name: &str, transform: Transform) -> impl Bundle {
+    (
+        Camera3d::default(),
+        Tonemapping::Reinhard,
+        transform,
+        Projection::Perspective(PerspectiveProjection {
+            fov: 70.0_f32.to_radians(),
+            near: 0.1,
+            far: 10000.0,
+            ..default()
+        }),
+        Instance {
+            name: name.to_string(),
+            class_name: ClassName::Camera,
+            archivable: true,
+            id: 0,
+            ..Default::default()
+        },
+        Name::new(name.to_string()),
+    )
+}
+
 /// One-shot diagnostic: dump all Camera3d and Mesh3d entities after 3 seconds
 fn diagnose_scene_once(
     cameras: Query<(Entity, &Transform, &Camera), With<Camera3d>>,
@@ -74,25 +108,11 @@ pub fn setup_default_scene(
     
     // Spawn camera — skybox will be auto-attached by SharedLightingPlugin's
     // attach_skybox_to_cameras system (same as egui era)
-    commands.spawn((
-        Camera3d::default(),
-        Tonemapping::Reinhard,
-        Transform::from_xyz(10.0, 8.0, 10.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
-        Projection::Perspective(PerspectiveProjection {
-            fov: 70.0_f32.to_radians(),
-            near: 0.1,
-            far: 10000.0,
-            ..default()
-        }),
-        Instance {
-            name: "Camera".to_string(),
-            class_name: ClassName::Camera,
-            archivable: true,
-            id: 0,
-            ..Default::default()
-        },
-        Name::new("Camera"),
+    // Editor camera — built from the shared `studio_camera_bundle` so it is
+    // identical to the AI camera (which uses the same method).
+    commands.spawn(studio_camera_bundle(
+        "Camera",
+        Transform::from_xyz(10.0, 8.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     
     // =========================================================================

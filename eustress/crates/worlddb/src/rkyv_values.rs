@@ -6,10 +6,15 @@
 //! `world_db_plugin` converts `bevy::Transform` ↔ [`ArchTransform`]
 //! and stores the rkyv archive in the `entities` partition.
 //!
-//! Read path is zero-copy: [`access_transform`] casts the stored
-//! bytes straight to `&ArchivedArchTransform` with no allocation and
-//! no field-by-field parse — the Tier-1 #2 win. Write path is one
-//! `rkyv::to_bytes`.
+//! Read path is [`decode_transform`] / [`decode_instance_core`]: copy
+//! past the tag byte into a 16-byte-aligned buffer, then `rkyv::access`
+//! (validate) + `rkyv::deserialize`. The copy is forced by storage
+//! reality, not laziness — Fjall returns unaligned `Vec<u8>` and rkyv's
+//! `access` requires the archive root to be aligned, while the leading
+//! tag byte offsets the archive by one. True zero-copy would need the
+//! store to hand back aligned, untagged buffers; it doesn't. Even with
+//! the copy this is far cheaper than the TOML parse the pivot replaced.
+//! Write path is one `rkyv::to_bytes` + a tag byte.
 //!
 //! Versioned: byte 0 is a layout tag so a future component-schema
 //! bump can coexist (mirrors the `header.bin` / `v{N}:` story).
@@ -43,8 +48,8 @@ impl ArchTransform {
 }
 
 /// Serialize a transform to a tagged rkyv archive. The leading tag
-/// byte lets [`access_transform`] reject foreign / wrong-version
-/// bytes before the zero-copy cast.
+/// byte lets [`decode_transform`] reject foreign / wrong-version bytes
+/// before the access.
 pub fn encode_transform(v: &ArchTransform) -> crate::error::Result<Vec<u8>> {
     let archived = rkyv::to_bytes::<rkyv::rancor::Error>(v)
         .map_err(|e| crate::error::Error::Archive(format!("rkyv encode: {e}")))?;
@@ -54,26 +59,22 @@ pub fn encode_transform(v: &ArchTransform) -> crate::error::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Zero-copy access — validates + casts the stored bytes to the
-/// archived view without deserialising. Hot read path: a 50k-entity
-/// load is 50k pointer casts, not 50k allocations.
-pub fn access_transform(
-    bytes: &[u8],
-) -> crate::error::Result<&ArchivedArchTransform> {
+/// Owned deserialize — the read path for bytes coming back from the
+/// store. Fjall hands back byte buffers with no alignment guarantee and
+/// the 1-byte tag offsets the archive, so we copy into an aligned buffer
+/// before the rkyv access (genuine zero-copy would require the store to
+/// return aligned bytes, which Fjall doesn't). Still far cheaper than a
+/// TOML parse — the original comparison the pivot was measured against.
+pub fn decode_transform(bytes: &[u8]) -> crate::error::Result<ArchTransform> {
     if bytes.is_empty() || bytes[0] != RKYV_VALUE_TAG {
         return Err(crate::error::Error::Archive(
             "rkyv value tag mismatch (foreign or wrong schema version)".into(),
         ));
     }
-    rkyv::access::<ArchivedArchTransform, rkyv::rancor::Error>(&bytes[1..])
-        .map_err(|e| crate::error::Error::Archive(format!("rkyv access: {e}")))
-}
-
-/// Full owned deserialize — for the cold path that needs an owned
-/// `ArchTransform` (e.g. the engine converting back to
-/// `bevy::Transform`). Still cheaper than TOML parse.
-pub fn decode_transform(bytes: &[u8]) -> crate::error::Result<ArchTransform> {
-    let archived = access_transform(bytes)?;
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(&bytes[1..]);
+    let archived = rkyv::access::<ArchivedArchTransform, rkyv::rancor::Error>(aligned.as_slice())
+        .map_err(|e| crate::error::Error::Archive(format!("rkyv access: {e}")))?;
     rkyv::deserialize::<ArchTransform, rkyv::rancor::Error>(archived)
         .map_err(|e| crate::error::Error::Archive(format!("rkyv decode: {e}")))
 }
@@ -136,14 +137,20 @@ pub fn encode_eusvalue(v: &EusValue) -> crate::error::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Owned decode of a tagged [`EusValue`] archive.
+/// Owned decode of a tagged [`EusValue`] archive. Like
+/// [`decode_transform`], copies past the tag byte into an aligned buffer
+/// because Fjall hands back unaligned `Vec<u8>` and rkyv's `access`
+/// requires the archive root to be aligned (EusValue contains i64/f64 →
+/// 8-byte alignment).
 pub fn decode_eusvalue(bytes: &[u8]) -> crate::error::Result<EusValue> {
     if bytes.is_empty() || bytes[0] != RKYV_VALUE_TAG {
         return Err(crate::error::Error::Archive(
             "rkyv value tag mismatch (EusValue)".into(),
         ));
     }
-    let archived = rkyv::access::<ArchivedEusValue, rkyv::rancor::Error>(&bytes[1..])
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(&bytes[1..]);
+    let archived = rkyv::access::<ArchivedEusValue, rkyv::rancor::Error>(aligned.as_slice())
         .map_err(|e| crate::error::Error::Archive(format!("rkyv access EusValue: {e}")))?;
     rkyv::deserialize::<EusValue, rkyv::rancor::Error>(archived)
         .map_err(|e| crate::error::Error::Archive(format!("rkyv decode EusValue: {e}")))
@@ -256,21 +263,20 @@ pub fn encode_instance_core(v: &ArchInstanceCore) -> crate::error::Result<Vec<u8
     Ok(out)
 }
 
-/// Zero-copy view of a stored [`ArchInstanceCore`] — the load hot path
-/// (a cast + validate, no allocation, no parse).
-pub fn access_instance_core(bytes: &[u8]) -> crate::error::Result<&ArchivedArchInstanceCore> {
+/// Owned decode — the real load path. Copies past the tag byte into an
+/// aligned buffer (Fjall buffers are unaligned and the tag offsets the
+/// archive; the contained EusValue tail needs 8-byte alignment), then
+/// validates + deserializes.
+pub fn decode_instance_core(bytes: &[u8]) -> crate::error::Result<ArchInstanceCore> {
     if bytes.is_empty() || bytes[0] != RKYV_VALUE_TAG {
         return Err(crate::error::Error::Archive(
             "rkyv value tag mismatch (ArchInstanceCore)".into(),
         ));
     }
-    rkyv::access::<ArchivedArchInstanceCore, rkyv::rancor::Error>(&bytes[1..])
-        .map_err(|e| crate::error::Error::Archive(format!("rkyv access ArchInstanceCore: {e}")))
-}
-
-/// Owned decode (cold path).
-pub fn decode_instance_core(bytes: &[u8]) -> crate::error::Result<ArchInstanceCore> {
-    let archived = access_instance_core(bytes)?;
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(&bytes[1..]);
+    let archived = rkyv::access::<ArchivedArchInstanceCore, rkyv::rancor::Error>(aligned.as_slice())
+        .map_err(|e| crate::error::Error::Archive(format!("rkyv access ArchInstanceCore: {e}")))?;
     rkyv::deserialize::<ArchInstanceCore, rkyv::rancor::Error>(archived)
         .map_err(|e| crate::error::Error::Archive(format!("rkyv decode ArchInstanceCore: {e}")))
 }
@@ -283,18 +289,17 @@ mod tests {
     fn transform_rkyv_roundtrip() {
         let v = ArchTransform::new([1.0, -2.5, 3.0], [0.0, 0.0, 0.0, 1.0], [2.0, 2.0, 2.0]);
         let bytes = encode_transform(&v).unwrap();
-        // zero-copy view
-        let a = access_transform(&bytes).unwrap();
-        assert_eq!(a.t[0], 1.0);
-        assert_eq!(a.s[1], 2.0);
-        // owned roundtrip
-        assert_eq!(decode_transform(&bytes).unwrap(), v);
+        let d = decode_transform(&bytes).unwrap();
+        assert_eq!(d.t[0], 1.0);
+        assert_eq!(d.s[1], 2.0);
+        // full owned roundtrip
+        assert_eq!(d, v);
     }
 
     #[test]
     fn rejects_untagged() {
-        assert!(access_transform(&[]).is_err());
-        assert!(access_transform(&[0xff, 1, 2, 3]).is_err());
+        assert!(decode_transform(&[]).is_err());
+        assert!(decode_transform(&[0xff, 1, 2, 3]).is_err());
     }
 
     #[test]
@@ -375,11 +380,10 @@ mod tests {
             )],
         };
         let bytes = encode_instance_core(&v).unwrap();
-        // zero-copy view
-        let a = access_instance_core(&bytes).unwrap();
-        assert_eq!(a.t[0], 1.0);
-        assert_eq!(a.s[1], 1.5);
-        // owned roundtrip
-        assert_eq!(decode_instance_core(&bytes).unwrap(), v);
+        let d = decode_instance_core(&bytes).unwrap();
+        assert_eq!(d.t[0], 1.0);
+        assert_eq!(d.s[1], 1.5);
+        // full owned roundtrip
+        assert_eq!(d, v);
     }
 }

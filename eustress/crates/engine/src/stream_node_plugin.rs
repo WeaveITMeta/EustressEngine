@@ -191,17 +191,21 @@ pub fn write_stream_port_file(handle: Res<StreamNodeHandle>) {
     );
 }
 
-/// Best-effort lookup of the active Universe root. Falls back to the
-/// canonical `~/Documents/Eustress/Universe1` when no override is set,
-/// matching the convention used elsewhere in the engine.
+/// Best-effort lookup of the active Universe root for advertising the
+/// stream-node port. Delegates to
+/// [`crate::space::best_default_universe_root`] (recorded
+/// `.default_universe` → first real Universe → `Universe1`), which routes
+/// through `workspace_root` and so bypasses OneDrive's redirected Documents
+/// folder — calling `dirs::document_dir()` directly (the old code) put the
+/// port file in `OneDrive\Documents`, where no sibling looks. A bare
+/// `first_universe_root()` would also misfire here: the workspace holds
+/// several universe dirs, and the loaded one (`Universe1`) is not the
+/// alphabetically-first (`ARC-AGI-3`).
 fn default_universe_root() -> std::path::PathBuf {
     if let Ok(env_path) = std::env::var("EUSTRESS_UNIVERSE_ROOT") {
         return std::path::PathBuf::from(env_path);
     }
-    if let Some(docs) = dirs::document_dir() {
-        return docs.join("Eustress").join("Universe1");
-    }
-    std::path::PathBuf::from(".")
+    crate::space::best_default_universe_root()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

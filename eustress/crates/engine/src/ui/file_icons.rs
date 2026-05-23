@@ -33,9 +33,11 @@ pub fn load_file_icon(extension: &str) -> String {
         "mp4" | "webm" | "mov" | "avi" | "mkv" | "flv" | "wmv" => "video",
         "wav" | "ogg" | "mp3" | "flac" | "aac" | "m4a" | "opus" => "audio",
         
-        // Documents - Tier 1
+        // Documents & Office - Tier 1
         "pdf" => "pdf",
-        "doc" | "docx" => "word",
+        "doc" | "docx" | "odt" | "rtf" | "epub" => "word",
+        "ppt" | "pptx" | "odp" => "powerpoint",
+        "xls" | "xlsx" | "ods" => "excel",
         "csv" | "tsv" => "table",
         "txt" | "text" => "file",
         
@@ -102,6 +104,38 @@ pub fn load_file_icon(extension: &str) -> String {
     };
     
     format!("../../assets/icons/filetypes/{}.svg", icon_name)
+}
+
+/// Decide whether double-clicking a file in the Explorer should hand it
+/// to the OS default application (PowerPoint, Word, a PDF viewer, an image
+/// viewer, …) rather than opening it in the in-engine text-tab editor.
+///
+/// Editable text / code / config / data formats open IN-ENGINE (returns
+/// `false`) so script and config editing stays inside Studio. Everything
+/// else — documents, presentations, spreadsheets, media, archives,
+/// binaries, and unknown extensions — opens EXTERNALLY (`true`) in the
+/// program that actually understands the file.
+pub fn opens_externally(extension: &str) -> bool {
+    !matches!(
+        extension.to_lowercase().as_str(),
+        // Code / scripts
+        "rs" | "ron" | "lua" | "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "py"
+        | "go" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "java"
+        | "kt" | "kts" | "swift" | "zig" | "rb" | "asm" | "s"
+        // Web / markup
+        | "html" | "htm" | "css" | "scss" | "sass" | "less" | "jsx" | "tsx" | "vue"
+        | "md" | "markdown" | "svg"
+        // Data / config
+        | "json" | "jsonc" | "toml" | "yaml" | "yml" | "xml" | "xsl" | "xsd"
+        | "csv" | "tsv" | "ini" | "cfg" | "conf" | "config" | "env" | "envrc"
+        | "editorconfig" | "proto" | "protobuf" | "sql"
+        // Shaders
+        | "wgsl" | "glsl" | "hlsl" | "vert" | "frag" | "comp"
+        // Plain text / build / devops
+        | "txt" | "text" | "log" | "sh" | "bash" | "zsh" | "fish"
+        | "dockerfile" | "makefile" | "make" | "cmake" | "cmakelist"
+        | "gitignore" | "gitattributes" | "gitmodules"
+    )
 }
 
 /// Load folder icon based on directory name and expanded state

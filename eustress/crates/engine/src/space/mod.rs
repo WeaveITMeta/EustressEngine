@@ -24,10 +24,13 @@ pub mod draco_decoder;
 pub mod space_ops;
 pub mod space_source;
 pub mod universe_registry;
+pub mod representation;
 #[cfg(feature = "world-db")]
 pub mod arch_instance;
 #[cfg(feature = "world-db")]
 pub mod auto_convert;
+#[cfg(feature = "world-db")]
+pub mod world_db_binary;
 #[cfg(feature = "world-db")]
 pub mod world_db_plugin;
 
@@ -212,16 +215,60 @@ pub fn universe_root_for_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// True if `path` is a real Universe directory: a non-hidden directory that
+/// holds a `Spaces/` (or legacy `spaces/`) tier and is not itself a Space.
+/// Excludes hidden config dirs (`.claude`, `.eustress`, `.git`, …) and
+/// stray files, so a workspace scan never mistakes them for a Universe.
+pub fn is_universe_dir(path: &Path) -> bool {
+    if !path.is_dir() || looks_like_space_root(path) {
+        return false;
+    }
+    let hidden = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with('.'))
+        .unwrap_or(true);
+    if hidden {
+        return false;
+    }
+    path.join("Spaces").is_dir() || path.join("spaces").is_dir()
+}
+
 pub fn first_universe_root() -> Option<PathBuf> {
     let workspace = workspace_root();
     let mut universes: Vec<PathBuf> = std::fs::read_dir(&workspace)
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && !looks_like_space_root(path))
+        .filter(|path| is_universe_dir(path))
         .collect();
     universes.sort();
     universes.into_iter().next()
+}
+
+/// The Universe directory named by the `.default_universe` marker the
+/// launcher writes under the workspace root, when it names an existing dir.
+pub fn recorded_default_universe() -> Option<PathBuf> {
+    let workspace = workspace_root();
+    let raw = std::fs::read_to_string(workspace.join(".default_universe")).ok()?;
+    let name = raw.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let candidate = workspace.join(name);
+    candidate.is_dir().then_some(candidate)
+}
+
+/// Best default Universe root when no specific Space is loaded: the
+/// recorded `.default_universe`, else the first real Universe, else
+/// `<workspace>/Universe1`. Always routes through `workspace_root`
+/// (OneDrive-avoiding). Use this — not a raw `read_dir().next()` — anywhere
+/// you need "the Universe the engine boots into" without a `SpaceRoot` in
+/// hand (port files, stream advertisements, default-space resolution).
+pub fn best_default_universe_root() -> PathBuf {
+    recorded_default_universe()
+        .or_else(first_universe_root)
+        .unwrap_or_else(|| workspace_root().join("Universe1"))
 }
 
 pub fn first_space_root_in_universe(universe_root: &Path) -> Option<PathBuf> {

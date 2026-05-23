@@ -300,7 +300,27 @@ fn open_world_db_on_space_change(
 fn mirror_transform_changes(
     handle: Res<WorldDbHandle>,
     load_in_progress: Res<super::file_loader::LoadInProgress>,
-    q: Query<(Entity, &Transform), Changed<Transform>>,
+    // Binary-ECS entities are excluded: their canonical store is the
+    // Morton-keyed INSTANCE_CORE record (written by
+    // `world_db_binary::mirror_binary_ecs_changes`), not the flat-keyed
+    // TRANSFORM component — so this mirror would only write a redundant
+    // second record for them.
+    q: Query<
+        (Entity, &Transform),
+        (
+            Changed<Transform>,
+            Without<super::world_db_binary::BinaryEcsInstance>,
+        ),
+    >,
+    // Value-gate (2026-05-21 fix). `Changed<Transform>` flips on ANY
+    // deref-mut, including same-value re-writes — e.g. Avian's per-frame
+    // transform sync re-writing anchored/static bodies even with physics
+    // paused. Measured: ~1200 NO-OP transform commits PER FRAME while
+    // idle (a Fjall journal + FPS storm). Persist only when the VALUE
+    // actually changed vs. the last commit; the compare is alloc-free
+    // (no encode) so the common idle case does ~zero work. This is the
+    // "nothing every frame unless data actually changed" rule.
+    mut last_written: Local<std::collections::HashMap<Entity, ([f32; 3], [f32; 4], [f32; 3])>>,
 ) {
     let Some(db) = handle.0.as_ref() else {
         return;
@@ -315,12 +335,34 @@ fn mirror_transform_changes(
         if budget == 0 {
             break;
         }
+        let cur = (
+            [
+                transform.translation.x,
+                transform.translation.y,
+                transform.translation.z,
+            ],
+            [
+                transform.rotation.x,
+                transform.rotation.y,
+                transform.rotation.z,
+                transform.rotation.w,
+            ],
+            [transform.scale.x, transform.scale.y, transform.scale.z],
+        );
+        // Skip no-op re-writes (value already persisted). This is what
+        // kills the change-detection-false-positive storm: an entity
+        // whose Transform was deref-mut'd to the SAME value contributes
+        // zero work past this point.
+        if last_written.get(&entity) == Some(&cur) {
+            continue;
+        }
         let bytes = encode_transform(transform);
         commit.put_component(
             WdbEntityId(entity.to_bits()),
             ComponentTypeId::TRANSFORM,
             bytes,
         );
+        last_written.insert(entity, cur);
         budget -= 1;
     }
 
@@ -381,8 +423,10 @@ fn drain_change_stream(
 
 /// Encode a Bevy `Transform` to a Fjall value via the worlddb rkyv
 /// mirror (Phase 4 — replaced the hand-rolled 40-byte layout). The
-/// stored bytes are a tagged rkyv archive; the read path is zero-copy
-/// (`eustress_worlddb::access_transform`).
+/// stored bytes are a tagged rkyv archive; the read path is
+/// `eustress_worlddb::decode_transform` (validate + deserialize past the
+/// tag byte; Fjall buffers are unaligned so a true zero-copy borrow
+/// isn't possible, but it still beats the TOML parse it replaced).
 pub(crate) fn encode_transform(t: &Transform) -> Vec<u8> {
     let arch = eustress_worlddb::ArchTransform::new(
         [t.translation.x, t.translation.y, t.translation.z],
@@ -490,5 +534,11 @@ impl Plugin for WorldDbPlugin {
             // Dual model: mirror runtime TOML edits into the Fjall tree
             // so the binary store stays in lockstep with hand/IDE edits.
             .add_systems(Update, sync_toml_edits_to_fjall);
+
+        // Binary-ECS arm of the representation router: boot-load the
+        // `entities` partition into the ECS + persist live edits back.
+        // Self-contained (its own latch + value-gate); a no-op when the
+        // partition is empty, so it can't regress a legacy disk Space.
+        super::world_db_binary::register(app);
     }
 }

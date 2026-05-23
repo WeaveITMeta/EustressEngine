@@ -138,6 +138,15 @@ pub struct FrameSelectionEvent {
     pub target_bounds: Option<(Vec3, Vec3)>,
 }
 
+/// Message to move the editor camera to look THROUGH another camera's pose
+/// (fired by pressing F on a selected `Camera` object, e.g. the AI camera).
+/// Unlike `FrameSelectionEvent` (which frames bounding-box bounds), this
+/// reproduces a specific camera's viewpoint.
+#[derive(Message, Debug, Clone)]
+pub struct GoToCameraEvent {
+    pub target: Entity,
+}
+
 /// Eustress Camera: Empowering focus and flow navigation
 /// Pivot-based system that builds positive momentum and keeps you centered on your vision
 #[derive(Component, Reflect)]
@@ -229,6 +238,7 @@ impl Plugin for CameraControllerPlugin {
             .add_message::<SnapToViewEvent>()
             .add_message::<ToggleProjectionEvent>()
             .add_message::<FrameSelectionEvent>()
+            .add_message::<GoToCameraEvent>()
             .add_systems(Update, (
                 ensure_camera_exists,
                 update_camera_viewport_for_ui,
@@ -237,6 +247,7 @@ impl Plugin for CameraControllerPlugin {
                 handle_snap_to_view,
                 handle_toggle_projection,
                 handle_frame_selection,
+                handle_go_to_camera,
                 animate_view_transition,
                 eustress_camera_controls,
                 update_eustress_camera_transform,
@@ -249,22 +260,33 @@ impl Plugin for CameraControllerPlugin {
 /// This constrains 3D rendering to only the visible viewport area, avoiding wasted GPU work
 /// behind opaque UI panels (ribbon, explorer, properties, output).
 fn update_camera_viewport_for_ui(
-    mut camera_query: Query<&mut Camera, (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
+    mut camera_query: Query<(&mut Camera, &bevy::camera::RenderTarget), (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
 ) {
     let Some(vb) = viewport_bounds else { return };
-    let Some(mut camera) = camera_query.iter_mut().next() else { return };
-    
+
     // Only clip if Slint has reported valid viewport dimensions
     if vb.width < 10.0 || vb.height < 10.0 {
         return;
     }
-    
-    camera.viewport = Some(bevy::camera::Viewport {
+
+    let vp = bevy::camera::Viewport {
         physical_position: UVec2::new(vb.x.max(0.0) as u32, vb.y.max(0.0) as u32),
         physical_size: UVec2::new(vb.width as u32, vb.height as u32),
         ..default()
-    });
+    };
+
+    for (mut camera, target) in camera_query.iter_mut() {
+        // Only the WINDOW camera gets the Slint-fitted viewport. Off-screen
+        // image cameras (e.g. the AI camera) must render their FULL image — a
+        // window-sized viewport overflows the image's bounds and panics the
+        // `set_scissor_rect` validation. Previously this took the first camera
+        // via `.next()`, which non-deterministically picked the AI camera.
+        if matches!(target, bevy::camera::RenderTarget::Image(_)) {
+            continue;
+        }
+        camera.viewport = Some(vp.clone());
+    }
 }
 
 /// Ensure at least one camera exists - auto-spawn if all cameras are deleted
@@ -812,6 +834,42 @@ fn eustress_camera_controls(
     }
 }
 
+/// F on a selected `Camera` object → move the editor camera to look THROUGH it.
+///
+/// Inverts the orbit math in `update_eustress_camera_transform` (which places
+/// the camera at `pivot + distance·(cos·sin, sin, cos·cos)` looking at `pivot`).
+/// To reproduce the target camera's pose (position `P`, forward `F`) we set the
+/// orbit `dir = -F`, derive yaw/pitch from it, and put the pivot `distance`
+/// ahead of `P` (`pivot = P + F·distance`) — so the editor camera ends up at
+/// `P` looking along `F`. After this, normal WASD/right-click resumes from that
+/// pose (a continuous "follow" mode is a future addition on top of this).
+fn handle_go_to_camera(
+    mut events: MessageReader<GoToCameraEvent>,
+    targets: Query<&GlobalTransform>,
+    mut editor: Query<&mut EustressCamera, With<Camera3d>>,
+) {
+    let Some(ev) = events.read().last() else { return };
+    let Ok(target_gt) = targets.get(ev.target) else { return };
+    let Ok(mut cam) = editor.single_mut() else { return };
+
+    let (_scale, rot, pos) = target_gt.to_scale_rotation_translation();
+    let fwd = (rot * Vec3::NEG_Z).normalize_or_zero();
+    if fwd == Vec3::ZERO {
+        return;
+    }
+    let dir = -fwd;
+    let pitch = dir.y.clamp(-1.0, 1.0).asin();
+    let yaw = dir.x.atan2(dir.z);
+    let distance = cam.distance.max(1.0);
+
+    cam.pivot = pos + fwd * distance;
+    cam.yaw = yaw;
+    cam.pitch = pitch;
+    cam.target_yaw = yaw;
+    cam.target_pitch = pitch;
+    info!("📷 F → editor camera now looking through camera {:?}", ev.target);
+}
+
 /// Transform Update - INSTANT, RAW response with NO smoothing
 fn update_eustress_camera_transform(
     mut query: Query<(&mut EustressCamera, &mut Transform), With<Camera3d>>,
@@ -851,16 +909,23 @@ fn update_eustress_camera_transform(
     }
 }
 
-/// Add EustressCamera component to the main camera - empowering your creative vision
+/// Add `EustressCamera` (WASD/right-click controls) to the WINDOW camera only.
+///
+/// Off-screen image cameras — e.g. the independent AI camera — are driven
+/// programmatically via their own bridge methods, NOT the editor controls.
+/// Giving one `EustressCamera` would create a second controlled camera, which
+/// makes the input systems' `single_mut::<EustressCamera>()` return `Err`
+/// (ambiguous) and silently kills WASD/right-click on the real camera. So we
+/// skip any camera whose render target is an Image.
 pub fn setup_camera_controller(
     mut commands: Commands,
-    camera_query: Query<Entity, (With<Camera3d>, Without<EustressCamera>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
+    camera_query: Query<(Entity, &bevy::camera::RenderTarget), (With<Camera3d>, Without<EustressCamera>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
 ) {
-    let count = camera_query.iter().count();
-    println!("🔍 Found {} Camera3d entities without EustressCamera", count);
-    
-    for entity in camera_query.iter() {
+    for (entity, target) in camera_query.iter() {
+        if matches!(target, bevy::camera::RenderTarget::Image(_)) {
+            continue; // off-screen camera (AI camera) — not user-controlled
+        }
         commands.entity(entity).insert(EustressCamera::default());
-        println!("✅ Eustress Camera: Empowering focus and flow enabled on entity {:?}", entity);
+        println!("✅ Eustress Camera: controls enabled on entity {:?}", entity);
     }
 }

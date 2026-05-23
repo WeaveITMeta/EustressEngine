@@ -78,9 +78,24 @@ mod history_stream;
 mod soul_script_migration;
 mod notifications;
 mod keybindings;
+// Engine Bridge is compiled as a BIN module (NOT pulled from the
+// `eustress_engine` lib) ON PURPOSE. Its handlers read/write engine
+// resources (StudioState, SelectionSyncManager, SpaceRoot), query
+// components (spawn::MeshSource, instance_loader::InstanceFile), and emit
+// MenuActionEvent — all of which are ALSO declared by the bin's own
+// `mod`s. The lib compiles its own copies of those types with different
+// `TypeId`s, so a lib-side bridge silently sees `None` for every engine
+// resource and never matches bin-spawned components (mesh/source come
+// back null). Compiling the bridge in the bin crate keeps its `TypeId`s
+// identical to the running engine's. See `engine_bridge::protocol`.
+mod engine_bridge;
+// Independent off-screen AI camera (bin module: its bridge handlers and the
+// plugin must share the bin's TypeIds, same reason as engine_bridge).
+mod ai_camera;
 mod part_selection;
 mod transform_space;
 mod clipboard;
+mod grouping;
 mod material_sync;
 mod lock_tool;
 mod video;
@@ -133,6 +148,7 @@ use undo::UndoPlugin;
 use notifications::NotificationPlugin;
 use keybindings::KeyBindingsPlugin;
 use clipboard::ClipboardPlugin;
+use grouping::GroupingPlugin;
 use material_sync::MaterialSyncPlugin;
 use terrain_plugin::EngineTerrainPlugin;
 use play_mode::PlayModePlugin;
@@ -273,7 +289,21 @@ fn main() {
         // Engine Bridge — JSON-RPC 2.0 over localhost TCP for sibling
         // processes (MCP server, plugins) to query live ECS / sim /
         // embedvec. Port handoff via `<universe>/.eustress/engine.port`.
-        .add_plugins(eustress_engine::engine_bridge::EngineBridgePlugin)
+        // Bin-local (`engine_bridge`, not `eustress_engine::engine_bridge`)
+        // so its handlers share the bin's `TypeId`s — see the `mod
+        // engine_bridge` note above.
+        .add_plugins(engine_bridge::EngineBridgePlugin)
+        // Guarantee `SpaceRoot` is always a resource. On a fresh launch the
+        // space loader resolves `default_space_root()` directly and only the
+        // runtime space-SWITCH path inserts `SpaceRoot`; without this the
+        // resource is absent at boot, breaking bridge handlers
+        // (viewport.capture, tools.call) and the port-file resync. Default
+        // = last-opened/default space; `--space`/`--universe` and runtime
+        // switches override it (init_resource is a no-op if already set).
+        .init_resource::<space::SpaceRoot>()
+        // Independent off-screen AI camera — the AI's own eyes (renders to an
+        // image, never the window, so it can't displace the editor camera).
+        .add_plugins(ai_camera::AiCameraPlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
         // Floating windows
@@ -315,6 +345,8 @@ fn main() {
         .add_plugins(KeyBindingsPlugin)
         // Clipboard
         .add_plugins(ClipboardPlugin)
+        // Group (Ctrl+G) / Ungroup (Ctrl+U)
+        .add_plugins(GroupingPlugin)
         // Workspace
         .add_plugins(WorkspacePlugin)
         // Service properties

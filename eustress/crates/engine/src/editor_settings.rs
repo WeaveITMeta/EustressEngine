@@ -499,11 +499,22 @@ pub(crate) fn git_autosave_commit(
 
     // Wrapper so the one-off commands all share the same cwd + error
     // shape. Output is captured so nothing leaks to the engine stdout.
+    //
+    // CREATE_NO_WINDOW (Windows): the autosave runs on a background
+    // thread every ~5 minutes; without this flag every `git` spawn flashes
+    // a console window over the engine. Mirrors `lsp_launcher.rs`. Routed
+    // through this single closure so all 8 git calls (init/config/rm/add/
+    // diff/commit/rev-parse) inherit it.
     let run = |args: &[&str]| -> Result<std::process::Output, String> {
-        Command::new("git")
-            .args(args)
-            .current_dir(space_path)
-            .output()
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(space_path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
             .map_err(|e| format!("git {:?}: {}", args, e))
     };
 
@@ -520,6 +531,19 @@ pub(crate) fn git_autosave_commit(
         let _ = run(&["config", "user.email", "autosave@eustress.local"]);
         let _ = run(&["config", "user.name", "Eustress Engine Autosave"]);
     }
+
+    // Keep the binary Fjall DB, the `.eustress` sidecar/trash, and
+    // recovery backups OUT of the autosave repo. The autosave versions
+    // the editable TOML hierarchy; `world.fjalldb/` is a large, derived,
+    // constantly-rewritten mirror. Hashing its 32 MB journals every
+    // interval was expensive, caused "unstable object source data"
+    // errors (git reading journals mid-write), and churned `.git/`
+    // (storming the file watcher → the ~5s editor stutter). Idempotent.
+    ensure_autosave_gitignore(space_path);
+    // Drop any DB files an earlier build already committed so this commit
+    // removes them from the index (no-op once gone; --ignore-unmatch
+    // stays quiet when nothing matched).
+    let _ = run(&["rm", "-r", "--cached", "--ignore-unmatch", "--quiet", "world.fjalldb"]);
 
     // Stage everything. `-A` picks up adds / modifies / deletes in one
     // pass without requiring the caller to enumerate paths.
@@ -569,5 +593,32 @@ pub(crate) fn git_autosave_commit(
         .unwrap_or_else(|| "HEAD".to_string());
 
     Ok(GitAutosave::Committed(sha))
+}
+
+/// Ensure the Space's autosave `.gitignore` excludes the binary Fjall DB,
+/// the `.eustress` sidecar/trash, and recovery `.bak-*` backups so
+/// `git add -A` never hashes them. Idempotent — only writes when an entry
+/// is missing, so it doesn't itself churn the file watcher.
+fn ensure_autosave_gitignore(space_path: &std::path::Path) {
+    let path = space_path.join(".gitignore");
+    let needed = ["world.fjalldb/", ".eustress/trash/", "*.bak-*"];
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut additions = String::new();
+    for entry in needed {
+        if !existing.lines().any(|l| l.trim() == entry) {
+            additions.push_str(entry);
+            additions.push('\n');
+        }
+    }
+    if additions.is_empty() {
+        return;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("# Eustress autosave: derived/binary + sidecar, not versioned\n");
+    content.push_str(&additions);
+    let _ = std::fs::write(&path, content);
 }
 

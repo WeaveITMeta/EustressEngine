@@ -38,7 +38,10 @@ pub mod play_mode;
 pub mod play_mode_runtime;
 pub mod script_editor;
 pub mod lsp_launcher;
-pub mod engine_bridge;
+// `engine_bridge` is compiled as a BIN-LOCAL module (see main.rs) so its
+// handlers share the bin's TypeIds for live resources/components. It is
+// intentionally NOT a lib module: the lib lacks the bin-only modules its
+// handlers reference (e.g. `ai_camera`), and nothing in the lib uses it.
 pub mod notifications;
 pub mod ui;
 pub mod seats;
@@ -98,6 +101,7 @@ pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
 pub mod clipboard;
+pub mod grouping;
 pub mod embedded_client;
 pub mod studio_plugins;
 pub mod grid_snapping;

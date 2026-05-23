@@ -16,6 +16,13 @@
 //! - `--output DIR`    — output directory, default: auto-detect Space1/Workspace/BenchmarkGrid
 //! - `--active-pct F`  — fraction of parts with velocity > 0 (MoE active), default: 0.10
 //! - `--seed U`        — random seed for reproducibility, default: 42
+//! - `--disk`          — legacy: write one folder + `_instance.toml` per part
+//! - `--binary-ecs`    — write rkyv `ArchInstanceCore` records into the
+//!                       `entities` partition (the representation-router
+//!                       BinaryEcs arm); verifies the binary-ECS boot-load
+//!                       path. Additive to the tree; small N (e.g. 50) is
+//!                       enough to confirm parts appear in viewport +
+//!                       Explorer + Properties.
 //!
 //! ## Scaling Guide
 //! - 100×100  =      10,000 parts  — basic smoke test
@@ -41,6 +48,14 @@ fn main() {
     // `world.fjalldb` tree partition — the same representation the
     // faithful importer produces and `SpaceSource::Fjall` loads.
     let disk_mode = args.iter().any(|a| a == "--disk");
+    // `--binary-ecs` writes each part as a pure binary-ECS rkyv
+    // `ArchInstanceCore` into the `entities` partition (Morton-keyed),
+    // NOT a TOML in the `tree`. This is the representation router's
+    // BinaryEcs arm; the engine's `world_db_binary::load_binary_ecs_instances`
+    // boot-loads them into the ECS (viewport + Explorer + Properties).
+    // It exists to VERIFY that path end-to-end without touching any
+    // interactive create flow. Ignored under `--disk`.
+    let binary_ecs_mode = args.iter().any(|a| a == "--binary-ecs");
     let output_dir = parse_string_flag(&args, "--output")
         .map(PathBuf::from)
         .unwrap_or_else(default_output_dir);
@@ -52,7 +67,16 @@ fn main() {
     println!("Active:     {:.0}% ({} parts with velocity)", active_pct * 100.0, (total as f32 * active_pct) as usize);
     println!("Seed:       {}", seed);
     println!("Output:     {}", output_dir.display());
-    println!("Mode:       {}", if disk_mode { "DISK (legacy 50k folders)" } else { "WORLDDB (direct to Fjall, no folders)" });
+    println!(
+        "Mode:       {}",
+        if disk_mode {
+            "DISK (legacy 50k folders)"
+        } else if binary_ecs_mode {
+            "BINARY-ECS (entities partition, rkyv cores)"
+        } else {
+            "WORLDDB (direct to Fjall tree, no folders)"
+        }
+    );
     println!();
 
     // ── Resolve the sink ──────────────────────────────────────────────
@@ -66,7 +90,7 @@ fn main() {
     } else {
         match derive_space_root_and_prefix(&output_dir) {
             Some((space_root, rel_prefix)) => {
-                match open_world_db_sink(&space_root, &rel_prefix) {
+                match open_world_db_sink(&space_root, &rel_prefix, binary_ecs_mode) {
                     Ok(sink) => Some(sink),
                     Err(e) => {
                         eprintln!("ERROR: WorldDb sink unavailable ({e}). Re-run with --disk to force the filesystem path.");
@@ -198,11 +222,22 @@ last_modified = "2026-03-22T00:00:00Z"
 
             #[cfg(feature = "world-db")]
             if let Some(ref sink) = world_db_sink {
-                // Direct-to-Fjall: key is the Space-relative path the
-                // loader's SpaceSource would read — no disk folder.
-                match sink.put_part(&part_name, toml_content.as_bytes()) {
-                    Ok(()) => written += 1,
-                    Err(e) => eprintln!("WARN: worlddb put {part_name}: {e}"),
+                if sink.binary_ecs {
+                    // Pure binary-ECS: a rkyv core in the entities
+                    // partition. Stable id is the linear grid index
+                    // (unique regardless of put failures).
+                    let stored_id = (row * grid_size + col) as u64 + 1;
+                    match sink.put_part_binary(stored_id, [x, y, z], scale, [r, g, b]) {
+                        Ok(()) => written += 1,
+                        Err(e) => eprintln!("WARN: worlddb put_binary {part_name}: {e}"),
+                    }
+                } else {
+                    // Direct-to-Fjall tree: key is the Space-relative path
+                    // the loader's SpaceSource would read — no disk folder.
+                    match sink.put_part(&part_name, toml_content.as_bytes()) {
+                        Ok(()) => written += 1,
+                        Err(e) => eprintln!("WARN: worlddb put {part_name}: {e}"),
+                    }
                 }
             } else {
                 write_part_to_disk(&output_dir, &part_name, &toml_content, &mut written);
@@ -239,6 +274,8 @@ last_modified = "2026-03-22T00:00:00Z"
     println!("Written: {} parts in {:.2?} ({:.0} parts/sec)", written, elapsed, rate);
     if disk_mode {
         println!("Output:  {} (disk folders)", output_dir.display());
+    } else if binary_ecs_mode {
+        println!("Output:  world.fjalldb entities partition (rkyv binary-ECS cores)");
     } else {
         println!("Output:  world.fjalldb tree partition (no disk folders)");
     }
@@ -277,6 +314,10 @@ fn write_part_to_disk(
 struct WorldDbSink {
     db: std::sync::Arc<dyn eustress_worlddb::WorldDb>,
     rel_prefix: String,
+    /// When true, parts are written as rkyv `ArchInstanceCore` records in
+    /// the `entities` partition (via `put_part_binary`) instead of TOML in
+    /// the `tree` (via `put_part`).
+    binary_ecs: bool,
 }
 
 #[cfg(feature = "world-db")]
@@ -287,6 +328,50 @@ impl WorldDbSink {
             .put_file(&key, bytes)
             .map_err(|e| e.to_string())
     }
+
+    /// Write one part as a pure binary-ECS core into the `entities`
+    /// partition, Morton-keyed by position. Color is stored as sRGB
+    /// [0,1] (the form `spawn_instance` feeds to `Color::srgba` on load).
+    fn put_part_binary(
+        &self,
+        stored_id: u64,
+        pos: [f32; 3],
+        scale: f32,
+        rgb: [u8; 3],
+    ) -> Result<(), String> {
+        let core = eustress_worlddb::ArchInstanceCore {
+            class_name: "Part".to_string(),
+            mesh: "parts/block.glb".to_string(),
+            scene: "Scene0".to_string(),
+            t: pos,
+            r: [0.0, 0.0, 0.0, 1.0],
+            s: [scale, scale, scale],
+            color: [
+                rgb[0] as f32 / 255.0,
+                rgb[1] as f32 / 255.0,
+                rgb[2] as f32 / 255.0,
+                1.0,
+            ],
+            transparency: 0.0,
+            reflectance: 0.0,
+            anchored: true,
+            can_collide: false,
+            cast_shadow: false,
+            locked: false,
+            material: "Plastic".to_string(),
+            tags: Vec::new(),
+            extra: Vec::new(),
+        };
+        let bytes = eustress_worlddb::encode_instance_core(&core).map_err(|e| e.to_string())?;
+        self.db
+            .put_instance_core(
+                eustress_worlddb::EntityId(stored_id),
+                (pos[0], pos[1], pos[2]),
+                &bytes,
+            )
+            .map_err(|e| e.to_string())
+    }
+
     fn flush(&self) -> Result<(), String> {
         self.db.flush().map_err(|e| e.to_string())
     }
@@ -299,25 +384,40 @@ impl WorldDbSink {
 /// and the engine's open/seed logic would skip importing the rest of
 /// the Space, loading a grid-only world.
 #[cfg(feature = "world-db")]
-fn open_world_db_sink(space_root: &Path, rel_prefix: &str) -> Result<WorldDbSink, String> {
+fn open_world_db_sink(
+    space_root: &Path,
+    rel_prefix: &str,
+    binary_ecs: bool,
+) -> Result<WorldDbSink, String> {
     let db_dir = space_root.join("world.fjalldb");
     std::fs::create_dir_all(&db_dir).map_err(|e| format!("create {db_dir:?}: {e}"))?;
     let db = eustress_worlddb::backend::open(&db_dir).map_err(|e| e.to_string())?;
-    let empty = db.tree_is_empty().map_err(|e| e.to_string())?;
-    if empty {
-        println!("WorldDb tree empty — importing existing Space disk content first…");
-        let summary = eustress_worlddb::import::import_space(db.as_ref(), space_root)
-            .map_err(|e| e.to_string())?;
-        println!(
-            "  imported {} files / {} dirs ({} bytes) from existing Space",
-            summary.files_imported, summary.dirs_walked, summary.bytes_imported
-        );
+    if binary_ecs {
+        // Binary-ECS grid is ADDITIVE to the `entities` partition and does
+        // NOT touch the `tree`, so leave any existing tree alone — the
+        // engine still loads the Space's real content (Baseplate, services)
+        // its usual way, and the grid spawns on top via the binary-ECS
+        // boot-load. (No tree import: that's only for the FjallSource TOML
+        // read path.)
+        println!("Binary-ECS mode — appending rkyv cores to the entities partition (tree untouched).");
     } else {
-        println!("WorldDb tree already populated — appending grid into existing Fjall world.");
+        let empty = db.tree_is_empty().map_err(|e| e.to_string())?;
+        if empty {
+            println!("WorldDb tree empty — importing existing Space disk content first…");
+            let summary = eustress_worlddb::import::import_space(db.as_ref(), space_root)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "  imported {} files / {} dirs ({} bytes) from existing Space",
+                summary.files_imported, summary.dirs_walked, summary.bytes_imported
+            );
+        } else {
+            println!("WorldDb tree already populated — appending grid into existing Fjall world.");
+        }
     }
     Ok(WorldDbSink {
         db,
         rel_prefix: rel_prefix.to_string(),
+        binary_ecs,
     })
 }
 

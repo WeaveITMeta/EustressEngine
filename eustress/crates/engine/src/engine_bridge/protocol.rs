@@ -102,6 +102,46 @@ pub enum MethodName {
     Ping,
     SimRead,
     EcsQuery,
+    /// Detailed live scene snapshot — per-entity class / transform / mesh
+    /// / material / render+physics flags / parent / on-disk source, plus
+    /// frame stats (FPS). This is the "AI inspects the running engine"
+    /// surface: far richer than `ecs.query`'s id/name/class, so a data bug
+    /// like a wrong `asset.mesh` (the V-Cell block-render regression) is
+    /// visible directly. Read-only; safe to call every frame.
+    EcsInspect,
+    /// Set the active editor tool (select/move/scale/rotate) — the AI
+    /// "equip tool" action; mirrors the Alt+Z/X/C/V shortcuts.
+    ToolEquip,
+    /// Replace the current selection with a set of entity ids — the AI
+    /// "select object(s)" action. Drives gizmos + Properties downstream.
+    SelectionSet,
+    /// Read live editor state (active tool + current selection) so the AI
+    /// can query the result of its own actions. The queryable complement.
+    StateGet,
+    /// Invoke any editor Action by name (Copy/Cut/Paste/Duplicate/Group/
+    /// Ungroup/Delete/SelectAll/Undo/Redo/SaveScene/tool switches/…) — the
+    /// AI "press the keyboard shortcut" surface. Writes the same
+    /// `MenuActionEvent` the keybinding layer produces, so the FULL action
+    /// path runs identically to a real key press. The core of systematic
+    /// editor testing over MCP.
+    ActionInvoke,
+    /// Capture the primary window (3D viewport + UI overlay) to a PNG on
+    /// disk and return its path — the AI's "eyes". The viewport renders to
+    /// the window, so this is exactly what a human sees. Read the returned
+    /// path with the file reader to view the frame.
+    ViewportCapture,
+    /// Place the independent AI camera (position + look-at/rotation) — the
+    /// AI's own off-screen camera, independent of the user's viewport.
+    AiCameraSetPose,
+    /// Orbit the AI camera around a point (center/distance/yaw/pitch).
+    AiCameraOrbit,
+    /// Frame a named entity in the AI camera (auto-distance from its size).
+    AiCameraFrame,
+    /// Render the AI camera's independent view to a PNG and return the path —
+    /// the AI's own eyes, separate from `viewport.capture` (which is the
+    /// user's window). On-demand: powers the off-screen camera up only for
+    /// the capture.
+    AiCameraCapture,
     /// List every registered Workshop tool — MCP's `tools/list` proxies
     /// to this so external IDEs see the same 52+ tool surface Workshop has.
     ToolsList,
@@ -121,6 +161,16 @@ where
         "ping" => MethodName::Ping,
         "sim.read" => MethodName::SimRead,
         "ecs.query" => MethodName::EcsQuery,
+        "ecs.inspect" => MethodName::EcsInspect,
+        "tool.equip" => MethodName::ToolEquip,
+        "selection.set" => MethodName::SelectionSet,
+        "state.get" => MethodName::StateGet,
+        "action.invoke" => MethodName::ActionInvoke,
+        "viewport.capture" => MethodName::ViewportCapture,
+        "ai_camera.set_pose" => MethodName::AiCameraSetPose,
+        "ai_camera.orbit" => MethodName::AiCameraOrbit,
+        "ai_camera.frame" => MethodName::AiCameraFrame,
+        "ai_camera.capture" => MethodName::AiCameraCapture,
         "tools.list" => MethodName::ToolsList,
         "tools.call" => MethodName::ToolsCall,
         _ => MethodName::Unknown(s),
@@ -320,6 +370,560 @@ pub mod handlers {
                 "returned": returned,
                 "has_more": has_more,
                 "encoding": encoding,
+            }),
+        )
+    }
+
+    /// `ecs.inspect` — a DETAILED live scene snapshot for AI debugging.
+    ///
+    /// Unlike `ecs.query` (id/name/class), this returns the fields that
+    /// actually surface bugs: the resolved mesh (the V-Cell block-render
+    /// regression was a wrong `mesh`), material, color, transform, the
+    /// render/physics flags, parent, and the on-disk source path. Plus
+    /// top-level frame stats (`fps`) so perf regressions show too.
+    ///
+    /// Params (all optional): `class` (exact class filter),
+    /// `name_contains` (case-insensitive substring), `offset`, `limit`
+    /// (default 200, max 5000). Read-only.
+    pub fn ecs_inspect(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use bevy::prelude::{ChildOf, Transform, Visibility};
+
+        let class_filter: Option<String> = req
+            .params
+            .get("class")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let name_filter: Option<String> = req
+            .params
+            .get("name_contains")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
+        let offset = req.params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = req
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|l| l as usize)
+            .unwrap_or(200)
+            .min(5_000);
+
+        // Cloned out of the World before the query borrow so we can turn
+        // absolute InstanceFile paths into Space-relative ones.
+        let space_root = world
+            .get_resource::<crate::space::SpaceRoot>()
+            .map(|sr| sr.0.clone());
+
+        #[derive(serde::Serialize)]
+        struct TransformJson {
+            pos: [f32; 3],
+            rot: [f32; 4],
+            scale: [f32; 3],
+        }
+        #[derive(serde::Serialize)]
+        struct EntityDetail {
+            id: String,
+            name: String,
+            class: Option<String>,
+            /// The resolved mesh reference (engine primitive `parts/*.glb`
+            /// or a custom/relative path). The field the V-Cell bug lived in.
+            mesh: Option<String>,
+            material: Option<String>,
+            color: Option<[f32; 4]>,
+            transparency: Option<f32>,
+            size: Option<[f32; 3]>,
+            transform: Option<TransformJson>,
+            visible: Option<bool>,
+            anchored: Option<bool>,
+            can_collide: Option<bool>,
+            cast_shadow: Option<bool>,
+            locked: Option<bool>,
+            parent: Option<String>,
+            /// Space-relative on-disk source (`None` for a binary-ECS
+            /// entity with only a synthetic path, or a synthetic path string).
+            source: Option<String>,
+        }
+
+        let mut q = world.query::<(
+            Entity,
+            &Name,
+            Option<&eustress_common::classes::Instance>,
+            Option<&Transform>,
+            Option<&eustress_common::classes::BasePart>,
+            Option<&crate::spawn::MeshSource>,
+            Option<&ChildOf>,
+            Option<&crate::space::instance_loader::InstanceFile>,
+            Option<&Visibility>,
+        )>();
+
+        let all: Vec<EntityDetail> = q
+            .iter(world)
+            .filter_map(|(entity, name, inst, tf, bp, mesh, child_of, file, vis)| {
+                let class = inst.map(|i| i.class_name.as_str().to_string());
+                if let Some(ref want) = class_filter {
+                    if class.as_deref() != Some(want.as_str()) {
+                        return None;
+                    }
+                }
+                let name_s = name.as_str().to_string();
+                if let Some(ref want) = name_filter {
+                    if !name_s.to_lowercase().contains(want) {
+                        return None;
+                    }
+                }
+                let color = bp.map(|b| {
+                    let c = b.color.to_srgba();
+                    [c.red, c.green, c.blue, c.alpha]
+                });
+                let source = file.map(|f| {
+                    let p = &f.toml_path;
+                    match &space_root {
+                        Some(root) => p
+                            .strip_prefix(root)
+                            .map(|r| r.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_else(|_| p.to_string_lossy().replace('\\', "/")),
+                        None => p.to_string_lossy().replace('\\', "/"),
+                    }
+                });
+                Some(EntityDetail {
+                    id: format!("{}v{}", entity.index(), entity.generation()),
+                    name: name_s,
+                    class,
+                    mesh: mesh.map(|m| m.path.clone()),
+                    material: bp.map(|b| b.material_name.clone()),
+                    color,
+                    transparency: bp.map(|b| b.transparency),
+                    size: bp.map(|b| [b.size.x, b.size.y, b.size.z]),
+                    transform: tf.map(|t| TransformJson {
+                        pos: [t.translation.x, t.translation.y, t.translation.z],
+                        rot: [t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w],
+                        scale: [t.scale.x, t.scale.y, t.scale.z],
+                    }),
+                    visible: vis.map(|v| !matches!(v, Visibility::Hidden)),
+                    anchored: bp.map(|b| b.anchored),
+                    can_collide: bp.map(|b| b.can_collide),
+                    cast_shadow: bp.map(|b| b.cast_shadow),
+                    locked: bp.map(|b| b.locked),
+                    parent: child_of
+                        .map(|c| c.0)
+                        .map(|p| format!("{}v{}", p.index(), p.generation())),
+                    source,
+                })
+            })
+            .collect();
+
+        let total = all.len();
+        let window: Vec<&EntityDetail> = all.iter().skip(offset).take(limit).collect();
+        let returned = window.len();
+
+        // Frame stats — best-effort (None if diagnostics aren't ready).
+        let fps = world
+            .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+            .and_then(|store| {
+                store
+                    .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
+                    .and_then(|d| d.smoothed())
+            });
+
+        let entities_value = match serde_json::to_value(&window) {
+            Ok(v) => v,
+            Err(e) => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal(format!("json encode failed: {}", e)),
+                );
+            }
+        };
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "entities":     entities_value,
+                "offset":       offset,
+                "total":        total,
+                "returned":     returned,
+                "has_more":     offset + returned < total,
+                "fps":          fps,
+                "entity_count": total,
+            }),
+        )
+    }
+
+    /// `tool.equip` — set the active editor tool. Param `tool`:
+    /// "select" | "move" | "scale" | "rotate". Mutates the same
+    /// `StudioState.current_tool` the Alt+Z/X/C/V shortcuts drive, so the
+    /// gizmos + tool systems react exactly as if a human pressed the key.
+    pub fn tool_equip(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let want = req
+            .params
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let tool = match want.as_str() {
+            "select" => crate::ui::Tool::Select,
+            "move" => crate::ui::Tool::Move,
+            "scale" => crate::ui::Tool::Scale,
+            "rotate" => crate::ui::Tool::Rotate,
+            other => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal(format!(
+                        "unknown tool '{}' (expected select|move|scale|rotate)",
+                        other
+                    )),
+                );
+            }
+        };
+        match world.get_resource_mut::<crate::ui::StudioState>() {
+            Some(mut state) => {
+                state.current_tool = tool;
+                BridgeResponse::ok(req.id.clone(), serde_json::json!({ "equipped": want }))
+            }
+            None => BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("StudioState resource not available"),
+            ),
+        }
+    }
+
+    /// `selection.set` — replace the current selection. Params: `ids`
+    /// (array of "indexVgeneration" id strings, as returned by
+    /// `ecs.inspect`/`ecs.query`) or `id` (single). Empty clears it.
+    /// Writes the shared `SelectionManager`, so gizmos + the Properties
+    /// panel update downstream exactly like a click-select.
+    pub fn selection_set(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let ids: Vec<String> = req
+            .params
+            .get("ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .or_else(|| {
+                req.params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| vec![s.to_string()])
+            })
+            .unwrap_or_default();
+
+        match world.get_resource::<crate::selection_sync::SelectionSyncManager>() {
+            Some(mgr) => {
+                mgr.0.write().set_selected(ids.clone());
+                BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "selected": ids, "count": ids.len() }),
+                )
+            }
+            None => BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("SelectionSyncManager resource not available"),
+            ),
+        }
+    }
+
+    /// `state.get` — live editor state (active tool + current selection)
+    /// so the AI can read back the result of its own actions.
+    pub fn state_get(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let current_tool = world.get_resource::<crate::ui::StudioState>().map(|s| {
+            match s.current_tool {
+                crate::ui::Tool::Select => "select",
+                crate::ui::Tool::Move => "move",
+                crate::ui::Tool::Scale => "scale",
+                crate::ui::Tool::Rotate => "rotate",
+                _ => "other",
+            }
+            .to_string()
+        });
+        let selected: Vec<String> = world
+            .get_resource::<crate::selection_sync::SelectionSyncManager>()
+            .map(|m| m.0.read().get_selected())
+            .unwrap_or_default();
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "current_tool":   current_tool,
+                "selected":       selected,
+                "selected_count": selected.len(),
+            }),
+        )
+    }
+
+    /// `action.invoke` — fire any editor `Action` by its enum-variant name
+    /// (param `action`, e.g. "Copy", "Cut", "Paste", "Duplicate", "Group",
+    /// "Ungroup", "Delete", "SelectAll", "Undo", "Redo", "SaveScene",
+    /// "MoveTool"…). `Action` derives `Deserialize`, so the variant name
+    /// parses directly. Writes the SAME `MenuActionEvent` the keybinding
+    /// dispatch produces, so the handler chain runs exactly as if the
+    /// shortcut were pressed — the AI's "press the shortcut" surface for
+    /// systematic editor testing.
+    ///
+    /// NOTE: some actions are destructive (Delete/Cut). This is a
+    /// deliberately-driven test surface (`requires_approval` is handled at
+    /// the MCP-tool layer), so the handler does not gate them here.
+    pub fn action_invoke(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let name = req
+            .params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let action: crate::keybindings::Action =
+            match serde_json::from_value(serde_json::Value::String(name.to_string())) {
+                Ok(a) => a,
+                Err(_) => {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::internal(format!(
+                            "unknown action '{}' — use the Action enum variant name \
+                             (Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, \
+                             SelectAll, Undo, Redo, SaveScene, MoveTool, ScaleTool, …)",
+                            name
+                        )),
+                    );
+                }
+            };
+        world.write_message(crate::ui::MenuActionEvent::new(action));
+        BridgeResponse::ok(req.id.clone(), serde_json::json!({ "invoked": name }))
+    }
+
+    /// `viewport.capture` — screenshot the primary window (3D viewport +
+    /// Slint overlay = what a human sees) to `<space>/.eustress/capture.png`
+    /// and return the absolute path. The caller reads that path to view the
+    /// frame. Mirrors `file_event_handler::capture_thumbnail_from_viewport`
+    /// (Bevy 0.18 `Screenshot::primary_window()` + `ScreenshotCaptured`
+    /// observer; GPU readback completes next frame, saved off-thread), but
+    /// full-resolution and to a fixed path.
+    ///
+    /// The old file is removed up front, so reading the path before the new
+    /// frame lands fails clearly (retry) rather than returning a stale image.
+    pub fn viewport_capture(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+            Some(sr) => sr.0.clone(),
+            None => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("SpaceRoot resource not available"),
+                );
+            }
+        };
+        let dir = space_root.join(".eustress");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("capture.png");
+        // Clear the stale frame so a premature read errors instead of
+        // returning the previous capture.
+        let _ = std::fs::remove_file(&path);
+
+        let save_path = path.clone();
+        world
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(
+                move |trigger: bevy::ecs::observer::On<
+                    bevy::render::view::screenshot::ScreenshotCaptured,
+                >| {
+                    let img = trigger.image.clone();
+                    let p = save_path.clone();
+                    // Save off the render thread (GPU readback → PNG encode).
+                    bevy::tasks::AsyncComputeTaskPool::get()
+                        .spawn(async move {
+                            match img.try_into_dynamic() {
+                                Ok(dyn_img) => {
+                                    if let Err(e) = dyn_img.save(&p) {
+                                        tracing::warn!("viewport.capture save failed: {}", e);
+                                    } else {
+                                        tracing::info!("viewport.capture → {:?}", p);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("viewport.capture conversion failed: {}", e)
+                                }
+                            }
+                        })
+                        .detach();
+                },
+            );
+
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "note": "screenshot queued; PNG lands within ~1-2 frames — read the path after a brief moment",
+            }),
+        )
+    }
+
+    // ── AI camera — the AI's independent off-screen view ─────────────────
+
+    /// Parse a `[x, y, z]` JSON array into a `Vec3`.
+    fn parse_vec3(v: Option<&Value>) -> Option<Vec3> {
+        let a = v?.as_array()?;
+        if a.len() < 3 {
+            return None;
+        }
+        Some(Vec3::new(
+            a[0].as_f64()? as f32,
+            a[1].as_f64()? as f32,
+            a[2].as_f64()? as f32,
+        ))
+    }
+
+    /// Write a pose onto the AI camera's `Transform`. Returns false if the
+    /// camera entity isn't present.
+    fn set_ai_camera_pose(world: &mut World, pos: Vec3, look_at: Option<Vec3>, rotation: Option<Quat>) -> bool {
+        let mut q = world.query_filtered::<&mut Transform, With<crate::ai_camera::AiCamera>>();
+        for mut tf in q.iter_mut(world) {
+            tf.translation = pos;
+            if let Some(target) = look_at {
+                tf.look_at(target, Vec3::Y);
+            } else if let Some(r) = rotation {
+                tf.rotation = r;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// `ai_camera.set_pose` — place the AI camera. Params: `position`
+    /// `[x,y,z]` (required); plus either `look_at` `[x,y,z]` or `rotation`
+    /// `[x,y,z,w]`. Independent of the user's camera.
+    pub fn ai_camera_set_pose(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let Some(pos) = parse_vec3(req.params.get("position")) else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("`position` [x,y,z] is required"),
+            );
+        };
+        let look_at = parse_vec3(req.params.get("look_at"));
+        let rotation = req.params.get("rotation").and_then(|v| v.as_array()).and_then(|a| {
+            if a.len() >= 4 {
+                Some(Quat::from_xyzw(
+                    a[0].as_f64()? as f32,
+                    a[1].as_f64()? as f32,
+                    a[2].as_f64()? as f32,
+                    a[3].as_f64()? as f32,
+                ))
+            } else {
+                None
+            }
+        });
+        if !set_ai_camera_pose(world, pos, look_at, rotation) {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("AI camera entity not found"),
+            );
+        }
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "position": [pos.x, pos.y, pos.z],
+                "look_at": look_at.map(|t| [t.x, t.y, t.z]),
+            }),
+        )
+    }
+
+    /// `ai_camera.orbit` — orbit the AI camera around a point. Params:
+    /// `center` `[x,y,z]` (default origin), `distance` (default 15),
+    /// `yaw_deg` (default 45), `pitch_deg` (default 30).
+    pub fn ai_camera_orbit(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let center = parse_vec3(req.params.get("center")).unwrap_or(Vec3::ZERO);
+        let distance =
+            req.params.get("distance").and_then(|v| v.as_f64()).unwrap_or(15.0) as f32;
+        let yaw = (req.params.get("yaw_deg").and_then(|v| v.as_f64()).unwrap_or(45.0) as f32)
+            .to_radians();
+        let pitch = (req.params.get("pitch_deg").and_then(|v| v.as_f64()).unwrap_or(30.0) as f32)
+            .to_radians();
+        let dir = Vec3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos());
+        let pos = center + dir * distance;
+        if !set_ai_camera_pose(world, pos, Some(center), None) {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("AI camera entity not found"),
+            );
+        }
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "position": [pos.x, pos.y, pos.z],
+                "center": [center.x, center.y, center.z],
+                "distance": distance,
+            }),
+        )
+    }
+
+    /// `ai_camera.frame` — frame a named entity in the AI camera. Param:
+    /// `name` (entity Name). Looks at the entity from a distance derived from
+    /// its size, so the AI can "go look at" a specific part.
+    pub fn ai_camera_frame(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let Some(name) = req.params.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())
+        else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params("`name` (entity name) is required"),
+            );
+        };
+        let mut tq = world
+            .query::<(&Name, &GlobalTransform, Option<&eustress_common::classes::BasePart>)>();
+        let mut target: Option<(Vec3, f32)> = None;
+        for (n, gt, bp) in tq.iter(world) {
+            if n.as_str() == name {
+                let extent = bp.map(|b| b.size.max_element()).unwrap_or(2.0);
+                target = Some((gt.translation(), extent));
+                break;
+            }
+        }
+        let Some((center, extent)) = target else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::invalid_params(format!("no entity named '{name}'")),
+            );
+        };
+        let distance = (extent * 2.5).max(6.0);
+        let dir = Vec3::new(1.0, 0.8, 1.0).normalize();
+        let pos = center + dir * distance;
+        if !set_ai_camera_pose(world, pos, Some(center), None) {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("AI camera entity not found"),
+            );
+        }
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "framed": name,
+                "position": [pos.x, pos.y, pos.z],
+                "center": [center.x, center.y, center.z],
+            }),
+        )
+    }
+
+    /// `ai_camera.capture` — render the AI camera's independent view to a PNG
+    /// and return its path (the AI's own eyes, distinct from
+    /// `viewport.capture` = the user's window). On-demand: powers the
+    /// off-screen camera up for the capture, then back down.
+    pub fn ai_camera_capture(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let space_root = world
+            .get_resource::<crate::space::SpaceRoot>()
+            .map(|sr| sr.0.clone())
+            .unwrap_or_else(crate::space::default_space_root);
+        let dir = space_root.join(".eustress");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ai_camera.png");
+        // Clear the stale frame so a premature read errors instead of
+        // returning the previous capture.
+        let _ = std::fs::remove_file(&path);
+        let Some(mut state) = world.get_resource_mut::<crate::ai_camera::AiCameraState>() else {
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("AiCameraState not available"),
+            );
+        };
+        crate::ai_camera::request_capture(&mut *state, path.clone());
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "note": "AI camera capture queued; PNG lands within ~3 frames — read the path after a brief moment",
             }),
         )
     }

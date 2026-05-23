@@ -62,8 +62,7 @@ pub use fjall_backend::FjallWorldDb;
 pub use header::{EngineVersion, WorldHeader, WorldSchemaVersion};
 pub use keys::{ComponentTypeId, KeyEncoder, FlatKeyEncoder, MortonKeyEncoder};
 pub use rkyv_values::{
-    ArchInstanceCore, ArchTransform, EusValue, access_instance_core, access_transform,
-    decode_eusvalue, decode_instance_core, decode_transform, encode_eusvalue,
-    encode_instance_core, encode_transform,
+    ArchInstanceCore, ArchTransform, EusValue, decode_eusvalue, decode_instance_core,
+    decode_transform, encode_eusvalue, encode_instance_core, encode_transform,
 };
 pub use schema::{ClassSchemaVersion, SchemaMigration, SchemaMigrationRegistry};

@@ -20,18 +20,24 @@ pub struct PortFile {
 }
 
 impl PortFile {
-    /// Write `port` to `<universe>/.eustress/engine.port`, picking up
-    /// the current Universe from the Eustress default documents
-    /// folder. We avoid reaching into Bevy resources here because
-    /// startup ordering makes `Res<SpaceRoot>` unreliable — this runs
-    /// once, early, and falls back to the default root when needed.
-    pub fn write_for_current_universe(port: u16) -> std::io::Result<Self> {
-        let universe = default_universe_root();
+    /// Write `port` to `<universe>/.eustress/engine.port` for an
+    /// explicitly-resolved Universe root. Callers that know the
+    /// actually-loaded Space (via `Res<SpaceRoot>`) should resolve the
+    /// Universe with [`resolve_universe_root`] and call this so the port
+    /// file lands beside the Space the engine really opened.
+    pub fn write_for_universe(universe: &Path, port: u16) -> std::io::Result<Self> {
         let dir = universe.join(".eustress");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("engine.port");
         std::fs::write(&path, port.to_string())?;
         Ok(Self { path, placeholder: false })
+    }
+
+    /// Back-compat convenience: resolve the Universe ourselves (no
+    /// `SpaceRoot` in hand) and write. Prefer [`write_for_universe`] when
+    /// the caller can supply the loaded Space's root.
+    pub fn write_for_current_universe(port: u16) -> std::io::Result<Self> {
+        Self::write_for_universe(&resolve_universe_root(None), port)
     }
 
     /// Placeholder used when the port file couldn't be written — the
@@ -48,6 +54,13 @@ impl PortFile {
             self.path.display().to_string()
         }
     }
+
+    /// The on-disk path this port file occupies (empty for placeholders).
+    /// The bridge compares it against the loaded Space's Universe to decide
+    /// whether the port file needs re-pointing.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl Drop for PortFile {
@@ -59,40 +72,50 @@ impl Drop for PortFile {
     }
 }
 
-/// Best-effort lookup of the currently-active Universe root. We try,
-/// in order:
+/// Resolve the Universe root whose `.eustress/engine.port` sibling
+/// processes (MCP server, plugins) read to find the bridge.
 ///
-/// 1. `EUSTRESS_UNIVERSE_ROOT` env var — explicit override for
-///    tests / CI / multi-instance setups,
-/// 2. `~/Documents/Eustress/Universe1` as the default first-Universe
-///    convention the rest of the engine assumes when no Space is
-///    loaded.
+/// Order:
+///   1. `EUSTRESS_UNIVERSE_ROOT` env override — tests / CI / multi-instance.
+///   2. The actually-loaded Space's Universe, when a `SpaceRoot` is supplied
+///      (handles `--universe Universe2`, runtime Space switches, non-default
+///      Universe names). This is authoritative.
+///   3. The `.default_universe` marker the launcher records under the
+///      workspace root — used when the bridge starts before the Space has
+///      loaded (so `SpaceRoot` isn't in the `World` yet).
+///   4. The first *real* Universe under the workspace root (a directory
+///      that holds a `Spaces/` tier), skipping hidden config dirs.
+///   5. `<workspace>/Universe1`, scaffolding a default if absent.
 ///
-/// If neither resolves we return the current directory so
-/// `create_dir_all` at least has somewhere to target.
-fn default_universe_root() -> PathBuf {
+/// CRITICAL — every disk path here flows through
+/// [`crate::space::workspace_root`] / `default_documents_root`, which
+/// deliberately bypass OneDrive's redirected Documents folder. The old
+/// code called `dirs::document_dir()` directly, which on a OneDrive
+/// "Known Folder Move" install resolves to `OneDrive\Documents`
+/// (`OneDrive\Documentos` on Spanish systems) — a directory neither the
+/// engine's Space loader nor the MCP server ever looks in, so the port
+/// file was effectively invisible and siblings could never connect.
+///
+/// Note steps 3-5 are only a best-effort *initial* guess: the bridge's
+/// `resync_port_file_to_space` system re-points the file to the loaded
+/// Space's real Universe (step 2) the moment `SpaceRoot` appears.
+pub fn resolve_universe_root(space_root: Option<&Path>) -> PathBuf {
     if let Ok(env_path) = std::env::var("EUSTRESS_UNIVERSE_ROOT") {
         return PathBuf::from(env_path);
     }
 
-    if let Some(docs) = dirs::document_dir() {
-        return docs.join("Eustress").join("Universe1");
-    }
-
-    PathBuf::from(".")
-}
-
-#[allow(dead_code)]
-fn universe_for_space(space_root: &Path) -> PathBuf {
-    // Walk up until we find a directory whose parent contains a
-    // `.eustress` folder OR whose name looks like `Universe*`.
-    // Fallback: the space_root's immediate grandparent (Universe/Spaces/SpaceX).
-    let mut cur = space_root;
-    while let Some(parent) = cur.parent() {
-        if parent.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("Universe")).unwrap_or(false) {
-            return parent.to_path_buf();
+    // (2) Authoritative: the Universe of the Space the engine actually opened.
+    if let Some(space) = space_root {
+        if let Some(universe) = crate::space::universe_root_for_path(space) {
+            return universe;
         }
-        cur = parent;
     }
-    space_root.to_path_buf()
+
+    // (3-5) Best-effort initial guess when the Space hasn't loaded yet:
+    // the recorded `.default_universe`, else first real Universe, else
+    // `<workspace>/Universe1` — all OneDrive-avoiding, all skipping the
+    // hidden config dirs that a naive scan would pick. The bridge's
+    // `resync_port_file_to_space` system re-points the file to the loaded
+    // Space's real Universe (step 2) the moment `SpaceRoot` appears.
+    crate::space::best_default_universe_root()
 }

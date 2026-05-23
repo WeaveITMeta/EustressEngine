@@ -104,7 +104,26 @@ impl SpaceFileWatcher {
         
         // Get the first path (notify can have multiple paths per event)
         let path = event.paths.first()?.clone();
-        
+
+        // Ignore churn OUTSIDE the editable Space content, BEFORE any
+        // syscall. The watcher is recursive over the whole Space, which
+        // also covers: the binary Fjall DB (`world.fjalldb/` — journals +
+        // segments rewritten constantly + compaction) and the autosave
+        // git repo (`.git/` — rewritten by `git add -A` every autosave
+        // interval). Without this, every autosave tick produced a burst
+        // of raw events that the main thread drained with a
+        // `path.is_file()` stat EACH — the ~5-second editor stutter.
+        // `.eustress/` is sidecar/trash, also not editable content. Cheap
+        // path-component scan; no filesystem access.
+        if path.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some("world.fjalldb") | Some(".git") | Some(".eustress")
+            )
+        }) {
+            return None;
+        }
+
         // Skip if not a file
         if !path.is_file() && change_type != FileChangeType::Removed {
             return None;
@@ -222,15 +241,30 @@ pub fn process_file_changes(
     // Clean up old entries from recently written files
     recently_written.cleanup();
 
-    // Periodic stale entity cleanup: every ~300 frames (~5s at 60fps), check if
-    // any file-loaded entities reference files that no longer exist on disk.
-    // This catches deletions the watcher might have missed (e.g. bulk delete,
-    // deletion before watcher was initialized, or directory removal).
-    static CLEANUP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let counter = CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if counter % 300 == 0 {
+    // Stale-entity safety net (AMORTIZED). Catches deletions the watcher
+    // might have missed (bulk delete, deletion before the watcher was up,
+    // directory removal). The OLD version stat'd EVERY file-loaded entity
+    // (`path.exists()`) in a SINGLE frame every ~300 frames — at 215+
+    // parts that ~5-second main-thread filesystem-stat burst WAS the
+    // editor stutter. Now: every ~300 frames we START a sweep, then
+    // spread the stats at STALE_SCAN_BATCH per frame over the following
+    // frames until the set is covered, then idle. Same total work +
+    // cadence, but no frame spikes and the vast majority of frames do
+    // zero stale-scan work (the "nothing every frame" rule).
+    const STALE_SCAN_BATCH: usize = 32;
+    static FRAME_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    // usize::MAX == idle (not sweeping); otherwise the next entity offset.
+    static SWEEP_POS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(usize::MAX);
+    if FRAME_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 300 == 0 {
+        SWEEP_POS.store(0, std::sync::atomic::Ordering::Relaxed); // kick off a sweep
+    }
+    let pos = SWEEP_POS.load(std::sync::atomic::Ordering::Relaxed);
+    if pos != usize::MAX {
         let mut stale: Vec<(Entity, std::path::PathBuf)> = Vec::new();
-        for (entity, loaded) in file_entities.iter() {
+        let mut scanned = 0usize;
+        for (entity, loaded) in file_entities.iter().skip(pos).take(STALE_SCAN_BATCH) {
+            scanned += 1;
             if !loaded.path.exists() && !registry.rename_in_progress.contains(&loaded.path) {
                 stale.push((entity, loaded.path.clone()));
             }
@@ -240,6 +274,12 @@ pub fn process_file_changes(
             commands.entity(entity).despawn();
             registry.unregister_file(&path);
         }
+        // Advance through the set; finish (idle) when a short batch shows
+        // we reached the end.
+        SWEEP_POS.store(
+            if scanned < STALE_SCAN_BATCH { usize::MAX } else { pos + STALE_SCAN_BATCH },
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     
     let events = watcher.poll_events();

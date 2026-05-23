@@ -92,7 +92,7 @@ Cumulative totals after each pass. Refining an existing row counts toward "refin
 | Wiring / import gaps flagged | 86 | ≈ 200 | ≈ 295 | **≈ 350** (retrofit pass exposed more) |
 | Cross-cutting concerns (C1–CN) | 10 | 12 | 12 | **16** *(+ C13 `eustress://`, C14 OAuth-deferred-KYC, C15 WASM-sandbox, C16 per-platform variants)* — **17 at P5** *(+ C17 WorldDb storage standard; C3/C11/C12 rewritten)* |
 | Open questions | 25 | ≈ 80 | ≈ 130 | **≈ 160** |
-| **P0 escalations** | — | — | 3 | **3** *(JWT auth · Play button · macOS notarisation — unchanged)* |
+| **P0 escalations** | — | — | 3 | **3** *(JWT auth: HTTP backend enforcement VERIFIED on every protected handler 2026-05-22 (extract_token + validate_token, claims.sub, projects.rs owner_id checks; browse endpoints public by design) — only the QUIC-handshake JWT remains (play_server with_no_client_auth), sequenced to V1.1 multiplayer · Play button · macOS notarisation)* |
 | **State corrections in P4 critique** | — | — | — | **10** *(07 Spatial-LLM, 08 jurisdictions, 08 succession, 09 marketplace, 09 Stripe, 10 persistence, 11 Watchman, 12 Vault, 14 HybridPosition, 16 DataStoreService, 19 Symbolica)* |
 
 ### P2 per-doc deltas

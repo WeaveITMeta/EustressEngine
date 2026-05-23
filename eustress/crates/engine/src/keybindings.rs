@@ -494,14 +494,24 @@ fn dispatch_keyboard_shortcuts(
     // focus-bubbling chain is healthy. Cursor over viewport with a
     // selection is still the normal "press Delete to delete entity"
     // path.
+    // `SlintUIFocus.has_focus` is set as `has_focus = !in_viewport` (slint_ui.rs),
+    // i.e. it's TRUE when the cursor is over a UI panel. So "cursor over the 3D
+    // viewport" is its inverse — `!has_focus`. This was previously written as
+    // `f.has_focus`, which inverted the gate: Delete only fired while the cursor
+    // was over a panel and never over the viewport (the delete-key regression).
+    // Default to in-viewport when the focus resource isn't up yet (pre-UI-init
+    // frames) so Delete still works; `text_input_focused` is already handled by
+    // the early return above, so typing-in-a-field can't trigger a delete.
     let cursor_over_viewport = ui_focus.as_ref()
-        .map(|f| f.has_focus)
-        .unwrap_or(false);
-    if keys.just_pressed(KeyCode::Delete) && cursor_over_viewport {
+        .map(|f| !f.has_focus)
+        .unwrap_or(true);
+    if (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
+        && cursor_over_viewport
+    {
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
         if !ctrl && !alt {
-            info!("⌨️ Delete/Backspace key detected directly");
+            info!("⌨️ Delete/Backspace in viewport → delete selection");
             menu_events.write(crate::ui::MenuActionEvent::new(Action::Delete));
             return;
         }
@@ -536,24 +546,23 @@ fn dispatch_keyboard_shortcuts(
 
     for action in actions {
         if bindings.check(action, &keys) {
-            // Destructive shortcuts (Delete, Cut, Duplicate, group ops)
-            // get the same cursor-over-viewport gate as the Delete key
-            // press above. The user-reported sequence — click a
-            // property field, press Backspace to clear it, type a new
-            // value — was silently triggering Action::Delete when the
-            // user had remapped Delete to Backspace (or simply because
-            // the focus-bubbling chain skipped a row). Gating
-            // destructives on cursor position is the durable defense:
-            // typing into a property field with the cursor still over
-            // the Properties panel will never reach the entity-delete
-            // path, regardless of which key was pressed or whether
-            // Slint's `text_input_focused` propagated correctly.
-            let is_destructive = matches!(
-                action,
-                Action::Delete | Action::Cut | Action::Duplicate
-                    | Action::Group | Action::Ungroup,
-            );
-            if is_destructive && !cursor_over_viewport {
+            // Only the BARE Delete key is a typing hazard: a focus
+            // false-negative, or a Delete→Backspace remap, could fire it
+            // while the user clears a property field. So Delete keeps the
+            // cursor-over-viewport guard (a property field sits outside
+            // the viewport).
+            //
+            // The Ctrl-chorded destructives (Cut / Duplicate / Group /
+            // Ungroup) can NEVER be produced by typing a value into a
+            // field — you don't hold Ctrl to type — so gating them on
+            // cursor position was wrong. It silently suppressed the
+            // entire Studio review workflow: select in the Explorer (the
+            // natural place to pick named items), press Ctrl+X/D/G/U with
+            // the cursor over the Explorer panel, nothing happens
+            // (2026-05-22 regression report). They must work from the
+            // Explorer, the menus, and anywhere else; the `text_input_focused`
+            // early-return above is the only guard they need.
+            if matches!(action, Action::Delete) && !cursor_over_viewport {
                 info!("⌨️ Suppressed {:?} — cursor not over viewport (likely editing a UI field)", action);
                 continue;
             }
@@ -580,6 +589,7 @@ fn handle_menu_action_events(
         MessageWriter<crate::commands::UndoCommandEvent>,
         MessageWriter<crate::commands::RedoCommandEvent>,
         MessageWriter<crate::camera_controller::FrameSelectionEvent>,
+        MessageWriter<crate::camera_controller::GoToCameraEvent>,
         MessageWriter<crate::clipboard::CopyEvent>,
         MessageWriter<crate::clipboard::DuplicateEvent>,
         MessageWriter<crate::undo::UndoEvent>,
@@ -614,6 +624,7 @@ fn handle_menu_action_events(
         ref mut undo_events,
         ref mut redo_events,
         ref mut frame_events,
+        ref mut go_to_camera_events,
         ref mut copy_events,
         ref mut duplicate_events,
         ref mut undo_action_events,
@@ -691,11 +702,23 @@ fn handle_menu_action_events(
                 let mut min = Vec3::splat(f32::MAX);
                 let mut max = Vec3::splat(f32::MIN);
                 let mut has_selection = false;
+                // If a selected entity is a Camera (e.g. the AI camera), F goes
+                // to ITS viewpoint instead of framing it — a camera has no size,
+                // so the old path just nudged the zoom on a point.
+                let mut camera_target: Option<Entity> = None;
 
                 if !selected_ids.is_empty() {
                     for (entity, transform, base_part) in entity_query.iter() {
                         let id = format!("{}v{}", entity.index(), entity.generation());
                         if !selected_ids.contains(&id) { continue; }
+
+                        if instance_query.get(entity)
+                            .map(|i| i.class_name == eustress_common::classes::ClassName::Camera)
+                            .unwrap_or(false)
+                        {
+                            camera_target = Some(entity);
+                            continue; // don't fold the camera into framing bounds
+                        }
 
                         let pos = transform.map(|t| t.translation()).unwrap_or(Vec3::ZERO);
                         let half_size = base_part
@@ -707,15 +730,19 @@ fn handle_menu_action_events(
                     }
                 }
 
-                if has_selection {
+                if let Some(cam_e) = camera_target {
+                    // Go to the selected camera's viewpoint (the AI camera's eyes).
+                    go_to_camera_events.write(crate::camera_controller::GoToCameraEvent {
+                        target: cam_e,
+                    });
+                    info!("📷 Focus: go to camera viewpoint {:?}", cam_e);
+                } else if has_selection {
                     frame_events.write(crate::camera_controller::FrameSelectionEvent {
                         target_bounds: Some((min, max)),
                     });
                     info!("📷 Focus on selection: bounds ({:?} to {:?})", min, max);
                 }
-                // No selection → no-op. Framing the whole scene on an empty
-                // selection used to fly the camera to an empty world and show
-                // only sky — unintuitive.
+                // No selection → no-op (framing an empty scene flew to sky).
             }
 
             // Snapping

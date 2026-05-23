@@ -427,6 +427,61 @@ impl WorldDb for FjallWorldDb {
         Ok(Box::new(iter))
     }
 
+    fn put_instance_core(&self, entity: EntityId, pos: (f32, f32, f32), core: &[u8]) -> Result<()> {
+        // Morton-keyed so a region scan returns a spatial neighbourhood.
+        // Inline default encoder (chunk_size 256) — must stay consistent
+        // with the read side below and with the streaming chunk size.
+        let key = crate::keys::MortonKeyEncoder::default().encode_spatial(
+            entity,
+            ComponentTypeId::INSTANCE_CORE,
+            pos,
+        );
+        let mut batch = self.keyspace.batch();
+        batch.insert(&self.entities, key.clone(), core);
+        batch.commit()?;
+        // Replication feed (mirrors apply_commit): emit AFTER the durable
+        // commit so replicas only ever see persisted state.
+        self.s_entities.publish_external(
+            eustress_fjall::ReplOp::Put,
+            &key,
+            &core[..core.len().min(64)],
+        );
+        Ok(())
+    }
+
+    fn delete_instance_core(&self, entity: EntityId, pos: (f32, f32, f32)) -> Result<()> {
+        let key = crate::keys::MortonKeyEncoder::default().encode_spatial(
+            entity,
+            ComponentTypeId::INSTANCE_CORE,
+            pos,
+        );
+        let mut batch = self.keyspace.batch();
+        batch.remove(&self.entities, key.clone());
+        batch.commit()?;
+        self.s_entities
+            .publish_external(eustress_fjall::ReplOp::Remove, &key, &[]);
+        Ok(())
+    }
+
+    fn iter_instance_cores(&self) -> Result<Vec<(EntityId, Vec<u8>)>> {
+        // Morton keys are `M | ver | morton63 | component | entity`; the
+        // component prefix for the spatial encoder is just `M | ver`, so
+        // this scan walks every Morton-keyed record and we keep only the
+        // INSTANCE_CORE ones (the only Morton-keyed component today).
+        let morton = crate::keys::MortonKeyEncoder::default();
+        let prefix = morton.component_prefix(ComponentTypeId::INSTANCE_CORE);
+        let mut out = Vec::new();
+        for res in self.entities.prefix(prefix) {
+            let (key, value) = res?;
+            if let Ok((entity, component)) = morton.decode_component(&key) {
+                if component == ComponentTypeId::INSTANCE_CORE {
+                    out.push((entity, value.to_vec()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn flush(&self) -> Result<()> {
         let _span = tracing::info_span!("worlddb.flush").entered();
         // Persist tx counter into the same flush so it doesn't lag

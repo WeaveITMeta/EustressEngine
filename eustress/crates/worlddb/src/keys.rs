@@ -58,6 +58,16 @@ impl ComponentTypeId {
     pub const ASSET_REF: ComponentTypeId = ComponentTypeId(6);
     /// MeasureUnit (Dynamic Unit System — see project_dynamic_unit_system memory).
     pub const MEASURE_UNIT: ComponentTypeId = ComponentTypeId(7);
+    /// Full instance core — the rkyv `ArchInstanceCore` archive-model
+    /// holding a whole bare entity's authoritative state in one zero-copy
+    /// record (identity, asset, transform, render/physics flags, tags,
+    /// extensible tail). This is the "binary ECS" home for the scalable,
+    /// file-less set; it is Morton-keyed by the entity's position via
+    /// [`MortonKeyEncoder::encode_spatial`] so a region scan returns a
+    /// spatial neighbourhood. File-bearing entities never live here —
+    /// they stay in the `tree` partition (see the engine's
+    /// `space::representation` router).
+    pub const INSTANCE_CORE: ComponentTypeId = ComponentTypeId(8);
 }
 
 /// Trait that turns `(EntityId, ComponentTypeId)` into the byte key
@@ -171,7 +181,7 @@ impl KeyEncoder for FlatKeyEncoder {
 /// magic-number method, exact for inputs < 2^21.
 pub fn part1by2(v: u32) -> u64 {
     let mut x = (v as u64) & 0x1f_ffff; // 21 bits
-    x = (x | (x << 32)) & 0x1f00_0000_00ff;
+    x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
     x = (x | (x << 16)) & 0x1f00_00ff_0000_ff;
     x = (x | (x << 8)) & 0x100f_00f0_0f00_f00f;
     x = (x | (x << 4)) & 0x10c3_0c30_c30c_30c3;
@@ -185,7 +195,7 @@ pub fn compact1by2(mut x: u64) -> u32 {
     x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
     x = (x | (x >> 4)) & 0x100f_00f0_0f00_f00f;
     x = (x | (x >> 8)) & 0x1f00_00ff_0000_ff;
-    x = (x | (x >> 16)) & 0x1f00_0000_00ff;
+    x = (x | (x >> 16)) & 0x001f_0000_0000_ffff;
     x = (x | (x >> 32)) & 0x1f_ffff;
     (x & 0x1f_ffff) as u32
 }

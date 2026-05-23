@@ -84,7 +84,7 @@ impl Plugin for EngineBridgePlugin {
         let pending = PendingRequests::default();
         app.insert_resource(BridgePendingQueue(pending.clone()))
             .add_systems(Startup, setup_engine_bridge)
-            .add_systems(Update, drain_bridge_requests);
+            .add_systems(Update, (drain_bridge_requests, resync_port_file_to_space));
     }
 }
 
@@ -116,7 +116,11 @@ pub struct EngineBridgeHandle {
 /// can't start (port exhausted, filesystem read-only, etc.) the engine
 /// still runs, siblings just can't connect. This matches the LSP
 /// launcher's "missing binary = no child = no error" ethos.
-fn setup_engine_bridge(mut commands: Commands, queue: Res<BridgePendingQueue>) {
+fn setup_engine_bridge(
+    mut commands: Commands,
+    queue: Res<BridgePendingQueue>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
     // Bring up our own multi-thread runtime. Two workers is enough —
     // the bridge's workload is a handful of short-lived request
     // tasks; anything compute-heavy runs on the Bevy main thread.
@@ -169,7 +173,13 @@ fn setup_engine_bridge(mut commands: Commands, queue: Res<BridgePendingQueue>) {
     // is current at startup. If `SpaceRoot` isn't set yet (bare engine
     // boot before a Universe is opened), we fall back to the Eustress
     // default location so siblings can still find us.
-    let port_file = PortFile::write_for_current_universe(port).unwrap_or_else(|e| {
+    // Resolve the Universe from the actually-loaded Space when we have
+    // one (covers `--universe`, runtime Space switches, non-default
+    // Universe names); otherwise fall back to a disk scan. Either path is
+    // OneDrive-avoiding, unlike the old hardcoded `dirs::document_dir()`
+    // guess that wrote the port file where no sibling could find it.
+    let universe = port_file::resolve_universe_root(space_root.as_ref().map(|s| s.0.as_path()));
+    let port_file = PortFile::write_for_universe(&universe, port).unwrap_or_else(|e| {
         warn!("EngineBridge: failed to write port file: {} — port {} still reachable via env var", e, port);
         PortFile::placeholder()
     });
@@ -218,6 +228,16 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::Ping => protocol::handlers::ping(&pending.request),
             MethodName::SimRead => protocol::handlers::sim_read(world, &pending.request),
             MethodName::EcsQuery => protocol::handlers::ecs_query(world, &pending.request),
+            MethodName::EcsInspect => protocol::handlers::ecs_inspect(world, &pending.request),
+            MethodName::ToolEquip => protocol::handlers::tool_equip(world, &pending.request),
+            MethodName::SelectionSet => protocol::handlers::selection_set(world, &pending.request),
+            MethodName::StateGet => protocol::handlers::state_get(world, &pending.request),
+            MethodName::ActionInvoke => protocol::handlers::action_invoke(world, &pending.request),
+            MethodName::ViewportCapture => protocol::handlers::viewport_capture(world, &pending.request),
+            MethodName::AiCameraSetPose => protocol::handlers::ai_camera_set_pose(world, &pending.request),
+            MethodName::AiCameraOrbit => protocol::handlers::ai_camera_orbit(world, &pending.request),
+            MethodName::AiCameraFrame => protocol::handlers::ai_camera_frame(world, &pending.request),
+            MethodName::AiCameraCapture => protocol::handlers::ai_camera_capture(world, &pending.request),
             MethodName::ToolsList => protocol::handlers::tools_list(world, &pending.request),
             MethodName::ToolsCall => protocol::handlers::tools_call(world, &pending.request),
             MethodName::Unknown(ref name) => {
@@ -236,5 +256,63 @@ fn drain_bridge_requests(world: &mut World) {
         if pending.responder.send(response).is_err() {
             debug!("EngineBridge: client dropped before response could be delivered");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Re-point the port file once the Space (hence its Universe) is known
+// ---------------------------------------------------------------------------
+
+/// The bridge binds and writes `engine.port` at `Startup`, before the Space
+/// finishes loading — so the initial write uses a best-effort Universe
+/// guess (see [`port_file::resolve_universe_root`]). Once `SpaceRoot` is
+/// inserted (default boot) or changes (runtime Space switch), re-point the
+/// port file at the loaded Space's *actual* Universe and drop the stale one,
+/// so siblings (MCP server, plugins) always read the port from the right
+/// place.
+///
+/// Cheap when idle: gated on `SpaceRoot` having changed, and a no-op when
+/// the file is already at the correct Universe.
+fn resync_port_file_to_space(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    handle: Option<ResMut<EngineBridgeHandle>>,
+) {
+    let Some(space_root) = space_root else { return };
+    if !space_root.is_changed() {
+        return;
+    }
+    let Some(mut handle) = handle else { return };
+    let Some(port) = handle.port else { return };
+
+    let Some(universe) = crate::space::universe_root_for_path(&space_root.0) else {
+        return;
+    };
+    let target = universe.join(".eustress").join("engine.port");
+
+    // Already pointing at the loaded Space's Universe — nothing to do.
+    if handle
+        .port_file
+        .as_ref()
+        .map(|pf| pf.path() == target.as_path())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    match PortFile::write_for_universe(&universe, port) {
+        Ok(new_pf) => {
+            info!(
+                "🔗 Engine Bridge port file re-pointed to loaded Space's Universe: {}",
+                new_pf.display_path()
+            );
+            // Replacing the handle drops the previous `PortFile`, whose
+            // `Drop` removes the stale (wrong-Universe) port file.
+            handle.port_file = Some(Arc::new(new_pf));
+        }
+        Err(e) => warn!(
+            "EngineBridge: failed to re-point port file to {}: {}",
+            universe.display(),
+            e
+        ),
     }
 }
