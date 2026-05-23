@@ -149,6 +149,19 @@ mod imp {
             .map(|p| p.to_string_lossy().replace('\\', "/"))
     }
 
+    /// True when an instance MUST stay on the filesystem and must never be
+    /// collapsed into a DB `.bin` binary-ECS record:
+    ///   - a file-natured class (scripts, GUI, documents — see the router), or
+    ///   - a part carrying a custom (non-`parts/`) mesh whose RELATIVE path a
+    ///     binary core cannot resolve (it has only a synthetic path, no folder).
+    /// Binarising either strands its real-file artifacts — that's how V-Cell
+    /// lost its custom housing meshes and a BillboardGui lost its child labels.
+    fn instance_stays_filesystem(def: &InstanceDefinition) -> bool {
+        let mesh = def.asset.as_ref().map(|a| a.mesh.as_str());
+        crate::space::representation::class_is_file_natured(&def.metadata.class_name)
+            || mesh.map(crate::space::representation::mesh_requires_filesystem).unwrap_or(false)
+    }
+
     /// Instance definition for an absolute in-Space path, from the DB.
     /// Binary fast-path → else the importer's TOML bytes (healed, then
     /// lazily upgraded to a binary record) → else `None` (caller falls
@@ -158,19 +171,30 @@ mod imp {
         let a = g.as_ref()?;
         let rel = rel_key(&a.root, abs)?;
 
+        // Binary fast-path — but NEVER let a stale `.bin` shadow a part that
+        // must stay on the filesystem (custom mesh / file-natured). An older
+        // build may have wrongly binarised it; prefer its authoritative TOML.
         if let Ok(Some(bytes)) = a.db.get_file(&format!("{rel}{BIN_SUFFIX}")) {
             if let Ok(def) = bincode::deserialize::<InstanceDefinition>(&bytes) {
-                note(&BIN_HITS, "instance bin-hit");
-                return Some(def);
+                if !instance_stays_filesystem(&def) {
+                    note(&BIN_HITS, "instance bin-hit");
+                    return Some(def);
+                }
             }
         }
         if let Ok(Some(toml_bytes)) = a.db.get_file(&rel) {
             if let Ok(s) = std::str::from_utf8(&toml_bytes) {
                 if let Ok(def) = instance_loader::load_instance_definition_from_str(s) {
-                    if let Ok(bin) = bincode::serialize(&def) {
-                        let _ = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin);
+                    // Only upgrade to a binary twin for entities that may live
+                    // in binary-ECS. Custom-mesh / file-natured parts stay TOML.
+                    if !instance_stays_filesystem(&def) {
+                        if let Ok(bin) = bincode::serialize(&def) {
+                            let _ = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin);
+                        }
+                        note(&TOML_UPGRADES, "instance toml→bin upgrade");
+                    } else {
+                        note(&TOML_UPGRADES, "instance toml (filesystem-kept)");
                     }
-                    note(&TOML_UPGRADES, "instance toml→bin upgrade");
                     return Some(def);
                 }
             }
@@ -183,6 +207,12 @@ mod imp {
     /// disk, no TOML. Returns `false` when no DB is active (caller then
     /// does its legacy disk write).
     pub fn put_instance(abs: &Path, def: &InstanceDefinition) -> bool {
+        // Custom-mesh / file-natured instances must persist as filesystem TOML,
+        // never a DB `.bin` (a binary core can't hold a resolvable mesh path).
+        // Returning false routes the caller to its disk-TOML write path.
+        if instance_stays_filesystem(def) {
+            return false;
+        }
         let Ok(g) = ACTIVE.read() else {
             return false;
         };
@@ -277,19 +307,32 @@ mod imp {
         let a = g.as_ref()?;
         let rel = rel_key(&a.root, abs)?;
 
+        // Binary fast-path — but ONLY for non-file-natured GUI. A stale `.bin`
+        // must never shadow the TOML of a file-natured class (BillboardGui/
+        // TextLabel/…); those are authoritative on the filesystem and may have
+        // been left behind by an older build that wrongly binarised them.
         if let Ok(Some(bytes)) = a.db.get_file(&format!("{rel}{BIN_SUFFIX}")) {
             if let Ok(def) = bincode::deserialize::<GuiTomlFile>(&bytes) {
-                note(&GUI_HITS, "gui bin-hit");
-                return Some(def);
+                if !crate::space::representation::class_is_file_natured(&def.metadata.class_name) {
+                    note(&GUI_HITS, "gui bin-hit");
+                    return Some(def);
+                }
             }
         }
         if let Ok(Some(toml_bytes)) = a.db.get_file(&rel) {
             if let Ok(s) = std::str::from_utf8(&toml_bytes) {
                 if let Ok(def) = gui_loader::load_gui_definition_from_str(s) {
-                    if let Ok(bin) = bincode::serialize(&def) {
-                        let _ = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin);
+                    // Upgrade the TOML to a binary twin only for non-file-natured
+                    // GUI. File-natured classes stay TOML-only so they remain
+                    // FileSystem-represented (children intact).
+                    if !crate::space::representation::class_is_file_natured(&def.metadata.class_name) {
+                        if let Ok(bin) = bincode::serialize(&def) {
+                            let _ = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin);
+                        }
+                        note(&GUI_HITS, "gui toml→bin upgrade");
+                    } else {
+                        note(&GUI_HITS, "gui toml (file-natured, kept on filesystem)");
                     }
-                    note(&GUI_HITS, "gui toml→bin upgrade");
                     return Some(def);
                 }
             }
@@ -299,6 +342,17 @@ mod imp {
 
     /// GUI definition twin of [`put_instance`].
     pub fn put_gui(abs: &Path, def: &GuiTomlFile) -> bool {
+        // File-natured GUI (BillboardGui, TextLabel, Frame, …) is authored and
+        // edited as filesystem TOML and routinely owns child files — a
+        // BillboardGui's TextLabel lives in a sibling/child folder. Collapsing
+        // the parent into a single DB `.bin` strands those children (the
+        // reported "edit a property and the label vanishes" bug). It must NEVER
+        // become a binary twin: return false so `write_gui_toml` takes the
+        // disk-TOML path, honoring the FileSystem representation the router
+        // already mandates via `class_is_file_natured`.
+        if crate::space::representation::class_is_file_natured(&def.metadata.class_name) {
+            return false;
+        }
         let Ok(g) = ACTIVE.read() else {
             return false;
         };

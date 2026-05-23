@@ -1033,12 +1033,43 @@ pub fn apply_ui_actions(
                         info!("✨ Spawned Sound into {:?}", service);
                     }
                     ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight => {
-                        commands.spawn((
-                            instance,
-                            service_owner,
-                            Name::new(class_name.as_str()),
-                        ));
-                        info!("✨ Spawned {:?} into {:?}", class_name, service);
+                        use crate::spawn::{spawn_point_light, spawn_spot_light, spawn_surface_light};
+                        use crate::classes::{EustressPointLight, EustressSpotLight, SurfaceLight};
+                        // Route through the real light spawns so the entity gets
+                        // an actual Bevy light (it lights up) AND its Eustress
+                        // light class component (the Properties panel shows
+                        // Brightness/Range/Color/Shadows instead of generic
+                        // BasePart fields). The old generic spawn here produced a
+                        // dark, propertyless instance — the reported bug.
+                        //
+                        // Roblox-style Insert-into-selection: parent the light to
+                        // the first selected entity if there is one, so it lands
+                        // inside the part the user picked rather than the service
+                        // root. Falls back to the service when nothing is selected.
+                        let selected_parent = selection_manager.0.read().get_selected().first()
+                            .and_then(|sid| query.iter()
+                                .find(|(e, _, _)| format!("{}v{}", e.index(), e.generation()) == *sid)
+                                .map(|(e, _, _)| e));
+                        // Small local offset so the source isn't buried at the
+                        // parent's origin.
+                        let light_xf = Transform::from_xyz(0.0, 2.0, 0.0);
+                        let light_entity = match class_name {
+                            ClassName::PointLight => spawn_point_light(
+                                &mut commands, instance, EustressPointLight::default(), light_xf),
+                            ClassName::SpotLight => spawn_spot_light(
+                                &mut commands, instance, EustressSpotLight::default(), light_xf),
+                            _ => spawn_surface_light(
+                                &mut commands, instance, SurfaceLight::default(),
+                                selected_parent.unwrap_or(Entity::PLACEHOLDER)),
+                        };
+                        match selected_parent {
+                            Some(parent) => { commands.entity(light_entity).insert(bevy::prelude::ChildOf(parent)); }
+                            None => { commands.entity(light_entity).insert(service_owner); }
+                        }
+                        if is_playing {
+                            commands.entity(light_entity).insert(SpawnedDuringPlayMode);
+                        }
+                        info!("✨ Spawned {:?} (parent={:?}) with real light + properties", class_name, selected_parent);
                     }
                     _ => {
                         // Generic spawn for other types

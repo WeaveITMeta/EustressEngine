@@ -245,6 +245,9 @@ fn handle_plugin_action_events(
     selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
     mut studio_state: ResMut<crate::ui::StudioState>,
     instance_query: Query<(Entity, &crate::classes::Instance)>,
+    // Read-only Transform access — add_label derives the BillboardGui ZIndex
+    // from the adornee part's scale (longest axis).
+    transforms: Query<&bevy::prelude::Transform>,
     billboard_query: Query<&crate::classes::BillboardGui>,
     text_label_query: Query<&crate::classes::TextLabel>,
     children_query: Query<&Children>,
@@ -296,6 +299,16 @@ fn handle_plugin_action_events(
                     notifications.warning(format!("Could not find entity '{}'", selected_id));
                     continue;
                 };
+
+                // ZIndex depth-bias derived from the adornee part's size: take
+                // the longest axis of its scale vector (a Part's scale IS its
+                // world size in this engine). A bigger part needs more
+                // camera-toward bias for the label to clear its surface; a
+                // unit-size part yields ZIndex 1. Rounds to the nearest integer.
+                let part_z_index = transforms
+                    .get(parent_entity)
+                    .map(|t| t.scale.max_element().round() as i32)
+                    .unwrap_or(0);
 
                 let has_inst_file = instance_files.get(parent_entity).is_ok();
                 let has_lff = loaded_from_file.get(parent_entity).is_ok();
@@ -401,8 +414,8 @@ fn handle_plugin_action_events(
                 // `units_offset = [0, 3, 0]`. `size` is a pure-pixel
                 // UDim2: scale=0, offset=200×50.
                 let instance_toml = format!(
-                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 0.0, 0.0]\nvisible = true\nalways_on_top = true\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
-                    now, now
+                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 0.0, 0.0]\nvisible = true\nalways_on_top = false\nz_index = {}\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
+                    now, now, part_z_index
                 );
                 let bb_toml_path = bb_dir.join("_instance.toml");
                 // Mark BEFORE the write so the file watcher's create event
@@ -459,7 +472,11 @@ fn handle_plugin_action_events(
                 // Roblox-parity Size is `UDim2`. Pure-pixel canvas
                 // dimensions: Scale=0, Offset=200×50.
                 billboard_gui.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
-                billboard_gui.always_on_top = true;
+                // AlwaysOnTop defaults to false (Roblox parity + user directive):
+                // the label respects depth and can be occluded by geometry.
+                billboard_gui.always_on_top = false;
+                // ZIndex = adornee part's longest scale axis (see part_z_index).
+                billboard_gui.z_index = part_z_index;
 
                 let billboard_entity = spawn_billboard_gui(&mut commands, billboard_instance, billboard_gui);
                 commands.entity(billboard_entity).insert(bevy::prelude::ChildOf(parent_entity));

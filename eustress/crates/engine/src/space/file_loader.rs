@@ -1219,6 +1219,10 @@ pub fn spawn_directory_entry(
                     _ => eustress_common::classes::ZIndexBehavior::Sibling,
                 };
             }
+            // ZIndex depth-bias (per-billboard integer). MindSpace's add-label
+            // derives it from the adornee part's longest scale axis; read it
+            // back so the value persists across reload instead of resetting to 0.
+            bb_class.z_index = g.z_index;
             // NOTE: `g.adornee` carries the instance name; resolution to
             // an Entity reference happens in a post-load pass once all
             // instances are spawned (see resolve_billboard_adornees, TODO).
