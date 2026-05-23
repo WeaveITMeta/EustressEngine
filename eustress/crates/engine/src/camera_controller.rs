@@ -292,11 +292,23 @@ fn update_camera_viewport_for_ui(
 /// Ensure at least one camera exists - auto-spawn if all cameras are deleted
 fn ensure_camera_exists(
     mut commands: Commands,
-    camera_query: Query<Entity, (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>)>,
+    camera_query: Query<
+        Option<&bevy::camera::RenderTarget>,
+        (With<Camera3d>, Without<crate::ui::slint_ui::SlintOverlayCamera>),
+    >,
 ) {
-    // If no cameras exist, spawn a new one at the origin
-    if camera_query.is_empty() {
-        info!("📷 No camera found - spawning new camera at origin");
+    // Count only the WINDOW-targeted editor camera. Off-screen cameras (the AI
+    // camera carries `RenderTarget::Image`) must NOT keep this guard satisfied:
+    // otherwise deleting the editor camera while the AI camera exists leaves the
+    // window with no controllable `EustressCamera`, so WASD, F-to-frame and
+    // F-to-camera all die and the view is stuck at the origin. A camera with no
+    // `RenderTarget` component defaults to the primary window, so `None` counts
+    // as an editor camera; only `Some(Image)` is excluded.
+    let has_window_camera = camera_query
+        .iter()
+        .any(|target| !matches!(target, Some(bevy::camera::RenderTarget::Image(_))));
+    if !has_window_camera {
+        info!("📷 No window camera found - spawning new editor camera");
         
         // Create EustressCamera with proper initialization
         let mut cam = EustressCamera::default();

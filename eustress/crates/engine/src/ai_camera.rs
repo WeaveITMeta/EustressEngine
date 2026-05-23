@@ -154,6 +154,13 @@ fn spawn_ai_camera(
             "AI Camera",
             Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
         ),
+        // Distinct render order so the editor tools' `find(camera.order == 0)`
+        // never grab THIS off-screen camera. Both the editor and AI camera come
+        // from `studio_camera_bundle`, which defaults to order 0 — that collision
+        // made select/move/scale/rotate cast their picking ray from the AI
+        // camera's pose, so selection was offset for every tool. -1 renders this
+        // image pass before the window camera and keeps it out of order 0.
+        Camera { order: -1, ..default() },
         AiCamera,
         // Off-screen: render to our image, never the window — so it can't
         // displace the editor camera. (Bevy resolves MSAA into the image, so we
