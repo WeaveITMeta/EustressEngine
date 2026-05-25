@@ -135,10 +135,18 @@ pub fn highlight_source(source: &str, language: &str) -> Vec<Vec<HighlightSpan>>
         .or_else(|| ss.find_syntax_by_extension(language))
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-    // Use "Monokai" theme (dark, ships with syntect defaults — close to VS Code Dark+)
+    // syntect's bundled ThemeSet does NOT actually contain "Monokai" — asking
+    // for it returned None and fell through to `.values().next()`, which is the
+    // LIGHT "GitHub" theme (white background). Its dark foregrounds — markdown
+    // **bold** most of all — were near-black and therefore INVISIBLE on the
+    // editor's dark background, so bold spans rendered blank. Use a real
+    // bundled DARK theme; `base16-eighties.dark` is vivid + close to VS Code
+    // Dark+ (bright text on a neutral-dark bg, distinct heading/keyword/bold
+    // colors), with `base16-ocean.dark` and then any theme as fallbacks.
     let theme = ts
         .themes
-        .get("Monokai")
+        .get("base16-eighties.dark")
+        .or_else(|| ts.themes.get("base16-ocean.dark"))
         .or_else(|| ts.themes.values().next())
         .expect("syntect ships at least one theme");
 
