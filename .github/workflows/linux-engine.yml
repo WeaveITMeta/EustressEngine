@@ -11,10 +11,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Run the JS actions (checkout@v4 / cache@v4) on Node 24 now, clearing the
-  # "Node.js 20 actions are deprecated" warning annotation. GitHub forces this
-  # default on 2026-06-02 anyway; opting in early keeps CI annotation-free.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   check-linux:
@@ -22,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: false
 
@@ -39,7 +35,7 @@ jobs:
             libssl-dev pkg-config mold clang
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
