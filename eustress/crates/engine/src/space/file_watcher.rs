@@ -1321,8 +1321,27 @@ fn coalesce_renames(
     let mut consumed = vec![false; events.len()];
     let mut renames: Vec<(FileChangeEvent, FileChangeEvent)> = Vec::new();
 
+    // Paths that are CREATED somewhere in this batch. A `Remove` whose path is
+    // ALSO `Create`d in the same batch is an atomic-write in-place rewrite
+    // (temp file → rename over the SAME path), NOT a `mv` — so it must never be
+    // a rename candidate. This is the guard that fixes group-move corruption:
+    // every folder entity's marker is named `_instance.toml`, so moving N
+    // entities at once emits N Remove + N Create events all sharing that
+    // basename. Without this guard the basename match below greedily cross-
+    // paired e.g. `Remove(Center/_instance.toml)` with
+    // `Create(Edge_09/_instance.toml)` → a FALSE rename that rekeyed Center's
+    // entity onto Edge_09's path (the name↔source scramble) AND freed Center's
+    // path so its own atomic re-Create spawned a DUPLICATE Center. Only a path
+    // that is gone and NOT re-created in the batch is a genuine rename.
+    let created_paths: std::collections::HashSet<std::path::PathBuf> = events.iter()
+        .filter(|e| e.change_type == FileChangeType::Created)
+        .map(|e| e.path.clone())
+        .collect();
+
     for i in 0..events.len() {
         if consumed[i] || events[i].change_type != FileChangeType::Removed { continue; }
+        // Same-path re-Create in this batch ⇒ atomic-write rewrite, not a `mv`.
+        if created_paths.contains(&events[i].path) { continue; }
         let rm_basename = match events[i].path.file_name() {
             Some(n) => n.to_os_string(),
             None => continue,

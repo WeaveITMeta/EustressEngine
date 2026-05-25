@@ -1090,10 +1090,19 @@ fn render_text(
         let mut fits_at = |candidate_size: f32| -> bool {
             let metrics = Metrics::new(candidate_size, candidate_size * 1.4);
             let mut buf = TextBuffer::new(&mut text_state.font_system, metrics);
+            // Bound WIDTH (so wrapping happens) but leave HEIGHT UNBOUNDED so
+            // every wrapped line is counted. Passing Some(height) made
+            // cosmic-text limit `layout_runs` to the lines that fit inside the
+            // band, so a multi-line label (e.g. "AI Workshop" wrapping to two
+            // lines) UNDER-reported its height → `fits_at` returned true for an
+            // oversized font → the text rendered too big and the overflow line
+            // was clipped ("AI Workshop" showed as "AI"). With `None` we sum
+            // the TRUE total height of all wrapped lines and shrink the font
+            // until the whole label genuinely fits the band height.
             buf.set_size(
                 &mut text_state.font_system,
                 Some(elem.width),
-                Some(elem.height),
+                None,
             );
             buf.set_wrap(&mut text_state.font_system, cosmic_text::Wrap::Word);
             buf.set_text(
