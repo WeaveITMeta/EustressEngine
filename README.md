@@ -6,6 +6,7 @@
   <img alt="Bevy 0.18" src="https://img.shields.io/badge/Bevy-0.18-232326.svg">
   <img alt="UI: Slint" src="https://img.shields.io/badge/UI-Slint-2379f4.svg">
   <img alt="Platform: Windows | macOS | Linux" src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg">
+  <a href="https://discord.gg/FztQJJacbw"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg?logo=discord&logoColor=white"></a>
 </p>
 
 > **The platform Roblox should have been.** A universal world-model engine, open source, forkable, AI- and MCP-native, and photoreal, built to **simulate the world, not just render a scene.**
