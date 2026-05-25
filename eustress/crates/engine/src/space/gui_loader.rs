@@ -999,6 +999,18 @@ fn spawn_text_label_element(
     // Roblox-parity Position/Size as UDim2 — single source of truth on disk.
     label.size = gui.size;
     label.position = gui.position;
+    // AnchorPoint + TextScaled round-trip through `apply_text_label_to_toml`
+    // (save-back writes `class.anchor_point` / `class.text_scaled`). The
+    // loader previously left BOTH at `TextLabel::default()`, so cold-load
+    // showed AnchorPoint (0,0) in the Properties panel even when the TOML
+    // said (0, 0.5) — and the very next save-back then CLOBBERED the disk
+    // back to the defaults (anchor (0,0), text_scaled=false), un-centering
+    // every banner. Load them here so the class mirrors disk and the
+    // round-trip is lossless. (The billboard renderer reads these from
+    // `GuiElementDisplay` on a separate path, which is why the 3D banner
+    // looked centered while the class component / panel did not.)
+    label.anchor_point = gui.anchor_point;
+    label.text_scaled = text_props.map(|t| t.text_scaled).unwrap_or(false);
     label.visible = gui.visible;
     label.z_index = gui.z_index;
 
