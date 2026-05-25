@@ -673,7 +673,16 @@ fn eustress_camera_controls(
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    
+
+    // Ctrl+Shift+Alt+wheel is reserved for the hover-resize gesture
+    // (`part_selection::hover_resize_system`) — neutralize the camera's zoom
+    // contribution for that chord so the wheel resizes ONLY the part under
+    // the cursor, not the camera distance too. The wheel events were already
+    // drained above (to prevent buildup); we just zero their zoom effect.
+    if ctrl && shift && alt {
+        scroll_delta = 0.0;
+    }
+
     // LOCAL SPACE: Get camera's actual local axes for intuitive movement
     let cam_forward = transform.forward();
     let cam_right = transform.right();

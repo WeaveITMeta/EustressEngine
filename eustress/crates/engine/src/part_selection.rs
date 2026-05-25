@@ -428,14 +428,17 @@ pub fn part_selection_system(
     if let Some((part_id, distance, hit_entity, parent_model)) = closest_hit {
         info!("[select] hit part_id='{}' dist={:.2}", part_id, distance);
 
-        // Ctrl+Alt+Click on a part with a `Link` attribute: open the
+        // Ctrl+Shift+Alt+Click on a part with a `Link` attribute: open the
         // URL in the OS default browser and skip the selection update
         // entirely. The lookup walks up the ChildOf chain so clicking
         // a part inside a Model with the Link attribute on the Model
         // also resolves (and matches Roblox-style "tap part to follow
         // link" intent). Case-insensitive key match — "Link", "link",
-        // "LINK" all work; the first hit on the chain wins.
-        if ctrl_pressed && alt_pressed {
+        // "LINK" all work; the first hit on the chain wins. The three-key
+        // chord (Ctrl+Shift+Alt) keeps link-follow clear of plain click +
+        // multi-select, and intentionally mirrors the Ctrl+Shift+Alt+wheel
+        // hover-resize gesture (see `hover_resize_system`).
+        if ctrl_pressed && shift_pressed && alt_pressed {
             let candidates = std::iter::once(hit_entity).chain(parent_model.into_iter());
             let mut opened = false;
             for candidate in candidates {
@@ -449,7 +452,7 @@ pub fn part_selection_system(
                         None
                     });
                     if let Some(url) = link {
-                        info!("[select] Ctrl+Alt+Click → opening Link '{}'", url);
+                        info!("[select] Ctrl+Shift+Alt+Click → opening Link '{}'", url);
                         open_url_in_default_browser(&url);
                         opened = true;
                         break;
@@ -678,6 +681,124 @@ fn open_url_in_default_browser(url: &str) {
     match spawn {
         Ok(_) => info!("[select] launched browser for {}", trimmed),
         Err(e) => warn!("[select] failed to launch browser for '{}': {}", trimmed, e),
+    }
+}
+
+/// **Ctrl+Shift+Alt + mouse-wheel resizes the part DIRECTLY UNDER THE
+/// CURSOR** — no click, no selection required. The cursor ray-casts against
+/// every part's visible OBB (`BasePart.size`, so it's collider-independent
+/// and works on anchored `can_collide = false` parts too); the closest hit
+/// is resized multiplicatively (~10% per notch, wheel-up grows / wheel-down
+/// shrinks) by firing the shared `ResizePartEvent`, so primitive-mesh regen,
+/// custom-GLB `Transform.scale` mode, `BasePart.cframe`, and the Avian
+/// collider rebuild all stay consistent. The same modifier chord zeroes the
+/// camera-zoom contribution in `eustress_camera_controls`, so the gesture
+/// resizes the part WITHOUT also dollying the camera.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn hover_resize_system(
+    mut ev_wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    parts_query: Query<(Entity, &GlobalTransform, &BasePart)>,
+    viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    // Used to keep a part's child BillboardGui label proportional to the
+    // part when it's resized (scale its studs size + z-index by the same
+    // factor).
+    children_query: Query<&Children>,
+    mut billboard_query: Query<&mut eustress_common::classes::BillboardGui>,
+    mut resize_events: MessageWriter<crate::scale_tool::ResizePartEvent>,
+) {
+    use bevy::input::mouse::MouseScrollUnit;
+
+    // Always drain wheel events (avoid buildup) and accumulate this frame's
+    // notches. Line unit = one notch per `ev.y`; Pixel unit (trackpads) is
+    // scaled down to a comparable magnitude.
+    let mut scroll = 0.0_f32;
+    for ev in ev_wheel.read() {
+        scroll += if ev.unit == MouseScrollUnit::Line { ev.y } else { ev.y * 0.1 };
+    }
+    if scroll == 0.0 {
+        return;
+    }
+
+    // Strict Ctrl+Shift+Alt gate — anything less is a normal wheel (camera
+    // zoom / panel scroll), which this must not hijack.
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    if !(ctrl && shift && alt) {
+        return;
+    }
+
+    // Cursor must be over the 3D viewport, not a Slint panel.
+    if ui_focus.as_ref().map(|f| f.has_focus).unwrap_or(false) {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor) = window.cursor_position() else { return };
+    if let Some(vb) = viewport_bounds.as_ref() {
+        if !vb.contains_logical(cursor, window.scale_factor() as f32) {
+            return;
+        }
+    }
+
+    // Main 3D camera (order 0 — the Slint overlay camera is order 100).
+    let Some((camera, cam_tf)) = camera_query.iter().find(|(c, _)| c.order == 0) else { return };
+    let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { return };
+
+    // Closest part whose visible OBB the cursor ray pierces.
+    let mut best: Option<(Entity, f32, Vec3)> = None;
+    for (entity, gt, bp) in parts_query.iter() {
+        if bp.locked {
+            continue;
+        }
+        let t = gt.compute_transform();
+        if let Some(dist) =
+            ray_obb_intersection(ray.origin, *ray.direction, t.translation, bp.size * 0.5, t.rotation)
+        {
+            if best.map_or(true, |(_, d, _)| dist < d) {
+                best = Some((entity, dist, bp.size));
+            }
+        }
+    }
+    let Some((entity, _, size)) = best else { return };
+
+    // Multiplicative resize: ~10% per notch, symmetric (up grows, down
+    // shrinks). Clamp to a small floor so a part can't be scrolled to zero
+    // (which would make it un-pickable and degenerate the collider).
+    let factor = 1.1_f32.powf(scroll);
+    let new_size = (size * factor).max(Vec3::splat(0.05));
+    resize_events.write(crate::scale_tool::ResizePartEvent { entity, new_size });
+
+    // Keep the part's child BillboardGui label PROPORTIONAL to the part:
+    // scale its STUDS size (UDim2 Scale component) by the SAME factor and
+    // re-derive ZIndex from the new studs size, so a 2×-the-part label stays
+    // 2× and keeps clearing the bigger part from the camera. e.g. part 2→4
+    // ⇒ billboard 4→8, ZIndex 4→8. Pure-pixel labels (Scale == 0) are left
+    // alone, per "scale it up if it's not in pixels". Mutating BillboardGui
+    // fires the marker→quad sync + the disk save-back automatically.
+    if let Ok(children) = children_query.get(entity) {
+        for child in children.iter() {
+            if let Ok(mut bb) = billboard_query.get_mut(child) {
+                if bb.size.x.scale > 0.0 {
+                    bb.size.x.scale *= factor;
+                }
+                if bb.size.y.scale > 0.0 {
+                    bb.size.y.scale *= factor;
+                }
+                // ZIndex tracks the (studs) billboard size — biggest axis —
+                // so the label always rides far enough toward the camera to
+                // clear the now-larger part. Avoids cumulative integer-round
+                // drift by deriving from the size rather than ×factor-ing the
+                // old z each notch.
+                let z_studs = bb.size.x.scale.max(bb.size.y.scale);
+                if z_studs > 0.0 {
+                    bb.z_index = z_studs.round() as i32;
+                }
+            }
+        }
     }
 }
 

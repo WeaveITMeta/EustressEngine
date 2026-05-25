@@ -570,6 +570,12 @@ fn main() {
         app.add_systems(Update, part_selection::part_selection_system
             .after(ui::slint_ui::SlintSystems::Drain)
             .after(ui::slint_ui::update_slint_ui_focus));
+        // Ctrl+Shift+Alt + mouse-wheel resizes the part under the cursor
+        // (no click/selection). Runs after the UI-focus update so it sees
+        // the authoritative cursor-over-viewport signal; fires
+        // ResizePartEvent which ScaleToolPlugin applies.
+        app.add_systems(Update, part_selection::hover_resize_system
+            .after(ui::slint_ui::update_slint_ui_focus));
     }
 
     // Streaming — must use a separate block because #[cfg] cannot gate
