@@ -639,6 +639,42 @@ fn handle_file_modified(
                                             commands.entity(entity).insert(echem.to_component());
                                         }
 
+                                        // BillboardGui class hot-reload. The
+                                        // InstanceDefinition path above only
+                                        // re-inserts Transform + material; a
+                                        // BillboardGui carries its size /
+                                        // z_index / offsets in the `[gui]`
+                                        // section, which lives on the
+                                        // `BillboardGui` CLASS component, not on
+                                        // anything the InstanceDefinition reload
+                                        // touches. Without re-inserting the
+                                        // class, an in-place `[gui] size` edit
+                                        // updated the file but never the live
+                                        // quad (built once at spawn from the
+                                        // class). Re-load the gui definition and
+                                        // re-insert the class so
+                                        // `Changed<BillboardGui>` fires
+                                        // sync_billboard_class_to_marker →
+                                        // sync_billboard_properties, which
+                                        // rebuilds the quad scale/canvas/z-bias.
+                                        // The class_name guard keeps Part /
+                                        // Model / Script instances (which also
+                                        // end in `_instance.toml`) out of this
+                                        // path. `units_offset` reaches the
+                                        // Transform through the same sync chain,
+                                        // so it wins over the generic Transform
+                                        // insert above (BillboardGui placement
+                                        // is `units_offset`, matching cold-load).
+                                        if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
+                                            if gui_def.metadata.class_name == "BillboardGui" {
+                                                let bb_class = super::gui_loader::billboard_class_from_props(&gui_def.gui);
+                                                if let Ok(mut ec) = commands.get_entity(entity) {
+                                                    ec.insert(bb_class);
+                                                }
+                                                debug!("🔄 Hot-reloaded BillboardGui class: {:?}", event.path);
+                                            }
+                                        }
+
                                         debug!("🔄 Hot-reloaded TOML instance: {:?}", event.path);
                                     }
                                     Err(e) => {

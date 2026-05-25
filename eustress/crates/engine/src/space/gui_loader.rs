@@ -802,6 +802,63 @@ pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTo
     }
 }
 
+/// Build a `BillboardGui` class component from parsed `[gui]` TOML
+/// properties. This is the single mapping from the on-disk schema
+/// (`GuiTomlProperties`) to the typed class — used by the cold-load path
+/// (`file_loader.rs`), the hot-*create* path (`file_watcher.rs`), and the
+/// hot-*modify* path. Centralising it here fixes the bug where an in-place
+/// `_instance.toml` edit (e.g. changing `[gui] size`) updated the file but
+/// not the live quad: the modify handler only re-inserted `Transform` +
+/// material and never refreshed the `BillboardGui` class, so the quad kept
+/// its spawn-time size. Re-inserting the class component this builds fires
+/// `Changed<BillboardGui>` → `sync_billboard_class_to_marker` →
+/// `sync_billboard_properties`, which rebuilds the quad scale, canvas, and
+/// z-bias from the new values. Optional schema fields that are absent leave
+/// the class default in place (older TOMLs that predate a property still
+/// load cleanly).
+pub fn billboard_class_from_props(
+    g: &GuiTomlProperties,
+) -> eustress_common::classes::BillboardGui {
+    let mut bb = eustress_common::classes::BillboardGui::default();
+
+    // Geometry
+    bb.size = g.size;
+    if let Some(v) = g.size_offset { bb.size_offset = v; }
+    if let Some(v) = g.extents_offset { bb.extents_offset = v; }
+    if let Some(v) = g.extents_offset_world_space { bb.extents_offset_world_space = v; }
+    if let Some(v) = g.units_offset { bb.units_offset = v; }
+    if let Some(v) = g.units_offset_world_space { bb.units_offset_world_space = v; }
+
+    // Distance
+    if let Some(v) = g.max_distance { bb.max_distance = v; }
+    if let Some(v) = g.distance_lower_limit { bb.distance_lower_limit = v; }
+    if let Some(v) = g.distance_upper_limit { bb.distance_upper_limit = v; }
+    if let Some(v) = g.distance_step { bb.distance_step = v; }
+
+    // Behaviour flags
+    if let Some(v) = g.active { bb.active = v; }
+    if let Some(v) = g.enabled { bb.enabled = v; }
+    if let Some(v) = g.always_on_top { bb.always_on_top = v; }
+    if let Some(v) = g.clips_descendants { bb.clips_descendants = v; }
+    if let Some(v) = g.reset_on_spawn { bb.reset_on_spawn = v; }
+    if let Some(v) = g.stiffness_by_distance { bb.stiffness_by_distance = v; }
+
+    // Appearance
+    if let Some(v) = g.brightness { bb.brightness = v; }
+    if let Some(v) = g.light_influence { bb.light_influence = v; }
+
+    // Sorting
+    if let Some(ref s) = g.z_index_behavior {
+        bb.z_index_behavior = match s.as_str() {
+            "Global" => eustress_common::classes::ZIndexBehavior::Global,
+            _ => eustress_common::classes::ZIndexBehavior::Sibling,
+        };
+    }
+    bb.z_index = g.z_index;
+
+    bb
+}
+
 fn spawn_frame_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,

@@ -219,21 +219,55 @@ fn make_part_id(entity: Entity) -> String {
     format!("{}v{}", entity.index(), entity.generation())
 }
 
+/// Resolve the SelectionManager's current id set into live entities — the
+/// ANCHOR set for the hierarchy-selection handlers below.
+///
+/// We read the manager (the selection source of truth) instead of
+/// `Query<Entity, With<Selected>>` because abstract-class containers
+/// (`Folder`, and the celestial classes) are deliberately denied the
+/// `Selected` ECS component by `sync_selection_components` so no selection
+/// box draws on them — yet they are perfectly valid hierarchy anchors. A
+/// user who clicks the "MindMap" Folder in the Explorer and chooses
+/// "Select Children" must still pick up its parts; before this, every
+/// handler saw an EMPTY `With<Selected>` set for a Folder anchor and
+/// silently no-op'd. That was the reported "Select Children/Descendants
+/// does not work in the Explorer" bug. `candidates` is every
+/// `Instance`-bearing entity (the selectable universe, abstract or not).
+fn resolve_selected_entities(
+    mgr: &SelectionSyncManager,
+    candidates: &Query<Entity, With<Instance>>,
+) -> Vec<Entity> {
+    let ids: std::collections::HashSet<String> =
+        mgr.0.read().get_selected().into_iter().collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    candidates
+        .iter()
+        .filter(|e| ids.contains(&make_part_id(*e)))
+        .collect()
+}
+
 /// Handle a single-level "select children" command — adds direct
 /// children of every currently-Selected entity to the selection.
 pub fn handle_select_children_event(
     mut events: MessageReader<SelectChildrenEvent>,
-    selected_entities: Query<Entity, With<Selected>>,
+    // Anchor off the SelectionManager (resolved via `anchor_candidates`),
+    // NOT `With<Selected>` — a Folder anchor never gets the `Selected`
+    // component (see `resolve_selected_entities`).
+    anchor_candidates: Query<Entity, With<Instance>>,
     children_query: Query<&Children>,
     instance_query: Query<Option<&Instance>>,
     selection_manager: Option<Res<SelectionSyncManager>>,
 ) {
     if events.read().next().is_none() { return; }
     let Some(mgr_res) = selection_manager else { return };
+    let anchors = resolve_selected_entities(&mgr_res, &anchor_candidates);
+    if anchors.is_empty() { return; }
 
     // Snapshot entities to add (avoid mutating during query iteration).
     let mut to_add: Vec<String> = Vec::new();
-    for parent in selected_entities.iter() {
+    for parent in anchors {
         let Ok(children) = children_query.get(parent) else { continue };
         for child in children.iter() {
             // Filter abstract classes (Folder etc. stay non-visual).
@@ -256,18 +290,24 @@ pub fn handle_select_children_event(
 /// does nothing (SelectionManager dedupes).
 pub fn handle_select_descendants_event(
     mut events: MessageReader<SelectDescendantsEvent>,
-    selected_entities: Query<Entity, With<Selected>>,
+    anchor_candidates: Query<Entity, With<Instance>>,
     children_query: Query<&Children>,
     instance_query: Query<Option<&Instance>>,
     selection_manager: Option<Res<SelectionSyncManager>>,
 ) {
     if events.read().next().is_none() { return; }
     let Some(mgr_res) = selection_manager else { return };
+    let anchors = resolve_selected_entities(&mgr_res, &anchor_candidates);
+    if anchors.is_empty() { return; }
 
     let mut to_add: Vec<String> = Vec::new();
+    // Seed the BFS frontier with the resolved anchor entities. We descend
+    // THROUGH abstract containers (Folders) — only their non-abstract
+    // leaves are added to the selection — so a Folder→sub-Folder→Part
+    // chain still reaches the Part.
     let mut visited: std::collections::HashSet<Entity> =
-        selected_entities.iter().collect();
-    let mut frontier: Vec<Entity> = visited.iter().copied().collect();
+        anchors.iter().copied().collect();
+    let mut frontier: Vec<Entity> = anchors;
 
     // BFS until we've traversed every reachable descendant.
     while let Some(parent) = frontier.pop() {
@@ -294,22 +334,28 @@ pub fn handle_select_descendants_event(
 /// Unity / Maya shortcut — walk up one level in the hierarchy.
 pub fn handle_select_parent_event(
     mut events: MessageReader<SelectParentEvent>,
-    selected_entities: Query<Entity, With<Selected>>,
+    anchor_candidates: Query<Entity, With<Instance>>,
     parent_query: Query<&ChildOf>,
-    instance_query: Query<Option<&Instance>>,
     selection_manager: Option<Res<SelectionSyncManager>>,
 ) {
     if events.read().next().is_none() { return; }
     let Some(mgr_res) = selection_manager else { return };
+    let anchors = resolve_selected_entities(&mgr_res, &anchor_candidates);
+    if anchors.is_empty() { return; }
 
     let mut new_selection: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-    for entity in selected_entities.iter() {
+    for entity in anchors {
         let Ok(child_of) = parent_query.get(entity) else { continue };
         let parent = child_of.parent();
         if !seen.insert(parent) { continue; }
-        let inst = instance_query.get(parent).ok().flatten();
-        if is_abstract_celestial(inst) { continue; }
+        // Do NOT filter abstract here: a Part's parent is almost always a
+        // Folder/Model container, which is exactly what "Select Parent"
+        // should navigate up to. The old abstract filter made this command
+        // a silent no-op for the common Part-inside-Folder case. The parent
+        // simply won't draw a selection box (it's added to the manager and
+        // highlighted in the Explorer), and a follow-up Select Children
+        // resolves it from the manager just fine.
         new_selection.push(make_part_id(parent));
     }
 
@@ -322,7 +368,7 @@ pub fn handle_select_parent_event(
 /// current selection.
 pub fn handle_select_siblings_event(
     mut events: MessageReader<SelectSiblingsEvent>,
-    selected_entities: Query<Entity, With<Selected>>,
+    anchor_candidates: Query<Entity, With<Instance>>,
     parent_query: Query<&ChildOf>,
     children_query: Query<&Children>,
     instance_query: Query<Option<&Instance>>,
@@ -330,10 +376,12 @@ pub fn handle_select_siblings_event(
 ) {
     if events.read().next().is_none() { return; }
     let Some(mgr_res) = selection_manager else { return };
+    let anchors = resolve_selected_entities(&mgr_res, &anchor_candidates);
+    if anchors.is_empty() { return; }
 
     // Collect unique parents of the current selection.
     let mut parents: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-    for entity in selected_entities.iter() {
+    for entity in anchors {
         if let Ok(child_of) = parent_query.get(entity) {
             parents.insert(child_of.parent());
         }
