@@ -3172,6 +3172,51 @@ struct DrainActionQueries<'w, 's> {
     /// Without this, scripts would only see tags placed by their own
     /// invocation — the per-VM-island bug we're trying to eliminate.
     entity_tags: Query<'w, 's, (Entity, &'static eustress_common::attributes::Tags)>,
+    /// Mutable custom-attribute access for the Properties-panel edit path:
+    /// editing an `[attributes]` row updates this in place (type-preserving),
+    /// and `save_tags_and_attributes_changes` (Changed<Attributes>) persists
+    /// it to TOML. Tags are set via `commands.insert(Tags(..))` instead — a
+    /// `&mut Tags` query here would alias the read-only `entity_tags` above.
+    attributes: Query<'w, 's, &'static mut eustress_common::attributes::Attributes>,
+}
+
+/// Parse a Properties-panel string edit into an `AttributeValue`, PRESERVING
+/// the existing value's type (editing a Number stays a Number, a Bool stays a
+/// Bool, …). Scalars + Vector2/Vector3 are parsed; richer variants fall back
+/// to String (the panel edits those as their display text anyway).
+fn parse_attribute_like(
+    existing: &eustress_common::AttributeValue,
+    s: &str,
+) -> eustress_common::AttributeValue {
+    use eustress_common::AttributeValue as A;
+    let t = s.trim();
+    let floats: Vec<f32> = t
+        .split([',', ' '])
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.trim().parse::<f32>().ok())
+        .collect();
+    match existing {
+        A::Bool(_) => A::Bool(matches!(
+            t.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )),
+        A::Int(_) => t
+            .parse::<i64>()
+            .or_else(|_| t.parse::<f64>().map(|f| f as i64))
+            .map(A::Int)
+            .unwrap_or_else(|_| A::String(t.to_string())),
+        A::Number(_) => t
+            .parse::<f64>()
+            .map(A::Number)
+            .unwrap_or_else(|_| A::String(t.to_string())),
+        A::Vector2(_) if floats.len() >= 2 => {
+            A::Vector2(bevy::math::Vec2::new(floats[0], floats[1]))
+        }
+        A::Vector3(_) if floats.len() >= 3 => {
+            A::Vector3(bevy::math::Vec3::new(floats[0], floats[1], floats[2]))
+        }
+        _ => A::String(t.to_string()),
+    }
 }
 
 
@@ -6537,10 +6582,45 @@ fn drain_slint_actions(
                             }
                         }
 
+                        // Custom CollectionService tags — the panel shows ONE
+                        // comma/semicolon-separated "Tags" row. Treat the typed
+                        // string as the FULL new tag list and replace the Tags
+                        // component (Changed<Tags> → save_tags_and_attributes_changes
+                        // persists it; the panel refreshes, A–Z within Tags). Set
+                        // via `commands` so it doesn't alias the read-only
+                        // `entity_tags` query in DrainActionQueries.
+                        "Tags" => {
+                            let tags: Vec<String> = val
+                                .split([',', ';'])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            commands
+                                .entity(entity)
+                                .insert(eustress_common::attributes::Tags(tags));
+                        }
+
                         _ => {
-                            // Unhandled property
-                            if let Some(ref mut out) = res.output {
-                                out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                            // Custom `[attributes]` edit: if `key` names an existing
+                            // attribute on this entity, update its value IN PLACE,
+                            // preserving the value's type. Changed<Attributes> →
+                            // save_tags_and_attributes_changes persists it and the
+                            // panel refreshes (A–Z within the Attributes section).
+                            // Only a key that is neither a built-in nor a known
+                            // attribute is genuinely "unhandled".
+                            let mut handled = false;
+                            if let Ok(mut attrs) = queries.attributes.get_mut(entity) {
+                                if let Some(existing) = attrs.values.get(&key).cloned() {
+                                    let parsed = parse_attribute_like(&existing, &val);
+                                    attrs.values.insert(key.clone(), parsed);
+                                    handled = true;
+                                }
+                            }
+                            if !handled {
+                                // Unhandled property
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("Property '{}' = '{}' (unhandled)", key, val));
+                                }
                             }
                         }
                     }
