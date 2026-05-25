@@ -678,6 +678,12 @@ fn spawn_bevy_gui_from_loaded_entities(
     >,
     // StarterGui service component to read ShowDevelopmentUI
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
+    // Ancestor walk (read-only): used to tell whether a GUI element belongs
+    // to a 3D-rendered root (BillboardGui / SurfaceGui — drawn by the
+    // billboard atlas) versus a 2D ScreenGui overlay. Only the latter gets
+    // a flat Bevy UI Node.
+    parents: Query<&bevy::prelude::ChildOf>,
+    all_instances: Query<&eustress_common::classes::Instance>,
 ) {
     use eustress_common::classes::ClassName;
     use crate::space::service_loader::PropertyValue;
@@ -719,6 +725,56 @@ fn spawn_bevy_gui_from_loaded_entities(
 
         if !is_gui {
             continue;
+        }
+
+        // 2D OVERLAY GATE (race-free). A flat Bevy UI Node belongs ONLY to a
+        // ScreenGui tree, which lives under the `StarterGui` service.
+        // BillboardGui / SurfaceGui trees attach to Workspace parts and
+        // render in 3D via the billboard atlas — they must never get a 2D
+        // node. Gating on the SERVICE (set once at spawn from the file path)
+        // is immune to the spawn-order race that the ChildOf ancestor walk
+        // below suffers: at cold-load a label can be processed BEFORE its
+        // `ChildOf` parent link is committed, so the walk finds no
+        // BillboardGui parent, wrongly spawns a 2D node, and stamps it
+        // permanently — that left a few residual overlay ghosts after the
+        // first fix. The service is known at spawn, so this catches every
+        // Workspace-hosted billboard label regardless of system ordering.
+        if loaded.service != "StarterGui" {
+            commands.entity(entity).insert(BevyGuiSpawned);
+            continue;
+        }
+
+        // Belt-and-suspenders: even within StarterGui, skip 2D nodes for any
+        // element whose nearest GUI-root ancestor is a BillboardGui or
+        // SurfaceGui. Those are already drawn by the billboard atlas
+        // renderer (from their `GuiElementDisplay`); also giving them a flat
+        // Bevy UI `Node` paints a SECOND, ghost copy stacked on the 2D
+        // overlay — the user-reported "shadow of all the billboards"
+        // artifact. Only ScreenGui descendants belong on the 2D overlay.
+        // Walk up the ChildOf chain: BillboardGui/SurfaceGui first → 3D
+        // (skip); ScreenGui first → genuine 2D overlay element (proceed).
+        {
+            let mut cur = entity;
+            let mut renders_in_3d = false;
+            while let Ok(child_of) = parents.get(cur) {
+                cur = child_of.parent();
+                match all_instances.get(cur) {
+                    Ok(anc) if matches!(
+                        anc.class_name,
+                        ClassName::BillboardGui | ClassName::SurfaceGui
+                    ) => {
+                        renders_in_3d = true;
+                        break;
+                    }
+                    Ok(anc) if matches!(anc.class_name, ClassName::ScreenGui) => break,
+                    _ => {}
+                }
+            }
+            if renders_in_3d {
+                // Stamp so the query doesn't reconsider it every frame.
+                commands.entity(entity).insert(BevyGuiSpawned);
+                continue;
+            }
         }
 
         // Read the TOML to get layout/style data
