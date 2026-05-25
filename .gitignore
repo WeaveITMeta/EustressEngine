@@ -104,3 +104,12 @@ infrastructure/cloudflare/api/.wrangler/
 LAUNCH_PLAN.md
 WEEK_PLAN.md
 recover_trashed_spaces.ps1
+
+# Accidental in-tree wgpu clone. It has its own .git, so git recorded it
+# as a phantom gitlink (mode 160000) with no matching .gitmodules entry —
+# that is the CI "fatal: No url found for submodule path
+# 'eustress/.patches/wgpu-fresh'" / git exit-128 checkout annotation. It
+# is NOT referenced by any [patch] (only gpu-allocator-fresh is). Ignored
+# so the untracked local copy never re-enters the index after we drop the
+# gitlink.
+eustress/.patches/wgpu-fresh/
