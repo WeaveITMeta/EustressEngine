@@ -1018,6 +1018,9 @@ fn handle_menu_action_events(
                                 for (path, desc_entity) in &descendant_paths {
                                     if *desc_entity == entity { continue; }
                                     commands.entity(*desc_entity).despawn();
+                                    // DB-primary: remove the descendant's record too,
+                                    // or it resurrects from world.fjalldb next session.
+                                    crate::space::active_db::delete_path(path);
                                     if let Some(ref mut registry) = file_registry {
                                         registry.unregister_file(path);
                                     }
@@ -1026,6 +1029,10 @@ fn handle_menu_action_events(
                             if let Some(ref mut registry) = file_registry {
                                 registry.unregister_file(&toml_path);
                             }
+                            // DB-primary: drop the entity's DB record (tree TOML +
+                            // binary twin) so it doesn't reload from world.fjalldb
+                            // next session — trashing the disk file isn't enough.
+                            crate::space::active_db::delete_path(&toml_path);
                         }
                         // Fallback: entities loaded via file_loader (soul scripts,
                         // Rune/Luau files) have LoadedFromFile but no InstanceFile.
@@ -1104,6 +1111,9 @@ fn handle_menu_action_events(
                             if let Some(ref mut registry) = file_registry {
                                 registry.unregister_file(&source_path);
                             }
+                            // DB-primary: drop the DB record for file-backed
+                            // entities (scripts, etc.) so they don't resurrect.
+                            crate::space::active_db::delete_path(&source_path);
                         }
                         commands.entity(entity).despawn();
                         info!("🗑️ Deleted entity {:?} ({})", entity, id);

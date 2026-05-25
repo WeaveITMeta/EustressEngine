@@ -2,6 +2,12 @@
 
 A batteries-included Rust game engine and editor built with **Bevy** + **Slint**.
 
+<p align="center">
+  <img src="docs/marketing/screenshot.png" alt="Eustress Engine studio — a live V-Cell battery simulation in the native 3D viewport, with the scene Explorer, real-time Properties, and the built-in AI Workshop assistant" width="900">
+</p>
+
+<p align="center"><em>The Eustress Engine studio in action — a native Bevy 3D viewport running a live <strong>V-Cell</strong> battery-monitor simulation, alongside the scene Explorer, real-time Properties, and the built-in <strong>AI Workshop</strong> assistant, all in a single Rust + Slint window.</em></p>
+
 ## What's Inside
 
 - **Engine** - Desktop 3D editor/studio for scene creation
@@ -58,7 +64,7 @@ Binaries output to: `eustress/target/release/`
 
 ## Architecture
 
-- **Engine**: Bevy 0.14
+- **Engine**: Bevy 0.18
 - **UI**: Slint (declarative GUI)
 - **Language**: 100% Rust
 - **Platform**: Desktop only (Windows, macOS, Linux)

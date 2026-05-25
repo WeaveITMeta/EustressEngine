@@ -5174,6 +5174,43 @@ fn drain_slint_actions(
                                                     }
                                                 }
                                             }
+                                            // Patch `_instance.toml` so the SoulScript's
+                                            // `name` / `source` reference tracks the rename.
+                                            // Without this, F2-renaming a script folder
+                                            // renamed the code+summary files but left
+                                            // `source = "<old>.rune"` (now missing) →
+                                            // loader failed to read the source and the
+                                            // entity fell back to a plain Folder, losing
+                                            // its SoulScript identity (user-reported
+                                            // 2026-05-25 on `vcell_cycle_life_test`).
+                                            {
+                                                let code_exts = ["rune", "luau", "soul", "lua"];
+                                                let landed_ext = code_exts.iter().find(|ext|
+                                                    new_folder.join(format!("{}.{}", name, ext)).exists()
+                                                );
+                                                let instance_toml = new_folder.join("_instance.toml");
+                                                if let Ok(contents) = std::fs::read_to_string(&instance_toml) {
+                                                    let patched: String = contents.lines().map(|line| {
+                                                        let trimmed = line.trim_start();
+                                                        if trimmed.starts_with("name = \"") && trimmed.ends_with('"') {
+                                                            format!("name = \"{}\"", name)
+                                                        } else if trimmed.starts_with("source = \"") && trimmed.ends_with('"') {
+                                                            match landed_ext {
+                                                                Some(ext) => format!("source = \"{}.{}\"", name, ext),
+                                                                None => line.to_string(),
+                                                            }
+                                                        } else {
+                                                            line.to_string()
+                                                        }
+                                                    }).collect::<Vec<_>>().join("\n");
+                                                    if patched != contents {
+                                                        let final_text = if contents.ends_with('\n') && !patched.ends_with('\n') {
+                                                            format!("{}\n", patched)
+                                                        } else { patched };
+                                                        let _ = std::fs::write(&instance_toml, final_text);
+                                                    }
+                                                }
+                                            }
                                             // Update LoadedFromFile.path so
                                             // future saves target the new
                                             // location. Reconstruct the same

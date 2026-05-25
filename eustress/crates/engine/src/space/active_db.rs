@@ -162,6 +162,48 @@ mod imp {
             || mesh.map(crate::space::representation::mesh_requires_filesystem).unwrap_or(false)
     }
 
+    /// True when the entity's on-disk folder owns at least one CHILD entity
+    /// (a subfolder carrying its own `_instance.toml`). Such a parent MUST
+    /// stay folder-form (FileSystem): a binary `.bin` is a single flat
+    /// record with no folder, so collapsing a parent-with-children strands
+    /// and then trashes them. This is the same failure `put_gui` already
+    /// guards file-natured GUI against — but a plain `Part` that has gained
+    /// children (e.g. a MindSpace BillboardGui attached to it) hits it too:
+    /// user-reported, moving such a Part trashed its billboard on every
+    /// release (8 `Label-*` copies accumulated in the Part's `.eustress/trash`).
+    /// The engine's own `.eustress/` trash dir and hidden dirs are skipped.
+    fn folder_has_child_entities(abs: &Path) -> bool {
+        let Some(folder) = abs.parent() else {
+            return false;
+        };
+        // RECURSIVE (2026-05-24): detect a descendant entity at ANY depth, not
+        // just direct children. A MindSpace label nests Block → BillboardGui →
+        // TextLabel; the one-level check kept the Block (it sees BillboardGui)
+        // and the BillboardGui (it sees TextLabel), but any path that collapsed
+        // a mid-level folder could still strand the deeper TextLabel and the
+        // stale-cleanup sweep then despawned it ("moving a block deletes the
+        // billboard's text label"). Walking the whole subtree means a parent
+        // with descendants at any depth always stays folder-form (FileSystem)
+        // and never binarises into a flat record that orphans them.
+        fn any_descendant(dir: &Path) -> bool {
+            let Ok(read_dir) = std::fs::read_dir(dir) else {
+                return false;
+            };
+            read_dir.flatten().any(|entry| {
+                let p = entry.path();
+                if !p.is_dir() {
+                    return false;
+                }
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') {
+                    return false; // skip `.eustress/` trash + hidden dirs
+                }
+                p.join("_instance.toml").is_file() || any_descendant(&p)
+            })
+        }
+        any_descendant(folder)
+    }
+
     /// Instance definition for an absolute in-Space path, from the DB.
     /// Binary fast-path → else the importer's TOML bytes (healed, then
     /// lazily upgraded to a binary record) → else `None` (caller falls
@@ -176,7 +218,7 @@ mod imp {
         // build may have wrongly binarised it; prefer its authoritative TOML.
         if let Ok(Some(bytes)) = a.db.get_file(&format!("{rel}{BIN_SUFFIX}")) {
             if let Ok(def) = bincode::deserialize::<InstanceDefinition>(&bytes) {
-                if !instance_stays_filesystem(&def) {
+                if !instance_stays_filesystem(&def) && !folder_has_child_entities(abs) {
                     note(&BIN_HITS, "instance bin-hit");
                     return Some(def);
                 }
@@ -187,7 +229,7 @@ mod imp {
                 if let Ok(def) = instance_loader::load_instance_definition_from_str(s) {
                     // Only upgrade to a binary twin for entities that may live
                     // in binary-ECS. Custom-mesh / file-natured parts stay TOML.
-                    if !instance_stays_filesystem(&def) {
+                    if !instance_stays_filesystem(&def) && !folder_has_child_entities(abs) {
                         if let Ok(bin) = bincode::serialize(&def) {
                             let _ = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin);
                         }
@@ -207,12 +249,6 @@ mod imp {
     /// disk, no TOML. Returns `false` when no DB is active (caller then
     /// does its legacy disk write).
     pub fn put_instance(abs: &Path, def: &InstanceDefinition) -> bool {
-        // Custom-mesh / file-natured instances must persist as filesystem TOML,
-        // never a DB `.bin` (a binary core can't hold a resolvable mesh path).
-        // Returning false routes the caller to its disk-TOML write path.
-        if instance_stays_filesystem(def) {
-            return false;
-        }
         let Ok(g) = ACTIVE.read() else {
             return false;
         };
@@ -222,6 +258,18 @@ mod imp {
         let Some(rel) = rel_key(&a.root, abs) else {
             return false;
         };
+        // Custom-mesh / file-natured instances, OR any instance that HAS
+        // CHILDREN, must persist as filesystem TOML — never a flat DB `.bin`
+        // (a binary core can't hold a resolvable mesh path, and a flat record
+        // has no folder so it strands child entities). Returning false routes
+        // the caller to its disk-TOML write path, preserving the children.
+        if instance_stays_filesystem(def) || folder_has_child_entities(abs) {
+            // Undo any earlier wrong collapse: drop a stale binary twin so the
+            // authoritative folder-form TOML (and its children) is served
+            // again instead of the flat record that stranded them.
+            let _ = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}"));
+            return false;
+        }
         match bincode::serialize(def) {
             Ok(bin) => {
                 let ok = a.db.put_file(&format!("{rel}{BIN_SUFFIX}"), &bin).is_ok();
@@ -283,6 +331,28 @@ mod imp {
         a.db
             .delete_instance_core(eustress_worlddb::EntityId(stored_id), (pos[0], pos[1], pos[2]))
             .is_ok()
+    }
+
+    /// Remove a folder-form entity's DB records — the `{rel}` tree TOML AND its
+    /// `{rel}.bin` binary twin — so a deleted/trashed entity does NOT resurrect
+    /// from the DB on the next session. The scene is DB-primary, so trashing the
+    /// disk `_instance.toml` alone leaves the authoritative record in
+    /// `world.fjalldb` behind (the reported "delete comes back next session"
+    /// bug). `abs` is the entity's `_instance.toml` path — the same key
+    /// `put_instance`/`put_gui` write under.
+    pub fn delete_path(abs: &Path) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let Some(rel) = rel_key(&a.root, abs) else {
+            return false;
+        };
+        let removed_toml = a.db.delete_file(&rel).is_ok();
+        let removed_bin = a.db.delete_file(&format!("{rel}{BIN_SUFFIX}")).is_ok();
+        removed_toml || removed_bin
     }
 
     /// Eager snapshot of every binary-ECS core in the active Space's
@@ -412,6 +482,9 @@ mod imp {
         false
     }
     pub fn delete_instance_core(_stored_id: u64, _pos: [f32; 3]) -> bool {
+        false
+    }
+    pub fn delete_path(_abs: &Path) -> bool {
         false
     }
     pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {

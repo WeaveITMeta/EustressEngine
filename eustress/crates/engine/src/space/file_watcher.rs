@@ -222,6 +222,17 @@ pub fn process_file_changes(
     space_root: Res<super::SpaceRoot>,
     // Query for entities loaded from files
     file_entities: Query<(Entity, &super::file_loader::LoadedFromFile)>,
+    // Parent links + an all-entities probe so the stale-cleanup sweep can
+    // tell whether a candidate is a live CHILD of a live parent (e.g. a
+    // BillboardGui/TextLabel under a Part). Such children are owned by the
+    // ECS hierarchy, not the disk sweep — they must NOT be despawned just
+    // because their folder path momentarily fails a filesystem stat.
+    // Bundled into one tuple param to stay within Bevy's 16-system-param
+    // ceiling (this system is already param-dense).
+    ownership_queries: (
+        Query<&bevy::prelude::ChildOf>,
+        Query<Entity>,
+    ),
     // Query for Soul scripts
     mut soul_scripts: Query<&mut crate::soul::SoulScriptData>,
     class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
@@ -237,7 +248,11 @@ pub fn process_file_changes(
     let Some(watcher) = watcher else {
         return;
     };
-    
+
+    // Unbundle the ownership-probe queries (tupled to respect the
+    // 16-system-param ceiling). Used only by the stale-cleanup sweep below.
+    let (child_of_query, alive_entities) = (&ownership_queries.0, &ownership_queries.1);
+
     // Clean up old entries from recently written files
     recently_written.cleanup();
 
@@ -266,6 +281,24 @@ pub fn process_file_changes(
         for (entity, loaded) in file_entities.iter().skip(pos).take(STALE_SCAN_BATCH) {
             scanned += 1;
             if !loaded.path.exists() && !registry.rename_in_progress.contains(&loaded.path) {
+                // OWNERSHIP GUARD (2026-05-24): never sweep a live CHILD of a
+                // live parent. A MindSpace label is `Part → BillboardGui →
+                // TextLabel` in the ECS; moving the Part could leave the
+                // BillboardGui folder momentarily un-stat-able (rename race,
+                // dual-model Fjall-vs-disk skew, atomic-write window), and the
+                // old sweep then despawned the billboard + its label — the
+                // user-reported "moving a block deletes the billboard's text
+                // label". A genuine on-disk delete still fires a watcher
+                // `Remove` event handled by `handle_file_removed` (which
+                // despawns regardless of parent); this amortized sweep is only
+                // a backstop for MISSED deletes, so skipping owned children is
+                // safe. Real parent deletion despawns children with it (Bevy
+                // recursive despawn), so they never reach this sweep orphaned.
+                if let Ok(child_of) = child_of_query.get(entity) {
+                    if alive_entities.contains(child_of.parent()) {
+                        continue;
+                    }
+                }
                 stale.push((entity, loaded.path.clone()));
             }
         }
@@ -308,11 +341,34 @@ pub fn process_file_changes(
     // animation progress, in-flight tool results, etc.). We detect
     // the pair by matching final-filename equality (same basename,
     // different full path) and promote it to an in-place path update.
-    let (events, renames) = coalesce_renames(events);
+    let (mut events, renames) = coalesce_renames(events);
     for (old_ev, new_ev) in renames {
         handle_file_renamed(&old_ev.path, &new_ev.path, &mut registry, &mut commands, &file_entities);
     }
-    
+
+    // PARENT-BEFORE-CHILD ordering for CREATE events (2026-05-24). Copy-paste /
+    // duplicate writes a whole folder TREE to disk; the watcher can deliver a
+    // child's `_instance.toml` (e.g. `<Part>/Label/_instance.toml`) BEFORE the
+    // parent's, so the child's parent-lookup (`registry.get_entity(parent
+    // marker)`) returns None and it spawns UNPARENTED — the user-reported
+    // "copy-paste didn't bring the children" (the pasted Part's BillboardGui/
+    // TextLabel detach). Cold-load never hits this because it loads depth-first
+    // parent-first. Depth-ordering the Creates (shallower paths first) makes the
+    // parent entity register before its descendants look it up. Non-Create
+    // events keep their relative order (stable sort, key 0).
+    // CREATE events FIRST (shallow-path-first so parents register before
+    // children), THEN Modified/Removed LAST. Ordering Removed/Modified first
+    // (the previous `_ => 0`) let a pasted root's atomic-write-replace Remove —
+    // which the reroute turns into a Modify that marks the path
+    // `recently_written` — run BEFORE the root's Create, so the Create got
+    // skipped and NOTHING spawned. Processing Creates first spawns+registers the
+    // whole pasted subtree (parents before children); the trailing
+    // Modified/Removed then update in place harmlessly.
+    events.sort_by_key(|e| match e.change_type {
+        FileChangeType::Created => e.path.components().count(),
+        _ => usize::MAX,
+    });
+
     // Grace period: ignore Modified events for the first 5 seconds after watcher
     // creation. `notify` fires spurious Modify events for pre-existing files when
     // the watcher starts — those files were already loaded by load_space_files_system.
@@ -364,7 +420,37 @@ pub fn process_file_changes(
                 handle_file_created(&event, &mut registry, &mut material_registry, &mut mesh_cache, &mut commands, &asset_server, &mut materials, &space_root.0, class_defaults.as_deref());
             }
             FileChangeType::Removed => {
-                handle_file_removed(&event, &mut registry, &mut commands);
+                // Atomic-write replace (every TOML save: temp file →
+                // MoveFileEx REPLACE_EXISTING over the destination) surfaces to
+                // `notify` as a SAME-path Remove+Create pair, which
+                // `coalesce_renames` does NOT fuse (it only fuses
+                // DIFFERENT-path rename pairs). The old code despawned on the
+                // spurious Remove — recursively killing a Part's
+                // BillboardGui/TextLabel children — then the paired Create
+                // respawned a CHILDLESS part (entity generation climbed once
+                // per move/save). If the path STILL EXISTS it was replaced, not
+                // deleted: re-route to the Modify handler so the entity updates
+                // IN PLACE (children preserved) AND external-editor edits still
+                // hot-reload their new content. A genuine delete leaves the
+                // path gone and falls through to the real despawn. Grace-period
+                // spurious Removes are left to `handle_file_removed`'s own
+                // still-exists guard (it skips despawn there too).
+                if !in_grace_period
+                    && event.path.exists()
+                    && !registry.rename_in_progress.contains(&event.path)
+                {
+                    recently_written.mark_written(event.path.clone());
+                    handle_file_modified(
+                        &event,
+                        &mut registry,
+                        &mut commands,
+                        &asset_server,
+                        &file_entities,
+                        &mut soul_scripts,
+                    );
+                } else {
+                    handle_file_removed(&event, &mut registry, &mut commands);
+                }
             }
         }
 
@@ -522,6 +608,24 @@ fn handle_file_modified(
                                             );
                                         }
                                         commands.entity(entity).insert(transform);
+
+                                        // Re-derive BasePart.size from the mesh
+                                        // AABB × the new Transform.scale, exactly
+                                        // as the spawn path does (it tags every
+                                        // mesh part with NeedsMeshSize). Without
+                                        // this, a TOML scale edit updated only
+                                        // Transform.scale while BasePart.size went
+                                        // stale; the legacy TOML write-back
+                                        // serialises scale FROM size, so the next
+                                        // save reverted the resize on reload
+                                        // (user-reported 2026-05-23: the entrance
+                                        // arch's columns reverted to their original
+                                        // height after a restart). The marker is a
+                                        // no-op on non-mesh instances (the
+                                        // recompute query requires Mesh3d + BasePart).
+                                        commands
+                                            .entity(entity)
+                                            .insert(crate::space::instance_loader::NeedsMeshSize);
 
                                         if let Some(ref mat) = instance_def.material {
                                             commands.entity(entity).insert(mat.to_component());
@@ -1278,6 +1382,25 @@ fn handle_file_removed(
     // Skip if this path is being renamed — the delete is expected
     if registry.rename_in_progress.remove(&event.path) {
         info!("➖ File deleted (rename in progress, skipping despawn): {:?}", event.path);
+        return;
+    }
+    // ATOMIC-WRITE ARTIFACT GUARD (2026-05-24). `write_atomic` saves by
+    // writing a temp file then `std::fs::rename(tmp, dest)` — on Windows that
+    // is `MoveFileEx(REPLACE_EXISTING)`, and replacing an EXISTING destination
+    // can surface to `notify` as a Remove(dest)+Create(dest) pair for the SAME
+    // path. `coalesce_renames` only fuses DIFFERENT-path rename pairs, so this
+    // same-path pair slips through: the old handler despawned the entity on the
+    // spurious Remove — recursively killing its children (a Part's
+    // BillboardGui/TextLabel) — then the paired Create respawned a CHILDLESS
+    // part. That is the user-reported "moving the block loses its label", with
+    // the part's entity generation climbing once per move. A path that STILL
+    // EXISTS on disk was not actually deleted, so skip the despawn; the paired
+    // same-path Create is already a no-op via `handle_file_created`'s
+    // `is_loaded` check (we never unregistered). A genuine deletion leaves the
+    // path gone and still despawns normally; external editor saves arrive as
+    // Modify (handled elsewhere), not Remove, so they're unaffected.
+    if event.path.exists() {
+        debug!("➖ ignoring Remove — path still present (atomic-write replace artifact): {:?}", event.path);
         return;
     }
     if let Some(entity) = registry.get_entity(&event.path) {

@@ -1104,6 +1104,80 @@ fn handle_stop_play(
     }
 }
 
+/// Safety-net world restore that runs on EVERY transition back to Edit mode,
+/// no matter which path stopped play.
+///
+/// `handle_stop_play` only restores when the stop arrives via the Slint Stop
+/// button (`studio_state.stop_requested`). But the MCP `stop_simulation` op
+/// and the sim auto-stop in `simulation::plugin` set `PlayModeState::Editing`
+/// directly, and the keyboard shortcuts used to write dead events — so those
+/// paths transitioned out of play WITHOUT restoring, leaving every un-anchored
+/// part wherever play-mode physics flung it (user-reported 2026-05-23:
+/// Play-with-character scattered the park; the fountain basin fell to
+/// y=-5000 and only an engine relaunch recovered it).
+///
+/// Keying the restore on the state transition instead of the trigger flag
+/// makes all stop paths converge here. It is idempotent with
+/// `handle_stop_play`: that handler clears the snapshot before this runs, so
+/// for the Slint-button path this is a no-op.
+fn restore_scene_on_enter_edit(
+    mut commands: Commands,
+    mut snapshot_stack: ResMut<SnapshotStack>,
+    mut play_mode: ResMut<PlayMode>,
+    mut physics_time: ResMut<Time<Physics>>,
+    mut restore_query: Query<
+        (Entity, Option<&mut Transform>, Option<&mut BasePart>),
+        (With<Instance>, Without<PlayModeCharacter>, Without<SpawnedDuringPlayMode>),
+    >,
+    spawned_during_play: Query<Entity, With<SpawnedDuringPlayMode>>,
+    play_mode_entities: Query<Entity, Or<(With<PlayModeCharacter>, With<PlayModeCamera>)>>,
+) {
+    // Edit mode never simulates physics.
+    physics_time.pause();
+
+    // Act only when a play snapshot is still pending — i.e. the
+    // trigger-gated `handle_stop_play` did NOT already restore + clear it.
+    let restored = {
+        let Some(snapshot) = snapshot_stack.initial() else { return };
+        info!(
+            "🔄 Safety-net restore on enter-edit: {} entities in snapshot",
+            snapshot.entities.len()
+        );
+        let mut restored = 0;
+        for (entity, transform, basepart) in restore_query.iter_mut() {
+            let Some(es) = snapshot.entities.get(&entity.to_bits()) else { continue };
+            if let (Some(mut t), Some(ts)) = (transform, &es.transform) {
+                ts.apply_to(&mut t);
+                restored += 1;
+            }
+            if let (Some(mut bp), Some(bps)) = (basepart, &es.basepart) {
+                bp.anchored = bps.anchored;
+                bp.can_collide = bps.can_collide;
+            }
+        }
+        restored
+    };
+    info!("🔄 Safety-net restored {} transforms to pre-play state", restored);
+
+    // Remove anything play mode spawned (character, follow camera, runtime parts).
+    for e in spawned_during_play.iter() {
+        if commands.get_entity(e).is_ok() {
+            commands.entity(e).despawn();
+        }
+    }
+    for e in play_mode_entities.iter() {
+        if commands.get_entity(e).is_ok() {
+            commands.entity(e).despawn();
+        }
+    }
+
+    // Snapshot consumed.
+    snapshot_stack.clear();
+    play_mode.world_snapshot = None;
+    play_mode.serialized_scene = None;
+    play_mode.started_at = None;
+}
+
 /// Event to create a save point during play
 #[derive(Event, Message, Debug, Clone)]
 pub struct CreateSavePointEvent {
@@ -1281,9 +1355,14 @@ fn handle_pause_toggle(
 fn play_mode_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
     current_state: Res<State<PlayModeState>>,
-    mut start_events: MessageWriter<StartPlayEvent>,
-    mut stop_events: MessageWriter<StopPlayEvent>,
-    mut pause_events: MessageWriter<TogglePauseEvent>,
+    // Drive the SAME StudioState request flags the Slint Play/Stop buttons
+    // set. Previously these shortcuts wrote StartPlayEvent/StopPlayEvent
+    // messages that NOTHING consumes, so F5/F6/F7/F8/Escape were silently
+    // dead (handle_start_play / handle_stop_play / handle_pause_toggle all
+    // read StudioState flags, not those events). Routing through the flags
+    // makes the shortcuts work AND sends Stop through handle_stop_play, which
+    // is the path that restores the pre-play world snapshot.
+    mut studio_state: ResMut<crate::ui::StudioState>,
     mut save_point_events: MessageWriter<CreateSavePointEvent>,
     mut restore_events: MessageWriter<RestoreToSavePointEvent>,
     snapshot_stack: Res<SnapshotStack>,
@@ -1293,58 +1372,39 @@ fn play_mode_shortcuts(
     
     // F5: Play with character
     if keyboard.just_pressed(KeyCode::F5) {
-        match current_state.get() {
-            PlayModeState::Editing => {
-                info!("▶️ F5: Play with Character");
-                start_events.write(StartPlayEvent {
-                    play_type: PlayModeType::WithCharacter,
-                });
-            }
-            _ => {}
+        if matches!(current_state.get(), PlayModeState::Editing) {
+            info!("▶️ F5: Play with Character");
+            studio_state.play_with_character_requested = true;
         }
     }
-    
+
     // F6: Pause/Resume
     if keyboard.just_pressed(KeyCode::F6) {
-        match current_state.get() {
-            PlayModeState::Playing | PlayModeState::Paused => {
-                pause_events.write(TogglePauseEvent);
-            }
-            _ => {}
+        if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
+            studio_state.pause_requested = true;
         }
     }
-    
+
     // F7: Play solo (no character)
     if keyboard.just_pressed(KeyCode::F7) {
-        match current_state.get() {
-            PlayModeState::Editing => {
-                info!("▶️ F7: Play Solo");
-                start_events.write(StartPlayEvent {
-                    play_type: PlayModeType::Solo,
-                });
-            }
-            _ => {}
+        if matches!(current_state.get(), PlayModeState::Editing) {
+            info!("▶️ F7: Play Solo");
+            studio_state.play_solo_requested = true;
         }
     }
-    
+
     // F8: Stop
     if keyboard.just_pressed(KeyCode::F8) {
-        match current_state.get() {
-            PlayModeState::Playing | PlayModeState::Paused => {
-                info!("⏹️ F8: Stop");
-                stop_events.write(StopPlayEvent);
-            }
-            _ => {}
+        if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
+            info!("⏹️ F8: Stop");
+            studio_state.stop_requested = true;
         }
     }
-    
+
     // Escape: Stop (alternative)
     if keyboard.just_pressed(KeyCode::Escape) {
-        match current_state.get() {
-            PlayModeState::Playing | PlayModeState::Paused => {
-                stop_events.write(StopPlayEvent);
-            }
-            _ => {}
+        if matches!(current_state.get(), PlayModeState::Playing | PlayModeState::Paused) {
+            studio_state.stop_requested = true;
         }
     }
     
@@ -1457,6 +1517,10 @@ impl Plugin for PlayModePlugin {
             .add_systems(OnEnter(PlayModeState::Editing), crate::soul::rune_api::cleanup_scripts_on_stop
                 .after(crate::soul::rune_api::run_script_exit))
             .add_systems(OnEnter(PlayModeState::Editing), restore_gui_on_stop)
+            // Safety-net world restore for EVERY stop path (MCP stop_simulation,
+            // sim auto-stop, keyboard F8/Escape) — not just the Slint Stop
+            // button that handle_stop_play is gated on.
+            .add_systems(OnEnter(PlayModeState::Editing), restore_scene_on_enter_edit)
 
             // Dynamic-script runtimes. LuauRuntimeState is registered
             // here so the Luau hot-reload system has somewhere to write

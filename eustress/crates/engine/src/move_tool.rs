@@ -757,7 +757,7 @@ fn handle_move_interaction(
                 .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
                 .or_else(|| {
                     find_surface_under_cursor_with_normal(&ray, &unselected_query, &selected_entities)
-                        .map(|(pt, norm)| (pt, norm, None))
+                        .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
                 });
 
             let dragged_entity = state.dragged_entity;

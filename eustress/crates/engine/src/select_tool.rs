@@ -18,7 +18,17 @@ use avian3d::prelude::*;
 use crate::selection_box::Selected;
 use crate::rendering::PartEntity;
 use crate::classes::{BasePart, Instance};
-use crate::ui::{StudioState, Tool, BevySelectionManager, SlintUIFocus};
+use crate::ui::{StudioState, Tool, SlintUIFocus};
+// IMPORTANT: use the `rendering::BevySelectionManager` resource, NOT the
+// `ui::BevySelectionManager` one. They are distinct Resource TYPES wrapping the
+// SAME `Arc<RwLock<SelectionManager>>` (cloned to both plugins in main.rs), but
+// only the rendering one is actually inserted at runtime — by `PartRenderingPlugin`
+// (added in main.rs). The ui one is inserted solely by the LEGACY, NOT-added
+// `StudioUiPlugin`, so `Option<Res<ui::BevySelectionManager>>` was always `None`
+// and `handle_box_selection` early-returned on its first line every frame
+// (box-select "didn't work at all"). part_selection.rs already uses the rendering
+// one — match it.
+use crate::rendering::BevySelectionManager;
 use crate::math_utils::{
     calculate_rotated_aabb, ray_plane_intersection, ray_obb_intersection,
     ray_intersects_part,
@@ -115,6 +125,14 @@ pub struct BoxSelectionState {
     pub additive: bool,
     /// Entities that were selected before box select started (for additive mode)
     pub previous_selection: Vec<Entity>,
+    /// The marquee rectangle in VIEWPORT-LOCAL LOGICAL pixels, computed by
+    /// `handle_box_selection` from `ViewportBounds` — the SAME rect the
+    /// selection scan uses. `render_box_selection` draws exactly this so the
+    /// visible box matches the selection region (WYSIWYG). Without sharing it,
+    /// the renderer recomputed the rect from a DIFFERENT viewport-offset source
+    /// (`get_viewport_x`), so the drawn box was shifted from what it selected.
+    pub rect_min: Vec2,
+    pub rect_size: Vec2,
 }
 
 /// Plugin for the select tool drag functionality
@@ -188,7 +206,7 @@ fn handle_select_drag(
     all_parts_query: Query<(Entity, &GlobalTransform, &Mesh3d, Option<&PartEntity>, Option<&Instance>, Option<&BasePart>), Without<Selected>>,
     // Query for children of selected entities (for Model support)
     hierarchy_queries: (Query<&Children>, Query<&ChildOf>),
-    spatial_query: SpatialQuery,
+    _spatial_query: SpatialQuery,
     settings_and_undo: (Res<crate::editor_settings::EditorSettings>, ResMut<crate::undo::UndoStack>),
     // Tool states to check if clicking on handles
     tool_states: (Res<crate::move_tool::MoveToolState>, Res<crate::scale_tool::ScaleToolState>, Res<crate::rotate_tool::RotateToolState>),
@@ -347,16 +365,40 @@ fn handle_select_drag(
         for (entity, transform, global_transform, _part_entity, _instance, basepart_opt) in &selected_query {
             let t = global_transform.compute_transform();
             let size = basepart_opt.map(|bp| bp.size).unwrap_or(t.scale);
-            // Use precise OBB intersection with rotation. Returns the ray
-            // parameter `t_hit` if hit; we need it to compute the exact
-            // world-space click point on the part for the grab-pivot.
-            if let Some(t_hit) = crate::math_utils::ray_obb_intersection(
+            // Closest ray-OBB hit among the selected entity AND its
+            // descendants. The descendant test is what lets you grab a
+            // Model: after the Workspace reorg, a Model sits at the world
+            // origin with no BasePart, so its own OBB is a 1×1×1 box at
+            // [0,0,0] — pressing on its visible child parts missed it and
+            // the drag never engaged ("the part won't move"). Walking the
+            // children fixes that; the grab pivot below encodes the hit
+            // point relative to the selected entity so surface-follow keeps
+            // the grabbed child under the cursor.
+            let mut grab_hit: Option<(f32, Vec3)> = crate::math_utils::ray_obb_intersection(
                 ray.origin, *ray.direction, t.translation, size * 0.5, t.rotation,
-            ) {
-                let grab_world = ray.origin + *ray.direction * t_hit;
-                // Convert to part-local frame so the offset rotates with
-                // the part (in case rotation changes mid-drag) and stays
-                // attached to the same physical point.
+            ).map(|th| (th, ray.origin + *ray.direction * th));
+            {
+                let mut stack: Vec<Entity> = Vec::new();
+                if let Ok(kids) = children_query.get(entity) { stack.extend(kids.iter()); }
+                while let Some(d) = stack.pop() {
+                    if let Ok((_, d_gt, _, _, _, d_bp)) = all_parts_query.get(d) {
+                        let dt = d_gt.compute_transform();
+                        let dsize = d_bp.map(|bp| bp.size).unwrap_or(dt.scale);
+                        if let Some(th) = crate::math_utils::ray_obb_intersection(
+                            ray.origin, *ray.direction, dt.translation, dsize * 0.5, dt.rotation,
+                        ) {
+                            if grab_hit.map_or(true, |(b, _)| th < b) {
+                                grab_hit = Some((th, ray.origin + *ray.direction * th));
+                            }
+                        }
+                    }
+                    if let Ok(kids) = children_query.get(d) { stack.extend(kids.iter()); }
+                }
+            }
+            if let Some((_t_hit, grab_world)) = grab_hit {
+                // Convert to the selected entity's local frame so the offset
+                // rotates with it and stays attached to the same physical
+                // point.
                 let grab_offset_local = t.rotation.inverse() * (grab_world - t.translation);
                 state.grab_offset_local = grab_offset_local;
                 state.dragging = true;
@@ -427,12 +469,19 @@ fn handle_select_drag(
                 let mut excluded_entities: Vec<Entity> = selected_query.iter()
                     .map(|(e, _, _, _, _, _)| e)
                     .collect();
-                // Also exclude children of selected entities (selection adornments, etc.)
-                // to prevent wireframe meshes from interfering with surface raycasting
-                let parent_list = excluded_entities.clone();
-                for parent in &parent_list {
-                    if let Ok(children) = children_query.get(*parent) {
-                        excluded_entities.extend(children.iter());
+                // Exclude the FULL descendant tree of every selected entity
+                // (not just direct children) so a dragged Model never snaps
+                // its surface to its own child parts — and so selection
+                // adornments/wireframes don't interfere with the raycast.
+                {
+                    let mut stack: Vec<Entity> = excluded_entities.clone();
+                    while let Some(p) = stack.pop() {
+                        if let Ok(children) = children_query.get(p) {
+                            for k in children.iter() {
+                                excluded_entities.push(k);
+                                stack.push(k);
+                            }
+                        }
                     }
                 }
 
@@ -453,11 +502,14 @@ fn handle_select_drag(
                     Vec3::ONE
                 };
                 
-                // 1. Find Surface (Roblox-style: cursor surface drives the drop)
-                let surface_hit = math_find_surface_with_physics(&spatial_query, &ray, &excluded_entities)
-                    .map(|(pt, norm, ent)| (pt, norm, Some(ent)))
-                    .or_else(|| math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
-                        .map(|(pt, norm)| (pt, norm, None)));
+                // 1. Find Surface from VISIBLE geometry only (the part-size
+                //    OBB — "what you see is the snap surface"). The physics
+                //    collider is intentionally NOT consulted, so collider
+                //    sizing can never corrupt where a dragged part lands.
+                //    `find_surface_with_normal` uses ray_obb_entry, which skips
+                //    any box the camera is inside (no teleport-to-camera).
+                let surface_hit = math_find_surface_with_normal(&ray, &all_parts_query, &excluded_entities)
+                    .map(|(pt, norm, ent)| (pt, norm, Some(ent)));
 
                 // The grab pivot rotated into the current world frame.
                 // Drag math: the cursor's surface hit point should land on
@@ -625,7 +677,7 @@ fn handle_select_drag(
                 };
 
                 state.last_target_position = final_target_pos;
-                
+
                 // 3. Apply Transformations
                 // Move group rigidly relative to leader
                 // pivot = initial_leader_pos
@@ -863,6 +915,11 @@ fn handle_box_selection(
     select_state: Option<Res<SelectToolState>>,
     studio_state: Option<Res<StudioState>>,
     ui_focus: Option<Res<SlintUIFocus>>,
+    // Transform-tool states: a grabbed gizmo handle (dragged_axis set) must
+    // pre-empt the marquee so it doesn't fight the gizmo.
+    move_state: Option<Res<crate::move_tool::MoveToolState>>,
+    scale_state: Option<Res<crate::scale_tool::ScaleToolState>>,
+    rotate_state: Option<Res<crate::rotate_tool::RotateToolState>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -923,50 +980,62 @@ fn handle_box_selection(
             return;
         }
 
-        // Check if clicking on a SELECTABLE part (not locked)
-        let ray = camera.viewport_to_world(camera_transform, cursor_pos).ok();
-        let clicking_on_part = ray.map(|r| {
-            parts_query.iter().any(|(_, transform, basepart, _, _)| {
-                // Skip locked parts - clicking on them should start box selection
-                if let Some(bp) = basepart {
-                    if bp.locked {
-                        return false;
-                    }
-                }
-                let t = transform.compute_transform();
-                let size = basepart.map(|bp| bp.size).unwrap_or(Vec3::ONE);
-                ray_intersects_part(r.origin, *r.direction, &t, size).is_some()
-            })
-        }).unwrap_or(false);
+        // MARQUEE START RULE (user choice 2026-05-24 "works on any drag"): start
+        // a pending marquee on ANY left-press, EXCEPT:
+        //   * a press that grabbed an already-SELECTED part — `handle_select_drag`
+        //     runs first and sets `select_state.dragging`, caught by the
+        //     `if select_state.dragging { return }` guard above (that's the move
+        //     gesture); and
+        //   * a press that grabbed a gizmo handle (`dragged_axis` set on the
+        //     move/scale/rotate tool).
+        // Everything else — empty space, the grass, the floor, an UNSELECTED part
+        // (locked or not) — begins the rubber-band. We do NOT clear the selection
+        // on press: a no-drag click is owned by `part_selection` (it selects the
+        // clicked part or deselects on empty), and a real drag REPLACES the
+        // selection in the active branch below. (Locked parts are still EXCLUDED
+        // from the marquee's selection results — see the scan loop.)
+        let handle_grabbed = move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+            || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+            || rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
 
         info!(
-            "📦 box-select press: cursor={:?} clicking_on_part={} shift={} parts_total={}",
+            "📦 box-select press: cursor={:?} handle={} shift={} parts_total={}",
             cursor_pos,
-            clicking_on_part,
+            handle_grabbed,
             shift_held,
             parts_query.iter().count(),
         );
 
-        if !clicking_on_part {
-            // Start potential box selection - mark as pending
+        if !handle_grabbed {
+            // Start a pending marquee (drag past threshold turns it active).
             box_state.pending = true;
             box_state.start_pos = cursor_pos;
             box_state.current_pos = cursor_pos;
             box_state.additive = shift_held;
             info!("📦 Box selection PENDING at {:?}", cursor_pos);
-            
-            // Store current selection for additive mode
-            if shift_held {
-                box_state.previous_selection = selected_query.iter().collect();
+
+            // For additive (Shift) mode, remember the pre-drag selection so the
+            // marquee adds to it. Non-additive: do NOT clear here — let
+            // part_selection own a plain click; the active branch replaces the
+            // selection once an actual drag begins.
+            box_state.previous_selection = if shift_held {
+                selected_query.iter().collect()
             } else {
-                // Clear selection immediately when clicking on empty space (non-additive)
-                // This provides instant feedback - box selection will re-select if dragged
-                let sm = selection_manager.0.write();
-                sm.clear();
-                box_state.previous_selection.clear();
-            }
+                Vec::new()
+            };
         }
     } else if mouse.pressed(MouseButton::Left) && box_state.pending && !select_state.dragging {
+        // If a transform handle got grabbed after the press (its dragged_axis
+        // is set a frame later), abort the pending marquee so it doesn't fight
+        // the gizmo drag.
+        let handle_grabbed = move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+            || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
+            || rotate_state.as_ref().and_then(|s| s.dragged_axis).is_some();
+        if handle_grabbed {
+            box_state.pending = false;
+            box_state.active = false;
+            return;
+        }
         // Only update box selection if we have a pending selection from THIS click
         let drag_distance = (cursor_pos - box_state.start_pos).length();
         
@@ -984,17 +1053,17 @@ fn handle_box_selection(
             box_state.active = true;
             box_state.current_pos = cursor_pos;
 
-            // Bridge the two coordinate spaces:
-            //   - `box_state.start_pos` / `cursor_pos` are WINDOW-logical
-            //     (from `window.cursor_position()`).
-            //   - `camera.world_to_viewport()` returns VIEWPORT-logical
-            //     because the Bevy `Camera` has a non-default `Viewport`
-            //     (the Slint UI hosts the 3D view in an offset rectangle).
-            // Subtracting the viewport's logical top-left from the cursor
-            // positions yields viewport-local box bounds that line up with
-            // the projected entity centers. The legacy code compared the
-            // two spaces directly, so any display with a left UI panel
-            // silently rejected every marquee selection.
+            // COORDINATE SPACES (fixed 2026-05-24):
+            //   - The editor camera renders FULL-WINDOW (that's why single-click
+            //     selection works by feeding the raw WINDOW cursor to
+            //     `viewport_to_world` in part_selection.rs). So
+            //     `camera.world_to_viewport()` below also returns WINDOW pixels.
+            //   - `ViewportBounds` is ONLY the Slint sizer's VISIBLE region (used
+            //     to gate clicks + to offset the DRAWN box), NOT the camera's
+            //     viewport. It must therefore NOT be subtracted from the SELECTION
+            //     rect. The old code subtracted it, so the box was compared against
+            //     parts ~panel-width (~280px) away — "wildly inaccurate, selects
+            //     far-off parts".
             let (vp_ox, vp_oy) = viewport_bounds
                 .as_deref()
                 .map(|vb| {
@@ -1003,19 +1072,22 @@ fn handle_box_selection(
                 })
                 .unwrap_or((0.0, 0.0));
 
-            let sx = box_state.start_pos.x - vp_ox;
-            let ex = cursor_pos.x - vp_ox;
-            let sy = box_state.start_pos.y - vp_oy;
-            let ey = cursor_pos.y - vp_oy;
-            let min_x = sx.min(ex);
-            let max_x = sx.max(ex);
-            let min_y = sy.min(ey);
-            let max_y = sy.max(ey);
+            // SELECTION rect — WINDOW-logical, matching `world_to_viewport`.
+            let win_min_x = box_state.start_pos.x.min(cursor_pos.x);
+            let win_max_x = box_state.start_pos.x.max(cursor_pos.x);
+            let win_min_y = box_state.start_pos.y.min(cursor_pos.y);
+            let win_max_y = box_state.start_pos.y.max(cursor_pos.y);
+
+            // RENDER rect (stored) — viewport-sizer-local: the Slint Rectangle
+            // lives INSIDE the sizer (offset by vp_ox/vp_oy), so subtract that
+            // offset here so the drawn box sits exactly under the cursor.
+            box_state.rect_min = Vec2::new(win_min_x - vp_ox, win_min_y - vp_oy);
+            box_state.rect_size = Vec2::new(win_max_x - win_min_x, win_max_y - win_min_y);
 
             if transitioned {
                 info!(
-                    "📦 box-select rect (viewport-local): x=[{:.1}..{:.1}] y=[{:.1}..{:.1}] vp_offset=({:.1},{:.1})",
-                    min_x, max_x, min_y, max_y, vp_ox, vp_oy,
+                    "📦 box-select rect: window x=[{:.1}..{:.1}] y=[{:.1}..{:.1}] sizer_offset=({:.1},{:.1})",
+                    win_min_x, win_max_x, win_min_y, win_max_y, vp_ox, vp_oy,
                 );
             }
 
@@ -1025,12 +1097,13 @@ fn handle_box_selection(
             let mut overlap_count = 0;
 
             for (entity, transform, basepart, part_entity, instance) in parts_query.iter() {
-                // Skip locked parts - they shouldn't be selectable via box selection
-                if let Some(bp) = basepart {
-                    if bp.locked {
-                        continue;
-                    }
-                }
+                // Only real scene PARTS are box-selectable. Skip anything without a
+                // BasePart — cameras (incl. the AI camera), Models/Folders, and GUI
+                // entities all carry an `Instance` so they're in the query, but they
+                // are NOT parts and must never be marquee-selected (the user hit the
+                // camera being selected). Locked parts are also skipped.
+                let Some(bp) = basepart else { continue; };
+                if bp.locked { continue; }
 
                 // Project the entity's full OBB to screen-space and test
                 // RECTANGLE INTERSECTION rather than center containment.
@@ -1038,7 +1111,7 @@ fn handle_box_selection(
                 // the marquee but most of its body inside should still
                 // select — matches Blender / Maya convention.
                 let t = transform.compute_transform();
-                let size = basepart.map(|bp| bp.size).unwrap_or(t.scale);
+                let size = bp.size;
                 let half = size * 0.5;
                 let corners = [
                     Vec3::new(-half.x, -half.y, -half.z),
@@ -1076,28 +1149,23 @@ fn handle_box_selection(
                 if !projected_any { continue; }
                 projected_count += 1;
 
-                // Standard AABB-AABB overlap test in viewport space.
-                let overlaps = ent_max_x >= min_x
-                    && ent_min_x <= max_x
-                    && ent_max_y >= min_y
-                    && ent_min_y <= max_y;
+                // Standard AABB-AABB overlap test in WINDOW space (the projected
+                // corners and the rect are both window-logical now).
+                let overlaps = ent_max_x >= win_min_x
+                    && ent_min_x <= win_max_x
+                    && ent_max_y >= win_min_y
+                    && ent_min_y <= win_max_y;
                 if overlaps {
                     overlap_count += 1;
-                    // Get part_id from PartEntity or Instance
-                    let part_id = if let Some(pe) = part_entity {
-                        if !pe.part_id.is_empty() {
-                            pe.part_id.clone()
-                        } else if instance.is_some() {
-                            format!("{}v{}", entity.index(), entity.generation())
-                        } else {
-                            continue;
-                        }
-                    } else if instance.is_some() {
-                        format!("{}v{}", entity.index(), entity.generation())
-                    } else {
-                        continue;
-                    };
-                    part_ids_in_box.push(part_id);
+                    // The selection id MUST be the entity index/generation — that
+                    // is exactly what `selection_sync::get_part_id` matches on
+                    // (it IGNORES PartEntity.part_id). Using PartEntity.part_id
+                    // here put the wrong key in the selection set for OLD parts
+                    // (which carry a non-empty part_id), so the sync never
+                    // highlighted them — "box-select works for new parts but not
+                    // old parts". `part_entity`/`instance` are unused now.
+                    let _ = (part_entity, instance);
+                    part_ids_in_box.push(format!("{}v{}", entity.index(), entity.generation()));
                 }
             }
 
@@ -1114,23 +1182,11 @@ fn handle_box_selection(
             let sm = selection_manager.0.write();
             
             if box_state.additive {
-                // Keep previous selection and add new ones
+                // Keep previous selection and add new ones. Same id contract:
+                // entity index/generation (what selection_sync matches on).
                 sm.clear();
-                // Re-add previous selection
                 for entity in &box_state.previous_selection {
-                    // Get part_id from entity by querying
-                    if let Ok((_, _, _, pe, inst)) = parts_query.get(*entity) {
-                        let part_id = if let Some(p) = pe {
-                            if !p.part_id.is_empty() { p.part_id.clone() }
-                            else if inst.is_some() { format!("{}v{}", entity.index(), entity.generation()) }
-                            else { continue; }
-                        } else if inst.is_some() {
-                            format!("{}v{}", entity.index(), entity.generation())
-                        } else {
-                            continue;
-                        };
-                        sm.select(part_id);
-                    }
+                    sm.select(format!("{}v{}", entity.index(), entity.generation()));
                 }
                 for part_id in &part_ids_in_box {
                     sm.select(part_id.clone());
@@ -1144,15 +1200,11 @@ fn handle_box_selection(
             }
         }
     } else if mouse.just_released(MouseButton::Left) {
-        // If we had a pending box selection that never became active (single click on empty space)
-        // Clear the selection (unless shift was held for additive mode)
-        if box_state.pending && !box_state.active && !box_state.additive {
-            let sm = selection_manager.0.write();
-            sm.clear();
-            info!("Cleared selection - clicked on empty space");
-        }
-        
-        // Reset all box selection state on mouse release
+        // A pending marquee that never became ACTIVE is just a plain click —
+        // do NOT clear here. `part_selection` already owns the click (it selects
+        // the clicked part, or deselects on empty space); clearing on release
+        // would wipe a single-click selection it just made. Only an actual drag
+        // (the active branch above) changes the selection.
         box_state.active = false;
         box_state.pending = false;
         box_state.previous_selection.clear();
@@ -1175,25 +1227,14 @@ fn render_box_selection(
         return;
     }
 
-    // cursor_position() returns logical pixels; viewport-sizer position is also
-    // logical (set via get_viewport_x/y * scale in sync_bevy_to_slint).
-    // Subtract viewport offset to get coordinates relative to viewport-sizer.
-    let vp_x = ui.get_viewport_x();
-    let vp_y = ui.get_viewport_y();
-
-    let x1 = box_state.start_pos.x - vp_x;
-    let y1 = box_state.start_pos.y - vp_y;
-    let x2 = box_state.current_pos.x - vp_x;
-    let y2 = box_state.current_pos.y - vp_y;
-
-    let min_x = x1.min(x2);
-    let min_y = y1.min(y2);
-    let w = (x2 - x1).abs();
-    let h = (y2 - y1).abs();
-
+    // Draw EXACTLY the rect the selection scan used (viewport-local logical
+    // pixels, computed from `ViewportBounds` in `handle_box_selection`). This
+    // is WYSIWYG: the visible box == the selected region. (Recomputing here from
+    // `get_viewport_x` used a different viewport-offset source, so the box was
+    // shifted from what it selected — the "highlighting is very miss" report.)
     ui.set_box_select_visible(true);
-    ui.set_box_select_x(min_x);
-    ui.set_box_select_y(min_y);
-    ui.set_box_select_w(w);
-    ui.set_box_select_h(h);
+    ui.set_box_select_x(box_state.rect_min.x);
+    ui.set_box_select_y(box_state.rect_min.y);
+    ui.set_box_select_w(box_state.rect_size.x);
+    ui.set_box_select_h(box_state.rect_size.y);
 }

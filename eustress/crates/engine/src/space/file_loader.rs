@@ -2197,6 +2197,90 @@ pub fn load_space_files_system(
     deferred.generation = gen.0;
 }
 
+/// Queue of freshly-pasted folder ROOTS (absolute paths, normally under
+/// Workspace) that must be spawned DETERMINISTICALLY instead of via the
+/// (unreliable) file watcher. `clipboard::spawn_pasted_entity` pushes here
+/// right after it copies the folder tree to disk; `drain_paste_spawn_queue`
+/// then scans + spawns the WHOLE subtree parent-first by reusing the cold-load
+/// `spawn_directory_entry`, so a pasted Part brings its BillboardGui/TextLabel
+/// children correctly attached — no dependency on notify event ordering/timing
+/// (which dropped/orphaned children at low FPS and under churn).
+#[derive(Resource, Default)]
+pub struct PasteSpawnQueue {
+    pub folders: Vec<std::path::PathBuf>,
+}
+
+/// Deterministically spawn pasted folder subtrees queued in [`PasteSpawnQueue`].
+/// Scans the pasted folder through a `DiskSource` (the files are on disk; the
+/// active source may be Fjall, which wouldn't see them yet) and spawns the tree
+/// with `spawn_directory_entry`, parented to the Workspace service. Entities are
+/// registered, so the file watcher's later `is_loaded` check skips the same
+/// paths — no double-spawn.
+pub fn drain_paste_spawn_queue(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut registry: ResMut<SpaceFileRegistry>,
+    mut material_registry: ResMut<super::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<super::instance_loader::PrimitiveMeshCache>,
+    space_root: Res<super::SpaceRoot>,
+    class_defaults: Option<Res<super::class_defaults::ClassDefaultsRegistry>>,
+    mut queue: ResMut<PasteSpawnQueue>,
+) {
+    if queue.folders.is_empty() {
+        return;
+    }
+    let space_path = space_root.0.clone();
+    let disk = super::space_source::DiskSource::new(space_path.clone());
+    let cd_ref = class_defaults.as_deref();
+    let workspace_dir = space_path.join("Workspace");
+    let folders: Vec<std::path::PathBuf> = queue.folders.drain(..).collect();
+    for folder in folders {
+        if registry.is_loaded(&folder) {
+            continue; // already spawned (watcher beat us) — don't duplicate
+        }
+        if !folder.exists() {
+            warn!("📋 paste-spawn: folder vanished before load: {:?}", folder);
+            continue;
+        }
+        let rel = super::space_source::rel_from_root(&space_path, &folder).unwrap_or_default();
+        let children = scan_dir_entries(&disk, &space_path, &rel, "Workspace");
+        let name = folder
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Pasted")
+            .to_string();
+        let dir_meta = FileMetadata {
+            path: folder.clone(),
+            file_type: FileType::Directory,
+            service: "Workspace".to_string(),
+            name,
+            size: 0,
+            modified: std::time::SystemTime::now(),
+            children,
+        };
+        // Parent the pasted top-level entity to the Workspace service so it
+        // sits in the scene tree exactly like a cold-loaded part.
+        let parent_entity = registry.get_entity(&workspace_dir);
+        spawn_directory_entry(
+            &mut commands,
+            &asset_server,
+            &mut meshes,
+            &mut materials,
+            &mut registry,
+            &mut material_registry,
+            &mut mesh_cache,
+            &space_path,
+            &dir_meta,
+            parent_entity,
+            cd_ref,
+            &disk,
+        );
+        info!("📋 paste: deterministically spawned pasted subtree {:?}", folder);
+    }
+}
+
 /// Update system: loads one deferred service per frame to keep the viewport responsive.
 pub fn load_deferred_services(
     mut commands: Commands,
@@ -2355,6 +2439,9 @@ impl Plugin for SpaceFileLoaderPlugin {
             .init_resource::<super::space_ops::SpaceRescanNeeded>()
             .init_resource::<DeferredServiceLoader>()
             .init_resource::<LoadInProgress>()
+            // Deterministic spawn queue for copy-paste/duplicate folder trees
+            // (drained by `drain_paste_spawn_queue` — reliable child parenting).
+            .init_resource::<PasteSpawnQueue>()
             // Content source for the loader — Disk by default; the
             // world-db plugin swaps it to Fjall on Space open once the
             // tree is seeded. Registered here (not behind the feature)
@@ -2397,6 +2484,10 @@ impl Plugin for SpaceFileLoaderPlugin {
                 load_deferred_services,
                 drain_pending_spawns.after(load_deferred_services),
                 tick_load_in_progress.after(drain_pending_spawns),
+                // Deterministic paste spawn BEFORE the watcher so pasted paths
+                // are registered first → the watcher's `is_loaded` check skips
+                // the same Create events (no double-spawn).
+                drain_paste_spawn_queue.before(super::file_watcher::process_file_changes),
                 super::file_watcher::process_file_changes,
                 super::instance_loader::ensure_tags_and_attributes_components,
                 super::instance_loader::ensure_measure_unit,

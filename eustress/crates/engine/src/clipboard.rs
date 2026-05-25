@@ -776,9 +776,14 @@ pub fn handle_paste_event(
     mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
     mut mesh_cache: Option<ResMut<crate::space::instance_loader::PrimitiveMeshCache>>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
-    instance_file_query: Query<&crate::space::instance_loader::InstanceFile>,
-    loaded_from_file_query: Query<&crate::space::file_loader::LoadedFromFile>,
+    // Bundled into one tuple param to stay within Bevy's 16-system-param ceiling.
+    cut_queries: (
+        Query<&crate::space::instance_loader::InstanceFile>,
+        Query<&crate::space::file_loader::LoadedFromFile>,
+    ),
+    mut paste_queue: ResMut<crate::space::file_loader::PasteSpawnQueue>,
 ) {
+    let (instance_file_query, loaded_from_file_query) = (&cut_queries.0, &cut_queries.1);
     for event in events.read() {
         if clipboard.is_empty() {
             notifications.warning("Clipboard is empty");
@@ -832,6 +837,7 @@ pub fn handle_paste_event(
                 material_registry.as_deref_mut(),
                 mesh_cache.as_deref_mut(),
                 file_registry.as_deref_mut(),
+                &mut paste_queue,
             );
 
             if let Some(id) = spawned_id {
@@ -1128,6 +1134,7 @@ fn spawn_pasted_entity(
     material_registry: Option<&mut crate::space::material_loader::MaterialRegistry>,
     mesh_cache: Option<&mut crate::space::instance_loader::PrimitiveMeshCache>,
     file_registry: Option<&mut crate::space::file_loader::SpaceFileRegistry>,
+    paste_queue: &mut crate::space::file_loader::PasteSpawnQueue,
 ) -> Option<String> {
     use crate::spawn::*;
 
@@ -1172,15 +1179,16 @@ fn spawn_pasted_entity(
                     dst_root_toml.display(), e
                 );
             }
-            // Folder paste is asynchronous — file_watcher discovers
-            // the new directory next scan and spawns the subtree.
-            // Return `None` so we don't pollute `created_ids` (used
-            // for auto-selection) with synthetic strings that don't
-            // match any live Entity. The notification still reports
-            // the right count because it reads `clipboard.entities.len()`,
-            // not `created_ids.len()`.
+            // Spawn the pasted subtree DETERMINISTICALLY: queue the folder for
+            // `drain_paste_spawn_queue`, which scans + spawns the whole tree
+            // parent-first (children attached) by reusing the cold-load loader —
+            // instead of relying on the file watcher, which dropped/orphaned
+            // children (ordering/timing/low-FPS). Return `None` so we don't
+            // pollute `created_ids` with a synthetic string (the spawn lands a
+            // frame later); the notification reads `clipboard.entities.len()`.
+            paste_queue.folders.push(dst_folder.clone());
             let _ = (commands, asset_server, materials, material_registry, mesh_cache, file_registry);
-            info!("📋 paste: copied folder {} → {}", src_folder.display(), dst_folder.display());
+            info!("📋 paste: queued folder for deterministic spawn {} → {}", src_folder.display(), dst_folder.display());
             return None;
         } else {
             warn!(

@@ -99,6 +99,66 @@ pub enum WorldDbEntityChange {
 /// writes spill to the next frame to keep `apply_commit` cost bounded.
 const MIRROR_PER_FRAME_BUDGET: usize = 2_048;
 
+/// Bring the Fjall `tree` partition back in step with the on-disk TOML
+/// hierarchy on Space open (non-migrated Spaces only).
+///
+/// For a non-migrated Space the on-disk `_instance.toml` / `_service.toml`
+/// hierarchy is the human source of truth, yet the loader serves the
+/// `tree` partition (FjallSource). The tree is seeded from disk on first
+/// open and thereafter the file-watcher only reconciles disk→tree for
+/// edits made WHILE the engine runs — so closed-engine edits drift. This
+/// walks the disk tree and, for every `.toml` whose bytes differ from the
+/// tree (or are missing from it), overwrites the tree key and drops the
+/// matching `#bin` bincode cache (which `active_db::get_instance` reads
+/// before the base key). Only `.toml` is considered — the large GLB/asset
+/// bytes the tree also holds are skipped, so this stays cheap. Unchanged
+/// files are left alone, so the change-stream and `#bin` caches aren't
+/// churned. Mirrors the out-of-band `reseed-space-subtree` bin, run
+/// automatically. Returns the number of files reconciled.
+fn reconcile_disk_toml_into_tree(space_root: &std::path::Path, db: &dyn WorldDb) -> usize {
+    let mut reconciled = 0usize;
+    let mut stack = vec![space_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                // Skip the database directory + its backups and any hidden
+                // / `.eustress` container dirs — only the human TOML tree.
+                if name.starts_with('.') || name.starts_with("world.fjalldb") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Ok(stripped) = path.strip_prefix(space_root) else {
+                continue;
+            };
+            let rel = stripped.to_string_lossy().replace('\\', "/");
+            let Ok(disk_bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            // Only write when disk actually differs from the tree.
+            if let Ok(Some(tree_bytes)) = db.get_file(&rel) {
+                if tree_bytes == disk_bytes {
+                    continue;
+                }
+            }
+            if db.put_file(&rel, &disk_bytes).is_ok() {
+                let _ = db.delete_file(&format!("{rel}#bin"));
+                reconciled += 1;
+            }
+        }
+    }
+    reconciled
+}
+
 /// Open / re-open the WorldDb whenever `SpaceRoot` changes (on
 /// startup + on Space switch), then decide the [`ActiveSpaceSource`]:
 ///
@@ -192,6 +252,37 @@ fn open_world_db_on_space_change(
                 *active_source =
                     super::space_source::ActiveSpaceSource::disk(space_root.0.clone());
                 return;
+            }
+
+            // ── TOML ↔ DB coherence on open ──────────────────────────
+            // The loader sources from the Fjall `tree` partition below,
+            // but the runtime file-watcher only mirrors disk→tree for
+            // edits made WHILE the engine runs. A CLOSED-engine disk edit
+            // (external editor, `git checkout`, an offline tool, or simply
+            // editing a `_instance.toml` between sessions) was therefore
+            // stranded: the stale tree shadowed the new disk bytes, so
+            // changes like `anchored`/color/scale silently failed to load
+            // (the "anchored loads from the DB, ignores my disk edit" and
+            // V-Cell-staleness class of bug). Reconcile the changed `.toml`
+            // back into the tree here, BEFORE FjallSource goes live, so the
+            // human-editable disk hierarchy and the database always agree
+            // on open. Skipped for a migrated Space (no loose disk tree).
+            let migrated = WorldHeader::read(&space_root.0)
+                .ok()
+                .flatten()
+                .map(|h| h.is_migrated())
+                .unwrap_or(false);
+            if !migrated {
+                let n = reconcile_disk_toml_into_tree(&space_root.0, db.as_ref());
+                if n > 0 {
+                    let _ = db.flush();
+                    info!(
+                        target: "eustress_engine::world_db",
+                        reconciled = n,
+                        space = %space_root.0.display(),
+                        "TOML↔DB reconcile: synced changed disk .toml → Fjall tree on open"
+                    );
+                }
             }
 
             let subscription = db.subscribe(Filter::any());

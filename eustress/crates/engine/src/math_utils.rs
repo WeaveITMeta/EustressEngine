@@ -74,6 +74,60 @@ pub fn ray_obb_intersection(
     )
 }
 
+/// Ray-AABB **entry** distance: the `t` at which the ray first crosses
+/// INTO the box from OUTSIDE, in front of the origin — or `None` if it
+/// never does. Unlike [`ray_aabb_intersection`], this does NOT clamp to
+/// 0: when the ray origin is INSIDE the box (`tmin < 0 <= tmax`, i.e. the
+/// camera is inside a large part / enclosure) it returns `None` instead
+/// of a spurious `t = 0` "hit" at the camera. Surface-snap drag needs
+/// exactly this — you can't drop a part onto the inside face of a box you
+/// are standing in, and the t=0 case is what teleported the dragged part
+/// onto the camera in the earlier OBB-primary attempt.
+pub fn ray_aabb_entry(
+    ray_origin: Vec3,
+    ray_direction: Vec3,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
+) -> Option<f32> {
+    let inv_dir = Vec3::new(
+        1.0 / ray_direction.x,
+        1.0 / ray_direction.y,
+        1.0 / ray_direction.z,
+    );
+    let t1 = (aabb_min.x - ray_origin.x) * inv_dir.x;
+    let t2 = (aabb_max.x - ray_origin.x) * inv_dir.x;
+    let t3 = (aabb_min.y - ray_origin.y) * inv_dir.y;
+    let t4 = (aabb_max.y - ray_origin.y) * inv_dir.y;
+    let t5 = (aabb_min.z - ray_origin.z) * inv_dir.z;
+    let t6 = (aabb_max.z - ray_origin.z) * inv_dir.z;
+
+    let tmin = t1.min(t2).max(t3.min(t4)).max(t5.min(t6));
+    let tmax = t1.max(t2).min(t3.max(t4)).min(t5.max(t6));
+
+    // No hit, box behind, or origin inside the box (tmin < 0) → reject.
+    if tmax < 0.0 || tmin > tmax || tmin < 0.0 {
+        None
+    } else {
+        Some(tmin)
+    }
+}
+
+/// Ray-OBB **entry** distance — [`ray_aabb_entry`] in the OBB's local
+/// frame. Returns the forward entry `t`, or `None` if the ray misses or
+/// the origin is inside the box.
+pub fn ray_obb_entry(
+    ray_origin: Vec3,
+    ray_direction: Vec3,
+    obb_center: Vec3,
+    obb_half_extents: Vec3,
+    obb_rotation: Quat,
+) -> Option<f32> {
+    let inv_rot = obb_rotation.inverse();
+    let local_origin = inv_rot * (ray_origin - obb_center);
+    let local_dir = inv_rot * ray_direction;
+    ray_aabb_entry(local_origin, local_dir, -obb_half_extents, obb_half_extents)
+}
+
 // ============================================================================
 // 3. Rotated AABB Calculation
 // ============================================================================
@@ -278,14 +332,23 @@ pub fn calculate_surface_offset(
     rx + ry + rz + SURFACE_SNAP_CLEARANCE
 }
 
-/// Find the surface under the cursor using mesh-based raycasting (fallback when no physics).
+/// Find the surface under the cursor from the parts' **visible geometry**
+/// (the `BasePart.size` OBB — exactly what the user sees), returning the
+/// closest hit's `(point, normal, entity)`.
+///
+/// Uses [`ray_obb_entry`] so a box the camera is INSIDE is skipped (no
+/// t=0 teleport-to-camera). The returned entity lets the drag look up the
+/// target part's transform for edge-snap + grid-in-frame snapping. This is
+/// the sole surface source for the Select-tool drag — the physics collider
+/// is intentionally NOT used, so collider sizing can never corrupt where a
+/// dragged part lands; "what you see is the snap surface".
 pub fn find_surface_under_cursor_with_normal<T: bevy::ecs::query::QueryFilter>(
     ray: &Ray3d,
     all_parts_query: &Query<(Entity, &GlobalTransform, &Mesh3d, Option<&crate::rendering::PartEntity>, Option<&crate::classes::Instance>, Option<&crate::classes::BasePart>), T>,
     excluded_entities: &[Entity],
-) -> Option<(Vec3, Vec3)> {
+) -> Option<(Vec3, Vec3, Entity)> {
     let mut closest_t = f32::MAX;
-    let mut closest_hit: Option<(Vec3, Vec3)> = None;
+    let mut closest_hit: Option<(Vec3, Vec3, Entity)> = None;
 
     for (entity, global_transform, _mesh, _part_entity, _instance, base_part) in all_parts_query.iter() {
         if excluded_entities.contains(&entity) {
@@ -295,7 +358,7 @@ pub fn find_surface_under_cursor_with_normal<T: bevy::ecs::query::QueryFilter>(
         let t_world = global_transform.compute_transform();
         let size = base_part.map(|bp| bp.size).unwrap_or(t_world.scale);
 
-        if let Some(t) = ray_obb_intersection(
+        if let Some(t) = ray_obb_entry(
             ray.origin,
             *ray.direction,
             t_world.translation,
@@ -314,7 +377,7 @@ pub fn find_surface_under_cursor_with_normal<T: bevy::ecs::query::QueryFilter>(
                     size * 0.5,
                     t_world.rotation,
                 );
-                closest_hit = Some((hit_point, normal));
+                closest_hit = Some((hit_point, normal, entity));
             }
         }
     }

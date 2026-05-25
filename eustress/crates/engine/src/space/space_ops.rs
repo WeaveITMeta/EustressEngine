@@ -471,7 +471,26 @@ pub fn save_space(world: &mut World) {
             };
 
             let def = if let Some(mut d) = existing {
-                d.transform = live_transform;
+                // SCALE GUARD (2026-05-24): for a CUSTOM-mesh part (mesh not
+                // under "parts/", e.g. "../meshes/Foo.glb") the TOML `scale`
+                // is the user's MULTIPLIER, while `BasePart.size` is the
+                // mesh-AABB-derived world size. Writing size→scale here
+                // double-applies it on reload and stretches the mesh (the
+                // V-Supreme "Save broke the suit" bug). So for custom meshes
+                // keep the on-disk scale and only refresh position+rotation;
+                // primitives (block.glb etc., size == scale) take the full
+                // live_transform. Mirrors the guard in
+                // `write_instance_changes_system` (instance_loader.rs).
+                let is_custom_mesh = d.asset.as_ref()
+                    .map(|a| crate::space::representation::mesh_requires_filesystem(&a.mesh))
+                    .unwrap_or(false);
+                if is_custom_mesh {
+                    d.transform.position = live_transform.position;
+                    d.transform.rotation = live_transform.rotation;
+                    // d.transform.scale preserved from disk (user multiplier)
+                } else {
+                    d.transform = live_transform;
+                }
                 d.properties.color = live_color;
                 d.properties.transparency = base_part.transparency;
                 d.properties.anchored = base_part.anchored;

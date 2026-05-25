@@ -55,11 +55,28 @@ pub struct HighlightSpan {
 impl HighlightSpan {
     fn from_style_text(style: Style, text: &str) -> Self {
         let c = style.foreground;
+        let (mut r, mut g, mut b) = (
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+        );
+        // Legibility floor: the editor renders on a dark background, but some
+        // theme scopes (notably Markdown's `markup.bold` / inline markup under
+        // Monokai) carry a near-black foreground, so those tokens rendered
+        // INVISIBLE — e.g. `**Version**:` showed as just `:`. Lift any token
+        // whose brightest channel is near-black to a readable light grey. The
+        // 0.30 threshold sits well below intentionally-dim tokens (Monokai
+        // comment grey ≈ 0.46) so it only rescues otherwise-invisible text.
+        if r.max(g).max(b) < 0.30 {
+            r = 0.85;
+            g = 0.85;
+            b = 0.86;
+        }
         Self {
             text: text.to_string(),
-            r: c.r as f32 / 255.0,
-            g: c.g as f32 / 255.0,
-            b: c.b as f32 / 255.0,
+            r,
+            g,
+            b,
         }
     }
 }
@@ -249,7 +266,10 @@ pub fn highlight_to_token_spans(source: &str, language: &str) -> Vec<TokenSpanDa
             let mut col: f32 = 0.0;
             spans.into_iter().map(move |s| {
                 let x = col * CHAR_WIDTH;
-                col += s.text.len() as f32;
+                // Advance by CHARACTER count, not byte length — otherwise
+                // multi-byte UTF-8 (em-dash `—`, `≥`, etc.) over-advances the
+                // monospace column and shifts every following token rightward.
+                col += s.text.chars().count() as f32;
                 let trimmed = s.text.trim();
                 let bold = is_markdown && (trimmed.starts_with('#') || trimmed.starts_with("```"));
                 TokenSpanData {

@@ -58,6 +58,35 @@ pub fn part_type_to_glb_path(part_type: &PartType) -> &'static str {
     }
 }
 
+/// Local-space collider half-extents that, after Avian re-applies the
+/// entity's (global) Transform scale to the collider, yield a *world*
+/// collider matching the part's visible `size`.
+///
+/// ## Why (verified 2026-05-25 against live scene + Avian 0.6 source)
+///
+/// Parts render a UNIT GLB mesh scaled by `Transform.scale`, and Avian
+/// scales the collider by the SAME accumulated scale
+/// (`propagate_collider_transforms` assigns `ColliderTransform.scale` =
+/// global scale; `update_collider_scale`'s child-collider path applies it
+/// ungated). Building at `size/2` therefore double-counts the scale: a part
+/// of size `s` (whose local `Transform.scale == s`, parent Model at scale 1)
+/// got a world collider of `(s/2)·s = s²/2` half-extent — verified by the
+/// non-linear signature the user saw (size 3 → 9 wide, size 5.2 → 27 wide,
+/// size 0.9 → 0.81). Dividing the local half-extents by the local Transform
+/// scale cancels Avian's multiply so the world collider resolves to `size/2`
+/// (a UNIT collider when `scale == size`). The cancellation is robust to
+/// ancestor (folder/Model) scale: Avian applies `A·S`, and
+/// `(size/2 / S)·(A·S) = size/2 · A`, which equals the visible extent for
+/// both the unit-mesh convention (`S=size`) and the baked-mesh one (`S=1`).
+pub fn collider_local_half(size: Vec3, transform_scale: Vec3) -> Vec3 {
+    let inv = |s: f32| if s.is_finite() && s.abs() > 1e-4 { 1.0 / s.abs() } else { 1.0 };
+    Vec3::new(
+        size.x * 0.5 * inv(transform_scale.x),
+        size.y * 0.5 * inv(transform_scale.y),
+        size.z * 0.5 * inv(transform_scale.z),
+    )
+}
+
 // ============================================================================
 // Part Spawning (file-system-first: .glb via AssetServer)
 // ============================================================================
@@ -82,20 +111,23 @@ pub fn spawn_part_glb(
     let mesh: Handle<Mesh> = asset_server.load(
         format!("{}#Mesh0/Primitive0", glb_path)
     );
-    
-    // Create collider — Avian3D takes half-extents for cuboid and half-height for cylinder
+
+    // Create collider — Avian3D takes half-extents for cuboid and half-height
+    // for cylinder. (Collider sizing under investigation — kept at size/2, the
+    // long-standing value; the drag no longer depends on it once OBB-primary
+    // surface-follow lands.)
     let half = size * 0.5;
     let collider = match part.shape {
         PartType::Ball => Collider::sphere(half.x),
         PartType::Cylinder | PartType::Cone => Collider::cylinder(half.x, half.y),
         _ => Collider::cuboid(half.x, half.y, half.z),
     };
-    
+
     // Create material with special handling for Glass
     let (roughness, metallic, reflectance) = base_part.material.pbr_params();
     let is_glass = matches!(base_part.material, crate::classes::Material::Glass);
     let transparency = base_part.transparency;
-    
+
     // Compute UV tiling from part size at spawn time so the first frame
     // renders with correct texture density. The material_sync system
     // will keep this in sync on subsequent BasePart / Transform changes.

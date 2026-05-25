@@ -305,10 +305,26 @@ fn handle_plugin_action_events(
                 // world size in this engine). A bigger part needs more
                 // camera-toward bias for the label to clear its surface; a
                 // unit-size part yields ZIndex 1. Rounds to the nearest integer.
+                // Doubled (2026-05-24, user request): the default z-index for a
+                // MindSpace label is 2× the adornee's longest scale axis so the
+                // label clears taller/surrounding geometry and reads above
+                // everything WITHOUT needing an `always_on_top` flag (which would
+                // also defeat occlusion). A unit-size part now yields ZIndex 2.
                 let part_z_index = transforms
                     .get(parent_entity)
-                    .map(|t| t.scale.max_element().round() as i32)
+                    .map(|t| (t.scale.max_element() * 2.0).round() as i32)
                     .unwrap_or(0);
+
+                // Billboard sizing (user directive 2026-05-24): the card matches
+                // the adornee part's X/Y WORLD size (BillboardGui scale is
+                // interpreted in studs — see ui_types.rs), and its TextLabel
+                // FILLS it (scale 1,1) instead of fixed pixels — the old
+                // 200×50 px default rendered a squished 4×1 card on a 4×4 block.
+                // For a Part, Transform.scale IS its world size.
+                let (bx, by) = transforms
+                    .get(parent_entity)
+                    .map(|t| (t.scale.x.max(0.1), t.scale.y.max(0.1)))
+                    .unwrap_or((1.0, 1.0));
 
                 let has_inst_file = instance_files.get(parent_entity).is_ok();
                 let has_lff = loaded_from_file.get(parent_entity).is_ok();
@@ -414,8 +430,8 @@ fn handle_plugin_action_events(
                 // `units_offset = [0, 3, 0]`. `size` is a pure-pixel
                 // UDim2: scale=0, offset=200×50.
                 let instance_toml = format!(
-                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nunits_offset = [0.0, 0.0, 0.0]\nvisible = true\nalways_on_top = false\nz_index = {}\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
-                    now, now, part_z_index
+                    "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\ncreated = \"{}\"\nlast_modified = \"{}\"\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [{}, 0.0, {}, 0.0]\nunits_offset = [0.0, 0.0, 0.0]\nvisible = true\nalways_on_top = false\nz_index = {}\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
+                    now, now, bx, by, part_z_index
                 );
                 let bb_toml_path = bb_dir.join("_instance.toml");
                 // Mark BEFORE the write so the file watcher's create event
@@ -446,7 +462,7 @@ fn handle_plugin_action_events(
                 // Strict UDim2 schema: position + size are 4-tuples
                 // `[scale_x, offset_x, scale_y, offset_y]`.
                 let label_toml = format!(
-                    "[instance]\nname = \"TextLabel\"\n\n[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [0.0, 200.0, 0.0, 50.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
+                    "[instance]\nname = \"TextLabel\"\n\n[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [1.0, 0.0, 1.0, 0.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = \"{}\"\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = {}\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
                     label_text.replace('"', "\\\""), font_size
                 );
                 let label_toml_path = label_dir.join("_instance.toml");
@@ -469,9 +485,10 @@ fn handle_plugin_action_events(
                 let mut billboard_gui = BillboardGui::default();
                 billboard_gui.adornee = Some(parent_entity);
                 billboard_gui.units_offset = [0.0, 0.0, 0.0];
-                // Roblox-parity Size is `UDim2`. Pure-pixel canvas
-                // dimensions: Scale=0, Offset=200×50.
-                billboard_gui.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
+                // Size = adornee part's X/Y in STUDS (BillboardGui scale is
+                // stud-valued), so the card matches the block face (4×4 block →
+                // 4×4 card) instead of a fixed squished 200×50 px.
+                billboard_gui.size = eustress_common::ui_types::UDim2::from_scale(bx, by);
                 // AlwaysOnTop defaults to false (Roblox parity + user directive):
                 // the label respects depth and can be occluded by geometry.
                 billboard_gui.always_on_top = false;
@@ -504,10 +521,10 @@ fn handle_plugin_action_events(
                 text_label.background_color3 = [0.0, 0.0, 0.0];
                 text_label.background_transparency = 1.0;
                 text_label.border_size_pixel = 0;
-                // Fill the parent BillboardGui canvas (200×50 px) so
-                // glyphs have room to draw; anchored at origin of the
-                // card. Roblox-parity Position/Size as `UDim2`.
-                text_label.size = eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0);
+                // FILL the parent BillboardGui (scale 1,1) so the text scales
+                // with the card instead of a fixed 200×50 px box (which looked
+                // compressed). Anchored at the card origin.
+                text_label.size = eustress_common::ui_types::UDim2::from_scale(1.0, 1.0);
                 text_label.position = eustress_common::ui_types::UDim2::default();
 
                 let text_entity = spawn_text_label(&mut commands, text_instance, text_label);
