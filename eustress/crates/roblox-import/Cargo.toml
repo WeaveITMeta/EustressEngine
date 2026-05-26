@@ -1,0 +1,52 @@
+# =============================================================================
+# eustress-roblox-import — Roblox place file importer
+# =============================================================================
+# Parses .rbxl / .rbxlx / .rbxm / .rbxmx into the Eustress instance model
+# via the canonical eustress_common::instance_create pipeline.
+#
+# Wave 1 scaffold: NOT YET added to workspace members.
+# Wave 2 will:
+#   1. Uncomment the rbx_* deps below.
+#   2. Add "crates/roblox-import" to eustress/Cargo.toml [workspace.members].
+#   3. Wire FileEvent::ImportRobloxPlace + drop-target in engine::ui.
+#
+# Spec: docs/architecture/ROBLOX_IMPORT_SPEC.md
+# =============================================================================
+
+[package]
+name = "eustress-roblox-import"
+version = "0.1.0"
+edition = "2021"
+description = "Roblox place file (.rbxl/.rbxlx/.rbxm/.rbxmx) → Eustress instance model"
+
+[dependencies]
+# In-tree deps (live ones — these are real and will compile once the crate
+# is added to the workspace).
+eustress-common = { path = "../common" }
+
+# Workspace-shared utilities
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+blake3      = "1.5"
+
+# Logging
+tracing     = "0.1"
+
+# Hex encoding (for uuid output)
+hex         = "0.4"
+
+# =============================================================================
+# DEFERRED — Wave 2 will uncomment after human approval.
+# These are the 4 rbx_* crates from rojo-rbx (all MIT, all pure Rust).
+# Versions reflect latest stable as of spec date (2026-05-26).
+# =============================================================================
+# rbx_dom_weak           = "3.0"
+# rbx_binary             = "1.0"
+# rbx_xml                = "1.0"
+# rbx_reflection_database = "1.0"
+
+[dev-dependencies]
+# Fixture diffing for golden tests (Wave 2)
+# pretty_assertions = "1.4"
