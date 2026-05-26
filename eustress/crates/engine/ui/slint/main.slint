@@ -7,6 +7,7 @@ import { VerticalBox, HorizontalBox, TabWidget, Button, ComboBox, LineEdit, Scro
 import { Ribbon, SavedIdentityData } from "ribbon.slint";
 import { ExplorerPanel, TreeNode } from "explorer.slint";
 import { PropertiesPanel, PropertyData } from "properties.slint";
+import { TagChip, TagSuggestion } from "tags_editor.slint";
 import { OutputConsole, LogData } from "output.slint";
 import { CommandBar, ScriptOutputEntry } from "command_bar.slint";
 import { Toolbox } from "toolbox.slint";
@@ -48,6 +49,9 @@ import { KeybindingsDialog } from "keybindings.slint";
 import { AboutDialog } from "about_dialog.slint";
 import { NewUniverseDialog } from "new_universe_dialog.slint";
 import { NewSpaceDialog } from "new_space_dialog.slint";
+import { AddAttributeDialog } from "add_attribute_dialog.slint";
+import { RenameTagDialog } from "rename_tag_dialog.slint";
+import { EditLabelDialog } from "edit_label_dialog.slint";
 import { ExitConfirmationDialog } from "exit_confirmation.slint";
 import { SyncDomainDialog } from "sync_domain.slint";
 import { WorkshopPanel, ChatMessage, PipelineStepData, ConversationSummary, MentionItemData } from "workshop_panel.slint";
@@ -192,6 +196,43 @@ export component StudioWindow inherits Window {
     in-out property <string> new-universe-name: "";
     in-out property <bool> show-new-space-dialog: false;
     in-out property <string> new-space-name: "";
+    // Add/Edit Attribute modal (Roblox-style custom attributes)
+    in-out property <bool> show-attribute-dialog: false;
+    in-out property <bool> attribute-dialog-is-edit: false;
+    in-out property <string> attribute-dialog-name: "";
+    in-out property <string> attribute-dialog-type: "String";
+    in-out property <string> attribute-dialog-value: "";
+    // AttributeValue type names, populated by Rust.
+    in property <[string]> attribute-type-options: [];
+    // (name, type, value, is-edit) — Rust inserts/updates the ECS Attributes component.
+    callback attribute-confirmed(string, string, string, bool);
+    // (name) — Rust removes the attribute from the ECS Attributes component.
+    callback attribute-delete(string);
+    // Tag system (chips + project registry tray).
+    in property <[TagChip]> entity-tags: [];
+    // Row buckets — Rust splits the flat assigned list into up to 4 rows so
+    // each row's HorizontalLayout can size chips naturally (the absolute-
+    // positioning approach broke Slint TouchArea hit testing — Explorer
+    // expand/select silently died).
+    in property <[TagChip]> entity-tag-row-0: [];
+    in property <[TagChip]> entity-tag-row-1: [];
+    in property <[TagChip]> entity-tag-row-2: [];
+    in property <[TagChip]> entity-tag-row-3: [];
+    in property <[TagSuggestion]> tag-suggestions: [];
+    in-out property <string> tag-input-text: "";
+    in property <bool> tags-collapsed: false;
+    callback tag-add(string);          // add tag to selected entity
+    callback tag-remove(string);       // remove tag from selected entity
+    callback tag-select-tagged(string); // select every entity carrying the tag
+    callback tag-rename(string, string); // rename a tag across ALL entities
+    // Rename-tag modal (window-root; created here, far from the chip subtree).
+    in-out property <bool> show-rename-tag-dialog: false;
+    in-out property <string> rename-tag-old: "";
+    in-out property <string> rename-tag-new: "";
+    // Edit-label modal (Enter on a selected part with a TextLabel descendant).
+    in-out property <bool> show-edit-label-dialog: false;
+    in-out property <string> edit-label-text: "";
+    callback edit-label-confirmed(/* new-text */ string);
 
     // New panels for egui parity
     in-out property <bool> show-terrain-editor: false;
@@ -2677,6 +2718,41 @@ export component StudioWindow inherits Window {
                             help-opens-in-tab: root.help-opens-in-tab;
                             on-property-changed(name, value) => { root.property-changed(name, value); }
                             on-section-toggle(category) => { root.section-toggle(category); }
+                            // Attributes UX. Add opens the modal empty; edit
+                            // prefills it from the row's own data (no round-trip);
+                            // delete routes to Rust to mutate the ECS component.
+                            on-add-attribute => {
+                                root.attribute-dialog-is-edit = false;
+                                root.attribute-dialog-name = "";
+                                root.attribute-dialog-type = "String";
+                                root.attribute-dialog-value = "";
+                                root.show-attribute-dialog = true;
+                            }
+                            on-attribute-edit(edit-name, edit-type, edit-value) => {
+                                root.attribute-dialog-is-edit = true;
+                                root.attribute-dialog-name = edit-name;
+                                root.attribute-dialog-type = edit-type;
+                                root.attribute-dialog-value = edit-value;
+                                root.show-attribute-dialog = true;
+                            }
+                            on-attribute-delete(name) => { root.attribute-delete(name); }
+                            // Tag system
+                            entity-tags: root.entity-tags;
+                            entity-tag-row-0: root.entity-tag-row-0;
+                            entity-tag-row-1: root.entity-tag-row-1;
+                            entity-tag-row-2: root.entity-tag-row-2;
+                            entity-tag-row-3: root.entity-tag-row-3;
+                            tag-suggestions: root.tag-suggestions;
+                            tag-input-text <=> root.tag-input-text;
+                            tags-collapsed: root.tags-collapsed;
+                            on-tag-add(name) => { root.tag-add(name); }
+                            on-tag-remove(name) => { root.tag-remove(name); }
+                            on-tag-select-tagged(name) => { root.tag-select-tagged(name); }
+                            on-tag-rename-request(name) => {
+                                root.rename-tag-old = name;
+                                root.rename-tag-new = name;
+                                root.show-rename-tag-dialog = true;
+                            }
                             on-open-learn-url(url) => { root.open-learn-url(url); }
                             on-input-focus-changed(focused) => { root.any-input-has-focus = focused; }
                             // Vec3 row copy / paste — Rust handles clipboard I/O + re-parsing.
@@ -3299,6 +3375,46 @@ export component StudioWindow inherits Window {
         on-cancel => {
             root.show-new-space-dialog = false;
             root.new-space-name = "";
+        }
+    }
+
+    // Edit Label Text dialog (window-root modal — safe; opened by Enter on a
+    // selected part that has a TextLabel descendant).
+    if root.show-edit-label-dialog: EditLabelDialog {
+        label-text <=> root.edit-label-text;
+        on-confirm(new-text) => {
+            root.show-edit-label-dialog = false;
+            root.edit-label-confirmed(new-text);
+        }
+        on-cancel => { root.show-edit-label-dialog = false; }
+    }
+
+    // Rename Tag dialog (window-root modal — safe; never mutates the chip subtree)
+    if root.show-rename-tag-dialog: RenameTagDialog {
+        old-name: root.rename-tag-old;
+        new-name <=> root.rename-tag-new;
+        on-rename(new) => {
+            root.show-rename-tag-dialog = false;
+            if new != "" && new != root.rename-tag-old {
+                root.tag-rename(root.rename-tag-old, new);
+            }
+        }
+        on-cancel => { root.show-rename-tag-dialog = false; }
+    }
+
+    // Add / Edit Attribute dialog (Roblox-style custom attributes)
+    if root.show-attribute-dialog: AddAttributeDialog {
+        is-edit: root.attribute-dialog-is-edit;
+        attr-name <=> root.attribute-dialog-name;
+        attr-type <=> root.attribute-dialog-type;
+        attr-value <=> root.attribute-dialog-value;
+        type-options: root.attribute-type-options;
+        on-confirm(name, type, value) => {
+            root.show-attribute-dialog = false;
+            root.attribute-confirmed(name, type, value, root.attribute-dialog-is-edit);
+        }
+        on-cancel => {
+            root.show-attribute-dialog = false;
         }
     }
 

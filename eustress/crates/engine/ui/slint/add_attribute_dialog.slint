@@ -1,0 +1,269 @@
+// ============================================================================
+// Add / Edit Attribute Dialog — themed to match the app's modals (NewSpace /
+// NewUniverse). Custom in-card type list (no std ComboBox) so it:
+//   • matches the theme,
+//   • never overflows the card (card height grows when the list is open),
+//   • is scroll-captured (scrolling the list no longer zooms the viewport),
+//   • keeps Cancel/Add pinned and visible.
+// Rows are left-aligned headers + value fields.
+// ============================================================================
+
+import { LineEdit, Button, ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component AddAttributeDialog inherits Rectangle {
+    in property <bool> is-edit: false;
+    in-out property <string> attr-name: "";
+    in-out property <string> attr-type: "String";
+    in-out property <string> attr-value: "";
+    in property <[string]> type-options: [];
+
+    callback on-confirm(string, string, string);
+    callback on-cancel();
+
+    property <bool> type-open: false;
+
+    width: 100%;
+    height: 100%;
+    background: Theme.modal-backdrop;
+
+    // Backdrop: click closes, scroll absorbed (never reaches the 3D viewport).
+    TouchArea {
+        clicked => { root.on-cancel(); }
+        scroll-event(event) => { return accept; }
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 440px;
+        height: root.type-open ? 470px : 300px;
+        background: Theme.background-secondary;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000a0;
+        clip: true;
+
+        // Absorb scroll anywhere over the card (outside the inner list).
+        TouchArea { scroll-event(event) => { return accept; } }
+
+        VerticalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            // ── Title bar ──
+            Rectangle {
+                height: 46px;
+                background: #13131f;
+                Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.is-edit ? "Edit Attribute" : "Add Attribute";
+                    color: Theme.text-primary;
+                    font-size: 13px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                Rectangle {
+                    x: parent.width - 36px;
+                    y: (parent.height - self.height) / 2;
+                    width: 28px; height: 28px;
+                    border-radius: 5px;
+                    background: close-ta.has-hover ? #3d1515 : transparent;
+                    Text {
+                        text: "×";
+                        color: close-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                        font-size: 18px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.on-cancel(); }
+                    }
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+            }
+
+            // ── Body ──
+            VerticalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 16px;
+                padding-bottom: 12px;
+                spacing: 12px;
+
+                // Name
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Name";
+                        width: 64px;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: name-edit.has-focus ? Theme.accent-blue : Theme.input-border;
+                        name-edit := LineEdit {
+                            x: 0px; y: 0px; width: 100%; height: 100%;
+                            placeholder-text: "Attribute name";
+                            text <=> root.attr-name;
+                            enabled: !root.is-edit;
+                        }
+                    }
+                }
+
+                // Type (custom dropdown)
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Type";
+                        width: 64px;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: root.type-open ? Theme.accent-blue : Theme.input-border;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            Text {
+                                text: root.attr-type;
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            Text {
+                                text: root.type-open ? "▲" : "▼";
+                                color: Theme.text-secondary;
+                                font-size: 8px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        type-field-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.type-open = !root.type-open; }
+                        }
+                    }
+                }
+
+                // Inline type list — scroll-captured (ScrollView), in-card.
+                // ALWAYS present but visibility/height-gated (NOT `if type-open`)
+                // so selecting a row — which sets `type-open = false` from a row
+                // TouchArea INSIDE this block — only hides the list instead of
+                // destroying the element mid-handler (that self-destruction is
+                // the Slint "Recursion detected" crash class).
+                Rectangle {
+                    visible: root.type-open;
+                    height: root.type-open ? 150px : 0px;
+                    background: Theme.input-background;
+                    border-radius: 4px;
+                    border-width: root.type-open ? 1px : 0px;
+                    border-color: Theme.input-border;
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 2px;
+                            for t in root.type-options: Rectangle {
+                                height: 26px;
+                                border-radius: 3px;
+                                background: trow-ta.has-hover ? Theme.accent-blue.with-alpha(0.22)
+                                          : (t == root.attr-type ? Theme.accent-blue.with-alpha(0.12) : transparent);
+                                Text {
+                                    x: 10px;
+                                    text: t;
+                                    color: t == root.attr-type ? Theme.accent-blue : Theme.text-primary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                trow-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.attr-type = t;
+                                        root.type-open = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Value
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "Value";
+                        width: 64px;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                    }
+                    Rectangle {
+                        height: 30px;
+                        background: Theme.input-background;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: value-edit.has-focus ? Theme.accent-blue : Theme.input-border;
+                        value-edit := LineEdit {
+                            x: 0px; y: 0px; width: 100%; height: 100%;
+                            placeholder-text: "Initial value";
+                            text <=> root.attr-value;
+                        }
+                    }
+                }
+            }
+
+            // Spacer pushes the button bar to the bottom.
+            Rectangle { vertical-stretch: 1; }
+
+            // ── Button bar (pinned) ──
+            Rectangle {
+                height: 56px;
+                Rectangle {
+                    y: 0px;
+                    width: 100%; height: 1px;
+                    background: Theme.border-color;
+                }
+                HorizontalLayout {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Cancel";
+                        width: 88px;
+                        clicked => { root.on-cancel(); }
+                    }
+                    Button {
+                        text: root.is-edit ? "Save" : "Add";
+                        primary: true;
+                        width: 88px;
+                        clicked => { root.on-confirm(root.attr-name, root.attr-type, root.attr-value); }
+                    }
+                }
+            }
+        }
+    }
+}

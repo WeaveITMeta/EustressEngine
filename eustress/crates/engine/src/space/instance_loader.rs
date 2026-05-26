@@ -1240,6 +1240,29 @@ fn rich_toml_value_to_attribute(v: &toml::Value) -> Option<eustress_common::Attr
     }
 }
 
+/// Build an ECS `Attributes` component from the typed `[attributes]` TOML
+/// table. Previously only the no-asset spawn branch parsed any attributes
+/// (and only from rich-schema `extra` sections), so every Part loaded an
+/// EMPTY `Attributes` component while the Properties panel read the
+/// `[attributes]` table straight from disk. That split meant panel edits +
+/// the `Changed<Attributes>` write-back operated on an empty component and
+/// would silently clobber the on-disk `[attributes]` table the moment any
+/// attribute changed. Routing every branch through this helper makes the
+/// live component the faithful in-memory mirror of disk for ALL classes.
+fn attributes_from_toml_table(
+    table: Option<&std::collections::HashMap<String, toml::Value>>,
+) -> Attributes {
+    let mut attrs = Attributes::new();
+    if let Some(map) = table {
+        for (k, v) in map {
+            if let Some(av) = rich_toml_value_to_attribute(v) {
+                attrs.set(k, av);
+            }
+        }
+    }
+    attrs
+}
+
 /// Known primitive mesh filenames that map to engine asset parts
 const PRIMITIVE_MESHES: &[(&str, &str, eustress_common::classes::PartType)] = &[
     ("block", "parts/block.glb", eustress_common::classes::PartType::Block),
@@ -1454,6 +1477,13 @@ pub fn spawn_instance(
         _ => Tags::new(),
     };
 
+    // Attributes → component, from the typed `[attributes]` TOML table.
+    // Declared at function scope so all three spawn branches (no-asset,
+    // custom-mesh, primitive) seed the SAME live component from disk —
+    // see `attributes_from_toml_table` for why an empty component on the
+    // asset branches was a latent clobber bug.
+    let base_attributes: Attributes = attributes_from_toml_table(instance.attributes.as_ref());
+
     // ── Part-class fallback: default to block primitive when no [asset] section ──
     // MCP tools and external IDEs create _instance.toml files with [transform]
     // + [properties] but no [asset]. Without this, Part entities hit the
@@ -1507,7 +1537,9 @@ pub fn spawn_instance(
         // OR a named section (Table) whose entries are { type, value, description } inline tables.
         // Both cases are stored in Attributes for the Properties panel to display.
 
-        let mut attrs = Attributes::new();
+        // Seed from the typed `[attributes]` table, then layer any
+        // rich-schema `extra` sections on top.
+        let mut attrs = base_attributes.clone();
         for (_section_name, section_val) in &instance.extra {
             // Each top-level entry under [extra] is a section table (e.g. [Appearance])
             if let toml::Value::Table(props) = section_val {
@@ -1696,7 +1728,7 @@ pub fn spawn_instance(
             base_part,
             eustress_common::classes::Part { shape: part_shape },
             PartEntity { part_id: String::new() }, // filled in below
-            Attributes::new(),
+            base_attributes.clone(),
             tags.clone(),
             InstanceFile {
                 toml_path: toml_path.clone(),
@@ -1797,7 +1829,7 @@ pub fn spawn_instance(
         base_part,
         eustress_common::classes::Part { shape: part_shape },
         PartEntity { part_id: String::new() }, // filled in below
-        Attributes::new(),
+        base_attributes.clone(),
         tags.clone(),
         InstanceFile {
             toml_path: toml_path.clone(),

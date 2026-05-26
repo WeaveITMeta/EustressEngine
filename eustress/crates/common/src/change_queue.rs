@@ -219,6 +219,7 @@ impl Plugin for StreamingPlugin {
                emit_lifecycle_deltas,
                emit_transform_deltas,
                emit_part_property_deltas,
+               emit_tag_attr_dirty,
                emit_name_deltas,
                emit_parent_deltas,
            ));
@@ -339,6 +340,21 @@ fn emit_transform_deltas(
                 scale:    t.scale.to_array(),
             },
         ));
+    }
+}
+
+/// Mark the Properties panel dirty when an entity's `Tags` or `Attributes`
+/// change, so panel edits — and runtime changes from scripts / the MCP
+/// `add_tag` tool / CollectionService — reflect in the panel immediately
+/// instead of waiting for the ~5 s periodic resync. The panel sync only
+/// rebuilds the single selected entity, so flagging on any change is cheap.
+fn emit_tag_attr_dirty(
+    changed_tags: Query<(), bevy::prelude::Changed<crate::attributes::Tags>>,
+    changed_attrs: Query<(), bevy::prelude::Changed<crate::attributes::Attributes>>,
+    mut dirty: ResMut<PanelDirtyFlags>,
+) {
+    if !changed_tags.is_empty() || !changed_attrs.is_empty() {
+        dirty.properties = true;
     }
 }
 

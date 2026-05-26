@@ -838,6 +838,12 @@ fn spawn_bevy_gui_from_loaded_entities(
 
         let bg_color = bevy::prelude::BackgroundColor(bg);
 
+        // Diagnostic: every Bevy UI Node we spawn here is a potential "ghost"
+        // candidate — if this fires for a Workspace/mindmap entity (service ≠
+        // StarterGui), the upstream service-gate is broken and the user will
+        // see a 2D UI overlay where they expect only a 3D billboard.
+        info!("🪟 [runtime-ui] spawn Bevy UI Node: entity={:?} name='{}' class={:?} service='{}' pos=({:.0},{:.0}) size=({:.0},{:.0}) vis={:?}",
+              entity, instance.name, instance.class_name, loaded.service, pos_x, pos_y, width, height, visibility);
         commands.entity(entity).insert((node, bg_color, visibility, BevyGuiSpawned));
 
         // For text-bearing elements, insert Text components

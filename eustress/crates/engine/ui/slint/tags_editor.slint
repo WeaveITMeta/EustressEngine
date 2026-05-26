@@ -1,0 +1,295 @@
+// ============================================================================
+// Eustress Tag System — a first-class, inline tag editor that transcends
+// Roblox Studio's CollectionService UI:
+//   • per-tag colored chips with individual ✕ remove (no comma-string editing)
+//   • auto-color per tag (stable hash→hue, computed in Rust) for fast scanning
+//   • live usage count on every chip (entities sharing the tag, space-wide)
+//   • a project-wide "Available tags" registry tray for one-click reuse
+//   • click a chip → select every entity carrying that tag (CollectionService)
+// ============================================================================
+
+import { Theme } from "theme.slint";
+import { LineEdit } from "std-widgets.slint";
+
+// One assigned tag on the selected entity.
+//
+// Rendered inside a HorizontalLayout — natural sizing, no absolute positioning.
+// Flow-wrap across rows is achieved by Rust pre-splitting the flat tag list
+// into `tag-row-0..3` properties on TagsEditor (see sync_tags_to_slint).
+export struct TagChip {
+    name: string,
+    color: color,   // auto-derived in Rust from the tag name
+    count: int,     // entities space-wide carrying this tag
+}
+
+// A project-registry tag NOT currently on the selected entity (reuse tray).
+export struct TagSuggestion {
+    name: string,
+    color: color,
+    count: int,
+}
+
+// A single assigned-tag pill: colored dot + name + count + ✕.
+//
+// Rename is handled by a WINDOW-ROOT modal (RenameTagDialog), NOT inline.
+// Every inline attempt crashed Slint with "Recursion detected" because
+// creating/destroying the editor mutated the chip subtree during a mouse
+// event (forward_input_to_slint) or the subsequent render (render_slint_to_
+// texture) — and the chip lives in a HORIZONTAL layout, so the editor also
+// reflowed the row. Double-click just fires `rename-requested` UP; the modal
+// is created at the StudioWindow root, far from this subtree, which is safe.
+component AssignedChip inherits Rectangle {
+    in property <string> name;
+    in property <color> chip-color;
+    in property <int> count;
+    callback select-tagged();
+    callback remove();
+    callback rename-requested();        // double-click → open the rename modal
+
+    height: 22px;
+    border-radius: 11px;
+    background: body-ta.has-hover ? chip-color.with-alpha(0.34) : chip-color.with-alpha(0.20);
+    border-width: 1px;
+    border-color: chip-color.with-alpha(0.65);
+
+    // Always-present chip-wide TouchArea (declared FIRST so the ✕'s TouchArea,
+    // declared later, sits on top in its own area). Single click selects all
+    // tagged; double click opens the rename modal.
+    body-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.select-tagged(); }
+        double-clicked => { root.rename-requested(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 4px;
+        spacing: 5px;
+
+        // Color dot
+        Rectangle {
+            width: 8px; height: 8px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: root.chip-color;
+        }
+
+        // Name — static; clicks fall through to body-ta.
+        Text {
+            text: root.name;
+            color: Theme.text-primary;
+            font-size: 11px;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+
+        // Usage count badge
+        Text {
+            text: root.count > 1 ? "\{root.count}" : "";
+            color: Theme.text-secondary;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+
+        // × remove button — always-visible glyph (U+00D7, renders in the UI
+        // font, unlike U+2715). Gray by default, bright red on hover.
+        Rectangle {
+            width: 18px; height: 18px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: x-ta.has-hover ? #5d1515 : #00000000;
+            Text {
+                text: "×";
+                color: x-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                font-size: 15px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            x-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}
+
+// A reuse-tray pill for a project tag not on this entity (click → add).
+component AvailableChip inherits Rectangle {
+    in property <string> name;
+    in property <color> chip-color;
+    in property <int> count;
+    callback add();
+
+    height: 20px;
+    border-radius: 10px;
+    background: add-ta.has-hover ? chip-color.with-alpha(0.20) : #00000000;
+    border-width: 1px;
+    border-color: add-ta.has-hover ? chip-color.with-alpha(0.6) : #3a3a3a;
+
+    add-ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.add(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 8px;
+        spacing: 4px;
+        Text {
+            text: "+";
+            color: add-ta.has-hover ? root.chip-color : Theme.text-secondary;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 6px; height: 6px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            background: root.chip-color;
+        }
+        Text {
+            text: root.name;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.count > 0 ? "\{root.count}" : "";
+            color: Theme.text-disabled;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component TagsEditor inherits Rectangle {
+    // `tags` is the FULL flat assigned list — kept for callers that want to
+    // count/inspect — but the actual rendering reads `tag-row-N`, which Rust
+    // pre-splits to give us flow-wrap WITHOUT absolute positioning (the
+    // absolute approach broke Slint TouchArea hit-testing for the Explorer).
+    in property <[TagChip]> tags: [];
+    in property <[TagChip]> tag-row-0: [];
+    in property <[TagChip]> tag-row-1: [];
+    in property <[TagChip]> tag-row-2: [];
+    in property <[TagChip]> tag-row-3: [];
+    in property <[TagSuggestion]> suggestions: [];
+    in-out property <string> input-text: "";
+
+    callback add-tag(string);
+    callback remove-tag(string);
+    callback select-tagged(string);
+    callback rename-requested(string);     // double-click chip → open rename modal
+    callback input-focus-changed(bool);
+
+    background: #00000000;
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 6px;
+        padding-bottom: 8px;
+        spacing: 6px;
+
+        // ── Assigned chips — up to FOUR rows of HorizontalLayouts ──
+        // Rust pre-splits the chips into rows so HorizontalLayout handles
+        // every chip's sizing/touch area naturally (no absolute positioning,
+        // which previously caused Slint to mis-register TouchArea hit boxes
+        // and silently kill clicks in the Explorer panel — that's the
+        // "Explorer no longer expands" regression). 4 rows ≈ 8-12 chips,
+        // beyond which extra tags spill into row 4 truncated.
+        if root.tag-row-0.length > 0: HorizontalLayout {
+            spacing: 5px;
+            for chip in root.tag-row-0: AssignedChip {
+                name: chip.name; chip-color: chip.color; count: chip.count;
+                select-tagged => { root.select-tagged(chip.name); }
+                remove => { root.remove-tag(chip.name); }
+                rename-requested => { root.rename-requested(chip.name); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.tag-row-1.length > 0: HorizontalLayout {
+            spacing: 5px;
+            for chip in root.tag-row-1: AssignedChip {
+                name: chip.name; chip-color: chip.color; count: chip.count;
+                select-tagged => { root.select-tagged(chip.name); }
+                remove => { root.remove-tag(chip.name); }
+                rename-requested => { root.rename-requested(chip.name); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.tag-row-2.length > 0: HorizontalLayout {
+            spacing: 5px;
+            for chip in root.tag-row-2: AssignedChip {
+                name: chip.name; chip-color: chip.color; count: chip.count;
+                select-tagged => { root.select-tagged(chip.name); }
+                remove => { root.remove-tag(chip.name); }
+                rename-requested => { root.rename-requested(chip.name); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.tag-row-3.length > 0: HorizontalLayout {
+            spacing: 5px;
+            for chip in root.tag-row-3: AssignedChip {
+                name: chip.name; chip-color: chip.color; count: chip.count;
+                select-tagged => { root.select-tagged(chip.name); }
+                remove => { root.remove-tag(chip.name); }
+                rename-requested => { root.rename-requested(chip.name); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        if root.tags.length == 0: Text {
+            text: "No tags yet — add one below, or click an available tag.";
+            color: Theme.text-disabled;
+            font-size: 10px;
+            wrap: word-wrap;
+        }
+
+        // ── Add input — matches the panel's standard input row styling ──
+        Rectangle {
+            height: 24px;
+            background: Theme.input-background;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: add-input.has-focus ? Theme.accent-blue : Theme.input-border;
+            add-input := LineEdit {
+                x: 0px;
+                y: 0px;
+                width: 100%;
+                height: 100%;
+                placeholder-text: "Add a tag and press Enter";
+                text <=> root.input-text;
+                changed has-focus => { root.input-focus-changed(self.has-focus); }
+                accepted(t) => {
+                    if t != "" {
+                        root.add-tag(t);
+                        root.input-text = "";
+                    }
+                }
+            }
+        }
+
+        // ── Available tags (project registry, click to add) ──
+        if root.suggestions.length > 0: Text {
+            text: "AVAILABLE";
+            color: Theme.text-disabled;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+        // Suggestion rack — single row, will overflow horizontally if many.
+        // Suggestions are capped at 16 in Rust so they fit acceptably in
+        // practice. Same revert pattern as the assigned chip rack to avoid
+        // the absolute-positioning hit-test regression.
+        if root.suggestions.length > 0: HorizontalLayout {
+            spacing: 5px;
+            for sug in root.suggestions: AvailableChip {
+                name: sug.name; chip-color: sug.color; count: sug.count;
+                add => { root.add-tag(sug.name); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+    }
+}

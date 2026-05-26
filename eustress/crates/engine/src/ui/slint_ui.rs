@@ -310,6 +310,23 @@ pub enum SlintAction {
     // Properties
     PropertyChanged(String, String),
     SectionToggle(String), // Toggle collapse/expand of a property section by category name
+    /// Add/Edit Attribute modal confirmed — `(name, type_name, value, is_edit)`.
+    /// Builds an `AttributeValue` and inserts/updates the selected entity's
+    /// `Attributes` component.
+    AttributeConfirmed(String, String, String, bool),
+    /// Delete a custom attribute by name from the selected entity.
+    AttributeDeleted(String),
+    /// Tag system. Add a tag to / remove a tag from the selected entity.
+    TagAdded(String),
+    TagRemoved(String),
+    /// Click a tag chip → select every entity carrying that tag.
+    TagSelectTagged(String),
+    /// Double-click a tag → rename it across EVERY entity carrying it. (old, new)
+    TagRenamed(String, String),
+    /// Edit-Label modal confirmed → update the targeted TextLabel's text.
+    /// The target entity lives in `LabelEditState.target` (set when the modal
+    /// was opened by `open_label_editor_on_enter`).
+    EditLabelConfirmed(String),
     /// Vec3 row copy icon — `(property_name, "x, y, z")`. Rust pushes
     /// the triple to the OS clipboard via `arboard`.
     CopyPropertyVector(String, String),
@@ -1053,6 +1070,7 @@ impl Plugin for StudioUiPlugin {
             .init_resource::<UnifiedExplorerState>()
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
+            .init_resource::<LabelEditState>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
             .init_resource::<crate::forge::ForgeState>()
@@ -1113,6 +1131,12 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
             .init_resource::<SlintUIFocus>()
+            // ── CRITICAL: must be registered here, not in the legacy
+            // StudioUiPlugin (which isn't used at runtime). drain_slint_actions
+            // takes `ResMut<LabelEditState>` for the EditLabelDialog handler;
+            // missing → Bevy skips the entire drain every frame → ALL Slint
+            // UI callbacks (Explorer, tag X, add-tag, ribbon, …) silently die.
+            .init_resource::<LabelEditState>()
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
             .init_resource::<crate::forge::ForgeState>()
@@ -1178,6 +1202,14 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer))
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
+            // Tag chips/registry sync — NOT focus-gated, so tags added via the
+            // (focused) add-field refresh immediately. Rebuilds on selection /
+            // Changed<Tags> only.
+            .add_systems(Update, sync_tags_to_slint.after(sync_viewport_selection_to_explorer))
+            // Enter on a selected part → open the Edit-Label modal for its
+            // first TextLabel descendant. Runs after focus tracking so we
+            // can correctly skip when another input has focus.
+            .add_systems(Update, open_label_editor_on_enter.after(update_slint_ui_focus))
             // Asset Manager sync: scan Universe + Space directories (throttled internally)
             .add_systems(Update, sync_asset_manager_to_slint)
             // Output log → EustressStream topic "log/output" (fires only when console changes)
@@ -1485,6 +1517,32 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_property_changed(move |key, val| q.push(SlintAction::PropertyChanged(key.to_string(), val.to_string())));
     let q = queue.clone();
     ui.on_section_toggle(move |category| q.push(SlintAction::SectionToggle(category.to_string())));
+    // Add/Edit Attribute modal + delete — Roblox-style custom attributes.
+    let q = queue.clone();
+    ui.on_attribute_confirmed(move |name, type_name, value, is_edit| {
+        q.push(SlintAction::AttributeConfirmed(
+            name.to_string(), type_name.to_string(), value.to_string(), is_edit,
+        ));
+    });
+    let q = queue.clone();
+    ui.on_attribute_delete(move |name| q.push(SlintAction::AttributeDeleted(name.to_string())));
+    // Tag system — chip add/remove + click-to-select-all-tagged.
+    let q = queue.clone();
+    ui.on_tag_add(move |name| q.push(SlintAction::TagAdded(name.to_string())));
+    let q = queue.clone();
+    ui.on_tag_remove(move |name| q.push(SlintAction::TagRemoved(name.to_string())));
+    let q = queue.clone();
+    ui.on_tag_select_tagged(move |name| q.push(SlintAction::TagSelectTagged(name.to_string())));
+    let q = queue.clone();
+    ui.on_tag_rename(move |old, new| q.push(SlintAction::TagRenamed(old.to_string(), new.to_string())));
+    let q = queue.clone();
+    ui.on_edit_label_confirmed(move |new_text| q.push(SlintAction::EditLabelConfirmed(new_text.to_string())));
+    // Populate the Add/Edit Attribute dialog's type dropdown once.
+    {
+        let opts: Vec<slint::SharedString> =
+            ATTRIBUTE_TYPE_NAMES.iter().map(|s| (*s).into()).collect();
+        ui.set_attribute_type_options(slint::ModelRc::new(slint::VecModel::from(opts)));
+    }
     // Vec3 row copy/paste icons — see SlintAction docs.
     let q = queue.clone();
     ui.on_copy_property_vector(move |name, val| q.push(SlintAction::CopyPropertyVector(name.to_string(), val.to_string())));
@@ -2194,20 +2252,66 @@ fn sync_gui_elements_to_slint(
         }
     }
 
+    // POSITIVE filter: an entity may render as a 2D UI overlay only if it
+    // genuinely descends from a `ScreenGui` somewhere up its ChildOf chain.
+    // This kills the "fixed-screen mindmap ghost" class — orphan or
+    // non-billboard-ancestor `GuiElementDisplay` entities (mindmap connector
+    // frames, stray TextLabels, etc.) were leaking into the overlay because
+    // the negative `is_under_billboard` filter only catches things explicitly
+    // under a billboard. By contract, 2D UI lives under a ScreenGui; if it
+    // doesn't, it shouldn't be in the screen-space overlay at all.
+    fn has_screen_gui_ancestor(
+        entity: Entity,
+        gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
+        parent_q: &Query<&ChildOf>,
+    ) -> bool {
+        let mut cur = entity;
+        loop {
+            if let Ok((_, d, _)) = gui_query.get(cur) {
+                if d.class_type == "screengui" { return true; }
+            }
+            match parent_q.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => return false,
+            }
+        }
+    }
+
     // Collect, filter hidden ScreenGui descendants + billboard children, sort.
+    // Diagnostic: log filter funnel ONCE per scene structural change so the
+    // user can grep why ghost entities slip through. Throttled by `last_count`.
+    let mut funnel = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize); // raw, after_screengui, after_hidden, after_billboard, after_has_screengui, accepted
+    let mut leaked: Vec<(Entity, String, f32, f32)> = Vec::new();
     let mut elements: Vec<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)> =
         gui_query.iter()
             .filter(|(e, d, _)| {
+                funnel.0 += 1;
                 // Skip the ScreenGui display element itself (zero-size container)
                 if d.class_type == "screengui" { return false; }
+                funnel.1 += 1;
                 // Skip children of hidden ScreenGuis
                 if is_ancestor_hidden(*e, &gui_query) { return false; }
+                funnel.2 += 1;
                 // Skip billboard descendants — rendered by billboard_gui plugin
                 if is_under_billboard(*e, &billboard_q, &parent_q) { return false; }
+                funnel.3 += 1;
+                // POSITIVE: only render entities that genuinely descend from a
+                // ScreenGui. Orphan or mindmap-adjacent GUI elements that lack
+                // a ScreenGui ancestor are NOT meant for the 2D overlay; this
+                // kills the fixed-screen-position mindmap ghost.
+                if !has_screen_gui_ancestor(*e, &gui_query, &parent_q) { return false; }
+                funnel.4 += 1;
+                funnel.5 += 1;
+                leaked.push((*e, d.class_type.clone(), d.x, d.y));
                 true
             })
             .map(|(e, d, _)| (e, d))
             .collect();
+    info!("👻 [gui-overlay] funnel: raw={} -screengui_self={} -hidden_anc={} -under_bb={} -has_sg_anc={} ACCEPTED={}",
+          funnel.0, funnel.1, funnel.2, funnel.3, funnel.4, funnel.5);
+    for (e, ct, x, y) in leaked.iter().take(20) {
+        info!("👻 [gui-overlay] accepted: entity={:?} class={} pos=({:.0},{:.0})", e, ct, x, y);
+    }
     elements.sort_by_key(|(_, e)| e.z_order);
 
     let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
@@ -2509,6 +2613,11 @@ pub fn update_slint_ui_focus(
                 || w.get_show_stress_test_dialog()
                 || w.get_show_sync_domain_dialog()
                 || w.get_show_simulation_settings_dialog()
+                // Add-Attribute modal — without this, scrolling its type list
+                // leaked to the camera and zoomed the 3D viewport.
+                || w.get_show_attribute_dialog()
+                || w.get_show_rename_tag_dialog()
+                || w.get_show_edit_label_dialog()
         })
         .unwrap_or(false);
     ui_focus.text_input_focused = any_focus;
@@ -3219,6 +3328,109 @@ fn parse_attribute_like(
     }
 }
 
+/// Canonical Roblox-style attribute type names shown in the Add/Edit
+/// Attribute dialog's type dropdown. Each maps 1:1 to an `AttributeValue`
+/// variant via `attribute_from_type_and_value`, so the panel, the dialog,
+/// and disk round-trip the same set.
+const ATTRIBUTE_TYPE_NAMES: &[&str] = &[
+    "String", "Number", "Int", "Bool",
+    "Vector2", "Vector3", "Color3", "Color", "BrickColor",
+    "CFrame", "UDim2", "Rect", "NumberRange", "Font",
+    "NumberSequence", "ColorSequence", "Object",
+];
+
+/// Deterministic per-tag color: hash the tag name to a stable hue, then map
+/// HSV(hue, 0.55, 0.92) → RGB. The same tag always gets the same color across
+/// the whole UI, so users scan tags by color (a step beyond Roblox, whose
+/// Properties-panel tags are colorless).
+fn tag_color(name: &str) -> slint::Color {
+    // FNV-1a hash → hue 0..360.
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    let hue = (h % 360) as f32;
+    let s = 0.55_f32;
+    let v = 0.92_f32;
+    let c = v * s;
+    let hp = hue / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    slint::Color::from_rgb_u8(
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
+}
+
+/// Render an `AttributeValue` as a clean, editable panel string that
+/// `parse_attribute_like` round-trips. Unlike `AttributeValue::display_value`
+/// this omits the surrounding quotes on strings and prints floats with their
+/// minimal representation, so the field shows exactly what the user typed.
+fn attribute_value_to_edit_string(v: &eustress_common::AttributeValue) -> String {
+    use eustress_common::AttributeValue as A;
+    match v {
+        A::String(s)  => s.clone(),
+        A::Int(i)     => i.to_string(),
+        A::Number(n)  => format!("{}", n),
+        A::Bool(b)    => b.to_string(),
+        A::Vector2(p) => format!("{}, {}", p.x, p.y),
+        A::Vector3(p) => format!("{}, {}, {}", p.x, p.y, p.z),
+        other         => other.display_value(),
+    }
+}
+
+/// Build an `AttributeValue` from a Roblox-style type name + a raw value
+/// string, for the Add/Edit Attribute dialog. Unparseable / empty values
+/// fall back to a sensible zero for that type so a freshly-added attribute
+/// is always valid. Numeric tuples accept comma- or space-separated parts.
+fn attribute_from_type_and_value(
+    type_name: &str,
+    value: &str,
+) -> eustress_common::AttributeValue {
+    use eustress_common::AttributeValue as A;
+    let t = value.trim();
+    let floats: Vec<f32> = t
+        .split([',', ' '])
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.trim().parse::<f32>().ok())
+        .collect();
+    let f = |i: usize| floats.get(i).copied().unwrap_or(0.0);
+    match type_name {
+        "Number"  => A::Number(t.parse::<f64>().unwrap_or(0.0)),
+        "Int"     => A::Int(t.parse::<i64>().or_else(|_| t.parse::<f64>().map(|x| x as i64)).unwrap_or(0)),
+        "Bool"    => A::Bool(matches!(t.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")),
+        "Vector2" => A::Vector2(bevy::math::Vec2::new(f(0), f(1))),
+        "Vector3" => A::Vector3(bevy::math::Vec3::new(f(0), f(1), f(2))),
+        // Colors accept "r, g, b" — 0–1 floats, or 0–255 ints (auto-detected).
+        "Color3" | "Color" => {
+            let scale = if floats.iter().any(|c| *c > 1.0) { 1.0 / 255.0 } else { 1.0 };
+            let c = bevy::prelude::Color::srgb(f(0) * scale, f(1) * scale, f(2) * scale);
+            if type_name == "Color3" { A::Color3(c) } else { A::Color(c) }
+        }
+        "BrickColor" => A::BrickColor(t.parse::<u32>().unwrap_or(0)),
+        "CFrame"  => A::CFrame(bevy::prelude::Transform::from_xyz(f(0), f(1), f(2))),
+        "UDim2"   => A::UDim2 { x_scale: f(0), x_offset: f(1), y_scale: f(2), y_offset: f(3) },
+        "Rect"    => A::Rect { min: bevy::math::Vec2::new(f(0), f(1)), max: bevy::math::Vec2::new(f(2), f(3)) },
+        "NumberRange" => A::NumberRange { min: f(0) as f64, max: f(1) as f64 },
+        "Font"    => A::Font { family: if t.is_empty() { "Default".into() } else { t.to_string() }, weight: 400, style: "normal".into() },
+        "NumberSequence" => A::NumberSequence(Vec::new()),
+        "ColorSequence"  => A::ColorSequence(Vec::new()),
+        "Object"  => A::Object(None),
+        // "String" and any unknown name → String.
+        _ => A::String(t.to_string()),
+    }
+}
+
 
 /// Extracted from `drain_slint_actions` to keep that function's stack frame small.
 #[inline(never)]
@@ -3510,6 +3722,7 @@ fn drain_slint_actions(
     mut queries: DrainActionQueries,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut label_edit_state: ResMut<LabelEditState>,
 ) {
     let Some(queue) = queue else {
         warn!("⚠ drain_slint_actions: SlintActionQueue resource not found!");
@@ -5548,6 +5761,179 @@ fn drain_slint_actions(
                 }
             }
 
+            // Add/Edit Attribute modal confirmed → build an AttributeValue from
+            // the chosen type + value and insert/replace it on the selected
+            // entity's Attributes component. Changed<Attributes> →
+            // save_tags_and_attributes_changes persists it; emit_tag_attr_dirty
+            // refreshes the panel.
+            SlintAction::AttributeConfirmed(name, type_name, value, _is_edit) => {
+                let sel = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                    SelectedItem::Entity(e) => Some(*e),
+                    SelectedItem::Service(svc) => queries.instances.iter()
+                        .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+                    _ => None,
+                });
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Attribute name cannot be empty".to_string());
+                    }
+                } else if let Some(entity) = sel {
+                    let av = attribute_from_type_and_value(&type_name, &value);
+                    if let Ok(mut attrs) = queries.attributes.get_mut(entity) {
+                        attrs.values.insert(name.clone(), av);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Attribute '{}' set ({})", name, type_name));
+                        }
+                    }
+                    if let Some(ref mut s) = res.state { s.show_properties = true; }
+                } else if let Some(ref mut out) = res.output {
+                    out.error("Select an entity before adding an attribute".to_string());
+                }
+            }
+
+            // Trash icon → delete a custom attribute from the selected entity.
+            SlintAction::AttributeDeleted(name) => {
+                let sel = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                    SelectedItem::Entity(e) => Some(*e),
+                    SelectedItem::Service(svc) => queries.instances.iter()
+                        .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+                    _ => None,
+                });
+                if let Some(entity) = sel {
+                    if let Ok(mut attrs) = queries.attributes.get_mut(entity) {
+                        attrs.values.remove(&name);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Attribute '{}' deleted", name));
+                        }
+                    }
+                    if let Some(ref mut s) = res.state { s.show_properties = true; }
+                }
+            }
+
+            // Tag chip / registry "+" → add a tag to the selected entity. Tags
+            // are re-inserted via `commands` (a `&mut Tags` query would alias the
+            // read-only `entity_tags`); Changed<Tags> → save + panel refresh.
+            SlintAction::TagAdded(name) => {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    let sel = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                        SelectedItem::Entity(e) => Some(*e),
+                        SelectedItem::Service(svc) => queries.instances.iter()
+                            .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+                        _ => None,
+                    });
+                    if let Some(entity) = sel {
+                        let mut tags = queries.entity_tags.get(entity)
+                            .map(|(_, t)| t.0.clone()).unwrap_or_default();
+                        if !tags.iter().any(|t| t == &name) {
+                            tags.push(name.clone());
+                            commands.entity(entity).insert(eustress_common::attributes::Tags(tags));
+                            if let Some(ref mut out) = res.output {
+                                out.info(format!("Tag '{}' added", name));
+                            }
+                        }
+                        if let Some(ref mut s) = res.state { s.show_properties = true; }
+                    } else if let Some(ref mut out) = res.output {
+                        out.error("Select an entity before adding a tag".to_string());
+                    }
+                }
+            }
+
+            // Tag chip ✕ → remove a tag from the selected entity.
+            SlintAction::TagRemoved(name) => {
+                let sel = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                    SelectedItem::Entity(e) => Some(*e),
+                    SelectedItem::Service(svc) => queries.instances.iter()
+                        .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+                    _ => None,
+                });
+                if let Some(entity) = sel {
+                    if let Ok((_, t)) = queries.entity_tags.get(entity) {
+                        let mut tags = t.0.clone();
+                        tags.retain(|x| x != &name);
+                        commands.entity(entity).insert(eustress_common::attributes::Tags(tags));
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Tag '{}' removed", name));
+                        }
+                    }
+                    if let Some(ref mut s) = res.state { s.show_properties = true; }
+                }
+            }
+
+            // Click a tag chip → select EVERY entity carrying that tag
+            // (CollectionService:GetTagged, inline — Roblox needs a separate
+            // window). Replays through BevySelectionManager for multi-select.
+            SlintAction::TagSelectTagged(name) => {
+                let tagged: Vec<Entity> = queries.entity_tags.iter()
+                    .filter(|(_, t)| t.0.iter().any(|x| x == &name))
+                    .map(|(e, _)| e)
+                    .collect();
+                if !tagged.is_empty() {
+                    if let Some(ref sel_mgr) = res.selection_manager {
+                        let mut mgr = sel_mgr.0.write();
+                        mgr.clear();
+                        for e in &tagged {
+                            mgr.toggle_selection(format!("{}v{}", e.index(), e.generation()));
+                        }
+                    }
+                    if let Some(ref mut es) = res.explorer_state {
+                        es.selected = SelectedItem::Entity(tagged[0]);
+                        es.needs_immediate_sync = true;
+                    }
+                    if let Some(ref mut out) = res.output {
+                        let n = tagged.len();
+                        out.info(format!("Selected {} entit{} tagged '{}'",
+                            n, if n == 1 { "y" } else { "ies" }, name));
+                    }
+                }
+            }
+
+            // Double-click rename → replace `old` with `new` on EVERY entity
+            // carrying it (project-wide CollectionService rename), de-duplicating
+            // if the target name already exists on an entity.
+            SlintAction::TagRenamed(old_name, new_name) => {
+                let old_name = old_name.trim().to_string();
+                let new_name = new_name.trim().to_string();
+                if !old_name.is_empty() && !new_name.is_empty() && old_name != new_name {
+                    let targets: Vec<Entity> = queries.entity_tags.iter()
+                        .filter(|(_, t)| t.0.iter().any(|x| *x == old_name))
+                        .map(|(e, _)| e)
+                        .collect();
+                    let n = targets.len();
+                    for e in &targets {
+                        if let Ok((_, t)) = queries.entity_tags.get(*e) {
+                            let mut seen = std::collections::HashSet::new();
+                            let tags: Vec<String> = t.0.iter()
+                                .map(|x| if *x == old_name { new_name.clone() } else { x.clone() })
+                                .filter(|x| seen.insert(x.clone()))
+                                .collect();
+                            commands.entity(*e).insert(eustress_common::attributes::Tags(tags));
+                        }
+                    }
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Renamed tag '{}' → '{}' on {} entit{}",
+                            old_name, new_name, n, if n == 1 { "y" } else { "ies" }));
+                    }
+                    if let Some(ref mut s) = res.state { s.show_properties = true; }
+                }
+            }
+
+            // Edit-Label modal confirmed (Enter on a selected part) → update
+            // the targeted TextLabel's text. Changed<TextLabel> triggers the
+            // existing save-back system to persist to the .textlabel.toml.
+            SlintAction::EditLabelConfirmed(new_text) => {
+                let target = label_edit_state.target.take();
+                if let Some(entity) = target {
+                    if let Ok(mut label) = queries.ui_text_labels.get_mut(entity) {
+                        label.text = new_text.clone();
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Label text updated: \"{}\"", new_text));
+                        }
+                    }
+                }
+            }
+
             // Vec3-row copy icon — write the current `"x, y, z"`
             // triple to the OS clipboard so the user can paste it
             // into another property row, another instance, or out to
@@ -6603,16 +6989,22 @@ fn drain_slint_actions(
                         _ => {
                             // Custom `[attributes]` edit: if `key` names an existing
                             // attribute on this entity, update its value IN PLACE,
-                            // preserving the value's type. Changed<Attributes> →
-                            // save_tags_and_attributes_changes persists it and the
-                            // panel refreshes (A–Z within the Attributes section).
-                            // Only a key that is neither a built-in nor a known
-                            // attribute is genuinely "unhandled".
+                            // preserving the value's type — or, if the field was
+                            // cleared, REMOVE the attribute (panel-driven delete).
+                            // Changed<Attributes> → save_tags_and_attributes_changes
+                            // persists it and the panel refreshes (A–Z within the
+                            // Attributes section). Only a key that is neither a
+                            // built-in nor a known attribute is genuinely "unhandled".
                             let mut handled = false;
                             if let Ok(mut attrs) = queries.attributes.get_mut(entity) {
-                                if let Some(existing) = attrs.values.get(&key).cloned() {
-                                    let parsed = parse_attribute_like(&existing, &val);
-                                    attrs.values.insert(key.clone(), parsed);
+                                if attrs.values.contains_key(&key) {
+                                    if val.trim().is_empty() {
+                                        attrs.values.remove(&key);
+                                    } else {
+                                        let existing = attrs.values.get(&key).cloned().unwrap();
+                                        let parsed = parse_attribute_like(&existing, &val);
+                                        attrs.values.insert(key.clone(), parsed);
+                                    }
                                     handled = true;
                                 }
                             }
@@ -12639,6 +13031,319 @@ fn build_file_tree_nodes(
     }
 }
 
+/// State for the Edit-Label modal: which TextLabel entity is being edited.
+/// Set by `open_label_editor_on_enter` when the user presses Enter on a part
+/// with a TextLabel descendant; read + cleared by the drain handler on commit.
+#[derive(Resource, Default)]
+struct LabelEditState {
+    target: Option<Entity>,
+}
+
+/// Press **F2** while the cursor is over the 3D viewport on a selected part
+/// to inline-edit the FIRST descendant TextLabel/TextBox/TextButton (matching
+/// the Roblox `FindFirstDescendantWhichIsA("TextLabel")` semantic) — opens
+/// the window-root EditLabelDialog with the found instance's current text.
+///
+/// Two diagnostic streams help when this doesn't fire:
+///   1. `⌨️ raw key:` — logs EVERY OS keyboard press (drains the Bevy
+///      KeyboardInput MessageReader). If F2 doesn't appear here, the OS/
+///      winit/forward layer is swallowing the key BEFORE Bevy sees it.
+///   2. `⏎ [label-edit] …` — logs every gate decision. If we see "F2
+///      detected" but then "skip: …", the gate name tells you why.
+///
+/// Gating order is intentional:
+///   - cursor must be in the 3D viewport (so Explorer F2 still triggers
+///     Slint's inline tree-rename via the same key — they're disambiguated
+///     by mouse position, not key code)
+///   - no Slint text input or modal may be focused (so F2 inside the
+///     Tag-add field or the EditLabelDialog itself doesn't re-trigger
+///     this handler — this is the user-asked-about gate)
+fn open_label_editor_on_enter(
+    keys: Res<bevy::input::ButtonInput<bevy::input::keyboard::KeyCode>>,
+    mut raw_keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    explorer_state: Option<Res<UnifiedExplorerState>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    text_labels: Query<&eustress_common::classes::TextLabel>,
+    children_q: Query<&bevy::prelude::Children>,
+    instances: Query<&eustress_common::classes::Instance>,
+    mut label_state: ResMut<LabelEditState>,
+) {
+    use eustress_common::classes::ClassName;
+
+    // ── DIAGNOSTIC: log EVERY keyboard press unconditionally ──
+    // If F2 doesn't appear in this log, Bevy never received the key — the
+    // problem is upstream (winit/forward layer), not inside this handler.
+    // Drains MessageReader so it doesn't pile up.
+    for evt in raw_keys.read() {
+        if evt.state == bevy::input::ButtonState::Pressed {
+            info!("⌨️ raw key: logical={:?}", evt.logical_key);
+        }
+    }
+
+    // ── Trigger: F2 while the viewport has focus ──
+    // F2 is the canonical Studio rename shortcut. Explorer's F2 rename still
+    // works because that's dispatched inside Slint while the Explorer panel
+    // has UI focus (cursor on the panel → `ui_focus.has_focus == true`).
+    // We fire ONLY when the cursor is over the 3D viewport.
+    let f2_pressed = keys.just_pressed(bevy::input::keyboard::KeyCode::F2);
+    if !f2_pressed { return; }
+
+    info!("⏎ [label-edit] F2 detected (just_pressed) — entering gates");
+
+    // Viewport-focus gate: ui_focus.has_focus == true means cursor is over a
+    // UI PANEL, not the viewport. We need the OPPOSITE — cursor in viewport.
+    let cursor_in_viewport = ui_focus.as_ref().map(|f| !f.has_focus).unwrap_or(false);
+    if !cursor_in_viewport {
+        info!("⏎ [label-edit] skip: cursor not in 3D viewport (ui_focus.has_focus=true)");
+        return;
+    }
+
+    // Don't fire while a text input/modal is focused — F2 belongs to it.
+    // (Tag-add field, Properties input, any open dialog including the
+    // EditLabelDialog this very handler may have opened.) This is the gate
+    // the user asked about: when they're typing in any Slint input, F2 stays
+    // with that input instead of stealing focus to open the label editor.
+    if ui_focus.as_ref().map(|f| f.text_input_focused).unwrap_or(false) {
+        info!("⏎ [label-edit] skip: text-input or modal already has focus");
+        return;
+    }
+    let Some(ctx) = slint_context else {
+        info!("⏎ [label-edit] skip: no slint context");
+        return;
+    };
+    let Some(es) = explorer_state else {
+        info!("⏎ [label-edit] skip: no explorer state");
+        return;
+    };
+
+    let primary = match &es.selected {
+        SelectedItem::Entity(e) => *e,
+        SelectedItem::File(_) => {
+            info!("⏎ [label-edit] skip: selection is File, not Entity");
+            return;
+        }
+        SelectedItem::Service(name) => {
+            info!("⏎ [label-edit] skip: selection is Service '{}', not Entity", name);
+            return;
+        }
+        SelectedItem::None => {
+            info!("⏎ [label-edit] skip: no selection");
+            return;
+        }
+    };
+
+    let primary_name = instances.get(primary).map(|i| i.name.clone())
+        .unwrap_or_else(|_| format!("{:?}", primary));
+    info!("⏎ [label-edit] FindFirstDescendantWhichIsA(TextLabel|TextBox|TextButton) from '{}' ({:?})",
+          primary_name, primary);
+
+    // ── FindFirstDescendantWhichIsA(TextLabel) — Roblox-parity search ──
+    // The "IsA" check is `Instance.class_name == ClassName::TextLabel`, the
+    // canonical class-identity field — same pattern as InstanceRef::is_a in
+    // common/src/scripting/instance.rs:281 and the Luau runtime's
+    // FindFirstAncestorWhichIsA. We accept TextLabel / TextBox / TextButton
+    // (all text-bearing GuiObject classes) so this works even if a billboard
+    // header is built from a TextButton. Per the user's question: yes, this
+    // is FindFirstDescendant + IsA — not findFirstChild, not a raw
+    // component probe.
+    let is_text_class = |cn: ClassName| matches!(
+        cn,
+        ClassName::TextLabel | ClassName::TextBox | ClassName::TextButton
+    );
+
+    let mut found: Option<(Entity, String, String)> = None; // (entity, name, text)
+    let mut visited = 0usize;
+    let mut stack = vec![primary];
+    while let Some(e) = stack.pop() {
+        visited += 1;
+        if let Ok(instance) = instances.get(e) {
+            if is_text_class(instance.class_name) {
+                // IsA matched. Pull live text from the TextLabel component
+                // (added by every spawn path for these classes). Fall back to
+                // empty if missing so the modal still opens — user can type
+                // fresh text and confirm.
+                let text = text_labels.get(e).map(|l| l.text.clone()).unwrap_or_default();
+                info!("⏎ [label-edit] FOUND '{}' (class={:?}, text=\"{}\") after {} entities",
+                      instance.name, instance.class_name, text, visited);
+                found = Some((e, instance.name.clone(), text));
+                break;
+            }
+        }
+        if let Ok(kids) = children_q.get(e) {
+            for child in kids.iter() {
+                stack.push(child);
+            }
+        }
+    }
+
+    if let Some((label_entity, _, text)) = found {
+        label_state.target = Some(label_entity);
+        let ui = &ctx.window;
+        ui.set_edit_label_text(text.as_str().into());
+        ui.set_show_edit_label_dialog(true);
+        info!("⏎ [label-edit] opened EditLabelDialog");
+    } else {
+        info!("⏎ [label-edit] no TextLabel/TextBox/TextButton descendant under '{}' (visited {} entities)",
+              primary_name, visited);
+    }
+}
+
+/// Dedicated, NON-focus-gated sync for the Tags editor (assigned chips +
+/// project-registry reuse tray). Kept separate from `sync_properties_to_slint`
+/// because that function returns early while any input is focused — and the
+/// Tag add-field keeps focus after Enter, so chips added there must refresh
+/// through this path to appear immediately. Rebuilds the chip/registry models
+/// only when the selection or any `Tags` component changes (cheap otherwise).
+fn sync_tags_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    explorer_state: Option<Res<UnifiedExplorerState>>,
+    studio_state: Option<Res<StudioState>>,
+    all_tags: Query<(Entity, &eustress_common::attributes::Tags)>,
+    changed_tags: Query<(), Changed<eustress_common::attributes::Tags>>,
+    mut last_sel: Local<u64>,
+) {
+    let Some(slint_context) = slint_context else { return };
+    let Some(explorer_state) = explorer_state else { return };
+    let ui = &slint_context.window;
+
+    // Mirror the Tags-section collapse EVERY frame (cheap bool) so toggling its
+    // header reflects instantly — the focus-gated properties sync can't be
+    // relied on for this. The shared SectionToggle handler flips the
+    // "Tags" entry in collapsed_sections.
+    if let Some(ref ss) = studio_state {
+        ui.set_tags_collapsed(ss.collapsed_sections.contains("Tags"));
+    }
+
+    let sel_entity = match &explorer_state.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    };
+    let sel_hash = sel_entity.map(|e| e.to_bits()).unwrap_or(0);
+    let selection_changed = sel_hash != *last_sel;
+    // Rebuild the chip/registry models on selection change OR any tag mutation.
+    if !selection_changed && changed_tags.is_empty() {
+        return;
+    }
+    *last_sel = sel_hash;
+
+    // Project-wide registry: count each tag across ALL tagged entities.
+    let mut registry: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, t) in all_tags.iter() {
+        for name in t.0.iter() {
+            *registry.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+    let selected_tags: Vec<String> = sel_entity
+        .and_then(|e| all_tags.get(e).ok())
+        .map(|(_, t)| t.0.clone())
+        .unwrap_or_default();
+
+    // Assigned chips (A–Z), each with its stable auto color + space-wide count.
+    //
+    // FLOW-WRAP via row pre-splitting (not absolute positioning). We estimate
+    // each chip's pixel width, accumulate into rows ≤ PANEL_INNER_PX wide, and
+    // push each row as a SEPARATE Slint property (tag_row_0..tag_row_3). Slint
+    // renders each row as a natural HorizontalLayout — every chip's TouchArea
+    // is registered correctly. Earlier attempt used absolute `x: chip-x * 1px`
+    // inside a Rectangle; Slint mis-registered the TouchArea hit boxes and
+    // silently killed all clicks in the Explorer panel.
+    //
+    // Width estimate: padding (8L + 4R) + dot (8) + gap (5) + glyph-width × name
+    // + gap (5) + count-glyphs + ×-button (18). Conservative; better to
+    // overestimate so a chip never sits past its parent's right edge.
+    const PANEL_INNER_PX: f32 = 248.0;
+    const COL_GAP_PX:     f32 = 5.0;
+    const CHIP_BASE_PX:   f32 = 56.0;  // padding + dot + ×-button overhead
+    const PER_CHAR_PX:    f32 = 6.2;
+    const MAX_ROWS:       usize = 4;
+
+    fn estimate_width(name: &str, count: i32, base: f32) -> f32 {
+        let mut w = base + (name.chars().count() as f32) * PER_CHAR_PX;
+        if count > 1 {
+            let digits = ((count as f32).log10().floor() as i32 + 1).max(1) as f32;
+            w += 4.0 + digits * 6.0;
+        }
+        w
+    }
+
+    fn split_into_rows<T: Clone>(items: &[(T, f32)], max_row_px: f32, max_rows: usize)
+        -> [Vec<T>; 4]
+    {
+        let mut rows: [Vec<T>; 4] = Default::default();
+        let mut row_idx: usize = 0;
+        let mut row_w: f32 = 0.0;
+        for (item, w) in items {
+            if row_w + *w > max_row_px && row_w > 0.0 {
+                if row_idx + 1 >= max_rows {
+                    // Out of rows — drop the rest. Pragmatic; the registry tray
+                    // catches anything that doesn't fit in the assigned rack.
+                    break;
+                }
+                row_idx += 1;
+                row_w = 0.0;
+            }
+            rows[row_idx].push(item.clone());
+            row_w += *w + COL_GAP_PX;
+        }
+        rows
+    }
+
+    let mut sel_sorted = selected_tags.clone();
+    sel_sorted.sort();
+
+    let assigned: Vec<TagChip> = sel_sorted.iter().map(|name| TagChip {
+        name: name.as_str().into(),
+        color: tag_color(name),
+        count: *registry.get(name).unwrap_or(&1) as i32,
+    }).collect();
+    // Build (chip, est-width) pairs for the row splitter.
+    let assigned_sized: Vec<(TagChip, f32)> = assigned.iter().map(|c| {
+        let w = estimate_width(c.name.as_str(), c.count, CHIP_BASE_PX);
+        (c.clone(), w)
+    }).collect();
+    let rows = split_into_rows(&assigned_sized, PANEL_INNER_PX, MAX_ROWS);
+
+    ui.set_entity_tags(slint::ModelRc::new(slint::VecModel::from(assigned)));
+    ui.set_entity_tag_row_0(slint::ModelRc::new(slint::VecModel::from(rows[0].clone())));
+    ui.set_entity_tag_row_1(slint::ModelRc::new(slint::VecModel::from(rows[1].clone())));
+    ui.set_entity_tag_row_2(slint::ModelRc::new(slint::VecModel::from(rows[2].clone())));
+    ui.set_entity_tag_row_3(slint::ModelRc::new(slint::VecModel::from(rows[3].clone())));
+
+    // Reuse tray: registry tags NOT on this entity, by count desc, capped.
+    // Single-row rendering — chips fit naturally; capped at 16 to keep
+    // horizontal overflow manageable.
+    let assigned_set: std::collections::HashSet<&String> = selected_tags.iter().collect();
+    let mut sug: Vec<(String, usize)> = registry.iter()
+        .filter(|(n, _)| !assigned_set.contains(*n))
+        .map(|(n, c)| (n.clone(), *c))
+        .collect();
+    sug.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sug.truncate(16);
+    let suggestions: Vec<TagSuggestion> = sug.into_iter().map(|(name, count)| TagSuggestion {
+        color: tag_color(&name),
+        name: name.as_str().into(),
+        count: count as i32,
+    }).collect();
+    ui.set_tag_suggestions(slint::ModelRc::new(slint::VecModel::from(suggestions)));
+}
+
+/// Auxiliary read-only queries for `sync_properties_to_slint`, bundled into
+/// one `SystemParam` so the system stays under Bevy's 16-param ceiling after
+/// the live Tags/Attributes query joined the signature.
+#[derive(bevy::ecs::system::SystemParam)]
+struct PropertyExtraQueries<'w, 's> {
+    /// GUI display component — used to read live GUI element layout when a
+    /// GuiElementDisplay-backed entity is selected.
+    gui_display: Query<'w, 's, &'static eustress_common::gui::billboard_renderer::GuiElementDisplay>,
+    /// Live Tags / Attributes components — the canonical runtime store the
+    /// CollectionService, scripts, and the MCP `add_tag` tool all mutate.
+    tag_attr: Query<'w, 's, (
+        Option<&'static eustress_common::attributes::Tags>,
+        Option<&'static eustress_common::attributes::Attributes>,
+    )>,
+}
+
 /// Syncs the selected entity's properties to the Slint properties panel.
 /// Builds a flat list with category headers interleaved for section grouping.
 /// Throttled to run every 15 frames.
@@ -12652,7 +13357,6 @@ fn sync_properties_to_slint(
     base_parts: Query<&eustress_common::classes::BasePart>,
     instance_files: Query<&crate::space::instance_loader::InstanceFile>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
-    gui_display_query: Query<&eustress_common::gui::billboard_renderer::GuiElementDisplay>,
     // UI class components split across two ParamSets — Bevy's ParamSet
     // caps at 8 members and we now surface 10 UI classes (BillboardGui /
     // ScreenGui / SurfaceGui joined the flat 2D classes when 3D UI
@@ -12680,6 +13384,9 @@ fn sync_properties_to_slint(
     // converts user input back to meters via DisplayUnit before reaching
     // ECS, so the Properties panel speaks the same unit at read and write.
     display_unit: Res<eustress_common::units::DisplayUnit>,
+    // Auxiliary read queries (GUI display + live Tags/Attributes) bundled
+    // into one SystemParam to stay under the 16-param ceiling.
+    extra_q: PropertyExtraQueries,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut studio_state) = studio_state else { return };
@@ -12780,7 +13487,10 @@ fn sync_properties_to_slint(
     // Collect raw properties with categories into buckets
     // category -> Vec<(name, value, type, editable)>
     let mut categorized: std::collections::BTreeMap<String, Vec<(String, String, String, bool)>> = std::collections::BTreeMap::new();
-    
+    // attribute name -> AttributeValue type name, for the Roblox-style type
+    // badge + edit-dialog prefill on rows in the "Attributes" category.
+    let mut attribute_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     // Helper to add a property to a category bucket
     let mut add_prop = |cat: &str, name: &str, value: String, prop_type: &str, editable: bool| {
         categorized.entry(cat.to_string())
@@ -13079,25 +13789,13 @@ fn sync_properties_to_slint(
             add_prop("Physics", "CanCollide", toml_def.properties.can_collide.to_string(), "bool", true);
             add_prop("Physics", "Locked", toml_def.properties.locked.to_string(), "bool", true);
 
-            // -- Attributes section (custom key-value pairs from [attributes] in TOML) --
-            if let Some(ref attrs) = toml_def.attributes {
-                for (key, value) in attrs {
-                    let val_str = match value {
-                        toml::Value::String(s) => s.clone(),
-                        toml::Value::Integer(i) => i.to_string(),
-                        toml::Value::Float(f) => format!("{:.4}", f),
-                        toml::Value::Boolean(b) => b.to_string(),
-                        other => format!("{}", other),
-                    };
-                    add_prop("Attributes", key, val_str, "string", true);
-                }
-            }
-
-            // -- Tags section (array from [tags] in TOML) --
-            if let Some(ref tags) = toml_def.tags {
-                let tags_str = tags.join(", ");
-                add_prop("Tags", "Tags", tags_str, "string", true);
-            }
+            // NOTE: Tags + Attributes are NO LONGER emitted here. They were
+            // previously read from disk TOML inside this non-UI-only branch,
+            // so UI classes (BillboardGui / TextLabel / …) never showed them
+            // and the panel could drift from the live ECS components that
+            // edits + write-back actually mutate. They are now emitted once,
+            // class-agnostically, from the live `Tags` / `Attributes`
+            // components after this block (search `ADD_ATTRIBUTE_ROW`).
 
             // -- Parameters section (from [parameters] in TOML) --
             if let Some(ref params) = toml_def.parameters {
@@ -13231,7 +13929,7 @@ fn sync_properties_to_slint(
                 );
             }
         }
-    } else if let Ok(gui) = gui_display_query.get(selected_entity) {
+    } else if let Ok(gui) = extra_q.gui_display.get(selected_entity) {
         // GUI element with GuiElementDisplay — show gui properties for live editing.
         // `gui.class_type` is the renderer-side mirror of `instance.class_name`;
         // surfacing both as separate rows is redundant — Properties shows
@@ -13365,7 +14063,50 @@ fn sync_properties_to_slint(
             }
         }
     }
-    
+
+    // ── Tags + Attributes — class-agnostic, sourced from live ECS components ──
+    //
+    // Emitted for EVERY selected entity (Part, GUI, Folder, Script, …) from
+    // the `Tags` / `Attributes` components rather than disk TOML, so:
+    //   • UI classes finally show them (the old disk path was inside the
+    //     non-UI-only branch — the user's "NOT showing up at all" report);
+    //   • runtime changes (scripts, MCP `add_tag`, CollectionService) appear
+    //     in real time, not just after a save round-trip;
+    //   • the sections are ALWAYS present (even empty) so the user can see
+    //     where tags/attributes live and add them.
+    // `ensure_tags_and_attributes_components` guarantees both components on
+    // any file-backed entity; a missing component just renders empty.
+    {
+        let (tags_opt, attrs_opt) = extra_q.tag_attr
+            .get(selected_entity)
+            .map(|(t, a)| (t, a))
+            .unwrap_or((None, None));
+
+        // Attributes — one editable row per key. The flat-list builder sorts
+        // rows A–Z within the section, so iteration order here is irrelevant.
+        // Each attribute's AttributeValue type name is recorded in
+        // `attribute_types` so the panel can render the Roblox-style type
+        // badge + prefill the edit dialog. The "+" button on the Attributes
+        // section header opens the Add-Attribute modal — no inline add row.
+        let _ = tags_opt; // Tags now render via the dedicated TagsEditor (below).
+        if let Some(attrs) = attrs_opt {
+            for (key, value) in attrs.values.iter() {
+                attribute_types.insert(key.clone(), value.type_name().to_string());
+                add_prop("Attributes", key, attribute_value_to_edit_string(value), "string", true);
+            }
+        }
+    }
+    // Always render the empty Attributes header so the "+" add button is
+    // reachable even when the entity has no attributes yet. Done AFTER the
+    // last `add_prop` call so it doesn't alias the closure's &mut borrow.
+    categorized.entry("Attributes".to_string()).or_default();
+
+    // NOTE: the Tag chips/registry models AND the Tags-section collapse flag
+    // are handled by the dedicated, NON-focus-gated `sync_tags_to_slint`
+    // system, so a tag added via the (focused) add-field — and a header
+    // collapse toggle — both reflect in the panel immediately. This
+    // focus-gated function returns early while typing, so it can't.
+
     // Build flat list with category headers interleaved.
     //
     // Category order mirrors Roblox Studio's Properties panel — the
@@ -13454,6 +14195,8 @@ fn sync_properties_to_slint(
             color_value: placeholder_color,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
+            is_attribute: false,
+            attribute_type: slint::SharedString::default(),
         });
 
         // Insert properties in this category (sorted A-Z by name)
@@ -13492,6 +14235,16 @@ fn sync_properties_to_slint(
                     placeholder_color
                 };
 
+                // Attribute rows (category == "Attributes") get the Roblox-style
+                // type badge + gear/trash controls. `attribute_types` carries the
+                // AttributeValue type name recorded when the row was emitted.
+                let is_attr = cat.as_str() == "Attributes";
+                let attr_type = if is_attr {
+                    attribute_types.get(&name).cloned().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
                 flat_props.push(PropertyData {
                     name: name.as_str().into(),
                     value: value.as_str().into(),
@@ -13511,6 +14264,8 @@ fn sync_properties_to_slint(
                     color_value,
                     description: slint::SharedString::default(),
                     learn_url: slint::SharedString::default(),
+                    is_attribute: is_attr,
+                    attribute_type: attr_type.as_str().into(),
                 });
             }
         }
@@ -14284,6 +15039,8 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
+            is_attribute: false,
+            attribute_type: slint::SharedString::default(),
         }
     };
 
@@ -14402,6 +15159,8 @@ fn build_service_properties(
             color_value,
             description: slint::SharedString::default(),
             learn_url: slint::SharedString::default(),
+            is_attribute: false,
+            attribute_type: slint::SharedString::default(),
         }
     };
 

@@ -5,6 +5,7 @@
 
 import { VerticalBox, HorizontalBox, LineEdit, ScrollView, CheckBox, Slider, ComboBox, SpinBox, GridBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { TagsEditor, TagChip, TagSuggestion } from "tags_editor.slint";
 
 // Property data structure
 export struct PropertyData {
@@ -37,6 +38,13 @@ export struct PropertyData {
     description: string,
     // URL path for the /learn documentation link (e.g. "/learn/atmosphere#density")
     learn-url: string,
+    // Custom-attribute UX: when true this row is a user [attributes] entry and
+    // gets the Roblox-style gear (change type) + red trash (delete) controls.
+    is-attribute: bool,
+    // AttributeValue type name for an attribute row (e.g. "String", "Number",
+    // "Vector3", "Color3"). Shown as a small badge and used to prefill the
+    // edit dialog's type dropdown.
+    attribute-type: string,
 }
 
 // Help icon button — shown left of property label when description is present.
@@ -124,14 +132,17 @@ export component HelpIcon inherits Rectangle {
 // Collapsible section header - polished with gradient and better typography
 component SectionHeader inherits Rectangle {
     in property <string> title: "";
+    in property <string> category: "";
     in-out property <bool> expanded: true;
-    
+
     // Fired when chevron is clicked so parent can update model state
     callback clicked();
-    
+    // Fired when the "+" add button (Attributes section only) is clicked
+    callback add-clicked();
+
     height: 32px;
     background: @linear-gradient(180deg, #252525 0%, #1e1e1e 100%);
-    
+
     // Bottom border line
     Rectangle {
         y: parent.height - 1px;
@@ -139,8 +150,8 @@ component SectionHeader inherits Rectangle {
         height: 1px;
         background: #333333;
     }
-    
-    TouchArea {
+
+    header-ta := TouchArea {
         mouse-cursor: pointer;
         clicked => {
             // Do NOT toggle root.expanded locally — Rust is the single source of truth.
@@ -149,12 +160,12 @@ component SectionHeader inherits Rectangle {
             root.clicked();
         }
     }
-    
+
     HorizontalLayout {
         padding-left: 12px;
-        padding-right: 12px;
+        padding-right: 8px;
         spacing: 8px;
-        
+
         // Chevron with smooth rotation feel
         Text {
             width: 14px;
@@ -164,7 +175,7 @@ component SectionHeader inherits Rectangle {
             vertical-alignment: center;
             horizontal-alignment: center;
         }
-        
+
         Text {
             text: root.title;
             color: Theme.text-primary;
@@ -173,10 +184,35 @@ component SectionHeader inherits Rectangle {
             letter-spacing: 0.3px;
             vertical-alignment: center;
         }
-        
+
         // Spacer
         Rectangle { horizontal-stretch: 1; }
-        
+
+        // "+" add button — Attributes section only. Roblox-style: opens the
+        // Add-Attribute modal (name + type + initial value).
+        if root.category == "Attributes": Rectangle {
+            width: 20px;
+            height: 20px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 4px;
+            background: add-ta.has-hover ? Theme.accent-blue : #2e2e2e;
+            border-width: 1px;
+            border-color: add-ta.has-hover ? Theme.accent-blue : #3a3a3a;
+
+            add-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.add-clicked(); }
+            }
+            Text {
+                text: "+";
+                color: add-ta.has-hover ? white : Theme.text-secondary;
+                font-size: 14px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
         // Item count badge (visual polish)
         VerticalLayout {
             alignment: center;
@@ -436,7 +472,11 @@ component PropRow inherits Rectangle {
     in property <string> description: "";
     in property <string> learn-url: "";
     in property <bool> show-help-icons: true;
-    
+    // Roblox-style custom-attribute controls: when true, render a type badge,
+    // a gear (change type / edit) icon, and a red trash (delete) icon.
+    in property <bool> is-attribute: false;
+    in property <string> attribute-type: "";
+
     // Expose focus state so parent can aggregate across all rows
     out property <bool> has-focus: input-edit.has-focus;
 
@@ -449,6 +489,10 @@ component PropRow inherits Rectangle {
     callback value-changed(string);
     callback open-learn-url(string);
     callback focus-changed(bool);
+    // Attribute row: gear clicked → open edit dialog (passes name, type, value).
+    callback gear-clicked(string, string, string);
+    // Attribute row: trash clicked → delete this attribute (passes name).
+    callback trash-clicked(string);
 
     // Hidden focus sink used by `accepted()` handlers to move focus away
     // from the LineEdit on Enter. Without this, pressing Enter commits the
@@ -527,6 +571,73 @@ component PropRow inherits Rectangle {
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
+        }
+
+        // ── Attribute controls (type badge + gear + trash) ──
+        if root.is-attribute: HorizontalLayout {
+            spacing: 3px;
+
+            // Type badge
+            Rectangle {
+                width: 46px;
+                height: 18px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 9px;
+                background: #2a3550;
+                Text {
+                    text: root.attribute-type;
+                    color: Theme.accent-blue;
+                    font-size: 8px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // Gear (change type / edit) icon
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4px;
+                background: gear-ta.has-hover ? #3a3a3a : transparent;
+                gear-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.gear-clicked(root.label, root.attribute-type, root.value); }
+                }
+                Image {
+                    width: 13px;
+                    height: 13px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../assets/icons/ui/settings.svg");
+                    image-fit: contain;
+                    colorize: gear-ta.has-hover ? Theme.accent-blue : Theme.text-secondary;
+                }
+            }
+
+            // Trash (delete) icon — red on hover
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 4px;
+                background: trash-ta.has-hover ? #5d1515 : transparent;
+                trash-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.trash-clicked(root.label); }
+                }
+                Image {
+                    width: 13px;
+                    height: 13px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../assets/icons/ui/delete.svg");
+                    image-fit: contain;
+                    colorize: trash-ta.has-hover ? #ef5350 : Theme.text-secondary;
+                }
+            }
         }
     }
 }
@@ -1980,7 +2091,31 @@ export component PropertiesPanel inherits Rectangle {
     // are all accepted) and synthesises a matching
     // `on-property-changed(name, "x, y, z")` call.
     callback on-paste-property-vector(string);
-    
+    // Attributes UX. `on-add-attribute` opens the Add-Attribute modal (empty).
+    // `on-attribute-edit` opens it prefilled for type/value change (name, type,
+    // value). `on-attribute-delete` removes the attribute (name).
+    callback on-add-attribute();
+    callback on-attribute-edit(string, string, string);
+    callback on-attribute-delete(string);
+    // Tag system (chips). entity-tags = assigned (with color + count);
+    // tag-suggestions = project registry tags not on this entity.
+    in property <[TagChip]> entity-tags: [];
+    // Flow-wrap rows. Rust splits entity-tags into ≤ 4 rows so each
+    // HorizontalLayout sizes its chips naturally (no absolute positioning,
+    // which breaks Slint TouchArea hit testing for the Explorer).
+    in property <[TagChip]> entity-tag-row-0: [];
+    in property <[TagChip]> entity-tag-row-1: [];
+    in property <[TagChip]> entity-tag-row-2: [];
+    in property <[TagChip]> entity-tag-row-3: [];
+    in property <[TagSuggestion]> tag-suggestions: [];
+    in-out property <string> tag-input-text: "";
+    // Collapse state for the Tags section (shared collapsed_sections mechanism).
+    in property <bool> tags-collapsed: false;
+    callback on-tag-add(string);
+    callback on-tag-remove(string);
+    callback on-tag-select-tagged(string);
+    callback on-tag-rename-request(string);   // open the rename modal for this tag
+
     background: Theme.panel-background;
     
     VerticalLayout {
@@ -2128,7 +2263,30 @@ export component PropertiesPanel inherits Rectangle {
                 padding-top: 6px;
                 spacing: 1px;
                 alignment: start;
-                
+
+                // First-class Tag system — uses the standard SectionHeader for
+                // visual + collapse parity with Appearance / Attributes / etc.
+                SectionHeader {
+                    title: "Tags";
+                    category: "Tags";
+                    expanded: !root.tags-collapsed;
+                    clicked => { root.on-section-toggle("Tags"); }
+                }
+                if !root.tags-collapsed: TagsEditor {
+                    tags: root.entity-tags;
+                    tag-row-0: root.entity-tag-row-0;
+                    tag-row-1: root.entity-tag-row-1;
+                    tag-row-2: root.entity-tag-row-2;
+                    tag-row-3: root.entity-tag-row-3;
+                    suggestions: root.tag-suggestions;
+                    input-text <=> root.tag-input-text;
+                    add-tag(name) => { root.on-tag-add(name); }
+                    remove-tag(name) => { root.on-tag-remove(name); }
+                    select-tagged(name) => { root.on-tag-select-tagged(name); }
+                    rename-requested(name) => { root.on-tag-rename-request(name); }
+                    input-focus-changed(f) => { root.on-input-focus-changed(f); }
+                }
+
                 for prop in root.properties: VerticalLayout {
                     spacing: 0px;
                     // Hide collapsed rows (height 0 + invisible)
@@ -2138,8 +2296,10 @@ export component PropertiesPanel inherits Rectangle {
                     // Category header — fires on-section-toggle so Rust updates section-collapsed
                     if prop.is-header: SectionHeader {
                         title: prop.category;
+                        category: prop.category;
                         expanded: !prop.section-collapsed;
                         clicked => { root.on-section-toggle(prop.category); }
+                        add-clicked => { root.on-add-attribute(); }
                     }
                     
                     // UDim2 property (Roblox-parity 2D layout: Position / Size)
@@ -2281,9 +2441,13 @@ export component PropertiesPanel inherits Rectangle {
                         description: prop.description;
                         learn-url: prop.learn-url;
                         show-help-icons: root.show-help-icons;
+                        is-attribute: prop.is-attribute;
+                        attribute-type: prop.attribute-type;
                         value-changed(val) => { root.on-property-changed(prop.name, val); }
                         open-learn-url(url) => { root.on-open-learn-url(url); }
                         focus-changed(focused) => { root.on-input-focus-changed(focused); }
+                        gear-clicked(n, t, v) => { root.on-attribute-edit(n, t, v); }
+                        trash-clicked(n) => { root.on-attribute-delete(n); }
                     }
                 }
             }
