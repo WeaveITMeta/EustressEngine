@@ -1,0 +1,144 @@
+# =============================================================================
+# .forge/ownership.toml — File ownership manifest for multi-agent dispatch
+# =============================================================================
+# Every dispatched worker agent reads this BEFORE claiming files.
+#
+# Three categories:
+#   [orchestrator_only]   — only the orchestrator may modify; workers file a
+#                           task and orchestrator handles serially
+#   [immutable]           — pre-existing systems too risky for the current wave
+#                           to touch; read-only enforced at integrator gate
+#   [per_wave.<task_id>]  — explicit OWNS list per active task; files claimed
+#                           by one task cannot be claimed by another in parallel
+#
+# Spec: docs/process/AGENT_DISPATCH.md
+# =============================================================================
+
+[orchestrator_only]
+# Only the orchestrator may modify these files. Workers file an "ADD DEP" or
+# "WORKSPACE CHANGE" task; orchestrator handles serially.
+files = [
+  "eustress/Cargo.toml",
+  "Cargo.lock",
+  ".forge/ownership.toml",
+  ".forge/dispatch_log.toml",       # future: append-only wave history
+  "docs/process/AGENT_DISPATCH.md",  # this file's sibling protocol doc
+]
+
+# =============================================================================
+# IMMUTABLE FOR WAVE 2 — pre-existing systems Wave 2 must not touch.
+# Workers may READ but not write. Touching = task failure at integrator gate.
+# =============================================================================
+
+[immutable.wave2]
+# Slint UI — Wave 2 is Rust-only; UI changes belong in Wave 3+.
+slint_ui = [
+  "eustress/crates/engine/ui/slint/**/*.slint",
+]
+
+# The drain — burned by it once (LOOP 5 / LabelEditState lesson). Any signature
+# change here requires explicit OWNS + the LOOP-5 startup assertion to be live.
+drain = [
+  # function body is in slint_ui.rs but only the specific function is locked,
+  # not the whole file; orchestrator audits diff for drain_slint_actions changes
+]
+
+# File watcher — chokepoint for TOML→ECS; UUID migration coordinates via mutex,
+# does NOT modify watcher itself.
+file_watcher = [
+  "eustress/crates/engine/src/space/file_watcher.rs",
+]
+
+# Avian physics — physics LOD is Wave 4; Wave 2/3 LOD touches visual only.
+physics = [
+  "eustress/crates/engine/src/physics/**/*.rs",
+]
+
+# Atmosphere/celestial — Wave 3 lighting spawners do NOT register for
+# Star/Sun/Moon (that's the celestial path).
+celestial = [
+  "eustress/crates/engine/src/plugins/lighting_plugin.rs",
+  "eustress/crates/common/src/plugins/lighting_plugin.rs",
+]
+
+# Legacy plugin — never add resources to this; use SlintUiPlugin instead
+# (LOOP 5 lesson from LabelEditState).
+legacy = [
+  # Hand-policed: do not add init_resource calls inside StudioUiPlugin::build
+  # (lives in crates/engine/src/ui/slint_ui.rs around line 1050)
+]
+
+# MCP bridge handlers — Wave 2 adds uuid lookups via NEW functions, doesn't
+# modify existing tool handlers.
+mcp_handlers = [
+  "eustress/crates/engine/src/engine_bridge/protocol/handlers/**/*.rs",
+]
+
+# Audit log + stream events — keys stay entity-bits in Wave 2; uuid migration
+# of audit-log keys is Wave 3.
+stream = [
+  "eustress/crates/engine/src/stream/**/*.rs",
+]
+
+# =============================================================================
+# PER-WAVE OWNERSHIP — active dispatched tasks
+# =============================================================================
+
+[per_wave.wave2_1]
+description = "UUID dedup migration (IDENTITY.md §6.2 + §10.1)"
+status = "queued"
+spec = "docs/architecture/IDENTITY.md"
+owns = [
+  "eustress/crates/worlddb/src/import.rs",
+  "eustress/crates/worlddb/src/backend.rs",
+  "eustress/crates/worlddb/src/header.rs",
+  "eustress/crates/worlddb/src/migrate_identity.rs",     # NEW FILE
+  "eustress/crates/worlddb/src/fjall_backend.rs",        # add new partitions
+  "eustress/crates/worlddb/src/keys.rs",                 # add uuid key encoder
+  "eustress/crates/common/src/instance_create.rs",
+  "eustress/crates/engine/src/space/instance_loader.rs", # InstanceMetadata.uuid field
+  "eustress/crates/engine/src/space/auto_convert.rs",    # migration trigger
+  "eustress/crates/engine/src/space/world_db_binary.rs", # find_entity_by_* helpers
+  "eustress/crates/common/src/classes.rs",               # MAYBE: only the Instance.uuid String comment update
+]
+reads = [
+  "docs/architecture/IDENTITY.md",
+  "docs/process/AGENT_DISPATCH.md",
+  "eustress/crates/worlddb/src/rkyv_values.rs",
+  "eustress/crates/engine/src/space/arch_instance.rs",
+  "eustress/crates/engine/src/bin/convert_to_eustress.rs",
+]
+
+[per_wave.wave2_2]
+description = "ClassSpawner trait scaffold (CLASS_REGISTRY.md §2)"
+status = "blocked_by_wave2_1"
+spec = "docs/architecture/CLASS_REGISTRY.md"
+owns = [
+  "eustress/crates/common/src/class_registry/mod.rs",         # NEW
+  "eustress/crates/common/src/class_registry/spawn_ctx.rs",   # NEW
+  "eustress/crates/common/src/class_registry/property_bag.rs",# NEW
+  "eustress/crates/common/src/class_registry/lod.rs",         # NEW
+  "eustress/crates/common/src/lib.rs",                        # add pub mod class_registry;
+]
+reads = [
+  "docs/architecture/CLASS_REGISTRY.md",
+  "docs/architecture/RENDER_CASCADE.md",
+  "docs/process/AGENT_DISPATCH.md",
+  "eustress/crates/common/src/classes.rs",
+]
+
+[per_wave.wave2_3]
+description = "ClassRegistry Bevy Resource + plugin + LOOP-5 assertion"
+status = "blocked_by_wave2_2"
+spec = "docs/architecture/CLASS_REGISTRY.md"
+owns = [
+  "eustress/crates/engine/src/class_registry/mod.rs",         # NEW
+  "eustress/crates/engine/src/class_registry/plugin.rs",      # NEW
+  "eustress/crates/engine/src/class_registry/loop5_assertion.rs", # NEW — the drain-resource validator
+  "eustress/crates/engine/src/lib.rs",                        # add pub mod class_registry;
+  "eustress/crates/engine/src/ui/slint_ui.rs",                # register ClassRegistryPlugin in SlintUiPlugin::build
+]
+reads = [
+  "docs/architecture/CLASS_REGISTRY.md",
+  "docs/process/AGENT_DISPATCH.md",
+]
