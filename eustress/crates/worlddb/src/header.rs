@@ -109,6 +109,17 @@ pub struct WorldHeader {
     /// `_instance.toml` trees left to diverge from.
     #[serde(default)]
     pub migrated_at: Option<String>,
+    /// UTC ISO-8601 timestamp at which `migrate_tree_to_uuid` finished
+    /// for this Space (IDENTITY.md §6.1). `None` for a world that has
+    /// never been UUID-migrated; `Some(ts)` means the new partitions
+    /// (`entities_uuid`, `path_to_uuid`, `uuid_to_path`, `class_index`)
+    /// are populated and the `auto_convert` gate short-circuits to a
+    /// no-op. The migration writes this LAST, after every per-entity
+    /// commit, so a half-finished migration leaves `migrated_to_uuid_at`
+    /// = `None` and the next open resumes from the
+    /// `migration_checkpoint` meta key (IDENTITY.md §6.3).
+    #[serde(default)]
+    pub migrated_to_uuid_at: Option<String>,
 }
 
 impl Default for WorldHeader {
@@ -120,6 +131,7 @@ impl Default for WorldHeader {
             asset_manifest: "assets/manifest.toml".to_string(),
             world_id: uuid::Uuid::new_v4(),
             migrated_at: None,
+            migrated_to_uuid_at: None,
         }
     }
 }
@@ -148,6 +160,21 @@ impl WorldHeader {
     /// and the Space root is the canonical container shape.
     pub fn is_migrated(&self) -> bool {
         self.migrated_at.is_some()
+    }
+
+    /// Stamp this header as UUID-migrated — every `_instance.toml` in
+    /// the `tree` partition has been baked into `entities_uuid` and the
+    /// secondary indexes (`path_to_uuid`, `uuid_to_path`, `class_index`)
+    /// are populated (IDENTITY.md §6). Idempotent.
+    pub fn mark_migrated_to_uuid(&mut self) {
+        self.migrated_to_uuid_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+
+    /// True once `migrate_tree_to_uuid` has stamped this header. The
+    /// `convert_space_if_needed` gate short-circuits to a no-op when
+    /// this is `true`.
+    pub fn is_migrated_to_uuid(&self) -> bool {
+        self.migrated_to_uuid_at.is_some()
     }
 
     /// Atomic write — temp-file + rename so a crash mid-write can

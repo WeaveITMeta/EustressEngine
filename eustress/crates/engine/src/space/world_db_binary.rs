@@ -166,6 +166,11 @@ fn core_from_components(
             created_by: None,
             modifications: Vec::new(),
             unit: None,
+            uuid: if instance.uuid.is_empty() {
+                None
+            } else {
+                Some(instance.uuid.clone())
+            },
         },
         material: None,
         thermodynamic: None,
@@ -373,4 +378,112 @@ pub fn register(app: &mut App) {
         Update,
         (load_binary_ecs_instances, mirror_binary_ecs_changes).chain(),
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// IDENTITY.md §10.4 — find_entity_by_* helpers
+// ─────────────────────────────────────────────────────────────────────
+//
+// Wrap the trait calls and handle the `[u8; 16]` ↔ hex `String` conversion
+// at the boundary so the rest of the engine stays string-typed. The MCP
+// `find_entity --uuid` / `--path` / `--class` tools route through these.
+
+use eustress_common::instance_create::{uuid_hex_to_bytes, is_valid_uuid};
+use eustress_worlddb::WorldDb;
+
+/// Look up an entity by its 32-char-hex UUID. Returns the rkyv
+/// `ArchInstanceCore` for that entity (or `None` when no row exists for
+/// this uuid). Used by MCP `find_entity --uuid`, the audit-log replayer,
+/// and the multiplayer "follow player" routing.
+pub fn find_entity_by_uuid(
+    db: &dyn WorldDb,
+    uuid_hex: &str,
+) -> Result<Option<ArchInstanceCore>, String> {
+    if !is_valid_uuid(uuid_hex) {
+        return Err(format!(
+            "find_entity_by_uuid: malformed uuid {uuid_hex:?} — expected 32 lowercase hex chars"
+        ));
+    }
+    let bytes = match uuid_hex_to_bytes(uuid_hex) {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    match db.get_entity_core_by_uuid(&bytes) {
+        Ok(Some(buf)) => match decode_instance_core(&buf) {
+            Ok(core) => Ok(Some(core)),
+            Err(e) => Err(format!("decode core for uuid {uuid_hex}: {e}")),
+        },
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("get_entity_core_by_uuid {uuid_hex}: {e}")),
+    }
+}
+
+/// Look up an entity by its Space-relative TOML path (e.g.
+/// `Workspace/Tower/_instance.toml`). Hops `path_to_uuid` once, then
+/// `entities_uuid` — both point reads. Returns `Ok(None)` when no entity
+/// lives at this path right now. Used by MCP `find_entity --path` for
+/// backward compatibility after the Wave 2.1 uuid pivot.
+pub fn find_entity_by_path(
+    db: &dyn WorldDb,
+    rel_path: &str,
+) -> Result<Option<ArchInstanceCore>, String> {
+    let uuid_bytes = match db.path_to_uuid(rel_path) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(format!("path_to_uuid {rel_path}: {e}")),
+    };
+    match db.get_entity_core_by_uuid(&uuid_bytes) {
+        Ok(Some(buf)) => match decode_instance_core(&buf) {
+            Ok(core) => Ok(Some(core)),
+            Err(e) => Err(format!(
+                "decode core for path {rel_path}: {e}"
+            )),
+        },
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!(
+            "get_entity_core_by_uuid via path {rel_path}: {e}"
+        )),
+    }
+}
+
+/// Eagerly collect every entity registered under `class_name` in the
+/// class_index. Returns the full set of `ArchInstanceCore` records. Used
+/// by Studio's class-filter views + by AI tools that want "all parts in
+/// this Space" without hitting `iter_instance_cores` (which scans the
+/// whole Morton-keyed prefix). Cost scales with the count returned, NOT
+/// total entity count.
+pub fn find_entities_by_class(
+    db: &dyn WorldDb,
+    class_name: &str,
+) -> Result<Vec<ArchInstanceCore>, String> {
+    let uuids = match db.iter_class(class_name) {
+        Ok(v) => v,
+        Err(e) => return Err(format!("iter_class {class_name}: {e}")),
+    };
+    let mut out = Vec::with_capacity(uuids.len());
+    for u in uuids {
+        match db.get_entity_core_by_uuid(&u) {
+            Ok(Some(buf)) => match decode_instance_core(&buf) {
+                Ok(core) => out.push(core),
+                Err(e) => {
+                    warn!(
+                        target: "eustress_engine::world_db",
+                        error = %e,
+                        class = class_name,
+                        "find_entities_by_class: decode failed for one uuid; skipping"
+                    );
+                }
+            },
+            Ok(None) => {
+                // Stale class_index entry — the entity was deleted but the
+                // index wasn't dropped. Skip; rebuild_indexes() repairs.
+            }
+            Err(e) => {
+                return Err(format!(
+                    "get_entity_core_by_uuid in find_entities_by_class {class_name}: {e}"
+                ))
+            }
+        }
+    }
+    Ok(out)
 }

@@ -296,6 +296,7 @@ mod tests {
                 created_by: None,
                 modifications: Vec::new(),
                 unit: Some("m".into()),
+                uuid: None,
             },
             material: None,
             thermodynamic: None,

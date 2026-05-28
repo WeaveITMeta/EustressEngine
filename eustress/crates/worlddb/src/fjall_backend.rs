@@ -81,6 +81,26 @@ fn ds_ord_key(store: &str, scope: &str, sort: i64, key: &str) -> Vec<u8> {
     k
 }
 
+/// Encode the UUID-keyed entity-core key for `entities_uuid` /
+/// `uuid_to_path` (IDENTITY.md §5.2). Today the key IS the 16-byte uuid;
+/// this helper exists so a schema-version prefix can be added later
+/// without rewriting call sites (matches the `FlatKeyEncoder::TAG` /
+/// `MortonKeyEncoder::TAG` discipline elsewhere in this crate).
+fn encode_uuid_key(uuid: &[u8; 16]) -> [u8; 16] {
+    *uuid
+}
+
+/// Encode the `class_index/<class>\x1f<uuid>` key. The `\x1f` (unit
+/// separator) can't appear in a class name (TOML keys / Rust idents),
+/// so this is collision-free without escaping.
+fn encode_class_index_key(class_name: &str, uuid: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(class_name.len() + 1 + 16);
+    out.extend_from_slice(class_name.as_bytes());
+    out.push(0x1f);
+    out.extend_from_slice(uuid);
+    out
+}
+
 /// Production [`WorldDb`] backend on Fjall 2.x. See module docs for
 /// the on-disk layout.
 pub struct FjallWorldDb {
@@ -101,6 +121,12 @@ pub struct FjallWorldDb {
     s_tree: eustress_fjall::StoreHandle,
     s_datastore: eustress_fjall::StoreHandle,
     s_datastore_ord: eustress_fjall::StoreHandle,
+    /// Multiplexer store for the new UUID-keyed primary store + indexes.
+    /// IDENTITY.md Wave 2.1.
+    s_entities_uuid: eustress_fjall::StoreHandle,
+    s_path_to_uuid: eustress_fjall::StoreHandle,
+    s_uuid_to_path: eustress_fjall::StoreHandle,
+    s_class_index: eustress_fjall::StoreHandle,
     keyspace: fjall::Keyspace,
     entities: fjall::PartitionHandle,
     meta: fjall::PartitionHandle,
@@ -115,6 +141,24 @@ pub struct FjallWorldDb {
     /// Ordered index for `OrderedDataStore` range scans:
     /// `{store}\x1f{scope}\x1f{sort_be8}\x1f{key}` → value.
     datastore_ord: fjall::PartitionHandle,
+
+    // ── IDENTITY.md Wave 2.1 partitions ───────────────────────────────
+    /// Primary UUID-keyed entity-core store. Keys are 16-byte raw UUIDs;
+    /// values are tagged rkyv `ArchInstanceCore` archives (same encoding
+    /// as the Morton-keyed `INSTANCE_CORE` rows in `entities`). The
+    /// existing `entities` partition stays untouched in Wave 2.1.
+    entities_uuid: fjall::PartitionHandle,
+    /// Secondary index: forward-slash relative path → 16-byte UUID.
+    /// `Fjall::get(rel_path.as_bytes())` answers "what entity lives at
+    /// this path right now?" in one point-get.
+    path_to_uuid: fjall::PartitionHandle,
+    /// Secondary index: 16-byte UUID → forward-slash relative path
+    /// (utf-8). Used by Explorer renderers and error messages.
+    uuid_to_path: fjall::PartitionHandle,
+    /// Secondary index: `<class_name>\x1f<uuid_16>` → empty marker.
+    /// Prefix-scan over `<class_name>\x1f` returns every uuid registered
+    /// under that class — IDENTITY.md §5.3.
+    class_index: fjall::PartitionHandle,
 
     /// Key layout. Boxed `dyn` so the engine plugin can swap encoders
     /// at open time (flat today, Morton in Phase 2).
@@ -173,6 +217,13 @@ impl FjallWorldDb {
         let s_tree = store("tree")?;
         let s_datastore = store("datastore")?;
         let s_datastore_ord = store("datastore_ord")?;
+        // IDENTITY.md Wave 2.1 partitions. Opening these is additive — a
+        // pre-Wave-2 world with no entries in any of them stays loadable;
+        // they only start filling after migration runs.
+        let s_entities_uuid = store("entities_uuid")?;
+        let s_path_to_uuid = store("path_to_uuid")?;
+        let s_uuid_to_path = store("uuid_to_path")?;
+        let s_class_index = store("class_index")?;
 
         let keyspace = s_entities.raw_keyspace();
         let entities = s_entities.raw_partition();
@@ -180,6 +231,10 @@ impl FjallWorldDb {
         let tree = s_tree.raw_partition();
         let datastore = s_datastore.raw_partition();
         let datastore_ord = s_datastore_ord.raw_partition();
+        let entities_uuid = s_entities_uuid.raw_partition();
+        let path_to_uuid = s_path_to_uuid.raw_partition();
+        let uuid_to_path = s_uuid_to_path.raw_partition();
+        let class_index = s_class_index.raw_partition();
 
         // Load the persisted tx counter; fall back to GENESIS for a
         // fresh world.
@@ -227,12 +282,20 @@ impl FjallWorldDb {
             s_tree,
             s_datastore,
             s_datastore_ord,
+            s_entities_uuid,
+            s_path_to_uuid,
+            s_uuid_to_path,
+            s_class_index,
             keyspace,
             entities,
             meta,
             tree,
             datastore,
             datastore_ord,
+            entities_uuid,
+            path_to_uuid,
+            uuid_to_path,
+            class_index,
             encoder,
             tx_counter: AtomicU64::new(tx_counter),
             commit_lock: Mutex::new(()),
@@ -480,6 +543,145 @@ impl WorldDb for FjallWorldDb {
             }
         }
         Ok(out)
+    }
+
+    // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────
+
+    fn put_entity_core_by_uuid(&self, uuid: &[u8; 16], core_bytes: &[u8]) -> Result<()> {
+        let key = encode_uuid_key(uuid);
+        self.entities_uuid.insert(&key, core_bytes)?;
+        // Replication feed — mirrors the existing apply_commit/put_instance_core
+        // pattern: emit on the entities-uuid store handle so a replica sees
+        // the new UUID-primary row.
+        self.s_entities_uuid.publish_external(
+            eustress_fjall::ReplOp::Put,
+            &key,
+            &core_bytes[..core_bytes.len().min(64)],
+        );
+        Ok(())
+    }
+
+    fn get_entity_core_by_uuid(&self, uuid: &[u8; 16]) -> Result<Option<Vec<u8>>> {
+        let key = encode_uuid_key(uuid);
+        Ok(self.entities_uuid.get(&key)?.map(|s| s.to_vec()))
+    }
+
+    fn delete_entity_by_uuid(&self, uuid: &[u8; 16]) -> Result<()> {
+        let key = encode_uuid_key(uuid);
+        self.entities_uuid.remove(&key)?;
+        self.s_entities_uuid
+            .publish_external(eustress_fjall::ReplOp::Remove, &key, &[]);
+        Ok(())
+    }
+
+    fn path_to_uuid(&self, rel_path: &str) -> Result<Option<[u8; 16]>> {
+        let key = normalise_rel(rel_path);
+        match self.path_to_uuid.get(key.as_bytes())? {
+            Some(bytes) if bytes.len() == 16 => {
+                let mut out = [0u8; 16];
+                out.copy_from_slice(&bytes);
+                Ok(Some(out))
+            }
+            Some(other) => Err(crate::error::Error::Other(format!(
+                "path_to_uuid: malformed value (len {} != 16) for {key:?}",
+                other.len()
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    fn put_path_to_uuid(&self, rel_path: &str, uuid: &[u8; 16]) -> Result<()> {
+        let key = normalise_rel(rel_path);
+        self.path_to_uuid.insert(key.as_bytes(), uuid.as_slice())?;
+        self.s_path_to_uuid.publish_external(
+            eustress_fjall::ReplOp::Put,
+            key.as_bytes(),
+            uuid.as_slice(),
+        );
+        Ok(())
+    }
+
+    fn delete_path_to_uuid(&self, rel_path: &str) -> Result<()> {
+        let key = normalise_rel(rel_path);
+        self.path_to_uuid.remove(key.as_bytes())?;
+        self.s_path_to_uuid
+            .publish_external(eustress_fjall::ReplOp::Remove, key.as_bytes(), &[]);
+        Ok(())
+    }
+
+    fn uuid_to_path(&self, uuid: &[u8; 16]) -> Result<Option<String>> {
+        let key = encode_uuid_key(uuid);
+        match self.uuid_to_path.get(&key)? {
+            Some(bytes) => Ok(Some(
+                std::str::from_utf8(&bytes)
+                    .map_err(|e| crate::error::Error::KeyDecode(
+                        format!("uuid_to_path: value not utf-8: {e}"),
+                    ))?
+                    .to_string(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn put_uuid_to_path(&self, uuid: &[u8; 16], rel_path: &str) -> Result<()> {
+        let key = encode_uuid_key(uuid);
+        let val = normalise_rel(rel_path);
+        self.uuid_to_path.insert(&key, val.as_bytes())?;
+        self.s_uuid_to_path
+            .publish_external(eustress_fjall::ReplOp::Put, &key, val.as_bytes());
+        Ok(())
+    }
+
+    fn delete_uuid_to_path(&self, uuid: &[u8; 16]) -> Result<()> {
+        let key = encode_uuid_key(uuid);
+        self.uuid_to_path.remove(&key)?;
+        self.s_uuid_to_path
+            .publish_external(eustress_fjall::ReplOp::Remove, &key, &[]);
+        Ok(())
+    }
+
+    fn put_class_index(&self, class_name: &str, uuid: &[u8; 16]) -> Result<()> {
+        let key = encode_class_index_key(class_name, uuid);
+        // Empty marker — the prefix-scan in iter_class only needs the key.
+        self.class_index.insert(&key, &[])?;
+        self.s_class_index
+            .publish_external(eustress_fjall::ReplOp::Put, &key, &[]);
+        Ok(())
+    }
+
+    fn delete_class_index(&self, class_name: &str, uuid: &[u8; 16]) -> Result<()> {
+        let key = encode_class_index_key(class_name, uuid);
+        self.class_index.remove(&key)?;
+        self.s_class_index
+            .publish_external(eustress_fjall::ReplOp::Remove, &key, &[]);
+        Ok(())
+    }
+
+    fn iter_class(&self, class_name: &str) -> Result<Vec<[u8; 16]>> {
+        let mut prefix = Vec::with_capacity(class_name.len() + 1);
+        prefix.extend_from_slice(class_name.as_bytes());
+        prefix.push(0x1f);
+        let mut out = Vec::new();
+        for kv in self.class_index.prefix(prefix.as_slice()) {
+            let (k, _v) = kv?;
+            // Key layout: `<class>\x1f<uuid_16>` — take the trailing 16 bytes.
+            if k.len() < prefix.len() + 16 {
+                continue;
+            }
+            let mut uuid = [0u8; 16];
+            uuid.copy_from_slice(&k[k.len() - 16..]);
+            out.push(uuid);
+        }
+        Ok(out)
+    }
+
+    fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.meta.get(key)?.map(|s| s.to_vec()))
+    }
+
+    fn put_meta(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.meta.insert(key, value)?;
+        Ok(())
     }
 
     fn flush(&self) -> Result<()> {

@@ -322,6 +322,138 @@ pub trait WorldDb: Send + Sync + 'static {
     fn iter_instance_cores(&self) -> Result<Vec<(EntityId, Vec<u8>)>> {
         Ok(Vec::new())
     }
+
+    // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
+    //
+    // The `entities_uuid` partition keys each entity's `ArchInstanceCore`
+    // by the persistent 16-byte UUID (not the session-local `EntityId`).
+    // This is the long-term home for the rkyv archive-model record; the
+    // Morton-keyed `entities` partition above keys by position for
+    // spatial scans and is allowed to coexist during Wave 2 (the migration
+    // writes to NEW partitions; nothing in the existing `entities`
+    // partition is touched).
+    //
+    // Secondary indexes (`path_to_uuid`, `uuid_to_path`, `class_index`)
+    // are all derivable from the primary store via `rebuild_indexes()` —
+    // crash-recovery primitive.
+    //
+    // The default impls let non-Fjall test backends compile; the
+    // production `FjallWorldDb` overrides every one.
+
+    /// Write an entity's rkyv `ArchInstanceCore` bytes, keyed by its
+    /// 16-byte UUID (IDENTITY.md §5.2). Overwrites any existing row at
+    /// this key — surfaces 1+4 (TOML import, Roblox re-import) rely on
+    /// UPDATE-in-place semantics.
+    fn put_entity_core_by_uuid(&self, uuid: &[u8; 16], core_bytes: &[u8]) -> Result<()> {
+        let _ = (uuid, core_bytes);
+        Err(crate::error::Error::Other(
+            "put_entity_core_by_uuid not supported by this backend".into(),
+        ))
+    }
+
+    /// Read one entity's rkyv `ArchInstanceCore` bytes by its UUID.
+    /// `Ok(None)` when no record exists for this uuid.
+    fn get_entity_core_by_uuid(&self, uuid: &[u8; 16]) -> Result<Option<Vec<u8>>> {
+        let _ = uuid;
+        Ok(None)
+    }
+
+    /// Remove an entity from the UUID-keyed primary store. The secondary
+    /// indexes (`path_to_uuid`, `uuid_to_path`, `class_index`) must be
+    /// updated by the caller in the same atomic commit (see the
+    /// engine-side `delete_instance` helper).
+    fn delete_entity_by_uuid(&self, uuid: &[u8; 16]) -> Result<()> {
+        let _ = uuid;
+        Ok(())
+    }
+
+    /// Look up a path → uuid mapping (IDENTITY.md §5.3 `path_to_uuid`).
+    /// `Ok(None)` when no entity lives at this path right now.
+    fn path_to_uuid(&self, rel_path: &str) -> Result<Option<[u8; 16]>> {
+        let _ = rel_path;
+        Ok(None)
+    }
+
+    /// Write the `path -> uuid` mapping for one entity. Idempotent —
+    /// re-writing the same key with the same value is a no-op.
+    fn put_path_to_uuid(&self, rel_path: &str, uuid: &[u8; 16]) -> Result<()> {
+        let _ = (rel_path, uuid);
+        Err(crate::error::Error::Other(
+            "put_path_to_uuid not supported by this backend".into(),
+        ))
+    }
+
+    /// Drop the `path -> uuid` mapping. Used when a TOML is deleted off
+    /// disk (file_watcher) or when an entity is moved/renamed.
+    fn delete_path_to_uuid(&self, rel_path: &str) -> Result<()> {
+        let _ = rel_path;
+        Ok(())
+    }
+
+    /// Reverse lookup: uuid → last-known relative path (IDENTITY.md
+    /// §5.3 `uuid_to_path`). Used by the Explorer to render rows, by
+    /// error messages, and by the file-watcher to know what disk path to
+    /// write to when a live ECS edit fires.
+    fn uuid_to_path(&self, uuid: &[u8; 16]) -> Result<Option<String>> {
+        let _ = uuid;
+        Ok(None)
+    }
+
+    /// Write the `uuid -> path` reverse mapping.
+    fn put_uuid_to_path(&self, uuid: &[u8; 16], rel_path: &str) -> Result<()> {
+        let _ = (uuid, rel_path);
+        Err(crate::error::Error::Other(
+            "put_uuid_to_path not supported by this backend".into(),
+        ))
+    }
+
+    /// Drop the `uuid -> path` reverse mapping.
+    fn delete_uuid_to_path(&self, uuid: &[u8; 16]) -> Result<()> {
+        let _ = uuid;
+        Ok(())
+    }
+
+    /// Write a `class_index/<class>/<uuid>` empty marker so a future
+    /// `iter_class(class)` returns this entity. Idempotent.
+    fn put_class_index(&self, class_name: &str, uuid: &[u8; 16]) -> Result<()> {
+        let _ = (class_name, uuid);
+        Err(crate::error::Error::Other(
+            "put_class_index not supported by this backend".into(),
+        ))
+    }
+
+    /// Drop the `class_index/<class>/<uuid>` marker. Caller is
+    /// responsible for knowing the entity's class — see `delete_instance`
+    /// for the canonical pattern (read the core first, then delete).
+    fn delete_class_index(&self, class_name: &str, uuid: &[u8; 16]) -> Result<()> {
+        let _ = (class_name, uuid);
+        Ok(())
+    }
+
+    /// Iterate every uuid registered under `class_name` (IDENTITY.md §5.3
+    /// `class_index`). One-shot collect into a `Vec` so the iterator
+    /// doesn't borrow the backend across the engine system boundary.
+    fn iter_class(&self, class_name: &str) -> Result<Vec<[u8; 16]>> {
+        let _ = class_name;
+        Ok(Vec::new())
+    }
+
+    /// Read or write a meta-partition key — used by the migration to
+    /// stamp `migration_checkpoint` every 1000 entities for resume-from-
+    /// checkpoint (IDENTITY.md §6.3).
+    fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _ = key;
+        Ok(None)
+    }
+
+    /// Write one byte-keyed meta entry. Used by the migration to record
+    /// `migration_checkpoint = "done"` at the end of a clean pass.
+    fn put_meta(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let _ = (key, value);
+        Err(crate::error::Error::Other(
+            "put_meta not supported by this backend".into(),
+        ))
+    }
 }
 
 /// One entry returned by [`WorldDb::list_dir`] — a file or an

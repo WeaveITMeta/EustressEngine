@@ -13550,6 +13550,11 @@ fn sync_properties_to_slint(
                     created_by: None,
                     modifications: Vec::new(),
                     unit: None,
+                    uuid: if instance.uuid.is_empty() {
+                        None
+                    } else {
+                        Some(instance.uuid.clone())
+                    },
                 },
                 material: None,
                 thermodynamic: None,

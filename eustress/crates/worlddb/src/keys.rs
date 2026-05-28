@@ -176,6 +176,19 @@ impl KeyEncoder for FlatKeyEncoder {
     }
 }
 
+/// Encode the UUID-keyed entity-core key for the new
+/// `entities_uuid` partition (IDENTITY.md §5.2). Returns the 16-byte
+/// raw UUID; the partition-level distinction makes a schema-version
+/// prefix optional, but this helper exists so a future schema bump
+/// can add one without touching call sites — mirrors the
+/// `FlatKeyEncoder::TAG` discipline elsewhere in this module.
+///
+/// Wave 2.1 wire form: the 16 raw bytes of the UUID. No tag/version
+/// — partition separation enforces the schema boundary.
+pub fn encode_uuid_entity_key(uuid: &[u8; 16]) -> [u8; 16] {
+    *uuid
+}
+
 /// Spread the low 21 bits of `v` into every 3rd bit (Z-order / Morton
 /// dilation for 3D). Pure bit-twiddle, no branches — the canonical
 /// magic-number method, exact for inputs < 2^21.

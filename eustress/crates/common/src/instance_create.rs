@@ -22,6 +22,122 @@
 
 use std::path::{Path, PathBuf};
 
+// ---------------------------------------------------------------------------
+// UUID — IDENTITY.md Wave 2.1 §3.2 / §10.3
+// ---------------------------------------------------------------------------
+
+/// Length in lowercase hex chars of a Eustress UUID (`blake3(seed)[..16]` → 32 chars).
+pub const UUID_HEX_LEN: usize = 32;
+
+/// Generate a fresh UUID for a Studio-create-style entry surface
+/// (IDENTITY.md §3.2 / §10.3). Returns 32 lowercase hex chars derived from
+/// `blake3(uuid_v4_random_bytes ‖ "\x1f" ‖ creation_unix_nanos)[..16]`.
+///
+/// Two simultaneous create surfaces on the same wall-clock instant don't
+/// collide because the leading random bytes come from `uuid::Uuid::new_v4`
+/// (cryptographic RNG). The trailing nanos make audit-replay deterministic
+/// for a sequence of creates by the same user.
+///
+/// Used by `apply_overrides` to stamp `metadata.uuid` on every Studio
+/// create + by the orchestrator's `__bin_` synthetic-path migration path.
+pub fn fresh_uuid_for_create() -> String {
+    // 16 bytes random from uuid::Uuid::new_v4 (cryptographic RNG).
+    let rand_bytes: [u8; 16] = *uuid::Uuid::new_v4().as_bytes();
+    let nanos: u128 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut seed = Vec::with_capacity(16 + 1 + 16);
+    seed.extend_from_slice(&rand_bytes);
+    seed.push(0x1f);
+    seed.extend_from_slice(&nanos.to_be_bytes());
+    let hash = blake3::hash(&seed);
+    hex_encode_first_16(hash.as_bytes())
+}
+
+/// Derive a UUID for the TOML-import surface (IDENTITY.md §3.1):
+/// `blake3(space_relative_path ‖ "\x1f" ‖ first_load_unix_nanos)[..16]`.
+///
+/// The path makes UUIDs unique within a Space (no two TOMLs can hash to the
+/// same UUID — paths are unique). The timestamp makes a parallel migration on
+/// a CI checkout match a developer's local one if they migrate at the same
+/// wall-clock instant. The write-back to TOML in the migration guarantees
+/// that every subsequent import is the "uuid is present" branch.
+pub fn derive_uuid_for_import(space_rel_path: &str, first_load_nanos: u128) -> String {
+    let mut seed = Vec::with_capacity(space_rel_path.len() + 1 + 16);
+    seed.extend_from_slice(space_rel_path.as_bytes());
+    seed.push(0x1f);
+    seed.extend_from_slice(&first_load_nanos.to_be_bytes());
+    let hash = blake3::hash(&seed);
+    hex_encode_first_16(hash.as_bytes())
+}
+
+/// Validate that `s` is exactly 32 lowercase hex chars — the IDENTITY.md
+/// §7.3 format. Invalid format → caller treats as "not present" and
+/// generates fresh (see §6.2 migration).
+pub fn is_valid_uuid(s: &str) -> bool {
+    s.len() == UUID_HEX_LEN
+        && s.bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Encode the first 16 bytes of `hash` as 32 lowercase hex chars (no dashes).
+/// IDENTITY.md §7.3: "lowercase hex, 32 chars, no separators — forever".
+fn hex_encode_first_16(hash: &[u8]) -> String {
+    let mut out = String::with_capacity(UUID_HEX_LEN);
+    for &b in &hash[..16] {
+        out.push(hex_nibble(b >> 4));
+        out.push(hex_nibble(b & 0x0f));
+    }
+    out
+}
+
+#[inline]
+fn hex_nibble(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        _ => '0',
+    }
+}
+
+/// Parse a 32-char lowercase-hex UUID into its 16 raw bytes. Returns `None`
+/// when the input fails [`is_valid_uuid`]. Used at the Fjall boundary
+/// (`path_to_uuid`, `entities/<uuid>` keys are byte-keyed; the human-facing
+/// surface keeps the hex string).
+pub fn uuid_hex_to_bytes(hex: &str) -> Option<[u8; 16]> {
+    if !is_valid_uuid(hex) {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    let bytes = hex.as_bytes();
+    for i in 0..16 {
+        let hi = hex_byte(bytes[i * 2])?;
+        let lo = hex_byte(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// Inverse of [`uuid_hex_to_bytes`] — 16 raw bytes → 32-char lowercase hex.
+pub fn uuid_bytes_to_hex(bytes: &[u8; 16]) -> String {
+    let mut out = String::with_capacity(UUID_HEX_LEN);
+    for &b in bytes {
+        out.push(hex_nibble(b >> 4));
+        out.push(hex_nibble(b & 0x0f));
+    }
+    out
+}
+
+#[inline]
+fn hex_byte(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    }
+}
+
 /// Per-call overrides applied to the root `_instance.toml` after the
 /// template is copied. Every field is optional — `None` means "keep the
 /// template's default".
@@ -210,6 +326,32 @@ fn apply_overrides(
                 "name".to_string(),
                 toml::Value::String(display.to_string()),
             );
+        }
+    }
+
+    // UUID stamp — IDENTITY.md §3.2 / §10.3. Every Studio create lands with
+    // a uuid in `[metadata]` so the file_watcher's spawn sees it on the very
+    // first load (no transient empty-uuid window per §12.5). If the template
+    // already had a uuid (rare — class_schema templates are uuid-less), we
+    // preserve it verbatim; otherwise we mint a fresh one via
+    // `fresh_uuid_for_create()`.
+    {
+        let meta = root
+            .entry("metadata".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if let Some(meta_table) = meta.as_table_mut() {
+            let has_valid = meta_table
+                .get("uuid")
+                .and_then(|v| v.as_str())
+                .map(is_valid_uuid)
+                .unwrap_or(false);
+            if !has_valid {
+                let uuid = fresh_uuid_for_create();
+                meta_table.insert(
+                    "uuid".to_string(),
+                    toml::Value::String(uuid),
+                );
+            }
         }
     }
 
@@ -416,4 +558,182 @@ pub fn unique_entity_name(dir: &Path, base: &str) -> String {
         }
     }
     format!("{}-{}", base, chrono::Utc::now().timestamp())
+}
+
+// ---------------------------------------------------------------------------
+// Tests — IDENTITY.md §14.1
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod uuid_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn fresh_uuid_is_32_lowercase_hex() {
+        let u = fresh_uuid_for_create();
+        assert_eq!(u.len(), 32, "uuid must be 32 chars, got {}: {u:?}", u.len());
+        assert!(
+            u.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "uuid must be lowercase hex: {u:?}"
+        );
+        assert!(is_valid_uuid(&u));
+    }
+
+    #[test]
+    fn ten_thousand_uuids_are_unique() {
+        // The random component drives uniqueness — even if every call
+        // landed on the same nanosecond they must not collide.
+        let mut seen: HashSet<String> = HashSet::new();
+        for _ in 0..10_000 {
+            let u = fresh_uuid_for_create();
+            assert!(seen.insert(u.clone()), "collision: {u:?}");
+        }
+    }
+
+    #[test]
+    fn derive_uuid_for_import_is_deterministic() {
+        let a = derive_uuid_for_import("Workspace/Tower/_instance.toml", 1234);
+        let b = derive_uuid_for_import("Workspace/Tower/_instance.toml", 1234);
+        assert_eq!(a, b, "same seed → same uuid");
+        let c = derive_uuid_for_import("Workspace/Tower/_instance.toml", 1235);
+        assert_ne!(a, c, "different nanos → different uuid");
+        let d = derive_uuid_for_import("Workspace/Other/_instance.toml", 1234);
+        assert_ne!(a, d, "different path → different uuid");
+    }
+
+    #[test]
+    fn is_valid_uuid_examples() {
+        assert!(is_valid_uuid("4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7"));
+        assert!(is_valid_uuid("0000000000000000000000000000ffff"));
+        // Wrong length
+        assert!(!is_valid_uuid(""));
+        assert!(!is_valid_uuid("4f3a8c2b1e9d7654a0b8c2e3f4d5a6"));
+        assert!(!is_valid_uuid("4f3a8c2b1e9d7654a0b8c2e3f4d5a6b78"));
+        // Wrong case
+        assert!(!is_valid_uuid("4F3A8C2B1E9D7654A0B8C2E3F4D5A6B7"));
+        // Wrong charset
+        assert!(!is_valid_uuid("4f3a8c2b1e9d7654a0b8c2e3f4d5a6gh"));
+        // Includes dashes — IDENTITY.md §7.3 forbids
+        assert!(!is_valid_uuid("4f3a8c2b-1e9d-7654-a0b8-c2e3f4d5a6b7"));
+    }
+
+    #[test]
+    fn uuid_bytes_roundtrip() {
+        let hex = fresh_uuid_for_create();
+        let bytes = uuid_hex_to_bytes(&hex).expect("valid uuid parses");
+        let back = uuid_bytes_to_hex(&bytes);
+        assert_eq!(hex, back);
+    }
+
+    #[test]
+    fn uuid_hex_to_bytes_rejects_invalid() {
+        assert!(uuid_hex_to_bytes("").is_none());
+        assert!(uuid_hex_to_bytes("not-hex-at-all-not-hex-at-all-no").is_none());
+        assert!(uuid_hex_to_bytes("4F3A8C2B1E9D7654A0B8C2E3F4D5A6B7").is_none());
+    }
+}
+
+#[cfg(test)]
+mod apply_overrides_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    /// Build a unique tempdir under `std::env::temp_dir()`. Avoids adding a
+    /// dev-dependency on `tempfile` (orchestrator owns Cargo.toml). The dir
+    /// is best-effort cleaned by the test's drop; even if the cleanup fails
+    /// on a CI host, the deterministic-but-unique seed bounds the leak.
+    fn make_tempdir() -> std::path::PathBuf {
+        let stem = format!(
+            "eustress_uuid_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let p = std::env::temp_dir().join(stem);
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("create tempdir");
+        p
+    }
+
+    /// `apply_overrides` always stamps a fresh UUID into `[metadata].uuid`
+    /// when one is missing.
+    #[test]
+    fn apply_overrides_stamps_uuid_when_missing() {
+        let dir = make_tempdir();
+        let toml_path = dir.join("_instance.toml");
+        // Minimal valid template — no metadata.uuid.
+        let mut f = fs::File::create(&toml_path).unwrap();
+        writeln!(f, "[metadata]").unwrap();
+        writeln!(f, "class_name = \"Part\"").unwrap();
+        drop(f);
+        let overrides = InstanceOverrides::default();
+        apply_overrides(&toml_path, "Part", "Part", &overrides).expect("apply_overrides");
+        let raw = fs::read_to_string(&toml_path).unwrap();
+        // Parse and inspect — robust against TOML key order.
+        let doc: toml::Value = raw.parse().unwrap();
+        let uuid_str = doc
+            .get("metadata")
+            .and_then(|m| m.get("uuid"))
+            .and_then(|v| v.as_str())
+            .expect("uuid was stamped into metadata");
+        assert!(
+            is_valid_uuid(uuid_str),
+            "stamped uuid must be 32-lowercase-hex: {uuid_str:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An existing valid UUID is preserved verbatim — the create path is
+    /// idempotent under re-runs (IDENTITY.md §6.2 resumability discipline).
+    #[test]
+    fn apply_overrides_preserves_existing_uuid() {
+        let dir = make_tempdir();
+        let toml_path = dir.join("_instance.toml");
+        let original = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let mut f = fs::File::create(&toml_path).unwrap();
+        writeln!(f, "[metadata]").unwrap();
+        writeln!(f, "class_name = \"Part\"").unwrap();
+        writeln!(f, "uuid = \"{original}\"").unwrap();
+        drop(f);
+        apply_overrides(&toml_path, "Part", "Part", &InstanceOverrides::default())
+            .expect("apply_overrides");
+        let raw = fs::read_to_string(&toml_path).unwrap();
+        let doc: toml::Value = raw.parse().unwrap();
+        let uuid_str = doc
+            .get("metadata")
+            .and_then(|m| m.get("uuid"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(uuid_str, original, "existing uuid must be preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An INVALID-format uuid on disk (e.g. RFC-4122 form with dashes) gets
+    /// replaced — the engine treats the bogus value as "not present" and
+    /// mints a fresh canonical one.
+    #[test]
+    fn apply_overrides_replaces_invalid_uuid() {
+        let dir = make_tempdir();
+        let toml_path = dir.join("_instance.toml");
+        let mut f = fs::File::create(&toml_path).unwrap();
+        writeln!(f, "[metadata]").unwrap();
+        writeln!(f, "class_name = \"Part\"").unwrap();
+        writeln!(f, "uuid = \"NOT-A-VALID-FORMAT\"").unwrap();
+        drop(f);
+        apply_overrides(&toml_path, "Part", "Part", &InstanceOverrides::default())
+            .expect("apply_overrides");
+        let raw = fs::read_to_string(&toml_path).unwrap();
+        let doc: toml::Value = raw.parse().unwrap();
+        let uuid_str = doc
+            .get("metadata")
+            .and_then(|m| m.get("uuid"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(is_valid_uuid(uuid_str), "bogus uuid replaced with valid one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

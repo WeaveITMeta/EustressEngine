@@ -50,6 +50,7 @@ pub mod fjall_backend;
 pub mod header;
 pub mod import;
 pub mod keys;
+pub mod migrate_identity;
 pub mod rkyv_values;
 pub mod schema;
 pub mod tracing_hooks;

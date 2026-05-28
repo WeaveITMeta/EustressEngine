@@ -597,6 +597,15 @@ pub struct InstanceMetadata {
     /// engine-native default with a warn! if it can't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
+    /// Stable UUID — 32 lowercase hex chars derived from blake3(seed)[..16].
+    /// Wave 2.1 (IDENTITY.md §7.1). `Option<String>` so a TOML without the
+    /// field deserializes cleanly. `skip_serializing_if = "Option::is_none"`
+    /// keeps newly-emitted TOMLs that somehow lose the field free of an
+    /// empty `uuid = ""` line. The migration always sets it to `Some`, so
+    /// the skip clause is purely defensive against round-trip code paths
+    /// that drop the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
 }
 
 fn default_class_name() -> String {
@@ -614,6 +623,7 @@ impl Default for InstanceMetadata {
             created_by: None,
             modifications: Vec::new(),
             unit: None,
+            uuid: None,
         }
     }
 }
