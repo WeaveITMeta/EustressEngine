@@ -203,7 +203,12 @@ impl Material {
 }
 
 /// Class names for type identification (Eustress ClassName)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reflect)]
+///
+/// `Hash` is required by the ClassSpawner registry
+/// (`HashMap<ClassName, Box<dyn ClassSpawner>>` in
+/// `class_registry::ClassRegistry`). The auto-derived hash is just the
+/// discriminant — purely additive, no behaviour change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Reflect)]
 pub enum ClassName {
     Instance,
     PVInstance,

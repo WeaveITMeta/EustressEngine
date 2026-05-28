@@ -59,6 +59,13 @@ pub mod classes;
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.
 pub mod class_schema;
+// Per-ClassName spawner trait + registry scaffold (Wave 2.2 — scaffold
+// only). The trait, PropertyBag, SpawnCtx, and LOD types live here; no
+// spawners are registered yet, and no engine system consumes them. Wave
+// 2.3 wires the Bevy plugin; Wave 3 migrates the 80+ hardcoded
+// `spawn_*` paths over to spawner impls. See
+// `docs/architecture/CLASS_REGISTRY.md`.
+pub mod class_registry;
 // Canonical entity-creation pipeline — every "create an instance of class X"
 // surface (Insert menu, Model ribbon, Toolbox, MCP `create_entity`, …) routes
 // through `instance_create::create_instance` so the resulting folder + TOML
