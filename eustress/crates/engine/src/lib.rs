@@ -139,6 +139,11 @@ pub mod class_conversion;
 /// registered there are invisible to the live engine, and that's the
 /// exact silent-failure mode the LOOP-5 breaker exists to catch.
 pub mod class_registry;
+/// Per-ClassName ClassSpawner implementations (Wave 3 fan-out).
+/// Each subdirectory exposes its own sub-plugin that registers its
+/// spawners with the ClassRegistry resource at plugin-build time.
+/// See `spawners/mod.rs` for the per-group layout.
+pub mod spawners;
 pub mod txt_to_toml_watcher;
 pub mod stream_node_plugin;
 pub mod updater;

@@ -1,0 +1,23 @@
+# PointLight — Omnidirectional point light source
+# Per LIGHTING_AUDIT.md §4.2 — physically-based authoring in lumens / meters.
+# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+
+[metadata]
+class_name = "PointLight"
+archivable = true
+unit = "m"
+
+[transform]
+position = [0.0, 2.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[Light]
+Brightness = { type = "float", value = 100000.0, min = 0.0, max = 1000000.0, description = "Intensity in lumens (physically based)" }
+Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Light hue" }
+Range      = { type = "float", value = 60.0, min = 0.1, max = 10000.0, description = "Falloff distance in meters" }
+Radius     = { type = "float", value = 0.0, min = 0.0, max = 100.0, description = "Spherical area-light radius — larger = softer shadows" }
+Shadows    = { type = "bool",  value = true, description = "Cast dynamic shadows" }
+
+[Appearance]
+Texture = { type = "asset", value = "", description = "Optional cubemap cookie (KTX2) — for gobos / stained glass" }

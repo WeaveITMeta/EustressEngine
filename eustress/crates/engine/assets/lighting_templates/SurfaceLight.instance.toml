@@ -1,0 +1,18 @@
+# SurfaceLight — Light emitted from a specific face of the parent part
+# Per LIGHTING_AUDIT.md §4.4 (Option A) — emissive quad child + child PointLight.
+# The Face enum selects which of the parent BasePart's six faces emits.
+
+[metadata]
+class_name = "SurfaceLight"
+archivable = true
+parent_required = true
+
+[Light]
+Brightness = { type = "float", value = 1.0, min = 0.0, max = 1000000.0, description = "Unitless brightness — scaled by AREA_LIGHT_BRIGHTNESS_SCALE for the emitter child" }
+Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Surface emissive + emitter color" }
+Range      = { type = "float", value = 60.0, min = 0.1, max = 10000.0, description = "Emitter falloff distance in meters" }
+Face       = { type = "enum",  value = "Front", options = ["Top", "Bottom", "Front", "Back", "Left", "Right"], description = "Which face of the parent BasePart emits the light" }
+Shadows    = { type = "bool",  value = true, description = "Cast dynamic shadows from the emitter child" }
+
+[Appearance]
+Texture = { type = "asset", value = "", description = "Face emission cookie texture" }

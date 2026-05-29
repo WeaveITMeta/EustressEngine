@@ -1,0 +1,22 @@
+# DirectionalLight — Distant parallel light (e.g. a stage spotlight)
+# Per LIGHTING_AUDIT.md §4.5 — distinct from the celestial Sun/Moon path.
+# Brightness is multiplied by 10000.0 internally to get Bevy illuminance (lux).
+
+[metadata]
+class_name = "DirectionalLight"
+archivable = true
+
+[transform]
+position = [0.0, 50.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[Light]
+Brightness       = { type = "float", value = 1.0, min = 0.0, max = 100.0, description = "Illuminance scale (multiplies by 10000 to get lux)" }
+Color            = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Light hue" }
+Shadows          = { type = "bool",  value = true, description = "Cast cascade shadows" }
+ShadowDepthBias  = { type = "float", value = 0.02, min = 0.0, max = 1.0, description = "Shadow depth bias (prevents shadow acne)" }
+ShadowNormalBias = { type = "float", value = 1.8, min = 0.0, max = 10.0, description = "Shadow normal bias" }
+
+[Appearance]
+Texture = { type = "asset", value = "", description = "Directional cookie — e.g. cloud_shadows.ktx2" }

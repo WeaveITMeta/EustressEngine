@@ -1125,6 +1125,20 @@ impl Plugin for SlintUiPlugin {
         // registry empty; Wave 3 populates it per CLASS_REGISTRY.md §8.
         app.add_plugins(crate::class_registry::ClassRegistryPlugin);
 
+        // Wave 3 — per-group spawner sub-plugins. ORDER MATTERS: the
+        // ClassRegistryPlugin above must mount the registry resource
+        // BEFORE any sub-plugin calls `register_class::<S>()`. Bevy
+        // builds plugins in add order, so this sequencing is correct.
+        // See spawners/mod.rs for the per-group breakdown.
+        app.add_plugins((
+            crate::spawners::lights::LightsSpawnerPlugin,
+            crate::spawners::gui_containers::GuiContainersSpawnerPlugin,
+            crate::spawners::gui_leaves::GuiLeavesSpawnerPlugin,
+            crate::spawners::constraints::ConstraintsSpawnerPlugin,
+            crate::spawners::containers::ContainersSpawnerPlugin,
+            crate::spawners::audio_vfx::AudioVfxSpawnerPlugin,
+        ));
+
         app
             // UI state resources
             .init_resource::<StudioState>()

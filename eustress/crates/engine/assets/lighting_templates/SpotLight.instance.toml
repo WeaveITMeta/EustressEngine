@@ -1,0 +1,23 @@
+# SpotLight — Directional cone-shaped light source
+# Per LIGHTING_AUDIT.md §4.3 — physically-based authoring in lumens / meters.
+# Bevy convention: -Z is the cone axis when rotation is identity.
+
+[metadata]
+class_name = "SpotLight"
+archivable = true
+unit = "m"
+
+[transform]
+position = [0.0, 5.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[Light]
+Brightness = { type = "float", value = 40000.0, min = 0.0, max = 1000000.0, description = "Intensity in lumens" }
+Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Light hue" }
+Range      = { type = "float", value = 60.0, min = 0.1, max = 10000.0, description = "Falloff distance in meters" }
+Angle      = { type = "float", value = 45.0, min = 0.0, max = 180.0, description = "Outer cone angle in degrees" }
+Shadows    = { type = "bool",  value = true, description = "Cast dynamic shadows" }
+
+[Appearance]
+Texture = { type = "asset", value = "", description = "2D cookie texture — gobo / stained glass / window frame" }

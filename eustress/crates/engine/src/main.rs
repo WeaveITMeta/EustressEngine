@@ -24,6 +24,7 @@ mod ui;
 mod parts;
 mod classes;        // Roblox-style class system
 mod class_registry; // ClassSpawner trait registry + plugin + LOOP-5 assertion (Wave 2.3)
+mod spawners;       // Per-class ClassSpawner impls (Wave 3 — lights / GUI / constraints / containers / audio_vfx)
 mod properties;     // Property access system
 mod rendering;
 mod camera;
