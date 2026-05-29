@@ -125,6 +125,20 @@ pub mod circumstances;
 pub mod workshop;
 pub mod manufacturing;
 pub mod class_conversion;
+/// ClassRegistry plugin + LOOP-5 startup assertion.
+///
+/// Plumbing only at Wave 2.3 — the registry boots empty, the LOOP-5
+/// drain-resource checklist is wired but has zero entries until other
+/// plugins opt in via `app.add_drain_resource::<R>(...)`. Wave 3 ships
+/// the per-class `ClassSpawner` impls; the plugin's build hook is
+/// where each one's `register_class::<...>()` line goes.
+///
+/// Mount via `app.add_plugins(class_registry::ClassRegistryPlugin)`
+/// inside `SlintUiPlugin::build`. Per `docs/process/AGENT_DISPATCH.md`
+/// LOOP 5: never mount inside the legacy `StudioUiPlugin` — resources
+/// registered there are invisible to the live engine, and that's the
+/// exact silent-failure mode the LOOP-5 breaker exists to catch.
+pub mod class_registry;
 pub mod txt_to_toml_watcher;
 pub mod stream_node_plugin;
 pub mod updater;

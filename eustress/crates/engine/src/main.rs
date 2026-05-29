@@ -23,6 +23,7 @@ mod terrain_plugin;
 mod ui;
 mod parts;
 mod classes;        // Roblox-style class system
+mod class_registry; // ClassSpawner trait registry + plugin + LOOP-5 assertion (Wave 2.3)
 mod properties;     // Property access system
 mod rendering;
 mod camera;

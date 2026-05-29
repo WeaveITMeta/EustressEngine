@@ -1118,6 +1118,13 @@ impl Plugin for SlintUiPlugin {
         slint::platform::set_platform(Box::new(SlintBevyPlatform {})).unwrap();
         info!("✅ Slint platform set");
         
+        // Wave 2.3 — ClassRegistry plugin: registers the ClassSpawner
+        // registry resource AND the LOOP-5 startup-time drain-resource
+        // validator that catches the LabelEditState class of bug (silent
+        // drain-skip from a missing init_resource). Plugin boots the
+        // registry empty; Wave 3 populates it per CLASS_REGISTRY.md §8.
+        app.add_plugins(crate::class_registry::ClassRegistryPlugin);
+
         app
             // UI state resources
             .init_resource::<StudioState>()
