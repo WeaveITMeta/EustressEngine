@@ -155,6 +155,9 @@ eustress-forge-sdk = { path = "../forge-sdk" }
 # on Space switch and mirrors Transform/BasePart writes alongside the
 # legacy TOML write path.
 eustress-worlddb = { path = "../worlddb", optional = true }
+# Roblox place importer (Wave 4/6) — File→Import→Roblox Place + drag-drop
+# call eustress_roblox_import::import_into_space.
+eustress-roblox-import = { path = "../roblox-import" }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-full = "0.3"
 
