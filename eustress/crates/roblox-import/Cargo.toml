@@ -38,15 +38,14 @@ tracing     = "0.1"
 hex         = "0.4"
 
 # =============================================================================
-# DEFERRED — Wave 2 will uncomment after human approval.
-# These are the 4 rbx_* crates from rojo-rbx (all MIT, all pure Rust).
-# Versions reflect latest stable as of spec date (2026-05-26).
+# Roblox file-format parsers — all MIT, all pure Rust, all rojo-rbx.
+# Enabled in Wave 4 (Phase 1) along with adding this crate to workspace.members.
 # =============================================================================
-# rbx_dom_weak           = "3.0"
-# rbx_binary             = "1.0"
-# rbx_xml                = "1.0"
-# rbx_reflection_database = "1.0"
+rbx_dom_weak           = "2"
+rbx_binary             = "0.7"
+rbx_xml                = "0.13"
+rbx_reflection_database = "0.2"
 
 [dev-dependencies]
-# Fixture diffing for golden tests (Wave 2)
-# pretty_assertions = "1.4"
+# Fixture diffing for golden tests
+pretty_assertions = "1.4"

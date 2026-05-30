@@ -30,6 +30,7 @@ members = [
     "crates/identity",
     "crates/eustress-fjall",
     "crates/worlddb",
+    "crates/roblox-import",
     "benches/instance-capacity"
 ]
 
