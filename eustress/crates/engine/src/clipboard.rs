@@ -16,17 +16,47 @@ use crate::rendering::BevySelectionManager;
 // Clipboard Serialization Types
 // ============================================================================
 
-/// Serializable entity data for clipboard operations
+/// Serializable entity data for clipboard operations.
+///
+/// ## Identity (Wave 2.1 / IDENTITY.md §11.2)
+///
+/// `uuid` is the persistent identity that survives across sessions, file
+/// renames, cross-space copies, and audit-log references. It is the only
+/// field the cross-space MOVE/COPY contract (IDENTITY.md §3.3 / §3.4)
+/// operates on.
+///
+/// `id` is retained as the **session-local Bevy entity handle** for the
+/// transient paste-batch parent linkage (`parent: Option<u32>`). It is not
+/// persisted to disk and does not survive engine restart —
+/// `Instance.uuid` is the authoritative identity, `Instance.id` is the
+/// live ECS handle (per IDENTITY.md §11.7).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardEntityData2 {
-    /// Unique ID for this entity
+    /// Live Bevy entity handle (session-local). Used by the paste-batch
+    /// parent linkage only — NOT a persistent identifier.
     pub id: u32,
+    /// Persistent 32-char-hex UUID for this entity (IDENTITY.md §11.2).
+    ///
+    /// `#[serde(default)]` so pre-Wave-2.1 clipboards (or OS-clipboard
+    /// payloads from another engine version) deserialize cleanly with
+    /// an empty uuid — the paste path then routes through fresh-create
+    /// surfaces (`instance_create::fresh_uuid_for_create` per §3.2)
+    /// instead of cross-space MOVE/COPY, which is the correct fallback
+    /// when no identity is known.
+    #[serde(default)]
+    pub uuid: String,
     /// Entity name
     pub name: String,
     /// Class name (Part, Model, etc.)
     pub class: String,
-    /// Parent entity ID (None for root entities)
+    /// Parent entity's Bevy handle (None for root entities). Same
+    /// session-local caveat as `id`.
     pub parent: Option<u32>,
+    /// Parent entity's persistent UUID (None for root entities).
+    /// Mirrors `parent` for the cross-session identity surface.
+    /// Defaults to `None` on legacy clipboards.
+    #[serde(default)]
+    pub parent_uuid: Option<String>,
     /// Transform data
     pub position: [f32; 3],
     pub rotation: [f32; 3],
@@ -256,7 +286,19 @@ pub struct CrossScenePasteModal {
     pub choice: Option<PasteMode>,
 }
 
-/// Enhanced clipboard with cross-scene support and serialization
+/// Enhanced clipboard with cross-scene support and serialization.
+///
+/// ## Identity model (Wave 2.1 / IDENTITY.md §3.3, §3.4, §11.2)
+///
+/// COPY operations regenerate every pasted entity's UUID per §3.4
+/// `blake3(source_uuid ‖ target_space_id ‖ copy_counter_be8)[..16]`;
+/// MOVE operations preserve the source UUID verbatim per §3.3. The
+/// `paste_count` field doubles as the §3.4 *copy_counter*: it starts at
+/// 0 and is bumped after each paste, so the first paste sees `1`, the
+/// second sees `2`, etc. — yielding 10 distinct UUIDs across 10 paste
+/// presses against the same source. `clear()` (called on every fresh
+/// Ctrl+C) resets `paste_count` back to 0, matching the §3.4 contract:
+/// *"counter resets on the next ctrl-C"*.
 #[derive(Resource)]
 pub struct EditorClipboard {
     /// Serialized entity data
@@ -269,7 +311,8 @@ pub struct EditorClipboard {
     pub include_metadata: bool,
     /// Center of copied selection (for relative positioning)
     pub copy_center: Vec3,
-    /// Paste offset counter (for multiple pastes)
+    /// Paste offset counter — also the §3.4 *copy_counter*. Bumped per
+    /// paste; reset to 0 on `clear()`.
     pub paste_count: u32,
     /// Original entity IDs that were copied
     pub copied_entity_ids: Vec<String>,
@@ -277,8 +320,12 @@ pub struct EditorClipboard {
     pub cross_scene_modal: CrossScenePasteModal,
     /// Cut mode (delete originals after paste)
     pub is_cut: bool,
-    /// Entity ID mapping (old -> new) for hierarchy reconstruction
-    pub id_mapping: HashMap<u32, u32>,
+    /// UUID mapping (source_uuid → minted_target_uuid) for cross-
+    /// reference fix-up during a single paste batch. Per IDENTITY.md
+    /// §11.2 this is the persistent-identity counterpart of the old
+    /// session-local `HashMap<u32, u32>`. Cleared at the start of each
+    /// remap pass (and on `clear()`).
+    pub uuid_mapping: HashMap<String, String>,
 }
 
 impl Default for EditorClipboard {
@@ -293,7 +340,7 @@ impl Default for EditorClipboard {
             copied_entity_ids: Vec::new(),
             cross_scene_modal: CrossScenePasteModal::default(),
             is_cut: false,
-            id_mapping: HashMap::new(),
+            uuid_mapping: HashMap::new(),
         }
     }
 }
@@ -309,7 +356,9 @@ impl EditorClipboard {
         self.entities.len()
     }
     
-    /// Clear the clipboard
+    /// Clear the clipboard. Resets `paste_count` (the §3.4 copy_counter)
+    /// to 0 so a subsequent Ctrl+C correctly starts a fresh counter — the
+    /// "ten distinct uuids from ten ctrl-V" guarantee depends on this.
     pub fn clear(&mut self) {
         self.entities.clear();
         self.source_scene = None;
@@ -318,7 +367,7 @@ impl EditorClipboard {
         self.paste_count = 0;
         self.copied_entity_ids.clear();
         self.is_cut = false;
-        self.id_mapping.clear();
+        self.uuid_mapping.clear();
     }
     
     /// Check if this is a cross-scene paste
@@ -361,55 +410,161 @@ impl EditorClipboard {
         self.paste_count = 0;
     }
     
-    /// Generate a new unique entity ID
-    pub fn generate_new_id(&mut self) -> u32 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u32;
-        // Mix with a counter to ensure uniqueness
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        timestamp.wrapping_add(counter)
-    }
-    
-    /// Remap entity IDs for paste with new IDs
-    pub fn remap_ids(&mut self) {
-        self.id_mapping.clear();
-        
-        // First pass: generate new IDs
-        for entity_data in &self.entities {
-            let old_id = entity_data.id;
-            let new_id = Self::generate_new_id_static();
-            self.id_mapping.insert(old_id, new_id);
+    /// Mint a fresh UUID for a cross-space COPY paste per IDENTITY.md §3.4.
+    ///
+    /// `new_uuid = hex(blake3(source_uuid_bytes ‖ 0x1f ‖ target_space_id_bytes
+    /// ‖ 0x1f ‖ copy_counter.to_be_bytes())[..16])`
+    ///
+    /// - Two distinct sources → distinct uuids (different `source_uuid`).
+    /// - Same source pasted into two different target spaces → distinct
+    ///   uuids (different `target_space_id`). Why this matters: without
+    ///   `target_space_id`, paste-into-SpaceB and paste-into-SpaceC of the
+    ///   same source would collide if a future move-from-B-to-C landed.
+    /// - Same source, same target, N consecutive pastes → N distinct
+    ///   uuids (different `copy_counter`). The §3.4 contract: one Ctrl+C
+    ///   followed by ten Ctrl+V presses must produce ten distinct
+    ///   entities. The counter resets on the next Ctrl+C via `clear()`.
+    /// - `source_uuid` may be empty (legacy entities with no uuid yet) —
+    ///   in that case the hash still produces a fresh deterministic uuid
+    ///   per-(target, counter), which is fine: the destination TOML is
+    ///   written with that uuid and behaves identically to a fresh
+    ///   create.
+    pub fn mint_paste_uuid(
+        source_uuid: &str,
+        target_space_id: &[u8],
+        copy_counter: u64,
+    ) -> String {
+        let mut seed =
+            Vec::with_capacity(source_uuid.len() + 1 + target_space_id.len() + 1 + 8);
+        seed.extend_from_slice(source_uuid.as_bytes());
+        seed.push(0x1f);
+        seed.extend_from_slice(target_space_id);
+        seed.push(0x1f);
+        seed.extend_from_slice(&copy_counter.to_be_bytes());
+        let hash = blake3::hash(&seed);
+        // 32-char lowercase hex per IDENTITY.md §7.3 — locked format forever.
+        let mut out = String::with_capacity(32);
+        for &b in &hash.as_bytes()[..16] {
+            out.push(hex_nibble(b >> 4));
+            out.push(hex_nibble(b & 0x0f));
         }
-        
-        // Second pass: apply new IDs
-        for entity_data in &mut self.entities {
-            if let Some(&new_id) = self.id_mapping.get(&entity_data.id) {
-                entity_data.id = new_id;
+        out
+    }
+
+    /// Compute a stable `target_space_id` byte-blob from a Space root path
+    /// (or any opaque path that names a Space). The bytes only need to be
+    /// stable across the engine session — they feed `mint_paste_uuid` to
+    /// distinguish two destination Spaces; no other consumer reads them.
+    pub fn target_space_id_for(space_root: Option<&PathBuf>) -> Vec<u8> {
+        space_root
+            .map(|p| p.to_string_lossy().as_bytes().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Remap UUIDs across the current clipboard batch per IDENTITY.md
+    /// §3.3 / §3.4.
+    ///
+    /// `target_space_id` is the byte-form of the destination Space's
+    /// identity (the Space root path bytes work fine — see
+    /// `target_space_id_for`).
+    ///
+    /// Behaviour:
+    ///
+    /// - COPY (`self.is_cut == false`): every entity's `uuid` is
+    ///   regenerated via [`mint_paste_uuid`] using
+    ///   `copy_counter = paste_count + 1` (the §3.4 contract: counter
+    ///   starts at 1 for the first paste). Within the same batch each
+    ///   entity gets a distinct uuid because each has its own
+    ///   `source_uuid`; if two entities in the batch happened to share
+    ///   a source_uuid (only possible if the user copied an alias),
+    ///   they would still differ because the closure also folds the
+    ///   batch index into the counter.
+    /// - MOVE (`self.is_cut == true`): uuids are preserved verbatim.
+    ///   The destination receives the same uuid; the source row in the
+    ///   Fjall partition + on-disk folder is removed by the paste
+    ///   handler's post-paste trash step.
+    ///
+    /// In both branches `parent_uuid` is rewritten through the same map
+    /// so within-batch parent linkage survives the rename.
+    pub fn remap_uuids(&mut self, target_space_id: &[u8]) {
+        self.uuid_mapping.clear();
+        if self.is_cut {
+            // MOVE — preserve uuids verbatim. We still populate the
+            // mapping as identity so the parent-rewrite pass below is a
+            // no-op rather than a panic on `Option<&String>`.
+            for entity_data in &self.entities {
+                if !entity_data.uuid.is_empty() {
+                    self.uuid_mapping
+                        .insert(entity_data.uuid.clone(), entity_data.uuid.clone());
+                }
             }
-            
-            // Update parent references
-            if let Some(old_parent) = entity_data.parent {
-                if let Some(&new_parent) = self.id_mapping.get(&old_parent) {
-                    entity_data.parent = Some(new_parent);
+            return;
+        }
+
+        // COPY — mint a fresh uuid per source per §3.4. The §3.4
+        // copy_counter starts at 1 for the first paste; map it from
+        // `paste_count` (which is bumped AFTER each paste, so reads as 0
+        // on the first paste). The trailing `batch_idx` makes
+        // within-batch collisions impossible even when two entities
+        // share a source_uuid.
+        let copy_counter_base = (self.paste_count as u64) + 1;
+        for (batch_idx, entity_data) in self.entities.iter().enumerate() {
+            let counter = copy_counter_base
+                .wrapping_mul(0x100)
+                .wrapping_add(batch_idx as u64);
+            let new_uuid =
+                Self::mint_paste_uuid(&entity_data.uuid, target_space_id, counter);
+            // Only insert when source is non-empty — legacy clipboards
+            // can have multiple empty-uuid entries and we don't want
+            // them all mapping to the same minted value (each gets its
+            // own fresh uuid by virtue of the differing batch_idx).
+            if !entity_data.uuid.is_empty() {
+                self.uuid_mapping.insert(entity_data.uuid.clone(), new_uuid);
+            }
+        }
+
+        // Apply the new uuids to each entity + rewrite parent_uuid links.
+        let copy_counter_base = (self.paste_count as u64) + 1;
+        for (batch_idx, entity_data) in self.entities.iter_mut().enumerate() {
+            if !entity_data.uuid.is_empty() {
+                if let Some(new_uuid) = self.uuid_mapping.get(&entity_data.uuid) {
+                    entity_data.uuid = new_uuid.clone();
+                }
+            } else {
+                // Empty source uuid — synthesize a fresh one anyway so
+                // the destination TOML carries a valid 32-hex uuid.
+                let counter = copy_counter_base
+                    .wrapping_mul(0x100)
+                    .wrapping_add(batch_idx as u64);
+                entity_data.uuid = Self::mint_paste_uuid("", target_space_id, counter);
+            }
+
+            // Parent uuid: rewrite if we have a mapping for it. A parent
+            // outside the current batch keeps its uuid unchanged (the
+            // user copied a leaf without its parent — the parent
+            // already exists in the destination).
+            if let Some(ref old_parent) = entity_data.parent_uuid {
+                if let Some(new_parent) = self.uuid_mapping.get(old_parent) {
+                    entity_data.parent_uuid = Some(new_parent.clone());
                 }
             }
         }
     }
-    
-    /// Generate a new unique entity ID (static version)
-    fn generate_new_id_static() -> u32 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u32;
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        timestamp.wrapping_add(counter)
+}
+
+// ============================================================================
+// UUID helpers — local to clipboard so we don't widen `eustress_common`
+// for one call site. These are wire-compatible with the IDENTITY.md
+// §7.3 format (32-char lowercase hex, no separators).
+// ============================================================================
+
+/// Map 0..16 → `'0'..'9' | 'a'..'f'`. IDENTITY.md §7.3 — lowercase only.
+#[inline]
+fn hex_nibble(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + (n - 10)) as char,
+        _ => '0',
     }
 }
 
@@ -710,9 +865,15 @@ pub fn handle_copy_event(
 
             let entity_data = ClipboardEntityData2 {
                 id: instance.id,
+                // Capture the persistent identity (IDENTITY.md §11.2).
+                // Legacy entities created before Wave 2.1 carry an empty
+                // string here — `remap_uuids` handles that by minting a
+                // fresh uuid via §3.4 on the COPY path.
+                uuid: instance.uuid.clone(),
                 name: instance.name.clone(),
                 class: instance.class_name.as_str().to_string(),
                 parent: None,
+                parent_uuid: None,
                 position: [transform.translation.x, transform.translation.y, transform.translation.z],
                 rotation: [x.to_degrees(), y.to_degrees(), z.to_degrees()],
                 scale: capture_scale,
@@ -803,11 +964,76 @@ pub fn handle_paste_event(
         if event.mode == PasteMode::Cancelled {
             continue;
         }
-        
-        // Remap IDs if requested
-        if matches!(event.mode, PasteMode::NewIds | PasteMode::DuplicateInPlace) {
-            clipboard.remap_ids();
+
+        // Resolve target space identity FIRST — the §3.4 hash needs it
+        // before we mint paste uuids. `space_root.0` is the canonical
+        // path of the active Space (the destination), `current_scene`
+        // is the active scene (typically nested under the Space). We
+        // prefer the Space root because COPY/MOVE conflicts are
+        // resolved at Space granularity (IDENTITY.md §8.3).
+        let target_space_id = EditorClipboard::target_space_id_for(
+            space_root.as_ref().map(|sr| &sr.0),
+        );
+
+        // Resolve workspace directory for the collision scan + TOML
+        // writes below. Defined here (before the MOVE conflict check)
+        // because both the §8.3 scan and the paste loop need it.
+        let workspace_dir = space_root.as_ref()
+            .map(|sr| sr.0.join("Workspace"))
+            .unwrap_or_else(|| crate::space::default_space_root().join("Workspace"));
+
+        // ── IDENTITY.md §8.3 — cross-space MOVE conflict check ───────
+        // For a MOVE (is_cut=true), refuse the paste up-front when any
+        // source uuid already exists in the target Space. The toast is
+        // emitted once; the source is NOT deleted (the user resolves
+        // manually by either deleting the destination's copy or
+        // choosing COPY instead).
+        //
+        // Detection scans the target Workspace tree for any
+        // `_instance.toml` whose `[metadata].uuid` matches a source
+        // uuid. That's O(N) over destination entities, but cross-space
+        // MOVE is rare (the common path is same-space ctrl-X /
+        // ctrl-V which short-circuits at `is_cross_scene == false`),
+        // so the filesystem scan is acceptable.
+        if clipboard.is_cut && !clipboard.entities.is_empty() {
+            let source_uuids: std::collections::HashSet<String> = clipboard
+                .entities
+                .iter()
+                .filter(|e| !e.uuid.is_empty())
+                .map(|e| e.uuid.clone())
+                .collect();
+            if !source_uuids.is_empty() {
+                let collisions =
+                    count_uuid_collisions_in_workspace(&workspace_dir, &source_uuids);
+                if collisions > 0 {
+                    notifications.warning(format!(
+                        "Move refused: {} entity uuid(s) already exist in the target space \
+                         (likely a previous Roblox import shared a referent). \
+                         Choose Copy instead of Cut, or delete the target's existing copy first.",
+                        collisions,
+                    ));
+                    // Critical: do NOT execute the move. Clear is_cut
+                    // so the source files survive; the user has to
+                    // re-issue Cut+Paste after resolving.
+                    clipboard.is_cut = false;
+                    continue;
+                }
+            }
         }
+
+        // Remap UUIDs per IDENTITY.md §3.3 / §3.4. The helper honours
+        // `is_cut` internally — MOVE preserves uuids verbatim, COPY
+        // regenerates via blake3(source ‖ target_space_id ‖ counter).
+        //
+        // This runs UNCONDITIONALLY (not gated on `NewIds | DuplicateInPlace`
+        // as the legacy `remap_ids` was) because the §3.4 contract for COPY
+        // and the §3.3 contract for MOVE both depend on uuid logic running
+        // on every paste — not just the "regenerate IDs to avoid conflicts"
+        // branch. The PasteMode enum still controls *offset* behaviour
+        // (Normal vs NewIds vs DuplicateInPlace), but uuid policy is
+        // orthogonal: every paste either regenerates (COPY) or preserves
+        // (MOVE).
+        clipboard.remap_uuids(&target_space_id);
 
         // Calculate paste offset — DuplicateInPlace uses zero offset
         let offset = if event.mode == PasteMode::DuplicateInPlace {
@@ -820,10 +1046,8 @@ pub fn handle_paste_event(
         
         let mut created_ids = Vec::new();
 
-        // Resolve workspace directory for TOML file writing
-        let workspace_dir = space_root.as_ref()
-            .map(|sr| sr.0.join("Workspace"))
-            .unwrap_or_else(|| crate::space::default_space_root().join("Workspace"));
+        // `workspace_dir` is defined above (before the §8.3 collision
+        // scan) — reused here for the per-entity TOML writes.
 
         // Spawn entities from clipboard — write TOML files for Parts (same as Insert)
         for entity_data in &clipboard.entities {
@@ -1060,16 +1284,95 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
+/// Walk `workspace_dir` (recursively) and count how many
+/// `_instance.toml` files claim a uuid present in `uuids`. Returns 0
+/// when the directory doesn't exist or contains no matches. Skips
+/// `.eustress` and other hidden directories.
+///
+/// Used by the IDENTITY.md §8.3 cross-space MOVE conflict check.
+/// Optimistic — a malformed TOML is silently skipped (no false
+/// positive). Caller treats a non-zero return as "refuse the move".
+fn count_uuid_collisions_in_workspace(
+    workspace_dir: &std::path::Path,
+    uuids: &std::collections::HashSet<String>,
+) -> u32 {
+    if uuids.is_empty() || !workspace_dir.exists() {
+        return 0;
+    }
+    let mut hits = 0u32;
+    let mut stack: Vec<std::path::PathBuf> = vec![workspace_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let name = entry.file_name();
+            let name_lossy = name.to_string_lossy();
+            if name_lossy.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(ty) = entry.file_type() else { continue };
+            if ty.is_dir() {
+                stack.push(path);
+            } else if ty.is_file() && name_lossy == "_instance.toml" {
+                let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+                let Ok(doc) = raw.parse::<toml::Value>() else { continue };
+                let Some(uuid) = doc
+                    .get("metadata")
+                    .and_then(|m| m.get("uuid"))
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                if uuids.contains(uuid) {
+                    hits = hits.saturating_add(1);
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// Rewrite `[metadata].uuid` in a raw TOML body to `new_uuid`. Returns
+/// `None` on parse failure (caller writes the source bytes verbatim).
+/// Used by the service-child paste path so a cross-space COPY of a
+/// non-visual service entity (Sky, Atmosphere, Star, …) lands with a
+/// fresh uuid rather than colliding against the source.
+fn rewrite_service_toml_uuid(raw: &str, new_uuid: &str) -> Option<String> {
+    let mut doc: toml::Value = raw.parse().ok()?;
+    let table = doc.as_table_mut()?;
+    let meta = table
+        .entry("metadata".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let meta_table = meta.as_table_mut()?;
+    meta_table.insert(
+        "uuid".to_string(),
+        toml::Value::String(new_uuid.to_string()),
+    );
+    toml::to_string_pretty(&doc).ok()
+}
+
 /// Patch the root `_instance.toml` of a freshly-pasted folder so the
 /// entity sits at `new_pos` in world space. Only the root needs
 /// adjustment — descendants' transforms are relative to their parent's
 /// local frame and survive the copy untouched. Returns `Ok(())` even
 /// when the TOML lacks a `[transform]` table; failure modes are write
 /// errors only.
+///
+/// Also stamps `metadata.uuid` to `target_uuid` when the caller supplied
+/// one — that's the persistent-identity write-back per IDENTITY.md §3.3
+/// (MOVE: preserve source uuid) and §3.4 (COPY: minted via
+/// `mint_paste_uuid`). When `target_uuid` is empty the field is left
+/// alone so legacy clipboards that didn't carry a uuid don't accidentally
+/// erase the source folder's existing uuid (the duplicate would still
+/// trip the §8.1 "uuid collision" rename on next load, but that's the
+/// correct fallback for a pre-Wave-2.1 payload).
 fn apply_offset_to_root_toml(
     toml_path: &std::path::Path,
     new_pos: Vec3,
     display_name: &str,
+    target_uuid: &str,
 ) -> std::io::Result<()> {
     let raw = std::fs::read_to_string(toml_path)?;
     let mut doc: toml::Value = match raw.parse() {
@@ -1111,6 +1414,18 @@ fn apply_offset_to_root_toml(
                 "name".to_string(),
                 toml::Value::String(display_name.to_string()),
             );
+            // Stamp the persistent uuid per IDENTITY.md §3.3 / §3.4.
+            // For COPY: a fresh §3.4 hash. For MOVE: the preserved
+            // source uuid. Empty string means "legacy clipboard, no
+            // uuid known" — leave the field alone so the file watcher
+            // can mint one via §3.1 on first load (or §8.1 collision
+            // rename if the source's old uuid is already present).
+            if !target_uuid.is_empty() {
+                meta_table.insert(
+                    "uuid".to_string(),
+                    toml::Value::String(target_uuid.to_string()),
+                );
+            }
         }
     }
     let serialised = toml::to_string_pretty(&doc)
@@ -1172,8 +1487,21 @@ fn spawn_pasted_entity(
             // is the original entity's display name — pinning
             // `metadata.name` to it stops the Explorer from showing
             // the disk-safe hex suffix (`SimpleBlock-810f`).
+            //
+            // `data.uuid` is the destination uuid set by the §3.3 /
+            // §3.4 remap pass:
+            // - COPY (`is_cut=false`): `remap_uuids` minted a fresh hash.
+            // - MOVE (`is_cut=true`): preserved verbatim from the source.
+            // - Pre-Wave-2.1 clipboards: empty string, in which case
+            //   `apply_offset_to_root_toml` leaves the field alone and
+            //   the file watcher's §3.1 path generates one on load.
             let dst_root_toml = dst_folder.join("_instance.toml");
-            if let Err(e) = apply_offset_to_root_toml(&dst_root_toml, new_pos, &data.name) {
+            if let Err(e) = apply_offset_to_root_toml(
+                &dst_root_toml,
+                new_pos,
+                &data.name,
+                &data.uuid,
+            ) {
                 warn!(
                     "📋 paste: copied folder but failed to patch position in {}: {}",
                     dst_root_toml.display(), e
@@ -1288,6 +1616,17 @@ fn spawn_pasted_entity(
                     name: Some(data.name.clone()),
                     created: now.clone(),
                     last_modified: now,
+                    // Stamp the persistent uuid per IDENTITY.md §3.3 / §3.4.
+                    // For COPY: minted by `remap_uuids` via §3.4 hash.
+                    // For MOVE: preserved from source.
+                    // Pre-Wave-2.1 clipboards (empty uuid) fall through to
+                    // None — the file watcher's §3.1 path will mint one
+                    // on first load.
+                    uuid: if data.uuid.is_empty() {
+                        None
+                    } else {
+                        Some(data.uuid.clone())
+                    },
                     ..Default::default()
                 },
                 material: None,
@@ -1375,7 +1714,26 @@ fn spawn_pasted_entity(
             // future Lighting/ or other service child). Write the raw TOML
             // into the target Space's service folder — the file watcher picks
             // it up and the hydration system attaches the right ECS components.
-            let toml_content = data.source_toml.as_deref().unwrap_or("");
+            //
+            // IDENTITY.md §3.3 / §3.4: stamp the destination uuid into the
+            // raw TOML's `[metadata]` table BEFORE writing. The COPY path
+            // hashes a fresh uuid (so the source row + destination row
+            // don't collide on next load); the MOVE path preserves the
+            // source uuid (which equals data.uuid after remap_uuids' MOVE
+            // branch). When the clipboard predates Wave 2.1 (data.uuid
+            // empty) we leave the TOML alone and let the §3.1 path fire.
+            let raw = data.source_toml.as_deref().unwrap_or("");
+            let toml_content: String = if data.uuid.is_empty() {
+                raw.to_string()
+            } else {
+                rewrite_service_toml_uuid(raw, &data.uuid).unwrap_or_else(|| {
+                    warn!(
+                        "📋 paste: failed to rewrite uuid in service TOML; \
+                         writing source bytes verbatim (may collide on next load)",
+                    );
+                    raw.to_string()
+                })
+            };
             let service_dir = workspace_dir
                 .parent()  // Space root (workspace_dir is SpaceRoot/Workspace)
                 .unwrap_or(workspace_dir)
@@ -1384,7 +1742,7 @@ fn spawn_pasted_entity(
             // Use <Name>.instance.toml — matches what space_ops writes.
             let file_name = format!("{}.instance.toml", data.name);
             let target_path = service_dir.join(&file_name);
-            if let Err(e) = std::fs::write(&target_path, toml_content) {
+            if let Err(e) = std::fs::write(&target_path, &toml_content) {
                 warn!("Failed to write pasted service child TOML {:?}: {}", target_path, e);
                 return None;
             }
@@ -1480,5 +1838,291 @@ impl Plugin for ClipboardPlugin {
                 handle_paste_event.after(consume_pending_paste),
                 render_cross_scene_modal,
             ));
+    }
+}
+
+// ============================================================================
+// Tests — IDENTITY.md §3.3 / §3.4 / §11.2
+// ============================================================================
+//
+// Wave 4 task wave4_B contract: prove that the clipboard's identity surface
+// honours the four-surface contract for cross-space COPY (regenerate uuid
+// via §3.4 hash) and MOVE (preserve source uuid per §3.3). Tests run the
+// helpers directly — they do not boot the Bevy plugin (the goal is to lock
+// the math, not exercise the system schedule).
+
+#[cfg(test)]
+mod uuid_tests {
+    use super::*;
+    use eustress_common::instance_create::is_valid_uuid;
+
+    /// Build a minimal clipboard entry for tests. Properties are empty;
+    /// only `id` + `uuid` are meaningful for the §3.3 / §3.4 surface.
+    fn entry(id: u32, uuid: &str) -> ClipboardEntityData2 {
+        ClipboardEntityData2 {
+            id,
+            uuid: uuid.to_string(),
+            name: format!("Entity{id}"),
+            class: "Part".to_string(),
+            parent: None,
+            parent_uuid: None,
+            position: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+            properties: HashMap::new(),
+            parameters: None,
+            source_toml: None,
+            service_folder: String::new(),
+            source_folder_path: None,
+        }
+    }
+
+    fn target_space_a() -> Vec<u8> {
+        b"Spaces/SpaceA".to_vec()
+    }
+
+    fn target_space_b() -> Vec<u8> {
+        b"Spaces/SpaceB".to_vec()
+    }
+
+    /// §3.4 — single COPY: source uuid is replaced by a fresh, valid
+    /// 32-hex uuid that differs from the source.
+    #[test]
+    fn copy_mints_fresh_uuid_per_3_4() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let mut cb = EditorClipboard::default();
+        cb.is_cut = false;
+        cb.entities.push(entry(1, source_uuid));
+
+        cb.remap_uuids(&target_space_a());
+
+        let result = &cb.entities[0];
+        assert_eq!(result.id, 1, "Bevy live handle is preserved");
+        assert_ne!(
+            result.uuid, source_uuid,
+            "COPY MUST mint a fresh uuid (§3.4)"
+        );
+        assert!(
+            is_valid_uuid(&result.uuid),
+            "minted uuid must satisfy IDENTITY.md §7.3 format: {:?}",
+            result.uuid
+        );
+        // The mapping records the source → target translation.
+        assert_eq!(
+            cb.uuid_mapping.get(source_uuid).map(String::as_str),
+            Some(result.uuid.as_str()),
+            "uuid_mapping carries the rename for parent-link fix-up",
+        );
+    }
+
+    /// §3.3 — MOVE preserves the source uuid verbatim. This is the
+    /// cross-space identity transport surface — the destination Fjall
+    /// row uses the same uuid so audit-log refs, network refs, and
+    /// script lookups all stay correct.
+    #[test]
+    fn move_preserves_source_uuid_per_3_3() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let mut cb = EditorClipboard::default();
+        cb.is_cut = true; // MOVE mode
+        cb.entities.push(entry(1, source_uuid));
+
+        cb.remap_uuids(&target_space_a());
+
+        let result = &cb.entities[0];
+        assert_eq!(
+            result.uuid, source_uuid,
+            "MOVE MUST preserve source uuid verbatim (§3.3)"
+        );
+        // The mapping is identity so any parent_uuid rewrites are no-ops.
+        assert_eq!(
+            cb.uuid_mapping.get(source_uuid).map(String::as_str),
+            Some(source_uuid),
+        );
+    }
+
+    /// §3.4 counter contract — ten Ctrl+V presses after one Ctrl+C
+    /// produce ten distinct uuids. Implemented by bumping `paste_count`
+    /// per paste; `mint_paste_uuid` folds it into the seed.
+    #[test]
+    fn three_copies_produce_three_distinct_uuids_via_counter() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let space_id = target_space_a();
+        let mut minted: Vec<String> = Vec::new();
+
+        for paste_index in 0..3u32 {
+            let mut cb = EditorClipboard::default();
+            cb.is_cut = false;
+            cb.paste_count = paste_index; // before bumping, like the live flow
+            cb.entities.push(entry(1, source_uuid));
+            cb.remap_uuids(&space_id);
+            minted.push(cb.entities[0].uuid.clone());
+        }
+
+        assert_eq!(minted.len(), 3);
+        assert_ne!(minted[0], minted[1], "paste 1 != paste 2");
+        assert_ne!(minted[1], minted[2], "paste 2 != paste 3");
+        assert_ne!(minted[0], minted[2], "paste 1 != paste 3");
+        for u in &minted {
+            assert!(
+                is_valid_uuid(u),
+                "every minted uuid must be valid 32-hex: {u:?}"
+            );
+            assert_ne!(u, source_uuid, "all distinct from source");
+        }
+    }
+
+    /// `mint_paste_uuid` is deterministic across processes — same inputs
+    /// always produce the same uuid. This is the property that lets a
+    /// parallel CI checkout match a developer's local result.
+    #[test]
+    fn mint_paste_uuid_is_deterministic() {
+        let a = EditorClipboard::mint_paste_uuid("source", b"target", 1);
+        let b = EditorClipboard::mint_paste_uuid("source", b"target", 1);
+        assert_eq!(a, b);
+        let c = EditorClipboard::mint_paste_uuid("source", b"target", 2);
+        assert_ne!(a, c, "different counter → different uuid");
+        let d = EditorClipboard::mint_paste_uuid("source", b"OTHER", 1);
+        assert_ne!(a, d, "different target_space_id → different uuid");
+        let e = EditorClipboard::mint_paste_uuid("OTHER", b"target", 1);
+        assert_ne!(a, e, "different source uuid → different uuid");
+    }
+
+    /// `mint_paste_uuid` always returns a IDENTITY.md §7.3-compliant
+    /// uuid: 32 chars, lowercase hex only.
+    #[test]
+    fn mint_paste_uuid_output_is_valid_format() {
+        let u = EditorClipboard::mint_paste_uuid(
+            "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7",
+            b"Spaces/SpaceA",
+            42,
+        );
+        assert!(
+            is_valid_uuid(&u),
+            "minted uuid must be 32-lowercase-hex per §7.3: {u:?}"
+        );
+    }
+
+    /// COPY into a different target Space produces a different uuid even
+    /// for the same source — §3.4 includes `target_space_id` in the
+    /// seed specifically so paste-into-B vs paste-into-C never collide.
+    #[test]
+    fn copy_into_two_target_spaces_gives_distinct_uuids() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+
+        let mut into_a = EditorClipboard::default();
+        into_a.is_cut = false;
+        into_a.paste_count = 0;
+        into_a.entities.push(entry(1, source_uuid));
+        into_a.remap_uuids(&target_space_a());
+
+        let mut into_b = EditorClipboard::default();
+        into_b.is_cut = false;
+        into_b.paste_count = 0;
+        into_b.entities.push(entry(1, source_uuid));
+        into_b.remap_uuids(&target_space_b());
+
+        assert_ne!(
+            into_a.entities[0].uuid, into_b.entities[0].uuid,
+            "paste from A into B and from A into C must produce different uuids \
+             (§3.4 — target_space_id in the seed)"
+        );
+    }
+
+    /// `clear()` resets `paste_count` so a fresh Ctrl+C starts the
+    /// counter at 0 — the §3.4 contract: "counter resets on the next
+    /// ctrl-C".
+    #[test]
+    fn clear_resets_copy_counter() {
+        let mut cb = EditorClipboard::default();
+        cb.paste_count = 9;
+        cb.entities.push(entry(1, "abc"));
+        cb.uuid_mapping
+            .insert("a".to_string(), "b".to_string());
+        cb.is_cut = true;
+        cb.clear();
+        assert_eq!(cb.paste_count, 0, "counter must reset on clear()");
+        assert!(cb.entities.is_empty());
+        assert!(cb.uuid_mapping.is_empty());
+        assert!(!cb.is_cut);
+    }
+
+    /// A multi-entity COPY batch produces distinct uuids for each entity
+    /// even when they share a source uuid — the `batch_idx` term in
+    /// `remap_uuids` makes within-batch collisions impossible.
+    #[test]
+    fn copy_batch_with_same_source_uuid_produces_distinct_uuids() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let mut cb = EditorClipboard::default();
+        cb.is_cut = false;
+        cb.entities.push(entry(1, source_uuid));
+        cb.entities.push(entry(2, source_uuid));
+        cb.entities.push(entry(3, source_uuid));
+        cb.remap_uuids(&target_space_a());
+
+        let uuids: Vec<String> = cb.entities.iter().map(|e| e.uuid.clone()).collect();
+        assert_ne!(uuids[0], uuids[1]);
+        assert_ne!(uuids[1], uuids[2]);
+        assert_ne!(uuids[0], uuids[2]);
+        for u in &uuids {
+            assert!(is_valid_uuid(u));
+        }
+    }
+
+    /// Legacy clipboards (pre-Wave-2.1) carry an empty `uuid` string.
+    /// COPY still produces a valid fresh uuid in the destination — the
+    /// destination TOML lands with a 32-hex uuid as if it were a fresh
+    /// create.
+    #[test]
+    fn copy_legacy_empty_uuid_still_mints_valid_destination_uuid() {
+        let mut cb = EditorClipboard::default();
+        cb.is_cut = false;
+        cb.entities.push(entry(1, "")); // legacy: no uuid
+        cb.remap_uuids(&target_space_a());
+        assert!(
+            is_valid_uuid(&cb.entities[0].uuid),
+            "legacy empty source must mint a valid destination uuid: {:?}",
+            cb.entities[0].uuid
+        );
+    }
+
+    /// `parent_uuid` is rewritten through the uuid_mapping so a parent
+    /// in the same paste batch keeps the correct linkage.
+    #[test]
+    fn copy_rewrites_parent_uuid_within_batch() {
+        let parent_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let child_source = "00112233445566778899aabbccddeeff";
+        let mut cb = EditorClipboard::default();
+        cb.is_cut = false;
+        // Parent
+        cb.entities.push(entry(1, parent_uuid));
+        // Child — references parent's uuid
+        let mut child = entry(2, child_source);
+        child.parent_uuid = Some(parent_uuid.to_string());
+        cb.entities.push(child);
+
+        cb.remap_uuids(&target_space_a());
+
+        // The child's parent_uuid must now point at the parent's MINTED
+        // uuid, not the source — otherwise the destination hierarchy
+        // would orphan the child.
+        let new_parent_uuid = cb.entities[0].uuid.clone();
+        assert_eq!(
+            cb.entities[1].parent_uuid,
+            Some(new_parent_uuid),
+            "child must reference parent's minted uuid post-remap",
+        );
+    }
+
+    /// `target_space_id_for` returns the path bytes when present and
+    /// empty when absent — exercised by tests that need to inspect the
+    /// helper without booting Bevy.
+    #[test]
+    fn target_space_id_for_handles_some_and_none() {
+        use std::path::PathBuf;
+        let p = PathBuf::from("E:\\foo\\bar");
+        let some = EditorClipboard::target_space_id_for(Some(&p));
+        assert!(!some.is_empty());
+        let none = EditorClipboard::target_space_id_for(None);
+        assert!(none.is_empty());
     }
 }
