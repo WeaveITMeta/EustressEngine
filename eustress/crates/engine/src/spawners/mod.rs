@@ -31,9 +31,12 @@
 //! Spec: `docs/architecture/CLASS_REGISTRY.md` §6 (plugin pattern) + §8
 //! (per-group module checklist).
 
+pub mod animation;       // Wave 5.D — Animator, KeyframeSequence
 pub mod audio_vfx;
 pub mod constraints;
 pub mod containers;
 pub mod gui_containers;
 pub mod gui_leaves;
 pub mod lights;
+pub mod networking;      // Wave 5.B — RemoteEvent/Function, BindableEvent/Function
+pub mod scripting;       // Wave 5.C — SoulScript, Luau*, WorkshopConversation

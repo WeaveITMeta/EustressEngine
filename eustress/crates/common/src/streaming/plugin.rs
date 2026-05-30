@@ -34,6 +34,9 @@ use super::chunk_grid::SpatialChunkGrid;
 use super::dirty_flusher::DirtyBitFlusher;
 use super::instance_index::InstanceIndex;
 use super::radius_gate::{GateDecision, GateStats, HysteresisRadiusGate};
+use super::render_cascade::{
+    sys_apply_tier_change, sys_render_cascade, RenderCascadeConfig, RenderCascadeFrame,
+};
 // `WatchEvent` is referenced via the fully-qualified path in
 // `sys_apply_file_changed` below, so no `use` needed here.
 use super::types::{InstanceBin, InstanceId, InstanceRecord, StreamingConfig, Tier};
@@ -177,6 +180,13 @@ impl Plugin for StreamingPlugin {
         app.add_message::<InstanceReloaded>();
         app.add_message::<InstancePromoted>();
         app.add_message::<InstanceDemoted>();
+
+        // Render-cascade resources (RENDER_CASCADE.md §3). Both are
+        // `init_resource` so the LOOP-5 drain-signature assertion (which
+        // matches every system `Res`/`ResMut` to an `init_resource` in the
+        // same plugin) is satisfied for `sys_render_cascade`.
+        app.init_resource::<RenderCascadeConfig>();
+        app.init_resource::<RenderCascadeFrame>();
         // `FileChanged` is registered by the engine's space plugin —
         // we read it here as a subscriber. If the engine plugin
         // hasn't run yet (e.g. headless test harness), Bevy auto-
@@ -199,6 +209,22 @@ impl Plugin for StreamingPlugin {
             sys_sync_active_transforms,
             sys_rebuild_index,
         ).chain());
+
+        // Render cascade (RENDER_CASCADE.md §3/§4 — Wave 3 CORE).
+        //   sys_render_cascade   — distance-band tier switcher (16-frame
+        //                          cadence + hysteresis + LRU caps)
+        //   sys_apply_tier_change — Changed<RenderTier> reactor (Visibility
+        //                          only; physics OFF LIMITS — LOOP 3)
+        // Chained AFTER `sys_radius_gate` so we only ever tier an entity the
+        // streamer has already spawned (constraint C1 / Risk R10). The
+        // switcher runs before the reactor so a tier assigned this frame is
+        // applied the same frame.
+        app.add_systems(
+            Update,
+            (sys_render_cascade, sys_apply_tier_change)
+                .chain()
+                .after(sys_radius_gate),
+        );
     }
 }
 

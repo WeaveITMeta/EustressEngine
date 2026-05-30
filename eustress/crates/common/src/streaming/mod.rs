@@ -42,6 +42,7 @@ pub mod dirty_flusher;
 pub mod toml_watcher;
 pub mod instance_index;
 pub mod plugin;
+pub mod render_cascade;
 
 // Re-export primary types for ergonomic use
 pub use types::{InstanceId, InstanceBin, InstanceRecord, ChunkCoord, StreamingConfig, Tier};
@@ -60,3 +61,8 @@ pub use dirty_flusher::DirtyBitFlusher;
 pub use toml_watcher::{WatchEvent, classify_file_change, apply_watch_event};
 pub use instance_index::InstanceIndex;
 pub use plugin::StreamingPlugin;
+// Render cascade (RENDER_CASCADE.md §2/§3/§4 — Wave 3 CORE).
+pub use render_cascade::{
+    compute_tier_with_hysteresis, enforce_caps, sys_apply_tier_change, sys_render_cascade,
+    MeshLodTier, RenderCascadeConfig, RenderCascadeFrame, RenderTier, TierCaps,
+};
