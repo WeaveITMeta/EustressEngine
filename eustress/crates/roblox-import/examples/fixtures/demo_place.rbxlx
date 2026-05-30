@@ -1,0 +1,106 @@
+<roblox version="4">
+  <Item class="Workspace" referent="RBX0000000000000001">
+    <Properties>
+      <string name="Name">Workspace</string>
+    </Properties>
+    <Item class="Part" referent="RBX0000000000000002">
+      <Properties>
+        <string name="Name">RedBlock</string>
+        <bool name="Anchored">true</bool>
+        <bool name="CanCollide">true</bool>
+        <CoordinateFrame name="CFrame">
+          <X>10</X><Y>5</Y><Z>-3</Z>
+          <R00>1</R00><R01>0</R01><R02>0</R02>
+          <R10>0</R10><R11>1</R11><R12>0</R12>
+          <R20>0</R20><R21>0</R21><R22>1</R22>
+        </CoordinateFrame>
+        <Vector3 name="size"><X>4</X><Y>1</Y><Z>2</Z></Vector3>
+        <Color3uint8 name="Color3uint8">4290772992</Color3uint8>
+        <float name="Transparency">0</float>
+        <token name="Material">256</token>
+      </Properties>
+      <Item class="PointLight" referent="RBX0000000000000003">
+        <Properties>
+          <string name="Name">BlockGlow</string>
+          <Color3 name="Color">
+            <R>1</R><G>0.85</G><B>0.6</B>
+          </Color3>
+          <float name="Brightness">2.5</float>
+          <float name="Range">18</float>
+          <bool name="Shadows">true</bool>
+        </Properties>
+      </Item>
+    </Item>
+    <Item class="Folder" referent="RBX0000000000000004">
+      <Properties>
+        <string name="Name">Props</string>
+      </Properties>
+      <Item class="Part" referent="RBX0000000000000005">
+        <Properties>
+          <string name="Name">FloorTile</string>
+          <bool name="Anchored">true</bool>
+          <CoordinateFrame name="CFrame">
+            <X>0</X><Y>0</Y><Z>0</Z>
+            <R00>1</R00><R01>0</R01><R02>0</R02>
+            <R10>0</R10><R11>1</R11><R12>0</R12>
+            <R20>0</R20><R21>0</R21><R22>1</R22>
+          </CoordinateFrame>
+          <Vector3 name="size"><X>20</X><Y>1</Y><Z>20</Z></Vector3>
+          <Color3uint8 name="Color3uint8">4288716960</Color3uint8>
+        </Properties>
+      </Item>
+    </Item>
+    <Item class="SpawnLocation" referent="RBX0000000000000006">
+      <Properties>
+        <string name="Name">SpawnPad</string>
+        <bool name="Anchored">true</bool>
+        <CoordinateFrame name="CFrame">
+          <X>0</X><Y>2</Y><Z>0</Z>
+          <R00>1</R00><R01>0</R01><R02>0</R02>
+          <R10>0</R10><R11>1</R11><R12>0</R12>
+          <R20>0</R20><R21>0</R21><R22>1</R22>
+        </CoordinateFrame>
+        <Vector3 name="size"><X>6</X><Y>1</Y><Z>6</Z></Vector3>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="Lighting" referent="RBX0000000000000007">
+    <Properties>
+      <string name="Name">Lighting</string>
+      <float name="Brightness">2</float>
+      <token name="Technology">2</token>
+    </Properties>
+    <Item class="Atmosphere" referent="RBX0000000000000008">
+      <Properties>
+        <string name="Name">Atmosphere</string>
+        <float name="Density">0.395</float>
+        <float name="Haze">2</float>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="RBX0000000000000009">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="RBX000000000000000A">
+      <Properties>
+        <string name="Name">HelloWorld</string>
+        <ProtectedString name="Source">print("Hello from imported Roblox script!")
+local part = workspace:WaitForChild("RedBlock")
+part.Touched:Connect(function(hit)
+    print(hit.Name .. " touched the block")
+end)</ProtectedString>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="ReplicatedStorage" referent="RBX000000000000000B">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="RemoteEvent" referent="RBX000000000000000C">
+      <Properties>
+        <string name="Name">ScoreUpdate</string>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>

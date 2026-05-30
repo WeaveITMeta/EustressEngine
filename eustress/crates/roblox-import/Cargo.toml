@@ -50,6 +50,7 @@ rbx_dom_weak           = "2"
 rbx_binary             = "0.7"
 rbx_xml                = "0.13"
 rbx_reflection_database = "0.2"
+rbx_reflection         = "4"   # ClassDescriptor / ClassTag — for the class-coverage audit + future property-schema validation
 
 [dev-dependencies]
 # Fixture diffing for golden tests
