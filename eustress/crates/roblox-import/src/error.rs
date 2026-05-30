@@ -40,4 +40,21 @@ pub enum ImportError {
         /// Stringified inner error.
         source_msg: String,
     },
+
+    /// The walker attempted to route into one of the Eustress-only
+    /// folders (`SoulService/`, `AdornmentService/`, `_retired_layers/`).
+    /// Should never happen if the router's deny-list is honored.
+    #[error("attempt to write into Eustress-only folder {0}")]
+    OffLimits(PathBuf),
+
+    /// Service router could not resolve a service name. Retained for
+    /// catastrophic cases (deny-listed names). Most "unknown" services
+    /// route to `_imported/<ServiceName>/` rather than failing.
+    #[error("service router could not resolve service {service}: {reason}")]
+    ServiceRouter {
+        /// The Roblox service name that failed to resolve.
+        service: String,
+        /// Human-readable reason.
+        reason: String,
+    },
 }

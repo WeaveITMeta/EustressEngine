@@ -20,9 +20,11 @@ edition = "2021"
 description = "Roblox place file (.rbxl/.rbxlx/.rbxm/.rbxmx) → Eustress instance model"
 
 [dependencies]
-# In-tree deps (live ones — these are real and will compile once the crate
-# is added to the workspace).
-eustress-common = { path = "../common" }
+# In-tree deps. The `luau` feature pulls in compat::ClassMapping /
+# PropertyMapping / ScriptTransformer — the curated Roblox↔Eustress
+# class + property + script translation tables the importer delegates to
+# (per ROBLOX_IMPORT_SPEC.md §5/§6, reuse not duplicate).
+eustress-common = { path = "../common", features = ["luau"] }
 
 # Workspace-shared utilities
 serde       = { workspace = true }
@@ -36,6 +38,9 @@ tracing     = "0.1"
 
 # Hex encoding (for uuid output)
 hex         = "0.4"
+
+# TOML emission for [properties.extras] routing + report serialization
+toml        = "0.8"
 
 # =============================================================================
 # Roblox file-format parsers — all MIT, all pure Rust, all rojo-rbx.
