@@ -545,6 +545,64 @@ impl WorldDb for FjallWorldDb {
         Ok(out)
     }
 
+    fn iter_instance_cores_in_region(
+        &self,
+        cx: (u32, u32),
+        cy: (u32, u32),
+        cz: (u32, u32),
+    ) -> Result<Vec<(EntityId, Vec<u8>)>> {
+        // Guard: a bad camera value must never trigger a multi-million-cell
+        // sweep. 4096 cells ≈ a 16×16×16 box at 256-unit cells (≈4 km span).
+        let nx = u64::from(cx.1.saturating_sub(cx.0)) + 1;
+        let ny = u64::from(cy.1.saturating_sub(cy.0)) + 1;
+        let nz = u64::from(cz.1.saturating_sub(cz.0)) + 1;
+        let cell_count = nx.saturating_mul(ny).saturating_mul(nz);
+        if cell_count > 4096 {
+            return Err(crate::error::Error::Other(format!(
+                "iter_instance_cores_in_region: cell box too large ({cell_count} > 4096)"
+            )));
+        }
+        // Per-cell prefix scans, unioned. (A single Morton range over a 3D
+        // box would pull a huge out-of-box superset — Z-order stitches
+        // between rows — so we scan each cell's exact prefix instead.)
+        let morton = crate::keys::MortonKeyEncoder::default();
+        let mut out = Vec::new();
+        for x in cx.0..=cx.1 {
+            for y in cy.0..=cy.1 {
+                for z in cz.0..=cz.1 {
+                    let prefix = morton.cell_prefix(x, y, z);
+                    for res in self.entities.prefix(prefix) {
+                        let (key, value) = res?;
+                        if let Ok((entity, component)) = morton.decode_component(&key) {
+                            if component == ComponentTypeId::INSTANCE_CORE {
+                                out.push((entity, value.to_vec()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn count_instance_cores_capped(&self, cap: usize) -> Result<usize> {
+        let morton = crate::keys::MortonKeyEncoder::default();
+        let prefix = morton.component_prefix(ComponentTypeId::INSTANCE_CORE);
+        let mut n = 0usize;
+        for res in self.entities.prefix(prefix) {
+            let (key, _value) = res?;
+            if let Ok((_e, component)) = morton.decode_component(&key) {
+                if component == ComponentTypeId::INSTANCE_CORE {
+                    n += 1;
+                    if n >= cap {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(n)
+    }
+
     // ── IDENTITY.md Wave 2.1 ─────────────────────────────────────────
 
     fn put_entity_core_by_uuid(&self, uuid: &[u8; 16], core_bytes: &[u8]) -> Result<()> {

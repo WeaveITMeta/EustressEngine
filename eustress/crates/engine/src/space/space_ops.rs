@@ -774,6 +774,24 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         *mat_registry = crate::space::material_loader::MaterialRegistry::default();
     }
 
+    // Reset the camera-locality streaming residency manager. Its state —
+    // the `enabled` flag, the resident-cell set, and CRITICALLY the
+    // `pending_cores` buffer of raw core bytes already scanned from the
+    // OUTGOING Space's `entities` partition — must NOT carry into the new
+    // Space. Without this, the next `sys_residency_load` tick drains the
+    // previous Space's buffered cores and spawns them here: cross-Space
+    // part bleed (a part/model made in Space A appears in Space B). Stale
+    // `resident_cells` would also make the new Space's own cells look
+    // already-loaded, so they'd never spawn. The incoming Space's boot-load
+    // re-decides `enabled` and the manager reloads cells from the correct
+    // (now-switched) DB.
+    #[cfg(feature = "world-db")]
+    if let Some(mut residency) =
+        world.get_resource_mut::<crate::space::residency::ResidencyState>()
+    {
+        *residency = crate::space::residency::ResidencyState::default();
+    }
+
     // Bump the load generation and clear any in-flight deferred queue.
     // Any load_deferred_services frame that already popped an entry will
     // see generation != gen.0 on its NEXT iteration and self-discard.

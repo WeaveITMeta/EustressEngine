@@ -240,6 +240,13 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::AiCameraCapture => protocol::handlers::ai_camera_capture(world, &pending.request),
             MethodName::ToolsList => protocol::handlers::tools_list(world, &pending.request),
             MethodName::ToolsCall => protocol::handlers::tools_call(world, &pending.request),
+            MethodName::EntityCreate => protocol::handlers::entity_create(world, &pending.request),
+            MethodName::EntityRead => protocol::handlers::entity_read(world, &pending.request),
+            MethodName::EntityUpdate => protocol::handlers::entity_update(world, &pending.request),
+            MethodName::EntityDelete => protocol::handlers::entity_delete(world, &pending.request),
+            MethodName::EntityFind => protocol::handlers::entity_find(world, &pending.request),
+            MethodName::EntityAddTag => protocol::handlers::entity_add_tag(world, &pending.request),
+            MethodName::EntityRemoveTag => protocol::handlers::entity_remove_tag(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.

@@ -323,6 +323,32 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Collect every `INSTANCE_CORE` whose Morton cell lies in the
+    /// inclusive 3D cell box `[cx.0..=cx.1] × [cy.0..=cy.1] × [cz.0..=cz.1]`.
+    /// Cell coords are the 21-bit values produced by `world_to_cell` at
+    /// chunk_size 256.0 — the SAME encoding `put_instance_core` uses — so a
+    /// caller enumerates the camera's cell box and gets exactly the cores in
+    /// that spatial neighbourhood. The read side of camera-locality
+    /// streaming (boot-load reads the whole world; this reads a region).
+    fn iter_instance_cores_in_region(
+        &self,
+        cx: (u32, u32),
+        cy: (u32, u32),
+        cz: (u32, u32),
+    ) -> Result<Vec<(EntityId, Vec<u8>)>> {
+        let _ = (cx, cy, cz);
+        Ok(Vec::new())
+    }
+
+    /// Count `INSTANCE_CORE` records, stopping early once `cap` is reached;
+    /// returns `min(actual, cap)`. Lets the engine choose "boot-load all"
+    /// (small Space) vs "stream by camera" (large Space) without
+    /// materializing millions of cores just to size the Space.
+    fn count_instance_cores_capped(&self, cap: usize) -> Result<usize> {
+        let _ = cap;
+        Ok(0)
+    }
+
     // ── UUID-keyed primary store — IDENTITY.md Wave 2.1 ──────────────
     //
     // The `entities_uuid` partition keys each entity's `ArchInstanceCore`

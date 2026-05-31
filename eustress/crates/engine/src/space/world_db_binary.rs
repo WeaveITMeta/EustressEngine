@@ -112,8 +112,9 @@ pub struct BinaryEcsLoadLatch(pub Option<PathBuf>);
 /// Build an `InstanceDefinition` from an entity's live components, then
 /// bake it to an `ArchInstanceCore` via the tested
 /// [`arch_instance::instance_to_arch`]. Used by the save mirror so the
-/// bytes match what the load path produced.
-fn core_from_components(
+/// bytes match what the load path produced — and by the bridge
+/// `entity.read` handler to project a RESIDENT entity's live state.
+pub(crate) fn core_from_components(
     instance: &Instance,
     transform: &Transform,
     base: Option<&BasePart>,
@@ -194,6 +195,241 @@ fn synthetic_path(space_root: &Path, class_name: &str, stored_id: u64) -> PathBu
         .join("_instance.toml")
 }
 
+/// Create a brand-new binary-ECS entity at runtime — the create-twin of
+/// [`load_binary_ecs_instances`]'s per-record body, and the heart of the
+/// "Insert defaults to the scalable representation" flip
+/// (SCALING_ARCHITECTURE.md §0.5 C1).
+///
+/// Given a freshly-built [`InstanceDefinition`] (the same parse model the
+/// disk path uses), this:
+/// 1. Refuses anything the router keeps on the filesystem (custom mesh,
+///    file-natured class) — returns `None` so the caller takes its TOML
+///    path. This is the V-Cell custom-mesh guard, enforced at create.
+/// 2. Mints the persistent identity: a 32-hex `uuid` (or honours one
+///    already on the def) and derives the stable `stored_id` (Morton key)
+///    from its first 8 bytes.
+/// 3. Bakes to `ArchInstanceCore` and back, so the spawned entity is
+///    BYTE-IDENTICAL to what the boot-load reconstructs from the persisted
+///    bytes (create == load — no visual drift across a reload).
+/// 4. Spawns via the SHARED [`spawn_instance`] + inserts the
+///    [`BinaryEcsInstance`] marker and `ChildOf(workspace)` (exactly the
+///    boot-load shape: no `InstanceFile`/`LoadedFromFile`, no disk TOML).
+/// 5. Persists all five stores via [`active_db::create_binary_instance`]
+///    (Morton core + uuid primary + path/uuid/class indices) so the new
+///    part is immediately findable by uuid / path / class.
+///
+/// Returns the spawned `Entity` (and its `stored_id` + `uuid` for undo
+/// recording) or `None` when routed to the filesystem / no DB active /
+/// encode failed.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_binary_instance(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    material_registry: &mut MaterialRegistry,
+    mesh_cache: &mut PrimitiveMeshCache,
+    space_root: &Path,
+    workspace: Entity,
+    mut def: InstanceDefinition,
+) -> Option<SpawnedBinary> {
+    use eustress_common::instance_create::{
+        fresh_uuid_for_create, is_valid_uuid, uuid_hex_to_bytes,
+    };
+
+    // 1. Router guard — never binarise a custom-mesh / file-natured class.
+    let mesh = def.asset.as_ref().map(|a| a.mesh.as_str());
+    if super::representation::representation_for_part(&def.metadata.class_name, mesh, None)
+        != super::representation::Representation::BinaryEcs
+    {
+        return None;
+    }
+
+    // 2. Mint identity (honour a pre-set valid uuid; else fresh).
+    let uuid_hex = match def.metadata.uuid.as_deref() {
+        Some(u) if is_valid_uuid(u) => u.to_string(),
+        _ => fresh_uuid_for_create(),
+    };
+    let uuid_bytes = uuid_hex_to_bytes(&uuid_hex)?;
+    def.metadata.uuid = Some(uuid_hex.clone());
+    // Stable Morton-key id derived from the identity uuid (no separate
+    // counter; collision-resistant because the uuid is blake3-random).
+    let stored_id = u64::from_be_bytes(
+        uuid_bytes[0..8]
+            .try_into()
+            .expect("uuid_bytes is 16 long; [0..8] is 8"),
+    );
+
+    // 3. Bake → encode → bake-back for create==load parity.
+    let arch = arch_instance::instance_to_arch(&def);
+    let encoded = match encode_instance_core(&arch) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                target: "eustress_engine::world_db",
+                error = %e, stored_id,
+                "spawn_binary_instance: encode failed; not creating"
+            );
+            return None;
+        }
+    };
+    let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
+    let rel = synthetic
+        .strip_prefix(space_root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| {
+            format!(
+                "Workspace/__bin_{}_{stored_id:016x}/_instance.toml",
+                arch.class_name
+            )
+        });
+    let def_for_spawn = arch_instance::arch_to_instance(&arch);
+
+    // 4. Spawn (shared path) + marker + parent under Workspace.
+    let entity = spawn_instance(
+        commands,
+        asset_server,
+        materials,
+        material_registry,
+        mesh_cache,
+        synthetic,
+        def_for_spawn,
+    );
+    let marker = BinaryEcsInstance::from_core(stored_id, &arch);
+    commands.entity(entity).insert((marker, ChildOf(workspace)));
+
+    // 5. Persist all five stores (best-effort; warns on partial write).
+    active_db::create_binary_instance(stored_id, &uuid_bytes, &arch.class_name, arch.t, &encoded, &rel);
+
+    Some(SpawnedBinary {
+        entity,
+        stored_id,
+        uuid: uuid_hex,
+        pos: arch.t,
+        class_name: arch.class_name,
+        synthetic_rel: rel,
+        def,
+    })
+}
+
+/// Outcome of [`spawn_binary_instance`] — the live entity plus the
+/// identity needed to undo / delete the create (all five stores keyed by
+/// these). `def` carries the uuid, so it can be serialized into the undo
+/// action and re-spawned (same identity) on redo.
+pub struct SpawnedBinary {
+    pub entity: Entity,
+    pub stored_id: u64,
+    pub uuid: String,
+    pub pos: [f32; 3],
+    pub class_name: String,
+    pub synthetic_rel: String,
+    pub def: InstanceDefinition,
+}
+
+/// Redo queue for binary creates: serialized `InstanceDefinition`s (each
+/// carrying its uuid) awaiting re-spawn. The undo system's redo arm pushes
+/// here; [`drain_pending_binary_recreate`] re-spawns next frame with proper
+/// system params. Keeping the spawn in a real system avoids the
+/// `&mut World` vs `Commands`+`ResMut` borrow conflict.
+#[derive(Resource, Default)]
+pub struct PendingBinaryRecreate(pub Vec<String>);
+
+/// Drain [`PendingBinaryRecreate`] (redo of a binary create): deserialize
+/// each stored def and re-spawn it via [`spawn_binary_instance`]. Because
+/// the def keeps its uuid, the re-created entity gets the SAME `stored_id`
+/// and overwrites the same five stores — identity is preserved across
+/// undo→redo. If services aren't ready yet, the items are left queued.
+#[allow(clippy::too_many_arguments)]
+fn drain_pending_binary_recreate(
+    mut pending: ResMut<PendingBinaryRecreate>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_registry: ResMut<MaterialRegistry>,
+    mut mesh_cache: ResMut<PrimitiveMeshCache>,
+    space_root: Res<SpaceRoot>,
+    services: Query<(Entity, &ServiceComponent)>,
+) {
+    if pending.0.is_empty() {
+        return;
+    }
+    let Some(workspace) = services
+        .iter()
+        .find(|(_, s)| s.class_name == "Workspace")
+        .map(|(e, _)| e)
+    else {
+        return; // services not spawned yet — keep the queue, retry next frame
+    };
+    let jobs: Vec<String> = pending.0.drain(..).collect();
+    for def_json in jobs {
+        match serde_json::from_str::<InstanceDefinition>(&def_json) {
+            Ok(def) => {
+                spawn_binary_instance(
+                    &mut commands,
+                    &asset_server,
+                    &mut materials,
+                    &mut material_registry,
+                    &mut mesh_cache,
+                    &space_root.0,
+                    workspace,
+                    def,
+                );
+            }
+            Err(e) => {
+                warn!(
+                    target: "eustress_engine::world_db",
+                    error = %e,
+                    "redo recreate: failed to deserialize stored def; dropping"
+                );
+            }
+        }
+    }
+}
+
+/// Spawn ONE binary-ECS core into the live world — the shared per-record
+/// body used by BOTH the boot-load (small Spaces) and the streaming
+/// residency manager (large Spaces). One place guarantees a streamed
+/// entity is byte-identical to a boot-loaded / created one, and the mirror
+/// persists either's edits unchanged. Returns the spawned `Entity`, or
+/// `None` if the core failed to decode.
+pub(crate) fn spawn_binary_core(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    materials: &mut Assets<StandardMaterial>,
+    material_registry: &mut MaterialRegistry,
+    mesh_cache: &mut PrimitiveMeshCache,
+    space_root: &Path,
+    workspace: Entity,
+    stored_id: u64,
+    bytes: &[u8],
+) -> Option<Entity> {
+    let arch = match decode_instance_core(bytes) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(
+                target: "eustress_engine::world_db",
+                error = %e, stored_id,
+                "binary-ECS spawn: decode failed; skipping record"
+            );
+            return None;
+        }
+    };
+    let marker = BinaryEcsInstance::from_core(stored_id, &arch);
+    let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
+    let def = arch_instance::arch_to_instance(&arch);
+    let entity = spawn_instance(
+        commands,
+        asset_server,
+        materials,
+        material_registry,
+        mesh_cache,
+        synthetic,
+        def,
+    );
+    commands.entity(entity).insert((marker, ChildOf(workspace)));
+    Some(entity)
+}
+
 /// Boot-load every binary-ECS core in the active Space into the ECS, once
 /// per Space, after the file loader has spawned the services.
 #[allow(clippy::too_many_arguments)]
@@ -207,6 +443,13 @@ fn load_binary_ecs_instances(
     mut material_registry: ResMut<MaterialRegistry>,
     mut mesh_cache: ResMut<PrimitiveMeshCache>,
     services: Query<(Entity, &ServiceComponent)>,
+    // Already-live binary entities (e.g. created by `spawn_binary_instance`
+    // before this one-shot boot-load ran for the Space). We skip their
+    // stored_ids so an early runtime create is never double-spawned.
+    existing: Query<&BinaryEcsInstance>,
+    // Phase 2: decide boot-load-all (small Space) vs camera streaming (large).
+    mut residency: ResMut<super::residency::ResidencyState>,
+    residency_cfg: Res<super::residency::ResidencyConfig>,
 ) {
     // Already loaded for this Space.
     if latch.0.as_deref() == Some(space_root.0.as_path()) {
@@ -236,38 +479,56 @@ fn load_binary_ecs_instances(
         return;
     }
 
+    // Phase 2 threshold: a LARGE Space is NOT boot-loaded in full — the
+    // camera-locality residency manager streams cells in/out so the live
+    // ECS set stays bounded. A small Space keeps today's spawn-everything
+    // behavior (all content present, zero streaming overhead). The probe
+    // stops counting at threshold+1, so a 10M Space pays only a bounded
+    // scan here, not a full materialization.
+    let cap = residency_cfg.big_space_threshold.saturating_add(1);
+    if active_db::count_instance_cores_capped(cap) > residency_cfg.big_space_threshold {
+        residency.enabled = true;
+        residency.last_camera_cell = None; // first residency tick loads the camera box
+        info!(
+            target: "eustress_engine::world_db",
+            threshold = residency_cfg.big_space_threshold,
+            space = %space_root.0.display(),
+            "binary-ECS: large Space — STREAMING by camera (residency manager), \
+             not boot-loading all cores"
+        );
+        return;
+    }
+    residency.enabled = false; // small Space: boot-load all; residency idle
+
     let cores = active_db::iter_instance_cores();
     if cores.is_empty() {
         return;
     }
 
+    // stored_ids already live this session (runtime-created before boot-load).
+    let existing_ids: std::collections::HashSet<u64> =
+        existing.iter().map(|b| b.stored_id).collect();
+
     let mut spawned = 0usize;
     for (stored_id, bytes) in cores {
-        let arch = match decode_instance_core(&bytes) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(
-                    target: "eustress_engine::world_db",
-                    error = %e, stored_id,
-                    "binary-ECS load: decode failed; skipping record"
-                );
-                continue;
-            }
-        };
-        let marker = BinaryEcsInstance::from_core(stored_id, &arch);
-        let synthetic = synthetic_path(&space_root.0, &arch.class_name, stored_id);
-        let def = arch_instance::arch_to_instance(&arch);
-        let entity = spawn_instance(
+        if existing_ids.contains(&stored_id) {
+            continue;
+        }
+        if spawn_binary_core(
             &mut commands,
             &asset_server,
             &mut materials,
             &mut material_registry,
             &mut mesh_cache,
-            synthetic,
-            def,
-        );
-        commands.entity(entity).insert((marker, ChildOf(workspace)));
-        spawned += 1;
+            &space_root.0,
+            workspace,
+            stored_id,
+            &bytes,
+        )
+        .is_some()
+        {
+            spawned += 1;
+        }
     }
     info!(
         target: "eustress_engine::world_db",
@@ -284,20 +545,41 @@ fn load_binary_ecs_instances(
 #[allow(clippy::type_complexity)]
 fn mirror_binary_ecs_changes(
     load_in_progress: Res<LoadInProgress>,
+    // Play mode is ephemeral: physics moves bodies and scripts spawn parts
+    // that must NOT persist. Bail entirely while playing so a `Stop` always
+    // restores the pre-play Fjall state (no leaked / mutated cores).
+    play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
     mut q: Query<
         (
-            &Instance,
+            Ref<Instance>,
             Ref<Transform>,
             Option<Ref<BasePart>>,
             Option<Ref<Tags>>,
             Option<&crate::spawn::MeshSource>,
             &mut BinaryEcsInstance,
         ),
-        Or<(Changed<Transform>, Changed<BasePart>, Changed<Tags>)>,
+        (
+            // `Changed<Instance>` catches renames (the display name lives on
+            // `Instance.name`, which `core_from_components` persists).
+            Or<(
+                Changed<Transform>,
+                Changed<BasePart>,
+                Changed<Tags>,
+                Changed<Instance>,
+            )>,
+            // Parts spawned during play are ephemeral — never persisted, so
+            // there is nothing to clean up on Stop.
+            Without<crate::play_mode::SpawnedDuringPlayMode>,
+        ),
     >,
 ) {
     if load_in_progress.active {
         return;
+    }
+    if let Some(state) = play_mode_state {
+        if *state.get() != crate::play_mode::PlayModeState::Editing {
+            return;
+        }
     }
     if !active_db::is_active() {
         return;
@@ -325,10 +607,14 @@ fn mirror_binary_ecs_changes(
         // data already lives in the DB (we loaded it FROM there), so
         // persisting again would be a redundant write spike across the
         // whole grid. A genuine later edit has is_changed && !is_added.
-        let props_changed = base
-            .as_ref()
-            .map(|b| b.is_changed() && !b.is_added())
-            .unwrap_or(false)
+        // A rename (or any other Instance edit) is a genuine change; the
+        // `!is_added()` guard skips the post-spawn frame like BasePart/Tags.
+        let inst_changed = instance.is_changed() && !instance.is_added();
+        let props_changed = inst_changed
+            || base
+                .as_ref()
+                .map(|b| b.is_changed() && !b.is_added())
+                .unwrap_or(false)
             || tags
                 .as_ref()
                 .map(|t| t.is_changed() && !t.is_added())
@@ -339,7 +625,7 @@ fn mirror_binary_ecs_changes(
 
         let mesh = mesh_src.map(|m| m.path.as_str()).unwrap_or(FALLBACK_MESH);
         let core = core_from_components(
-            instance,
+            &*instance,
             &*transform,
             base.as_deref(),
             tags.as_deref(),
@@ -357,13 +643,20 @@ fn mirror_binary_ecs_changes(
             }
         };
 
-        // Morton key is position-derived: a move must delete the old key
-        // before writing the new one (a same-cell move re-writes the same
-        // key, which is harmless).
-        if new_pos != bin.morton_pos {
-            active_db::delete_instance_core(bin.stored_id, bin.morton_pos);
-        }
-        if active_db::put_instance_core(bin.stored_id, new_pos, &encoded) {
+        // Persist to BOTH cores (Morton spatial + uuid-primary) so an edit
+        // is visible to boot-load/streaming AND to find-by-uuid / the bridge
+        // `entity.read` of a non-resident entity. Morton key is position-
+        // derived, so a move deletes the old key before writing the new one
+        // (handled inside mirror_binary_core); the uuid key is position-
+        // independent (plain overwrite).
+        let uuid_bytes = eustress_common::instance_create::uuid_hex_to_bytes(&instance.uuid);
+        if active_db::mirror_binary_core(
+            bin.stored_id,
+            uuid_bytes.as_ref(),
+            bin.morton_pos,
+            new_pos,
+            &encoded,
+        ) {
             bin.morton_pos = new_pos;
             bin.last_rot = new_rot;
             bin.last_scale = new_scale;
@@ -374,10 +667,26 @@ fn mirror_binary_ecs_changes(
 /// Register the binary-ECS load + save systems. Called from
 /// [`super::world_db_plugin::WorldDbPlugin`].
 pub fn register(app: &mut App) {
-    app.init_resource::<BinaryEcsLoadLatch>().add_systems(
-        Update,
-        (load_binary_ecs_instances, mirror_binary_ecs_changes).chain(),
-    );
+    app.init_resource::<BinaryEcsLoadLatch>()
+        .init_resource::<PendingBinaryRecreate>()
+        .init_resource::<super::residency::ResidencyState>()
+        .init_resource::<super::residency::ResidencyConfig>()
+        // Order is load-bearing (Phase 2 risk R1): boot-load decides the
+        // streaming mode → residency loads camera-local cells → the mirror
+        // PERSISTS edits → residency evicts far cells. Eviction must come
+        // AFTER the mirror so an edited entity's core is written before it
+        // is despawned.
+        .add_systems(
+            Update,
+            (
+                load_binary_ecs_instances,
+                super::residency::sys_residency_load,
+                mirror_binary_ecs_changes,
+                super::residency::sys_residency_evict,
+            )
+                .chain(),
+        )
+        .add_systems(Update, drain_pending_binary_recreate);
 }
 
 // ─────────────────────────────────────────────────────────────────────

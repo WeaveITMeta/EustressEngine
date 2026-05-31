@@ -149,6 +149,25 @@ pub enum MethodName {
     /// external IDEs execute tools in-process inside the engine with
     /// full ECS access rather than re-implementing them out-of-process.
     ToolsCall,
+    // ── Binary-ECS entity CRUD (Phase 3 — AI-on-binary) ──────────────
+    // The in-engine path for MCP entity tools to locate + edit binary-ECS
+    // cores (which live in Fjall, not on disk — the MCP server can't open
+    // the single-writer DB). Each handler operates on the LIVE entity when
+    // resident, else directly on the DB core (streamed-out / large Space).
+    /// Create a binary-ECS entity (reuses `spawn_binary_instance`).
+    EntityCreate,
+    /// Read an entity as a TOML/JSON projection (the AI's editable view).
+    EntityRead,
+    /// Patch an entity's properties (position/size/color/material/…).
+    EntityUpdate,
+    /// Delete an entity (purges all DB stores; despawns if resident).
+    EntityDelete,
+    /// Find entities by uuid / path / class (identity indices ∪ live ECS).
+    EntityFind,
+    /// Add a CollectionService tag.
+    EntityAddTag,
+    /// Remove a CollectionService tag.
+    EntityRemoveTag,
     Unknown(String),
 }
 
@@ -173,6 +192,13 @@ where
         "ai_camera.capture" => MethodName::AiCameraCapture,
         "tools.list" => MethodName::ToolsList,
         "tools.call" => MethodName::ToolsCall,
+        "entity.create" => MethodName::EntityCreate,
+        "entity.read" => MethodName::EntityRead,
+        "entity.update" => MethodName::EntityUpdate,
+        "entity.delete" => MethodName::EntityDelete,
+        "entity.find" => MethodName::EntityFind,
+        "entity.add_tag" => MethodName::EntityAddTag,
+        "entity.remove_tag" => MethodName::EntityRemoveTag,
         _ => MethodName::Unknown(s),
     })
 }
@@ -192,6 +218,798 @@ pub mod handlers {
             req.id.clone(),
             serde_json::json!({ "pong": true, "engine": "eustress" }),
         )
+    }
+
+    // ── Binary-ECS entity CRUD (Phase 3 — AI-on-binary) ──────────────────
+    // The in-engine path for the MCP entity tools to locate + edit binary
+    // cores (which live in Fjall, not on disk). Each handler operates on the
+    // LIVE entity when resident, else directly on the DB core.
+    /// Parse a `[x, y, z]` JSON array param into `[f32; 3]`, else `default`.
+    /// (Named `param_vec3` to avoid colliding with the ai_camera handlers'
+    /// existing 1-arg `parse_vec3(Option<&Value>) -> Option<Vec3>`.)
+    #[cfg(feature = "world-db")]
+    fn param_vec3(params: &Value, key: &str, default: [f32; 3]) -> [f32; 3] {
+        params
+            .get(key)
+            .and_then(|v| v.as_array())
+            .and_then(|a| {
+                if a.len() >= 3 {
+                    Some([
+                        a[0].as_f64()? as f32,
+                        a[1].as_f64()? as f32,
+                        a[2].as_f64()? as f32,
+                    ])
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(default)
+    }
+
+    /// Create a binary-ECS Part — reuses `spawn_binary_instance` (the same
+    /// path the Insert menu uses), so it's persisted + identity-indexed
+    /// identically. Only bare Parts go binary; other classes return
+    /// `routed:"filesystem"` so the MCP wrapper does a disk create (matching
+    /// the Insert-menu split). Params mirror the disk `create_entity`.
+    pub fn entity_create(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.create: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            use bevy::ecs::system::SystemState;
+            use crate::space::instance_loader::{
+                AssetReference, InstanceDefinition, InstanceMetadata, InstanceProperties,
+                PrimitiveMeshCache, TransformData,
+            };
+            use crate::space::material_loader::MaterialRegistry;
+            use crate::space::service_loader::ServiceComponent;
+
+            let class = req.params.get("class").and_then(|v| v.as_str()).unwrap_or("Part");
+            if !class.eq_ignore_ascii_case("Part") {
+                return BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "routed": "filesystem",
+                        "reason": format!("class '{class}' uses the filesystem representation"),
+                    }),
+                );
+            }
+            let shape = req.params.get("shape").and_then(|v| v.as_str()).unwrap_or("block");
+            let mesh = match shape.to_ascii_lowercase().as_str() {
+                "ball" | "sphere" => "parts/ball.glb",
+                "cylinder" => "parts/cylinder.glb",
+                "wedge" => "parts/wedge.glb",
+                "cornerwedge" | "corner_wedge" => "parts/corner_wedge.glb",
+                "cone" => "parts/cone.glb",
+                _ => "parts/block.glb",
+            };
+            let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("Part").to_string();
+            let position = param_vec3(&req.params, "position", [0.0, 0.0, 0.0]);
+            let size = param_vec3(&req.params, "size", [1.0, 1.0, 1.0]);
+            let color = param_vec3(&req.params, "color", [0.639, 0.635, 0.647]);
+            let material = req
+                .params
+                .get("material")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Plastic")
+                .to_string();
+            let anchored = req.params.get("anchored").and_then(|v| v.as_bool()).unwrap_or(true);
+            let can_collide = req.params.get("can_collide").and_then(|v| v.as_bool()).unwrap_or(true);
+            let now = chrono::Utc::now().to_rfc3339();
+
+            let def = InstanceDefinition {
+                asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string() }),
+                transform: TransformData {
+                    position,
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: size,
+                },
+                properties: InstanceProperties {
+                    color: [color[0], color[1], color[2], 1.0],
+                    transparency: 0.0,
+                    anchored,
+                    can_collide,
+                    cast_shadow: true,
+                    reflectance: 0.0,
+                    material,
+                    locked: false,
+                },
+                metadata: InstanceMetadata {
+                    class_name: "Part".to_string(),
+                    archivable: true,
+                    name: Some(name),
+                    created: now.clone(),
+                    last_modified: now,
+                    created_by: None,
+                    modifications: Vec::new(),
+                    unit: None,
+                    uuid: None,
+                },
+                material: None,
+                thermodynamic: None,
+                electrochemical: None,
+                ui: None,
+                attributes: None,
+                tags: None,
+                parameters: None,
+                extra: std::collections::HashMap::new(),
+            };
+
+            enum Outcome {
+                NoWorkspace,
+                Done(Option<crate::space::world_db_binary::SpawnedBinary>),
+            }
+            let mut state: SystemState<(
+                Commands,
+                Res<AssetServer>,
+                ResMut<Assets<StandardMaterial>>,
+                ResMut<MaterialRegistry>,
+                ResMut<PrimitiveMeshCache>,
+                Res<crate::space::SpaceRoot>,
+                Query<(Entity, &ServiceComponent)>,
+            )> = SystemState::new(world);
+            let outcome = {
+                let (mut commands, asset_server, mut materials, mut material_registry, mut mesh_cache, space_root, services) =
+                    state.get_mut(world);
+                match services
+                    .iter()
+                    .find(|(_, s)| s.class_name == "Workspace")
+                    .map(|(e, _)| e)
+                {
+                    None => Outcome::NoWorkspace,
+                    Some(ws) => Outcome::Done(crate::space::world_db_binary::spawn_binary_instance(
+                        &mut commands,
+                        &asset_server,
+                        &mut materials,
+                        &mut material_registry,
+                        &mut mesh_cache,
+                        &space_root.0,
+                        ws,
+                        def,
+                    )),
+                }
+            };
+            // Flush the deferred spawn/insert commands (mandatory — else the
+            // entity is dropped). The DB write inside spawn_binary_instance is
+            // synchronous, so the core persists regardless.
+            state.apply(world);
+
+            return match outcome {
+                Outcome::NoWorkspace => BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("entity.create: Workspace service not ready"),
+                ),
+                Outcome::Done(Some(s)) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "routed": "binary",
+                        "uuid": s.uuid,
+                        "stored_id": s.stored_id,
+                        "entity": format!("{}v{}", s.entity.index(), s.entity.generation()),
+                        "position": s.pos,
+                    }),
+                ),
+                Outcome::Done(None) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "routed": "filesystem",
+                        "reason": "router kept this on the filesystem (custom mesh / file-natured)",
+                    }),
+                ),
+            };
+        }
+    }
+    /// Read an entity as an editable TOML/JSON projection — the AI's
+    /// "open the file" for a binary core. Resident-first (projects the LIVE
+    /// components, freshest), else reads the DB core by uuid (streamed-out /
+    /// large Space). Params: `uuid` (preferred) | `name`.
+    pub fn entity_read(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.read: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            use eustress_common::classes::{BasePart, Instance};
+            use eustress_common::Tags;
+
+            let uuid = req.params.get("uuid").and_then(|v| v.as_str()).map(str::to_string);
+            let name = req.params.get("name").and_then(|v| v.as_str()).map(str::to_string);
+            if uuid.is_none() && name.is_none() {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("entity.read: provide `uuid` or `name`"),
+                );
+            }
+
+            // Resident-first: project the LIVE entity (freshest — avoids the
+            // ≤1-frame mirror lag). `core_from_components` is the same bake the
+            // save mirror uses, so the projection matches the persisted core.
+            let mut q = world.query::<(
+                &Instance,
+                &Transform,
+                Option<&BasePart>,
+                Option<&Tags>,
+                Option<&crate::spawn::MeshSource>,
+            )>();
+            let resident: Option<eustress_worlddb::ArchInstanceCore> =
+                q.iter(world).find_map(|(inst, tf, bp, tags, mesh)| {
+                    let hit = match (&uuid, &name) {
+                        (Some(u), _) => &inst.uuid == u,
+                        (None, Some(n)) => &inst.name == n,
+                        _ => false,
+                    };
+                    if !hit {
+                        return None;
+                    }
+                    let mesh_path = mesh.map(|m| m.path.as_str()).unwrap_or("");
+                    Some(crate::space::world_db_binary::core_from_components(
+                        inst, tf, bp, tags, mesh_path,
+                    ))
+                });
+
+            let (resident_flag, core) = match resident {
+                Some(core) => (true, Some(core)),
+                None => {
+                    // Non-resident: read the DB core by uuid (the durable key;
+                    // a name match needs a live entity).
+                    let core = uuid.as_deref().and_then(|u| {
+                        let db = world
+                            .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+                            .and_then(|h| h.0.clone());
+                        db.and_then(|db| {
+                            crate::space::world_db_binary::find_entity_by_uuid(db.as_ref(), u)
+                                .ok()
+                                .flatten()
+                        })
+                    });
+                    (false, core)
+                }
+            };
+
+            let Some(core) = core else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params(
+                        "entity.read: no entity found (resident or in DB) for the given uuid/name",
+                    ),
+                );
+            };
+
+            let def = crate::space::arch_instance::arch_to_instance(&core);
+            let definition = serde_json::to_value(&def).unwrap_or(Value::Null);
+            let toml = toml::to_string_pretty(&def).ok();
+            return BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "uuid": def.metadata.uuid,
+                    "name": def.metadata.name,
+                    "class": def.metadata.class_name,
+                    "resident": resident_flag,
+                    "definition": definition,
+                    "toml": toml,
+                }),
+            );
+        }
+    }
+    /// Optional `[x,y,z]` patch field → `Some([f32;3])` when present+valid.
+    #[cfg(feature = "world-db")]
+    fn opt_vec3(params: &Value, key: &str) -> Option<[f32; 3]> {
+        params.get(key).and_then(|v| v.as_array()).and_then(|a| {
+            if a.len() >= 3 {
+                Some([
+                    a[0].as_f64()? as f32,
+                    a[1].as_f64()? as f32,
+                    a[2].as_f64()? as f32,
+                ])
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Patch an entity's properties. RESIDENT: mutate the live components
+    /// (Transform/BasePart) — `Changed<>` propagates to material_sync
+    /// (render) and the mirror (persists BOTH cores). NON-RESIDENT: mutate
+    /// the DB core and `mirror_binary_core` it. Patch fields (all optional):
+    /// position/size/color/material/transparency/anchored/can_collide.
+    /// (Stream-delta + undo emission is the remaining `apply_entity_patch`
+    /// polish; render + persistence already propagate via change detection.)
+    pub fn entity_update(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.update: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            use eustress_common::classes::{BasePart, Instance};
+            use eustress_common::instance_create::uuid_hex_to_bytes;
+
+            let uuid = req.params.get("uuid").and_then(|v| v.as_str()).map(str::to_string);
+            let name = req.params.get("name").and_then(|v| v.as_str()).map(str::to_string);
+            if uuid.is_none() && name.is_none() {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("entity.update: provide `uuid` or `name`"),
+                );
+            }
+            let position = opt_vec3(&req.params, "position");
+            let size = opt_vec3(&req.params, "size");
+            let color = opt_vec3(&req.params, "color");
+            let material = req.params.get("material").and_then(|v| v.as_str()).map(str::to_string);
+            let transparency = req.params.get("transparency").and_then(|v| v.as_f64()).map(|f| f as f32);
+            let anchored = req.params.get("anchored").and_then(|v| v.as_bool());
+            let can_collide = req.params.get("can_collide").and_then(|v| v.as_bool());
+
+            // Resolve a resident entity by uuid/name, noting whether it's a
+            // binary-ECS entity (the only kind the mirror persists).
+            let mut q = world.query::<(
+                Entity,
+                &Instance,
+                bevy::prelude::Has<crate::space::world_db_binary::BinaryEcsInstance>,
+            )>();
+            let target = q.iter(world).find_map(|(e, inst, is_binary)| {
+                let hit = match (&uuid, &name) {
+                    (Some(u), _) => &inst.uuid == u,
+                    (None, Some(n)) => &inst.name == n,
+                    _ => false,
+                };
+                if hit {
+                    Some((e, is_binary))
+                } else {
+                    None
+                }
+            });
+
+            // A resident FileSystem (TOML) entity isn't persisted by the
+            // binary mirror — hand it to the disk tool (the wrapper acts on
+            // `routed:"filesystem"`).
+            if let Some((_, false)) = target {
+                return BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "routed": "filesystem" }),
+                );
+            }
+            if let Some((entity, _)) = target {
+                // RESIDENT binary — mutate components (Changed → render + persist).
+                let mut ent = world.entity_mut(entity);
+                if position.is_some() || size.is_some() {
+                    if let Some(mut tf) = ent.get_mut::<Transform>() {
+                        if let Some(p) = position {
+                            tf.translation = Vec3::from_array(p);
+                        }
+                        if let Some(s) = size {
+                            tf.scale = Vec3::from_array(s);
+                        }
+                    }
+                }
+                if let Some(mut bp) = ent.get_mut::<BasePart>() {
+                    if let Some(c) = color {
+                        bp.color = Color::srgb(c[0], c[1], c[2]);
+                    }
+                    if let Some(t) = transparency {
+                        bp.transparency = t;
+                    }
+                    if let Some(a) = anchored {
+                        bp.anchored = a;
+                    }
+                    if let Some(cc) = can_collide {
+                        bp.can_collide = cc;
+                    }
+                    if let Some(ref m) = material {
+                        bp.material_name = m.clone();
+                    }
+                }
+                return BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "updated": true, "resident": true }),
+                );
+            }
+
+            // NON-RESIDENT — read → mutate the DB core → mirror both stores.
+            let Some(uuid_hex) = uuid else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params(
+                        "entity.update: not resident; provide `uuid` to edit it in the DB",
+                    ),
+                );
+            };
+            let db = world
+                .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+                .and_then(|h| h.0.clone());
+            let Some(db) = db else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("entity.update: no WorldDb"),
+                );
+            };
+            match crate::space::world_db_binary::find_entity_by_uuid(db.as_ref(), &uuid_hex) {
+                Ok(Some(mut core)) => {
+                    let old_pos = core.t;
+                    if let Some(p) = position {
+                        core.t = p;
+                    }
+                    if let Some(s) = size {
+                        core.s = s;
+                    }
+                    if let Some(c) = color {
+                        core.color = [c[0], c[1], c[2], core.color[3]];
+                    }
+                    if let Some(t) = transparency {
+                        core.transparency = t;
+                    }
+                    if let Some(a) = anchored {
+                        core.anchored = a;
+                    }
+                    if let Some(cc) = can_collide {
+                        core.can_collide = cc;
+                    }
+                    if let Some(m) = material {
+                        core.material = m;
+                    }
+                    let encoded = match eustress_worlddb::encode_instance_core(&core) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return BridgeResponse::error(
+                                req.id.clone(),
+                                BridgeError::internal(format!("entity.update: encode failed: {e}")),
+                            )
+                        }
+                    };
+                    let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap_or([0u8; 16]);
+                    let stored_id =
+                        u64::from_be_bytes(uuid_bytes[0..8].try_into().unwrap_or([0u8; 8]));
+                    crate::space::active_db::mirror_binary_core(
+                        stored_id,
+                        Some(&uuid_bytes),
+                        old_pos,
+                        core.t,
+                        &encoded,
+                    );
+                    BridgeResponse::ok(
+                        req.id.clone(),
+                        serde_json::json!({ "updated": true, "resident": false }),
+                    )
+                }
+                Ok(None) => BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("entity.update: no entity for that uuid"),
+                ),
+                Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+            }
+        }
+    }
+    /// Delete a binary-ECS entity — purges all five DB stores (no
+    /// resurrection on reload) and despawns the live entity if resident.
+    /// Resident: resolve uuid/name → live entity (pos from the marker's
+    /// `morton_pos`, the last-persisted key). Non-resident: read the DB core
+    /// by uuid for its position/class. Params: `uuid` (preferred) | `name`.
+    pub fn entity_delete(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.delete: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            use crate::space::world_db_binary::BinaryEcsInstance;
+            use eustress_common::classes::Instance;
+            use eustress_common::instance_create::uuid_hex_to_bytes;
+
+            let uuid = req.params.get("uuid").and_then(|v| v.as_str()).map(str::to_string);
+            let name = req.params.get("name").and_then(|v| v.as_str()).map(str::to_string);
+            if uuid.is_none() && name.is_none() {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("entity.delete: provide `uuid` or `name`"),
+                );
+            }
+
+            // Resident-first (note binary vs FileSystem).
+            let mut q = world.query::<(Entity, &Instance, Option<&BinaryEcsInstance>)>();
+            let found = q.iter(world).find_map(|(e, inst, bin)| {
+                let hit = match (&uuid, &name) {
+                    (Some(u), _) => &inst.uuid == u,
+                    (None, Some(n)) => &inst.name == n,
+                    _ => false,
+                };
+                if hit {
+                    Some((
+                        e,
+                        bin.map(|b| (b.stored_id, b.morton_pos)),
+                        inst.class_name.as_str().to_string(),
+                        inst.uuid.clone(),
+                    ))
+                } else {
+                    None
+                }
+            });
+
+            if let Some((entity, bin_opt, class, uuid_hex)) = found {
+                match bin_opt {
+                    Some((stored_id, morton_pos)) => {
+                        let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap_or([0u8; 16]);
+                        let rel = format!("Workspace/__bin_{}_{:016x}/_instance.toml", class, stored_id);
+                        crate::space::active_db::delete_binary_instance(
+                            stored_id,
+                            &uuid_bytes,
+                            &class,
+                            morton_pos,
+                            &rel,
+                        );
+                        world.despawn(entity);
+                        return BridgeResponse::ok(
+                            req.id.clone(),
+                            serde_json::json!({ "deleted": true, "resident": true, "uuid": uuid_hex }),
+                        );
+                    }
+                    // Resident FileSystem (TOML) entity → disk tool deletes it.
+                    None => {
+                        return BridgeResponse::ok(
+                            req.id.clone(),
+                            serde_json::json!({ "routed": "filesystem" }),
+                        );
+                    }
+                }
+            }
+
+            // Non-resident: delete the DB core by uuid.
+            let Some(uuid_hex) = uuid else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params(
+                        "entity.delete: not resident; provide `uuid` to delete it from the DB",
+                    ),
+                );
+            };
+            let db = world
+                .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+                .and_then(|h| h.0.clone());
+            let Some(db) = db else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("entity.delete: no WorldDb"),
+                );
+            };
+            match crate::space::world_db_binary::find_entity_by_uuid(db.as_ref(), &uuid_hex) {
+                Ok(Some(core)) => {
+                    let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap_or([0u8; 16]);
+                    let stored_id =
+                        u64::from_be_bytes(uuid_bytes[0..8].try_into().unwrap_or([0u8; 8]));
+                    let rel = format!(
+                        "Workspace/__bin_{}_{:016x}/_instance.toml",
+                        core.class_name, stored_id
+                    );
+                    crate::space::active_db::delete_binary_instance(
+                        stored_id,
+                        &uuid_bytes,
+                        &core.class_name,
+                        core.t,
+                        &rel,
+                    );
+                    BridgeResponse::ok(
+                        req.id.clone(),
+                        serde_json::json!({ "deleted": true, "resident": false, "uuid": uuid_hex }),
+                    )
+                }
+                Ok(None) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "deleted": false, "reason": "not found" }),
+                ),
+                Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+            }
+        }
+    }
+    /// Find entities by `uuid` | `path` | `class` via the Phase-1 identity
+    /// indices (post mirror-fix these are reliable for resident AND
+    /// non-resident entities). Returns uuid-handle summaries. Params:
+    /// exactly one of `uuid` / `path` / `class`, optional `limit` (200).
+    pub fn entity_find(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.find: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            let db = world
+                .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+                .and_then(|h| h.0.clone());
+            let Some(db) = db else {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::internal("entity.find: no WorldDb (legacy disk Space?)"),
+                );
+            };
+            let limit = req.params.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+
+            let cores: Vec<eustress_worlddb::ArchInstanceCore> =
+                if let Some(u) = req.params.get("uuid").and_then(|v| v.as_str()) {
+                    match crate::space::world_db_binary::find_entity_by_uuid(db.as_ref(), u) {
+                        Ok(c) => c.into_iter().collect(),
+                        Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+                    }
+                } else if let Some(p) = req.params.get("path").and_then(|v| v.as_str()) {
+                    match crate::space::world_db_binary::find_entity_by_path(db.as_ref(), p) {
+                        Ok(c) => c.into_iter().collect(),
+                        Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+                    }
+                } else if let Some(c) = req.params.get("class").and_then(|v| v.as_str()) {
+                    match crate::space::world_db_binary::find_entities_by_class(db.as_ref(), c) {
+                        Ok(v) => v,
+                        Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+                    }
+                } else {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params("entity.find: provide `uuid`, `path`, or `class`"),
+                    );
+                };
+
+            let total = cores.len();
+            let entities: Vec<Value> = cores
+                .iter()
+                .take(limit)
+                .map(|core| {
+                    let def = crate::space::arch_instance::arch_to_instance(core);
+                    serde_json::json!({
+                        "uuid": def.metadata.uuid,
+                        "name": def.metadata.name,
+                        "class": def.metadata.class_name,
+                        "position": def.transform.position,
+                        "mesh": def.asset.as_ref().map(|a| a.mesh.clone()),
+                    })
+                })
+                .collect();
+            return BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "entities": entities,
+                    "total": total,
+                    "returned": entities.len(),
+                }),
+            );
+        }
+    }
+    /// Shared add/remove tag op. Resident: mutate the `Tags` component
+    /// (Changed → mirror persists). Non-resident: mutate `core.tags` and
+    /// re-mirror. Params: `uuid`|`name`, `tag`.
+    #[cfg(feature = "world-db")]
+    fn tag_op(world: &mut World, req: &BridgeRequest, add: bool) -> BridgeResponse {
+        use eustress_common::classes::Instance;
+        use eustress_common::instance_create::uuid_hex_to_bytes;
+        use eustress_common::Tags;
+
+        let uuid = req.params.get("uuid").and_then(|v| v.as_str()).map(str::to_string);
+        let name = req.params.get("name").and_then(|v| v.as_str()).map(str::to_string);
+        let Some(tag) = req.params.get("tag").and_then(|v| v.as_str()).map(str::to_string) else {
+            return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params("tag op: provide `tag`"));
+        };
+        if uuid.is_none() && name.is_none() {
+            return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params("tag op: provide `uuid` or `name`"));
+        }
+
+        let mut q = world.query::<(
+            Entity,
+            &Instance,
+            bevy::prelude::Has<crate::space::world_db_binary::BinaryEcsInstance>,
+        )>();
+        let target = q.iter(world).find_map(|(e, inst, is_binary)| {
+            let hit = match (&uuid, &name) {
+                (Some(u), _) => &inst.uuid == u,
+                (None, Some(n)) => &inst.name == n,
+                _ => false,
+            };
+            if hit { Some((e, is_binary)) } else { None }
+        });
+
+        // Resident FileSystem (TOML) entity → disk tool handles tags.
+        if let Some((_, false)) = target {
+            return BridgeResponse::ok(req.id.clone(), serde_json::json!({ "routed": "filesystem" }));
+        }
+        if let Some((entity, _)) = target {
+            let mut ent = world.entity_mut(entity);
+            match ent.get_mut::<Tags>() {
+                Some(mut tags) => {
+                    if add {
+                        if !tags.0.iter().any(|t| t == &tag) {
+                            tags.0.push(tag.clone());
+                        }
+                    } else {
+                        tags.0.retain(|t| t != &tag);
+                    }
+                }
+                None => {
+                    if add {
+                        ent.insert(Tags(vec![tag.clone()]));
+                    }
+                }
+            }
+            return BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({ "ok": true, "resident": true, "add": add, "tag": tag }),
+            );
+        }
+
+        // Non-resident.
+        let Some(uuid_hex) = uuid else {
+            return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params("tag op: not resident; provide `uuid`"));
+        };
+        let db = world
+            .get_resource::<crate::space::world_db_plugin::WorldDbHandle>()
+            .and_then(|h| h.0.clone());
+        let Some(db) = db else {
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal("tag op: no WorldDb"));
+        };
+        match crate::space::world_db_binary::find_entity_by_uuid(db.as_ref(), &uuid_hex) {
+            Ok(Some(mut core)) => {
+                if add {
+                    if !core.tags.iter().any(|t| t == &tag) {
+                        core.tags.push(tag.clone());
+                    }
+                } else {
+                    core.tags.retain(|t| t != &tag);
+                }
+                let encoded = match eustress_worlddb::encode_instance_core(&core) {
+                    Ok(b) => b,
+                    Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::internal(format!("tag op: encode failed: {e}"))),
+                };
+                let uuid_bytes = uuid_hex_to_bytes(&uuid_hex).unwrap_or([0u8; 16]);
+                let stored_id = u64::from_be_bytes(uuid_bytes[0..8].try_into().unwrap_or([0u8; 8]));
+                crate::space::active_db::mirror_binary_core(stored_id, Some(&uuid_bytes), core.t, core.t, &encoded);
+                BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "ok": true, "resident": false, "add": add, "tag": tag }),
+                )
+            }
+            Ok(None) => BridgeResponse::error(req.id.clone(), BridgeError::invalid_params("tag op: no entity for that uuid")),
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+        }
+    }
+
+    pub fn entity_add_tag(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal("entity.add_tag: world-db disabled"));
+        }
+        #[cfg(feature = "world-db")]
+        {
+            return tag_op(world, req, true);
+        }
+    }
+
+    pub fn entity_remove_tag(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(req.id.clone(), BridgeError::internal("entity.remove_tag: world-db disabled"));
+        }
+        #[cfg(feature = "world-db")]
+        {
+            return tag_op(world, req, false);
+        }
     }
 
     /// Read one or more simulation watchpoint values. Mirrors the

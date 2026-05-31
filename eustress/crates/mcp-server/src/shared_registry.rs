@@ -40,6 +40,25 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::AiCameraOrbitTool);
         r.register(crate::bridge_tools::AiCameraFrameTool);
         r.register(crate::bridge_tools::AiCameraCaptureTool);
+        // Binary-ECS entity CRUD: OVERRIDE the disk entity tools by name so
+        // they operate on binary cores via the bridge when the engine is
+        // live, and fall back to the disk tool (FileSystem rep) when it's
+        // closed or the engine routes the op to disk. Registered AFTER the
+        // baseline, so `register` (HashMap insert by name) replaces the disk
+        // versions. The in-engine Workshop uses its OWN registry, so it is
+        // unaffected by these MCP-server-local overrides.
+        use crate::bridge_tools::BridgeEntityTool;
+        r.register(BridgeEntityTool::new("entity.create", eustress_tools::entity_tools::CreateEntityTool));
+        r.register(BridgeEntityTool::new("entity.update", eustress_tools::entity_tools::UpdateEntityTool));
+        r.register(BridgeEntityTool::new("entity.delete", eustress_tools::entity_tools::DeleteEntityTool));
+        r.register(BridgeEntityTool::new("entity.add_tag", eustress_tools::simulation_tools::AddTagTool));
+        r.register(BridgeEntityTool::new("entity.remove_tag", eustress_tools::simulation_tools::RemoveTagTool));
+        // Read/list over the bridge too, so the AI's habitual discovery tools
+        // SEE binary parts (not just on-disk TOML). Both target the rich live
+        // `ecs.inspect`; query_entities passes `class` straight through, while
+        // find_entity remaps `query` → `name_contains` (dedicated wrapper).
+        r.register(BridgeEntityTool::new("ecs.inspect", eustress_tools::entity_tools::QueryEntitiesTool));
+        r.register(crate::bridge_tools::FindEntityBridgeTool::default());
         r
     })
 }
@@ -74,20 +93,41 @@ pub fn is_bridge_tool(name: &str) -> bool {
 pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
     let universe = universe?.clone();
 
-    // The MCP server doesn't know which Space inside the Universe is
-    // "active" — there may be many. Default to the first Space under
-    // `Spaces/`, falling back to the Universe root itself for tools
-    // that don't care. Tools that need a specific Space must take
-    // `space` as an input parameter.
-    let spaces_dir = universe.join("Spaces");
-    let space_root = std::fs::read_dir(&spaces_dir)
-        .ok()
-        .and_then(|mut it| it.find_map(|e| e.ok().map(|e| e.path())))
-        .unwrap_or_else(|| universe.clone());
+    // Target the engine's CURRENT Space (its persisted `last_space_path`),
+    // NOT the first Space under `Spaces/`. The MCP server is out-of-process,
+    // so disk-write tools (`create_entity`, `write_file`, …) must land in
+    // the Space the user is actually viewing. The old "first Space" default
+    // wrote everything into one Space (e.g. `Universe1/Space1`) regardless
+    // of where the user was — a part created while viewing Finance/"Game
+    // Economics" ended up bleeding into `Universe1/Space1`. The engine
+    // auto-saves `last_space_path` on every Space switch, so reading it here
+    // is the cross-process handshake. When it's absent/stale (engine never
+    // run this session) we fall back to the first-Space behavior.
+    let (space_root, universe_root) = match engine_current_space() {
+        Some(space) if space.is_dir() => {
+            // Derive the Universe from the Space (…/<Universe>/Spaces/<Space>)
+            // so the context's universe agrees with its space.
+            let uni = space
+                .parent()
+                .and_then(|p| p.parent())
+                .filter(|u| u.join("Spaces").is_dir())
+                .map(|u| u.to_path_buf())
+                .unwrap_or_else(|| universe.clone());
+            (space, uni)
+        }
+        _ => {
+            let spaces_dir = universe.join("Spaces");
+            let space_root = std::fs::read_dir(&spaces_dir)
+                .ok()
+                .and_then(|mut it| it.find_map(|e| e.ok().map(|e| e.path())))
+                .unwrap_or_else(|| universe.clone());
+            (space_root, universe)
+        }
+    };
 
     Some(ToolContext {
         space_root,
-        universe_root: universe,
+        universe_root,
         user_id: None,
         username: None,
         luau_executor: None,
@@ -97,6 +137,24 @@ pub fn build_context(universe: Option<&PathBuf>) -> Option<ToolContext> {
         // explicitly; Space-default unit then acts as the fallback.
         display_unit: None,
     })
+}
+
+/// Read the engine's currently-open Space from its persisted editor
+/// settings (`~/.eustress_engine/settings.json` → `last_space_path`, with
+/// the legacy `~/.eustress_studio/` location as fallback). The engine
+/// writes this on every Space switch (auto-saved via change detection), so
+/// the out-of-process MCP server can follow the user's active Space here
+/// instead of guessing the first Space under a default Universe. `None`
+/// when unset / unreadable (engine never run, or a non-UI open path).
+fn engine_current_space() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let current = home.join(".eustress_engine").join("settings.json");
+    let legacy = home.join(".eustress_studio").join("settings.json");
+    let path = if current.exists() { current } else { legacy };
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let last = json.get("last_space_path")?.as_str()?;
+    Some(PathBuf::from(last))
 }
 
 /// Definitions of every tool in the shared registry. Emitted alongside

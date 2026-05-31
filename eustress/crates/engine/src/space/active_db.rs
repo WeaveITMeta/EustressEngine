@@ -333,6 +333,52 @@ mod imp {
             .is_ok()
     }
 
+    /// Persist a live binary-ECS entity's edit to BOTH cores in one call —
+    /// the Morton spatial core (boot-load / streaming reads this) AND the
+    /// UUID-primary core in `entities_uuid` (`find_entity --uuid` and the
+    /// bridge `entity.read` of a NON-resident entity read this). The
+    /// `mirror_binary_ecs_changes` system previously wrote ONLY the Morton
+    /// core, so after any resident edit the uuid-primary copy went stale
+    /// (an edited-then-evicted entity read back its pre-edit values). A
+    /// position change moves the Morton key (delete-old + put-new); the
+    /// uuid key is position-independent so it's a plain overwrite. `uuid`
+    /// is `None` only defensively (a binary entity always carries one).
+    /// Returns whether the Morton write (the canonical persist) succeeded.
+    pub fn mirror_binary_core(
+        stored_id: u64,
+        uuid: Option<&[u8; 16]>,
+        old_pos: [f32; 3],
+        new_pos: [f32; 3],
+        core: &[u8],
+    ) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let eid = eustress_worlddb::EntityId(stored_id);
+        if new_pos != old_pos {
+            let _ = a
+                .db
+                .delete_instance_core(eid, (old_pos[0], old_pos[1], old_pos[2]));
+        }
+        let morton_ok = a
+            .db
+            .put_instance_core(eid, (new_pos[0], new_pos[1], new_pos[2]), core)
+            .is_ok();
+        if let Some(u) = uuid {
+            if a.db.put_entity_core_by_uuid(u, core).is_err() {
+                tracing::warn!(
+                    target: "eustress_engine::active_db",
+                    stored_id,
+                    "mirror_binary_core: uuid-primary core write failed (find-by-uuid stale until next edit / rebuild_indexes)"
+                );
+            }
+        }
+        morton_ok
+    }
+
     /// Remove a folder-form entity's DB records — the `{rel}` tree TOML AND its
     /// `{rel}.bin` binary twin — so a deleted/trashed entity does NOT resurrect
     /// from the DB on the next session. The scene is DB-primary, so trashing the
@@ -369,6 +415,148 @@ mod imp {
             .iter_instance_cores()
             .map(|v| v.into_iter().map(|(e, b)| (e.0, b)).collect())
             .unwrap_or_default()
+    }
+
+    /// Region scan for camera-locality streaming: cores whose Morton cell
+    /// lies in the inclusive cell box. Empty when no DB is active.
+    pub fn iter_instance_cores_in_region(
+        cx: (u32, u32),
+        cy: (u32, u32),
+        cz: (u32, u32),
+    ) -> Vec<(u64, Vec<u8>)> {
+        let Ok(g) = ACTIVE.read() else {
+            return Vec::new();
+        };
+        let Some(a) = g.as_ref() else {
+            return Vec::new();
+        };
+        a.db
+            .iter_instance_cores_in_region(cx, cy, cz)
+            .map(|v| v.into_iter().map(|(e, b)| (e.0, b)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Capped count of binary-ECS cores (stops at `cap`). Used to gate
+    /// boot-load-all vs streaming. 0 when no DB is active.
+    pub fn count_instance_cores_capped(cap: usize) -> usize {
+        let Ok(g) = ACTIVE.read() else {
+            return 0;
+        };
+        let Some(a) = g.as_ref() else {
+            return 0;
+        };
+        a.db.count_instance_cores_capped(cap).unwrap_or(0)
+    }
+
+    /// Create a binary-ECS entity in ALL FIVE stores in one call — the
+    /// chokepoint for the "Insert defaults to scalable" create-flip
+    /// (SCALING_ARCHITECTURE.md §0.5 C1). A binary entity must be findable
+    /// by uuid / path / class exactly like a folder-form TOML entity, so
+    /// creating one means writing:
+    ///   1. the Morton-keyed spatial core (`entities`)  — boot-load reads it
+    ///   2. the UUID-keyed primary core (`entities_uuid`) — IDENTITY §5.2
+    ///   3. `path_to_uuid` (synthetic in-Space path → uuid)
+    ///   4. `uuid_to_path` (reverse)
+    ///   5. `class_index/<class>/<uuid>` (so `iter_class` returns it)
+    ///
+    /// `put_instance_core` alone (what the boot-load mirror uses) populates
+    /// ONLY store 1, so a part written that way is invisible to
+    /// `find_entity --uuid/--path/--class`. This helper closes that gap.
+    ///
+    /// There is no atomic core+index write in the trait (see
+    /// `migrate_identity.rs`, which makes the same calls in sequence and
+    /// relies on `rebuild_indexes()` for crash recovery). We therefore do
+    /// best-effort writes and WARN on any partial failure rather than
+    /// failing the whole create — the worst case is a missing secondary
+    /// index, which `rebuild_indexes()` reconstructs from the primary core.
+    ///
+    /// `core` is the SAME tagged rkyv `ArchInstanceCore` bytes for stores
+    /// 1 and 2 (the partitions store identical bytes — confirmed in
+    /// `fjall_backend`). Returns `false` when no DB is active (caller then
+    /// keeps the in-memory entity / falls back to its TOML create path).
+    pub fn create_binary_instance(
+        stored_id: u64,
+        uuid: &[u8; 16],
+        class_name: &str,
+        pos: [f32; 3],
+        core: &[u8],
+        synthetic_rel: &str,
+    ) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let eid = eustress_worlddb::EntityId(stored_id);
+        // Store 1: Morton spatial core (the boot-load source of truth).
+        let core_ok = a
+            .db
+            .put_instance_core(eid, (pos[0], pos[1], pos[2]), core)
+            .is_ok();
+        // Stores 2–5: identity. Best-effort; warn (not fail) on partial
+        // write — rebuild_indexes() can reconstruct any missing index.
+        let mut index_failures: Vec<&str> = Vec::new();
+        if a.db.put_entity_core_by_uuid(uuid, core).is_err() {
+            index_failures.push("entities_uuid");
+        }
+        if a.db.put_path_to_uuid(synthetic_rel, uuid).is_err() {
+            index_failures.push("path_to_uuid");
+        }
+        if a.db.put_uuid_to_path(uuid, synthetic_rel).is_err() {
+            index_failures.push("uuid_to_path");
+        }
+        if a.db.put_class_index(class_name, uuid).is_err() {
+            index_failures.push("class_index");
+        }
+        if !core_ok {
+            tracing::warn!(
+                target: "eustress_engine::active_db",
+                stored_id, class_name,
+                "create_binary_instance: Morton core write FAILED — entity not persisted (kept in ECS this session only)"
+            );
+        }
+        if !index_failures.is_empty() {
+            tracing::warn!(
+                target: "eustress_engine::active_db",
+                stored_id, class_name,
+                failed = ?index_failures,
+                "create_binary_instance: identity index write(s) failed — entity persisted but not yet fully indexed (rebuild_indexes recovers)"
+            );
+        } else if core_ok {
+            note(&INSTANCE_PUTS, "binary instance create (5-store)");
+        }
+        core_ok && index_failures.is_empty()
+    }
+
+    /// Symmetric teardown for [`create_binary_instance`]: remove the entity
+    /// from all five stores so a deleted binary part does NOT resurrect
+    /// from the DB on the next boot-load (and is no longer found by uuid /
+    /// path / class). Best-effort; a delete of a missing key is harmless.
+    /// `pos` MUST be the entity's last-persisted (Morton-key) position.
+    pub fn delete_binary_instance(
+        stored_id: u64,
+        uuid: &[u8; 16],
+        class_name: &str,
+        pos: [f32; 3],
+        synthetic_rel: &str,
+    ) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let eid = eustress_worlddb::EntityId(stored_id);
+        let core_removed = a
+            .db
+            .delete_instance_core(eid, (pos[0], pos[1], pos[2]))
+            .is_ok();
+        let _ = a.db.delete_entity_by_uuid(uuid);
+        let _ = a.db.delete_path_to_uuid(synthetic_rel);
+        let _ = a.db.delete_uuid_to_path(uuid);
+        let _ = a.db.delete_class_index(class_name, uuid);
+        core_removed
     }
 
     /// GUI definition twin of [`get_instance`].
@@ -489,6 +677,44 @@ mod imp {
     }
     pub fn iter_instance_cores() -> Vec<(u64, Vec<u8>)> {
         Vec::new()
+    }
+    pub fn iter_instance_cores_in_region(
+        _cx: (u32, u32),
+        _cy: (u32, u32),
+        _cz: (u32, u32),
+    ) -> Vec<(u64, Vec<u8>)> {
+        Vec::new()
+    }
+    pub fn count_instance_cores_capped(_cap: usize) -> usize {
+        0
+    }
+    pub fn mirror_binary_core(
+        _stored_id: u64,
+        _uuid: Option<&[u8; 16]>,
+        _old_pos: [f32; 3],
+        _new_pos: [f32; 3],
+        _core: &[u8],
+    ) -> bool {
+        false
+    }
+    pub fn create_binary_instance(
+        _stored_id: u64,
+        _uuid: &[u8; 16],
+        _class_name: &str,
+        _pos: [f32; 3],
+        _core: &[u8],
+        _synthetic_rel: &str,
+    ) -> bool {
+        false
+    }
+    pub fn delete_binary_instance(
+        _stored_id: u64,
+        _uuid: &[u8; 16],
+        _class_name: &str,
+        _pos: [f32; 3],
+        _synthetic_rel: &str,
+    ) -> bool {
+        false
     }
     pub fn get_gui(_abs: &Path) -> Option<GuiTomlFile> {
         None

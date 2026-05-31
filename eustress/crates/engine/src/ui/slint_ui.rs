@@ -8640,6 +8640,57 @@ fn drain_slint_actions(
                     [0.0, 0.5, 0.0]
                 };
 
+                // Scalable default (SCALING_ARCHITECTURE.md §0.5 C1): a
+                // TOP-LEVEL primitive insert (no Folder/Model selected)
+                // routes through SpawnPartEvent, where
+                // `handle_spawn_part_events` creates it as a binary-ECS
+                // core when the Space DB is active (no TOML folder) — and
+                // also records the create on the undo stack. This is the
+                // same path the viewport drag-create already uses, so the
+                // Insert menu and the viewport agree. Container-targeted
+                // inserts fall through to the folder/TOML path below so the
+                // part lands INSIDE the selected Folder/Model (binary parts
+                // are Workspace-rooted only, for now).
+                let container_selected = res
+                    .explorer_state
+                    .as_ref()
+                    .and_then(|es| match &es.selected {
+                        SelectedItem::Entity(e) => queries
+                            .instances
+                            .get(*e)
+                            .ok()
+                            .and_then(|(ent, inst)| {
+                                matches!(
+                                    inst.class_name,
+                                    eustress_common::classes::ClassName::Folder
+                                        | eustress_common::classes::ClassName::Model
+                                )
+                                .then_some(ent)
+                            }),
+                        _ => None,
+                    })
+                    .is_some();
+
+                if !container_selected {
+                    let part_type = match part_type_str.as_str() {
+                        "Part" | "Block" => crate::classes::PartType::Block,
+                        "SpherePart" | "Ball" => crate::classes::PartType::Ball,
+                        "CylinderPart" | "Cylinder" => crate::classes::PartType::Cylinder,
+                        "WedgePart" | "Wedge" => crate::classes::PartType::Wedge,
+                        "CornerWedgePart" | "CornerWedge" => crate::classes::PartType::CornerWedge,
+                        "Cone" => crate::classes::PartType::Cone,
+                        _ => crate::classes::PartType::Block,
+                    };
+                    events.spawn_events.write(super::SpawnPartEvent {
+                        part_type,
+                        position: Vec3::from_array(spawn_pos),
+                    });
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Inserted {}", part_type_str));
+                    }
+                    continue;
+                }
+
                 // Determine correct parent entity:
                 // 1. If a Folder/Model entity is selected in explorer → parent to that
                 // 2. Otherwise → parent to the Workspace service root entity

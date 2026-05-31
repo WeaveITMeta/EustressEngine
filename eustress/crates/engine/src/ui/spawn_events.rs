@@ -52,11 +52,24 @@ pub fn handle_spawn_part_events(
     space_root: Option<Res<crate::space::SpaceRoot>>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    // Resources for the scalable binary-ECS create path (C1). Present in
+    // every build (the disk loader uses them too); only read under the
+    // `world-db` feature below.
+    mut material_registry: ResMut<crate::space::material_loader::MaterialRegistry>,
+    mut mesh_cache: ResMut<crate::space::instance_loader::PrimitiveMeshCache>,
+    services: Query<(Entity, &crate::space::service_loader::ServiceComponent)>,
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
 ) {
     let Some(selection_manager) = selection_manager else { return };
     let Some(mut notifications) = notifications else { return };
     let Some(play_mode_state) = play_mode_state else { return };
     let is_playing = *play_mode_state.get() != PlayModeState::Editing;
+    // Without the world-db feature the binary create path is compiled out;
+    // touch the binary-only params so the no-feature build stays quiet.
+    #[cfg(not(feature = "world-db"))]
+    {
+        let _ = (&material_registry, &mesh_cache, &services, &undo_stack);
+    }
     for event in spawn_events.read() {
         // Determine part name based on type
         let part_name = match event.part_type {
@@ -119,17 +132,85 @@ pub fn handle_spawn_part_events(
         let part = Part {
             shape: event.part_type,
         };
-        
-        // Spawn part from .glb file (file-system-first: mesh loaded via AssetServer)
-        let spawned_entity = crate::spawn::spawn_part_glb(
-            &mut commands,
-            &asset_server,
-            &mut materials,
-            instance,
-            base_part,
-            part,
-        );
-        
+
+        // Primitive mesh path — used by both the binary create path and
+        // the legacy TOML save below.
+        let mesh_path = crate::spawn::part_type_to_glb_path(&event.part_type);
+
+        // Default to the SCALABLE representation (SCALING_ARCHITECTURE.md
+        // §0.5 C1): a bare Part with a primitive `parts/*.glb` mesh
+        // persists as a binary-ECS rkyv core in Fjall, not a TOML folder.
+        // Custom-mesh / file-natured classes, play mode, or a Space with
+        // no active DB fall through to the legacy TOML create path below.
+        // `representation_for_part` carries the V-Cell custom-mesh guard.
+        let mut persisted_binary = false;
+        let mut binary_entity: Option<Entity> = None;
+        #[cfg(feature = "world-db")]
+        {
+            if !is_playing && crate::space::active_db::is_active() {
+                if let Some(ref sr) = space_root {
+                    let rep = crate::space::representation::representation_for_part(
+                        "Part",
+                        Some(mesh_path),
+                        None,
+                    );
+                    if rep == crate::space::representation::Representation::BinaryEcs {
+                        if let Some(ws) = services
+                            .iter()
+                            .find(|(_, s)| s.class_name == "Workspace")
+                            .map(|(e, _)| e)
+                        {
+                            let def = build_binary_part_def(
+                                part_name,
+                                mesh_path,
+                                actual_position,
+                                size,
+                                &base_part,
+                            );
+                            if let Some(spawned) =
+                                crate::space::world_db_binary::spawn_binary_instance(
+                                    &mut commands,
+                                    &asset_server,
+                                    &mut materials,
+                                    &mut material_registry,
+                                    &mut mesh_cache,
+                                    &sr.0,
+                                    ws,
+                                    def,
+                                )
+                            {
+                                binary_entity = Some(spawned.entity);
+                                persisted_binary = true;
+                                // Record undo: Ctrl+Z despawns + purges the
+                                // core; redo re-spawns from the stored def
+                                // (same uuid → same stored_id).
+                                if let Ok(def_json) = serde_json::to_string(&spawned.def) {
+                                    undo_stack.push(crate::undo::Action::CreateBinaryInstance {
+                                        stored_id: spawned.stored_id,
+                                        def_json,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spawn from the .glb (legacy/file-system path) unless the scalable
+        // binary core already created + spawned the entity above.
+        let spawned_entity = match binary_entity {
+            Some(e) => e,
+            None => crate::spawn::spawn_part_glb(
+                &mut commands,
+                &asset_server,
+                &mut materials,
+                instance,
+                base_part,
+                part,
+            ),
+        };
+
         // Mark as spawned during play mode (will be despawned on stop)
         if is_playing {
             commands.entity(spawned_entity).insert(SpawnedDuringPlayMode);
@@ -159,10 +240,9 @@ pub fn handle_spawn_part_events(
         // Synchronous ECS spawn already happened above; registering the
         // returned TOML path in `SpaceFileRegistry` makes the file
         // watcher's `is_loaded(path)` check skip its own spawn pass.
-        if !is_playing {
+        if !is_playing && !persisted_binary {
             if let Some(ref sr) = space_root {
                 let workspace_dir = sr.0.join("Workspace");
-                let mesh_path = crate::spawn::part_type_to_glb_path(&event.part_type);
                 // Stage 7: stamp the Space-default authoring unit into
                 // the new TOML so the file records its provenance. None
                 // when the Space hasn't declared a default — the engine
@@ -248,6 +328,66 @@ pub fn handle_spawn_part_events(
 
         notifications.success(format!("Added {} (selected)", part_name));
         info!("✨ Spawned {} at {:?}, entity: {:?}", part_name, actual_position, spawned_entity);
+    }
+}
+
+/// Build the parse-model `InstanceDefinition` for a freshly-inserted bare
+/// Part, in ENGINE-NATIVE units (binary cores store meters directly — no
+/// authoring-unit conversion, unlike the TOML path). `spawn_binary_instance`
+/// mints the uuid, so it is left `None` here. Field set mirrors
+/// `world_db_binary::core_from_components` exactly so create == load.
+#[cfg(feature = "world-db")]
+fn build_binary_part_def(
+    name: &str,
+    mesh: &str,
+    position: Vec3,
+    size: Vec3,
+    base: &BasePart,
+) -> crate::space::instance_loader::InstanceDefinition {
+    use crate::space::instance_loader::{
+        AssetReference, InstanceDefinition, InstanceMetadata, InstanceProperties, TransformData,
+    };
+    let c = base.color.to_srgba();
+    let now = chrono::Utc::now().to_rfc3339();
+    InstanceDefinition {
+        asset: Some(AssetReference {
+            mesh: mesh.to_string(),
+            scene: "Scene0".to_string(),
+        }),
+        transform: TransformData {
+            position: [position.x, position.y, position.z],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [size.x, size.y, size.z],
+        },
+        properties: InstanceProperties {
+            color: [c.red, c.green, c.blue, c.alpha],
+            transparency: base.transparency,
+            anchored: base.anchored,
+            can_collide: base.can_collide,
+            cast_shadow: base.cast_shadow,
+            reflectance: base.reflectance,
+            material: base.material.as_str().to_string(),
+            locked: base.locked,
+        },
+        metadata: InstanceMetadata {
+            class_name: "Part".to_string(),
+            archivable: true,
+            name: Some(name.to_string()),
+            created: now.clone(),
+            last_modified: now,
+            created_by: None,
+            modifications: Vec::new(),
+            unit: None,
+            uuid: None,
+        },
+        material: None,
+        thermodynamic: None,
+        electrochemical: None,
+        ui: None,
+        attributes: None,
+        tags: None,
+        parameters: None,
+        extra: std::collections::HashMap::new(),
     }
 }
 

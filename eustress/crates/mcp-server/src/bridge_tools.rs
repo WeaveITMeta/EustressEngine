@@ -511,3 +511,117 @@ impl ToolHandler for AiCameraCaptureTool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Binary-ECS entity CRUD — bridge-backed OVERRIDES of the disk entity tools
+// ---------------------------------------------------------------------------
+//
+// Phase 1 made the Insert default to binary-ECS cores (no TOML on disk), so
+// the disk entity tools (which read/write `_instance.toml`) are blind to
+// user-created parts. These wrappers route create/update/delete/tag through
+// the engine bridge (which owns the live World + Fjall DB) when the engine is
+// running, and fall back to the original disk tool when it's closed (offline
+// authoring of FileSystem-representation entities). Each reuses the disk
+// tool's name + schema (so it OVERRIDES it by name in the registry) and its
+// `execute` as the offline / filesystem-routed fallback.
+
+/// Generic bridge-backed wrapper. `definition()` delegates to the wrapped
+/// disk tool (identical name + schema → registry override). `execute()`
+/// calls the bridge `method`; on `routed:"filesystem"` (the engine's router
+/// decided this belongs on disk — custom mesh / non-Part / TOML entity) OR
+/// on "engine not running" it falls back to the disk tool; any other bridge
+/// error is surfaced (engine up but the op failed — don't silently diverge).
+pub struct BridgeEntityTool {
+    method: &'static str,
+    disk: Box<dyn ToolHandler>,
+}
+
+impl BridgeEntityTool {
+    pub fn new(method: &'static str, disk: impl ToolHandler) -> Self {
+        Self { method, disk: Box::new(disk) }
+    }
+}
+
+impl ToolHandler for BridgeEntityTool {
+    fn definition(&self) -> ToolDefinition {
+        self.disk.definition()
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let name = self.disk.definition().name;
+        match call_engine(&ctx.universe_root, self.method, input.clone()) {
+            Ok(result) => {
+                if result.get("routed").and_then(|v| v.as_str()) == Some("filesystem") {
+                    // The engine routed this to the filesystem representation;
+                    // perform the equivalent disk op so it actually lands.
+                    return self.disk.execute(input, ctx);
+                }
+                let summary = format!(
+                    "{name} via engine bridge (binary-ECS): {}",
+                    serde_json::to_string(&result).unwrap_or_default()
+                );
+                ok(name, summary, result)
+            }
+            // Engine offline → disk tool (FileSystem representation).
+            Err(e) if e.contains("is not running") => self.disk.execute(input, ctx),
+            // Engine up but the RPC failed — surface it (don't write a
+            // divergent disk copy behind the user's back).
+            Err(e) => fail(name, e),
+        }
+    }
+}
+
+/// `find_entity` over the bridge: maps the disk tool's `query` param to
+/// `ecs.inspect`'s `name_contains`, so it finds LIVE entities (including
+/// binary-ECS parts that have no TOML on disk) by name — not just on-disk
+/// folders. Falls back to the disk folder-name search when the engine is
+/// offline. (Resident-only: a streamed-out part won't match by name, since
+/// only uuid/path/class are indexed — use those via the engine for those.)
+pub struct FindEntityBridgeTool {
+    disk: eustress_tools::universe_tools::FindEntityTool,
+}
+
+impl Default for FindEntityBridgeTool {
+    fn default() -> Self {
+        Self { disk: eustress_tools::universe_tools::FindEntityTool }
+    }
+}
+
+impl ToolHandler for FindEntityBridgeTool {
+    fn definition(&self) -> ToolDefinition {
+        self.disk.definition()
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        match call_engine(
+            &ctx.universe_root,
+            "ecs.inspect",
+            serde_json::json!({ "name_contains": query }),
+        ) {
+            Ok(result) => {
+                let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+                let returned = result.get("returned").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("entities").and_then(|v| v.as_array()) {
+                    for e in arr.iter().take(20) {
+                        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let class = e.get("class").and_then(|v| v.as_str()).unwrap_or("?");
+                        let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        lines.push(format!("  - {name} ({class}) id={id}"));
+                    }
+                }
+                ok(
+                    "find_entity",
+                    format!(
+                        "{returned} live match(es) for '{query}' (of {total} scanned)\n{}",
+                        lines.join("\n")
+                    ),
+                    result,
+                )
+            }
+            Err(e) if e.contains("is not running") => self.disk.execute(input, ctx),
+            Err(e) => fail("find_entity", e),
+        }
+    }
+}

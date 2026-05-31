@@ -203,6 +203,18 @@ pub enum Action {
     SpawnFolders {
         folders: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     },
+
+    /// Create ONE binary-ECS entity (the scalable Insert default, C1).
+    /// Unlike `SpawnFolders`, a binary entity has NO disk folder — its
+    /// authoritative state is a rkyv core in Fjall (Morton + identity
+    /// indices). Undo despawns the entity and purges all five stores;
+    /// redo re-spawns it. `def_json` is the serialized `InstanceDefinition`
+    /// (carrying its uuid), so redo restores the SAME entity (same uuid →
+    /// same `stored_id`), keeping identity continuous across undo cycles.
+    CreateBinaryInstance {
+        stored_id: u64,
+        def_json: String,
+    },
 }
 
 /// Snapshot of a property value for undo/redo
@@ -247,6 +259,7 @@ impl Action {
             Action::ScaleEntities { .. }          => "scale",
             Action::TrashEntities { .. }          => "delete",
             Action::SpawnFolders { .. }           => "create",
+            Action::CreateBinaryInstance { .. }   => "create",
         }
     }
 
@@ -283,6 +296,7 @@ impl Action {
             Action::ScaleEntities { old_states, .. } => format!("Scale {} objects", old_states.len()),
             Action::TrashEntities { paths, .. } => format!("Delete {} objects", paths.len()),
             Action::SpawnFolders { folders, .. } => format!("Spawn {} objects", folders.len()),
+            Action::CreateBinaryInstance { .. } => "Create object".to_string(),
         }
     }
 }
@@ -879,6 +893,45 @@ fn apply_undo_ecs(action: &Action, world: &mut World) {
                 }
             }
         }
+        Action::CreateBinaryInstance { stored_id, def_json } => {
+            // Undo create: purge the Fjall core + identity indices, then
+            // despawn the live entity. (No files — binary entities have
+            // none.) The entity is found by its stable `stored_id`, which
+            // survives redo (redo re-uses the stored uuid), so repeated
+            // undo/redo cycles stay correct.
+            #[cfg(feature = "world-db")]
+            {
+                if let Ok(def) = serde_json::from_str::<crate::space::instance_loader::InstanceDefinition>(def_json) {
+                    let uuid_hex = def.metadata.uuid.clone().unwrap_or_default();
+                    let uuid_bytes =
+                        eustress_common::instance_create::uuid_hex_to_bytes(&uuid_hex)
+                            .unwrap_or([0u8; 16]);
+                    let class = def.metadata.class_name.clone();
+                    let synthetic_rel = format!(
+                        "Workspace/__bin_{}_{:016x}/_instance.toml",
+                        class, stored_id
+                    );
+                    crate::space::active_db::delete_binary_instance(
+                        *stored_id,
+                        &uuid_bytes,
+                        &class,
+                        def.transform.position,
+                        &synthetic_rel,
+                    );
+                }
+                let sid = *stored_id;
+                let mut q = world
+                    .query::<(Entity, &crate::space::world_db_binary::BinaryEcsInstance)>();
+                let target = q
+                    .iter(world)
+                    .find(|(_, b)| b.stored_id == sid)
+                    .map(|(e, _)| e);
+                if let Some(e) = target {
+                    world.despawn(e);
+                    info!("↶ Undo create: despawned + purged binary entity {:016x}", sid);
+                }
+            }
+        }
         _ => {
             warn!("Undo not yet implemented for: {}", action.description());
         }
@@ -1049,6 +1102,24 @@ fn apply_redo_ecs(action: &Action, world: &mut World) {
                     Ok(_) => info!("↷ Respawned {:?}", original_path.file_name().unwrap_or_default()),
                     Err(e) => warn!("Failed to respawn {:?}: {}", original_path, e),
                 }
+            }
+        }
+        Action::CreateBinaryInstance { def_json, .. } => {
+            // Redo create: queue the stored def for re-spawn. A dedicated
+            // system (`drain_pending_binary_recreate`) does the actual
+            // spawn next frame with proper system params (Commands + the
+            // mesh/material resources) — re-using the def's uuid so the
+            // SAME entity/stored_id comes back. Doing it here would need
+            // Commands + several ResMut concurrently, which a raw
+            // `&mut World` can't hand out at once.
+            #[cfg(feature = "world-db")]
+            {
+                world
+                    .get_resource_or_insert_with(
+                        crate::space::world_db_binary::PendingBinaryRecreate::default,
+                    )
+                    .0
+                    .push(def_json.clone());
             }
         }
         _ => {

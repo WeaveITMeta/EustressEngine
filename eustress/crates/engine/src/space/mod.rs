@@ -32,6 +32,8 @@ pub mod auto_convert;
 #[cfg(feature = "world-db")]
 pub mod world_db_binary;
 #[cfg(feature = "world-db")]
+pub mod residency;
+#[cfg(feature = "world-db")]
 pub mod world_db_plugin;
 
 /// Resource holding the current Space root path

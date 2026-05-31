@@ -580,6 +580,23 @@ fn dispatch_keyboard_shortcuts(
 /// Processes MenuActionEvents dispatched by keyboard shortcuts or Slint UI.
 /// Handles actions that modify StudioState or trigger editor behavior.
 /// Uses Option wrappers to prevent silent skip from error handler.
+/// Parse a binary-ECS synthetic instance path
+/// (`.../Workspace/__bin_{class}_{stored_id:016x}/_instance.toml`) into
+/// `(stored_id, class_name)`. Returns `None` for a normal on-disk path, so
+/// only true binary-ECS entities take the core-purge branch on delete.
+/// Mirrors `world_db_binary::synthetic_path`'s folder format.
+fn parse_synthetic_bin_path(toml_path: &std::path::Path) -> Option<(u64, String)> {
+    let folder = toml_path.parent()?.file_name()?.to_str()?;
+    let rest = folder.strip_prefix("__bin_")?;
+    // `{class}_{16-hex id}` — split the trailing id off the (final) '_'.
+    let (class, id_hex) = rest.rsplit_once('_')?;
+    if id_hex.len() != 16 {
+        return None;
+    }
+    let stored_id = u64::from_str_radix(id_hex, 16).ok()?;
+    Some((stored_id, class.to_string()))
+}
+
 fn handle_menu_action_events(
     mut events: MessageReader<crate::ui::MenuActionEvent>,
     mut commands: Commands,
@@ -781,7 +798,7 @@ fn handle_menu_action_events(
                     let mut trashed_paths: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
                     let mut skipped_services = 0u32;
 
-                    for (entity, _, _) in entity_query.iter() {
+                    for (entity, gtransform, _) in entity_query.iter() {
                         let id = format!("{}v{}", entity.index(), entity.generation());
                         if !selected_ids.contains(&id) { continue; }
 
@@ -810,6 +827,56 @@ fn handle_menu_action_events(
                         {
                             camera_deleted = true;
                         }
+
+                        // Binary-ECS entities (scalable Insert default, C1):
+                        // their authoritative state is a rkyv core in Fjall
+                        // (Morton + identity indices), reachable only by their
+                        // synthetic `__bin_{class}_{id}` path — NOT a disk
+                        // folder. The file-trash branch below would fail to
+                        // trash a non-existent folder AND leave the core
+                        // behind, so it resurrects on the next boot-load.
+                        // Detect + purge all five stores here, then despawn.
+                        if let Ok(inst_file) = instance_file_query.get(entity) {
+                            if let Some((stored_id, class_name)) =
+                                parse_synthetic_bin_path(&inst_file.toml_path)
+                            {
+                                let uuid_hex = instance_query
+                                    .get(entity)
+                                    .map(|i| i.uuid.clone())
+                                    .unwrap_or_default();
+                                let uuid_bytes =
+                                    eustress_common::instance_create::uuid_hex_to_bytes(&uuid_hex)
+                                        .unwrap_or([0u8; 16]);
+                                // Morton key is position-derived; the live
+                                // (global) translation matches the persisted
+                                // position within the 256-unit Morton cell for
+                                // any settled part.
+                                let pos = gtransform
+                                    .map(|g| {
+                                        let t = g.translation();
+                                        [t.x, t.y, t.z]
+                                    })
+                                    .unwrap_or([0.0, 0.0, 0.0]);
+                                let synthetic_rel = format!(
+                                    "Workspace/__bin_{}_{:016x}/_instance.toml",
+                                    class_name, stored_id
+                                );
+                                crate::space::active_db::delete_binary_instance(
+                                    stored_id,
+                                    &uuid_bytes,
+                                    &class_name,
+                                    pos,
+                                    &synthetic_rel,
+                                );
+                                commands.entity(entity).despawn();
+                                info!(
+                                    "🗑️ Deleted binary-ECS entity stored_id={:016x} (purged Fjall core + identity indices)",
+                                    stored_id
+                                );
+                                continue;
+                            }
+                        }
+
                         // Move TOML (or the whole folder, for folder-based
                         // entities) to .eustress/trash/ so Ctrl+Z can restore.
                         if let Ok(inst_file) = instance_file_query.get(entity) {
