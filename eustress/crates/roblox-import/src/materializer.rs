@@ -24,10 +24,11 @@
 //!    referent → uuid map and writes the resolved entries under
 //!    `[references]`.
 //!
-//! Terrain + CSG instances are emitted as plain placeholders with an
-//! `ImportReport::approximations` entry — the full decoders land in
-//! Wave 4.A.2 (terrain) and Wave 4.A.3 (CSG mesh extraction). See spec
-//! sections §6 and §7 for the deferred work.
+//! Terrain + CSG instances are dispatched to dedicated decoders:
+//! [`crate::terrain::import_terrain`] decodes the `SmoothGrid` voxel
+//! volume into chunk files, and [`crate::csg::import_csg`] extracts each
+//! CSG operation's baked `MeshData` into a `csg.glb` asset (AABB-block
+//! fallback when no mesh is present). See spec §6 and §7.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,33 @@ use crate::property_map::{map_properties, PropertyBag};
 use crate::service_router::{RouteOutcome, ServiceRouter};
 
 // ---------------------------------------------------------------------------
+// Special-class classification (Terrain / CSG dispatch)
+// ---------------------------------------------------------------------------
+
+/// Roblox classes that need a dedicated decoder rather than the generic
+/// class_map + property_map path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialKind {
+    /// The `Terrain` voxel volume (spec §6).
+    Terrain,
+    /// A CSG operation (`UnionOperation` / `NegateOperation` /
+    /// `IntersectOperation`) carrying a baked mesh (spec §7).
+    Csg,
+    /// Everything else — handled generically.
+    None,
+}
+
+impl SpecialKind {
+    fn classify(roblox_class: &str) -> Self {
+        match roblox_class {
+            "Terrain" => SpecialKind::Terrain,
+            "UnionOperation" | "NegateOperation" | "IntersectOperation" => SpecialKind::Csg,
+            _ => SpecialKind::None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ImportOptions — public knobs per spec §15
 // ---------------------------------------------------------------------------
 
@@ -62,17 +90,20 @@ pub struct ImportOptions {
     /// covers every standard Roblox service.
     pub service_router: Option<ServiceRouter>,
 
-    /// Whether to decode SmoothGrid voxel data (§6). Default: true. The
-    /// actual decoder is deferred to Wave 4.A.2 — Wave 4.A.1 just emits
-    /// an `Approximation` entry no matter what this is set to.
+    /// Whether to decode SmoothGrid voxel data (§6). Default: true. When
+    /// false, a `Terrain` instance is still materialised but its voxel
+    /// grid is skipped (recorded as an approximation).
     pub import_terrain: bool,
 
-    /// Whether to extract baked CSG MeshData (§7.1). Default: true.
-    /// Deferred to Wave 4.A.2 — Wave 4.A.1 emits an `Approximation`.
+    /// Whether to extract baked CSG MeshData (§7.1). Default: true. The
+    /// baked-mesh path always runs for CSG instances; this flag is
+    /// reserved for a future "skip CSG entirely" mode.
     pub extract_csg_baked: bool,
 
     /// Whether to re-execute CSG from ChildData when MeshData is absent
-    /// (§7.2). Default: true. Deferred to Wave 4.A.2.
+    /// (§7.2). Default: true. The `truck-shapeops` re-execution path is
+    /// currently a stub — when MeshData is absent the importer falls back
+    /// to an AABB block. The baked-mesh path covers the ~99% case.
     pub recompute_csg_when_missing: bool,
 
     /// Whether to invoke `compat::ScriptTransformer` on Luau bodies.
@@ -323,10 +354,24 @@ impl<'dom> Materializer<'dom> {
             return Ok(());
         }
 
-        // Map the Roblox class to a Eustress ClassName.
-        let Some(eustress_class) = roblox_to_eustress_class(inst.class.as_str()) else {
-            report.record_unmapped_class(&inst.class, &inst.name);
-            return Ok(());
+        // Classify Terrain / CSG up-front: we need it both to route CSG
+        // operands that have no dedicated ClassName to a Part (below) and
+        // to dispatch to the dedicated decoders (terrain.rs / csg.rs)
+        // after the instance is created.
+        let special = SpecialKind::classify(inst.class.as_str());
+
+        // Map the Roblox class to a Eustress ClassName. CSG operations
+        // (`NegateOperation` / `IntersectOperation`) have no dedicated
+        // enum variant — per spec §7 they legacy-route to a Part here so
+        // the CSG dispatcher can swap in the baked mesh (or fall back to
+        // an AABB block when no MeshData is present).
+        let eustress_class = match roblox_to_eustress_class(inst.class.as_str()) {
+            Some(c) => c,
+            None if special == SpecialKind::Csg => ClassName::Part,
+            None => {
+                report.record_unmapped_class(&inst.class, &inst.name);
+                return Ok(());
+            }
         };
 
         // Map properties.
@@ -337,22 +382,6 @@ impl<'dom> Materializer<'dom> {
             inst.class.clone()
         } else {
             inst.name.clone()
-        };
-
-        // For Terrain / CSG, emit an Approximation entry + plain
-        // placeholder. The real decode lands in Wave 4.A.2.
-        let approx_note = if inst.class == "Terrain" {
-            Some(("Terrain — voxel data deferred to Wave 4.A.2".to_string(), "Terrain"))
-        } else if matches!(
-            inst.class.as_str(),
-            "UnionOperation" | "NegateOperation" | "IntersectOperation"
-        ) {
-            Some((
-                format!("CSG ({}) — baked mesh extraction deferred to Wave 4.A.2", inst.class),
-                "Part",
-            ))
-        } else {
-            None
         };
 
         // Create the instance via the canonical pipeline.
@@ -461,9 +490,24 @@ impl<'dom> Materializer<'dom> {
             patch.script_class = Some(eustress_class);
         }
 
-        // Approximation note (Terrain, CSG).
-        if let Some((reason, target)) = approx_note {
-            report.record_approximation(&entity_relpath, &inst.class, target, &reason);
+        // ── Terrain + CSG: dispatch to the dedicated decoders. ──
+        match special {
+            SpecialKind::Terrain if self.opts.import_terrain => {
+                self.import_terrain_instance(inst, &created, report)?;
+            }
+            SpecialKind::Terrain => {
+                // Terrain decode disabled by options — note it.
+                report.record_approximation(
+                    &entity_relpath,
+                    &inst.class,
+                    "Terrain",
+                    "terrain voxel import disabled via ImportOptions",
+                );
+            }
+            SpecialKind::Csg => {
+                self.import_csg_instance(inst, &created, &entity_relpath, report)?;
+            }
+            SpecialKind::None => {}
         }
 
         // Event/function counter for the spec §8 metric.
@@ -482,6 +526,102 @@ impl<'dom> Materializer<'dom> {
             self.walk_subtree(*child_ref, &created.folder_path, &entity_relpath, report)?;
         }
 
+        Ok(())
+    }
+
+    /// Decode a `Terrain` instance's `SmoothGrid` into voxel chunk files
+    /// + patch the Terrain TOML with `[material_colors]` and globals.
+    /// Spec §6.
+    fn import_terrain_instance(
+        &mut self,
+        inst: &rbx_dom_weak::Instance,
+        created: &eustress_common::instance_create::CreatedInstance,
+        report: &mut ImportReport,
+    ) -> Result<(), ImportError> {
+        let props = &inst.properties;
+        let smooth_grid = crate::terrain::binary_string_bytes(props, "SmoothGrid");
+        let material_colors = crate::terrain::material_colors(props);
+        let globals = crate::terrain::collect_globals(props);
+
+        // Empty terrain (no SmoothGrid) → nothing to decode. Still patch
+        // the TOML so the material_colors + globals survive.
+        let grid = smooth_grid.unwrap_or(&[]);
+        crate::terrain::import_terrain(
+            &created.folder_path,
+            grid,
+            material_colors,
+            &globals,
+            report,
+        )
+        .map_err(|e| ImportError::Io(created.folder_path.clone(), e))?;
+        Ok(())
+    }
+
+    /// Extract a CSG instance's baked `MeshData` → `csg.glb` and point the
+    /// `Part` at it (or fall back to an AABB block). Spec §7.
+    fn import_csg_instance(
+        &mut self,
+        inst: &rbx_dom_weak::Instance,
+        created: &eustress_common::instance_create::CreatedInstance,
+        entity_relpath: &str,
+        report: &mut ImportReport,
+    ) -> Result<(), ImportError> {
+        let props = &inst.properties;
+        // MeshData may be a BinaryString or a (deduplicated) SharedString.
+        let mesh_data: Option<Vec<u8>> = match props.get("MeshData") {
+            Some(rbx_dom_weak::types::Variant::BinaryString(bs)) => {
+                Some(AsRef::<[u8]>::as_ref(bs).to_vec())
+            }
+            Some(rbx_dom_weak::types::Variant::SharedString(ss)) => Some(ss.data().to_vec()),
+            _ => None,
+        };
+
+        // AABB fallback size from the source Part.Size (Vector3), else 4³.
+        let size = match props.get("Size") {
+            Some(rbx_dom_weak::types::Variant::Vector3(v)) => [v.x, v.y, v.z],
+            _ => [4.0, 4.0, 4.0],
+        };
+
+        let outcome = crate::csg::import_csg(&created.folder_path, mesh_data.as_deref(), size)
+            .map_err(|e| ImportError::Io(created.folder_path.clone(), e))?;
+
+        // Point the Part at csg.glb + record the CSG op + count.
+        let csg_op = match inst.class.as_str() {
+            "UnionOperation" => "union",
+            "NegateOperation" => "negate",
+            "IntersectOperation" => "intersect",
+            _ => "union",
+        };
+        let patch = self
+            .pending_patches
+            .entry(created.toml_path.clone())
+            .or_default();
+        match &outcome {
+            crate::csg::CsgOutcome::Baked { mesh_file, triangles } => {
+                patch.asset_mesh = Some(mesh_file.clone());
+                patch
+                    .extras
+                    .insert("csg_op".to_string(), toml::Value::String(csg_op.to_string()));
+                patch.extras.insert(
+                    "csg_triangles".to_string(),
+                    toml::Value::Integer(*triangles as i64),
+                );
+                report.csg_baked_extracted += 1;
+            }
+            crate::csg::CsgOutcome::Aabb { mesh_file, reason } => {
+                patch.asset_mesh = Some(mesh_file.clone());
+                patch
+                    .extras
+                    .insert("csg_op".to_string(), toml::Value::String(csg_op.to_string()));
+                report.csg_fallback_aabb += 1;
+                report.record_approximation(
+                    entity_relpath,
+                    &inst.class,
+                    "Part",
+                    &format!("CSG AABB fallback: {reason}"),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -939,7 +1079,10 @@ mod tests {
     }
 
     #[test]
-    fn terrain_emits_deferral_approximation() {
+    fn empty_terrain_imports_without_chunks_or_deferral() {
+        // A Terrain instance with no SmoothGrid materialises but produces
+        // zero voxel chunks and (now that the decoder is wired) NO
+        // deferral approximation.
         let dm = InstanceBuilder::new("DataModel").with_child(
             InstanceBuilder::new("Workspace")
                 .with_child(InstanceBuilder::new("Terrain").with_name("Terrain")),
@@ -951,27 +1094,38 @@ mod tests {
             PathBuf::new(),
         );
 
-        let space_root = make_temp_root("terrain");
+        let space_root = make_temp_root("terrain_empty");
         let report = import_into_space(&rbx, &space_root, ImportOptions::default())
             .expect("import");
+        assert_eq!(report.terrain_chunks_imported, 0);
         assert!(
-            report
-                .approximations
-                .iter()
-                .any(|a| a.reason.contains("voxel data deferred")),
-            "Terrain should produce a Wave 4.A.2 approximation note: {:?}",
+            !report.approximations.iter().any(|a| a.reason.contains("deferred")),
+            "no deferral note expected now that terrain decode is live: {:?}",
             report.approximations
         );
+        // The Terrain folder + TOML should exist.
+        let terrain_toml = space_root
+            .join("Workspace")
+            .join("Terrain")
+            .join("_instance.toml");
+        assert!(terrain_toml.is_file());
         let _ = std::fs::remove_dir_all(&space_root);
     }
 
     #[test]
-    fn csg_emits_deferral_approximation() {
-        let dm = InstanceBuilder::new("DataModel").with_child(
-            InstanceBuilder::new("Workspace").with_child(
-                InstanceBuilder::new("UnionOperation").with_name("Carved"),
-            ),
-        );
+    fn terrain_with_smooth_grid_writes_voxel_chunks() {
+        // Build a one-chunk SmoothGrid (all Grass) and attach it to a
+        // Terrain instance. The importer should decode it and write a
+        // chunk file + bump terrain_chunks_imported.
+        let smooth_grid = build_single_chunk_grid(0, 0, 0, 2 /* Grass */, 255);
+        let terrain = InstanceBuilder::new("Terrain")
+            .with_name("Terrain")
+            .with_property(
+                "SmoothGrid",
+                rbx_dom_weak::types::BinaryString::from(smooth_grid),
+            );
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("Workspace").with_child(terrain));
         let dom = WeakDom::new(dm);
         let rbx = RobloxDom::from_dom(
             dom,
@@ -979,18 +1133,108 @@ mod tests {
             PathBuf::new(),
         );
 
-        let space_root = make_temp_root("csg");
+        let space_root = make_temp_root("terrain_voxels");
         let report = import_into_space(&rbx, &space_root, ImportOptions::default())
             .expect("import");
+        assert_eq!(
+            report.terrain_chunks_imported, 1,
+            "expected exactly one decoded chunk"
+        );
+        let chunk = space_root
+            .join("Workspace")
+            .join("Terrain")
+            .join("voxel_chunks")
+            .join("chunk_0_0_0.bin");
+        assert!(chunk.is_file(), "voxel chunk file should exist: {}", chunk.display());
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn csg_with_mesh_data_extracts_glb_and_part() {
+        // A UnionOperation carrying a baked CSGMDL2 mesh → csg.glb +
+        // csg_baked_extracted incremented + [asset] mesh on the TOML.
+        let mesh_blob = crate::csg::make_csgmdl2_triangle_fixture();
+        let union = InstanceBuilder::new("UnionOperation")
+            .with_name("Carved")
+            .with_property("Size", rbx_dom_weak::types::Vector3::new(4.0, 4.0, 4.0))
+            .with_property(
+                "MeshData",
+                rbx_dom_weak::types::BinaryString::from(mesh_blob),
+            );
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("Workspace").with_child(union));
+        let dom = WeakDom::new(dm);
+        let rbx = RobloxDom::from_dom(
+            dom,
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+
+        let space_root = make_temp_root("csg_baked");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
+            .expect("import");
+        assert_eq!(report.csg_baked_extracted, 1, "one CSG mesh should bake");
+        assert_eq!(report.csg_fallback_aabb, 0);
+
+        let csg_dir = space_root.join("Workspace").join("Carved");
+        assert!(csg_dir.join("csg.glb").is_file(), "csg.glb should exist");
+        // The Part TOML should point its asset mesh at csg.glb.
+        let toml = std::fs::read_to_string(csg_dir.join("_instance.toml")).unwrap();
+        assert!(toml.contains("csg.glb"), "TOML should reference csg.glb: {toml}");
+        assert!(toml.contains("csg_op"), "TOML should record the csg_op: {toml}");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn csg_without_mesh_data_falls_back_to_aabb() {
+        let union = InstanceBuilder::new("NegateOperation")
+            .with_name("Hollow")
+            .with_property("Size", rbx_dom_weak::types::Vector3::new(2.0, 6.0, 2.0));
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("Workspace").with_child(union));
+        let dom = WeakDom::new(dm);
+        let rbx = RobloxDom::from_dom(
+            dom,
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+
+        let space_root = make_temp_root("csg_aabb");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default())
+            .expect("import");
+        assert_eq!(report.csg_baked_extracted, 0);
+        assert_eq!(report.csg_fallback_aabb, 1, "should fall back to AABB");
         assert!(
-            report
-                .approximations
-                .iter()
-                .any(|a| a.reason.contains("CSG") && a.reason.contains("deferred")),
-            "CSG should produce a Wave 4.A.2 approximation note: {:?}",
+            report.approximations.iter().any(|a| a.reason.contains("AABB fallback")),
+            "AABB fallback should be logged: {:?}",
             report.approximations
         );
+        assert!(space_root
+            .join("Workspace")
+            .join("Hollow")
+            .join("csg.glb")
+            .is_file());
         let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// Build a one-chunk SmoothGrid blob (version byte + chunk header +
+    /// RLE cells), all of one material. Mirrors the terrain.rs test
+    /// helper so the materializer integration test stays self-contained.
+    fn build_single_chunk_grid(cx: i32, cy: i32, cz: i32, material: u8, occupancy: u8) -> Vec<u8> {
+        let cells_per_chunk = crate::terrain::CELLS_PER_CHUNK;
+        let mut buf = vec![crate::terrain::SMOOTH_GRID_VERSION];
+        buf.extend_from_slice(&cx.to_le_bytes());
+        buf.extend_from_slice(&cy.to_le_bytes());
+        buf.extend_from_slice(&cz.to_le_bytes());
+        let mut emitted = 0;
+        while emitted < cells_per_chunk {
+            let run = (cells_per_chunk - emitted).min(256);
+            buf.push((material & 0b0011_1111) | 0b0100_0000 | 0b1000_0000);
+            buf.push(occupancy);
+            buf.push((run - 1) as u8);
+            emitted += run;
+        }
+        buf
     }
 
     #[test]

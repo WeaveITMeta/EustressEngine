@@ -33,6 +33,10 @@ thiserror   = { workspace = true }
 uuid        = { workspace = true }
 blake3      = "1.5"
 
+# Terrain SmoothGrid voxel-chunk compression (Wave 4.A.2). Same version
+# `common` uses, already in the lockfile.
+lz4_flex    = "0.11"
+
 # Logging
 tracing     = "0.1"
 

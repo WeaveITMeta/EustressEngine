@@ -23,14 +23,23 @@
 //!                          file_watcher → ECS → worlddb (fjall)
 //! ```
 //!
-//! ## Wave 4.A.1 status
+//! ## Status
 //!
 //! The core importer is live. [`parse`], [`import_into_space`],
 //! and every module call into the real Roblox toolchain (`rbx_dom_weak`,
-//! `rbx_binary`, `rbx_xml`). Wave 4.A.2 wires terrain SmoothGrid decode
-//! and CSG baked-mesh extraction (those are emitted as
-//! `ImportReport::approximations` entries for now); Wave 4.A.3 lands the
-//! Studio modal + drop-target.
+//! `rbx_binary`, `rbx_xml`).
+//!
+//! Wave 4.A.2 landed terrain SmoothGrid voxel decode ([`terrain`]) and
+//! CSG baked-mesh extraction ([`csg`]): a `Terrain` instance's voxel
+//! grid is decoded into LZ4 chunk files under
+//! `Workspace/Terrain/voxel_chunks/`, and each
+//! `UnionOperation`/`NegateOperation`/`IntersectOperation` has its baked
+//! `MeshData` decoded → `csg.glb` and materialised as an asset-meshed
+//! `Part` (AABB-block fallback when no mesh is present). CSG
+//! re-execution from `ChildData` via `truck-shapeops` (§7.2) remains a
+//! stub — the baked-mesh path covers the ~99% common case.
+//!
+//! Wave 4.A.3 lands the Studio modal + drop-target.
 //!
 //! ## Public surface
 //!
@@ -44,6 +53,7 @@
 
 pub mod asset_resolver;
 pub mod class_map;
+pub mod csg;
 pub mod error;
 pub mod identity;
 pub mod import_report;
@@ -51,6 +61,7 @@ pub mod materializer;
 pub mod parser;
 pub mod property_map;
 pub mod service_router;
+pub mod terrain;
 
 // ── Re-exports — the only stable public surface. ───────────────────────────
 pub use crate::asset_resolver::{AssetReference, ResolvedAsset};
@@ -61,7 +72,14 @@ pub use crate::import_report::{
     SkippedService, TerrainDecodeError, TerrainMaterialApproximation, UnmappedClass,
     UnmappedProperty, UnresolvedRef,
 };
+pub use crate::csg::{
+    aabb_box_mesh, decode_mesh_data, encode_glb, import_csg, write_glb, CsgError, CsgMesh,
+    CsgOutcome,
+};
 pub use crate::materializer::{import_into_space, ImportOptions, Materializer};
 pub use crate::parser::{parse, RobloxDom, RobloxFormat};
 pub use crate::property_map::{map_properties, PropertyBag, UnmappedRecord};
 pub use crate::service_router::{RouteOutcome, ServiceRouter};
+pub use crate::terrain::{
+    decode_smooth_grid, import_terrain, DecodeResult, TerrainGlobals, VoxelChunk,
+};
