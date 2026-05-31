@@ -40,3 +40,4 @@ pub mod gui_leaves;
 pub mod lights;
 pub mod networking;      // Wave 5.B — RemoteEvent/Function, BindableEvent/Function
 pub mod scripting;       // Wave 5.C — SoulScript, Luau*, WorkshopConversation
+pub mod value_objects;   // Wave 6.A — 11 ValueObject classes (String/Int/Number/Bool/Object/Color3/Vector3/CFrame/BrickColor/Ray/BinaryString)

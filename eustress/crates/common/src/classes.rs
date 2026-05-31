@@ -319,6 +319,21 @@ pub enum ClassName {
     Material,                // .mat.toml material definition
     Image,                   // .png/.jpg texture image asset — instanceable as a 3D quad with image as albedo
     Video,                   // .mp4/.webm video asset — instanceable as a 3D quad (placeholder render until decoder lands)
+    // ── ValueObjects (Wave 6.A) ──
+    // Each holds exactly ONE typed value — the simplest possible classes,
+    // non-visual containers used by Luau scripts to stash data on the tree.
+    // Roblox stores the payload in a property literally named "Value".
+    StringValue,             // String payload
+    IntValue,                // i64 payload
+    NumberValue,             // f64 payload
+    BoolValue,               // bool payload
+    ObjectValue,             // Option<String> — target entity uuid/path (Roblox: a Ref)
+    Color3Value,             // [f32; 3] RGB payload
+    Vector3Value,            // [f32; 3] xyz payload
+    CFrameValue,             // Transform (position + rotation) payload
+    BrickColorValue,         // i32 — BrickColor palette index
+    RayValue,                // [f32; 6] — origin xyz + direction xyz
+    BinaryStringValue,       // String — base64/opaque payload
 }
 
 impl ClassName {
@@ -418,9 +433,21 @@ impl ClassName {
             ClassName::Material => "Material",
             ClassName::Image => "Image",
             ClassName::Video => "Video",
+            // ValueObjects (Wave 6.A)
+            ClassName::StringValue => "StringValue",
+            ClassName::IntValue => "IntValue",
+            ClassName::NumberValue => "NumberValue",
+            ClassName::BoolValue => "BoolValue",
+            ClassName::ObjectValue => "ObjectValue",
+            ClassName::Color3Value => "Color3Value",
+            ClassName::Vector3Value => "Vector3Value",
+            ClassName::CFrameValue => "CFrameValue",
+            ClassName::BrickColorValue => "BrickColorValue",
+            ClassName::RayValue => "RayValue",
+            ClassName::BinaryStringValue => "BinaryStringValue",
         }
     }
-    
+
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "Instance" => Ok(ClassName::Instance),
@@ -529,6 +556,18 @@ impl ClassName {
             "Material" => Ok(ClassName::Material),
             "Image" => Ok(ClassName::Image),
             "Video" => Ok(ClassName::Video),
+            // ValueObjects (Wave 6.A)
+            "StringValue" => Ok(ClassName::StringValue),
+            "IntValue" => Ok(ClassName::IntValue),
+            "NumberValue" => Ok(ClassName::NumberValue),
+            "BoolValue" => Ok(ClassName::BoolValue),
+            "ObjectValue" => Ok(ClassName::ObjectValue),
+            "Color3Value" => Ok(ClassName::Color3Value),
+            "Vector3Value" => Ok(ClassName::Vector3Value),
+            "CFrameValue" => Ok(ClassName::CFrameValue),
+            "BrickColorValue" => Ok(ClassName::BrickColorValue),
+            "RayValue" => Ok(ClassName::RayValue),
+            "BinaryStringValue" => Ok(ClassName::BinaryStringValue),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -7491,4 +7530,129 @@ impl Default for Video {
             volume: 0.5,
         }
     }
+}
+
+// ============================================================================
+// ValueObjects (Wave 6.A)
+// ============================================================================
+//
+// The 11 Roblox ValueObject classes — each is a non-visual container that
+// holds exactly ONE typed value. Luau scripts use them to stash data on the
+// instance tree (e.g. a `StringValue` named "Difficulty" with value "Hard").
+//
+// Roblox stores the payload in a property literally named `Value`; each
+// spawner's `import_from_roblox` reads that property into the `value` field
+// here. These are the first "full vertical" classes proving the complete
+// ClassName-enum + component-struct + compat-mapping + ClassSpawner +
+// registration pattern end-to-end (see `docs/architecture/CLASS_REGISTRY.md`).
+//
+// Every struct derives `Component + Debug + Clone + Serialize + Deserialize +
+// Reflect + Default` and registers as a reflected component so the Properties
+// panel can read/edit the value without a bespoke writer (LOOP 7 breaker).
+
+/// `StringValue` — holds a single UTF-8 string. Roblox `StringValue`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct StringValue {
+    /// The stored string payload (Roblox `StringValue.Value`).
+    pub value: String,
+}
+
+/// `IntValue` — holds a single 64-bit signed integer. Roblox `IntValue`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct IntValue {
+    /// The stored integer payload (Roblox `IntValue.Value`, a 64-bit int).
+    pub value: i64,
+}
+
+/// `NumberValue` — holds a single 64-bit float. Roblox `NumberValue`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct NumberValue {
+    /// The stored float payload (Roblox `NumberValue.Value`, a double).
+    pub value: f64,
+}
+
+/// `BoolValue` — holds a single boolean. Roblox `BoolValue`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BoolValue {
+    /// The stored boolean payload (Roblox `BoolValue.Value`).
+    pub value: bool,
+}
+
+/// `ObjectValue` — holds an optional reference to another entity.
+///
+/// Roblox stores a `Ref` (a referent to another `Instance`). Eustress stores
+/// the target's stable UUID or tree path as a string; `None` means "no target"
+/// (Roblox's nil ref). Wave 4+ resolves the referent → UUID during import.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ObjectValue {
+    /// Target entity UUID/path, or `None` when unset (Roblox nil `Ref`).
+    pub value: Option<String>,
+}
+
+/// `Color3Value` — holds a single linear-sRGB RGB triple. Roblox `Color3Value`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Color3Value {
+    /// The stored color payload as `[r, g, b]` (Roblox `Color3Value.Value`).
+    pub value: [f32; 3],
+}
+
+/// `Vector3Value` — holds a single 3D vector. Roblox `Vector3Value`.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Vector3Value {
+    /// The stored vector payload as `[x, y, z]` (Roblox `Vector3Value.Value`).
+    pub value: [f32; 3],
+}
+
+/// `CFrameValue` — holds a single coordinate frame (position + rotation).
+///
+/// Roblox `CFrameValue` stores a full `CFrame`; Eustress maps it onto a Bevy
+/// [`Transform`] (the `scale` component is left at identity — a CFrame carries
+/// no scale).
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CFrameValue {
+    /// The stored coordinate frame (Roblox `CFrameValue.Value`).
+    pub value: Transform,
+}
+
+/// `BrickColorValue` — holds a single BrickColor palette index.
+///
+/// Roblox `BrickColorValue` stores a `BrickColor` (an index into the legacy
+/// BrickColor palette). Eustress keeps the raw `i32` index; downstream code
+/// resolves it to an RGB triple via the BrickColor palette table when needed.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BrickColorValue {
+    /// The stored BrickColor palette index (Roblox `BrickColorValue.Value`).
+    pub value: i32,
+}
+
+/// `RayValue` — holds a single ray (origin + direction). Roblox `RayValue`.
+///
+/// Stored as `[ox, oy, oz, dx, dy, dz]`: the first three components are the
+/// origin, the last three are the direction.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RayValue {
+    /// `[origin_x, origin_y, origin_z, dir_x, dir_y, dir_z]`
+    /// (Roblox `RayValue.Value`).
+    pub value: [f32; 6],
+}
+
+/// `BinaryStringValue` — holds opaque binary data as a string.
+///
+/// Roblox `BinaryStringValue` stores raw bytes; Eustress keeps them as a
+/// (typically base64-encoded) string so the value survives TOML round-trips.
+#[derive(Component, Debug, Clone, Default, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BinaryStringValue {
+    /// The stored opaque payload, base64/opaque (Roblox `BinaryStringValue.Value`).
+    pub value: String,
 }

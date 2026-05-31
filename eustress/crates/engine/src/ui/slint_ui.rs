@@ -225,8 +225,14 @@ pub enum SlintAction {
     SaveSceneAs,
     /// File → Import. Slint signal carries no path; the Rust side opens
     /// the OS file picker (rfd) and forwards the chosen path through
-    /// `FileEvent::ImportAsset` for `do_import_asset` to consume.
+    /// `FileEvent::ImportAsset` for `do_import_asset` to consume. If the
+    /// user picks a Roblox file via this combined picker, it is rerouted
+    /// to `FileEvent::ImportRobloxPlace` instead.
     ImportAsset,
+    /// File → Import Roblox Place. Opens a `.rbxl/.rbxlx/.rbxm/.rbxmx`
+    /// picker (rfd) and forwards the chosen path through
+    /// `FileEvent::ImportRobloxPlace` for `do_import_roblox_place`.
+    ImportRobloxPlace,
     PublishUniverse,
     PublishSpace,
     Publish(PublishRequest),
@@ -1142,6 +1148,8 @@ impl Plugin for SlintUiPlugin {
             crate::spawners::networking::NetworkingSpawnerPlugin,
             crate::spawners::scripting::ScriptingSpawnerPlugin,
             crate::spawners::animation::AnimationSpawnerPlugin,
+            // Wave 6.A (11 ValueObject spawners)
+            crate::spawners::value_objects::ValueObjectsSpawnerPlugin,
         ));
 
         app
@@ -1404,6 +1412,8 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_save_scene_as(move || q.push(SlintAction::SaveSceneAs));
     let q = queue.clone();
     ui.on_import_asset(move || q.push(SlintAction::ImportAsset));
+    let q = queue.clone();
+    ui.on_import_roblox_place(move || q.push(SlintAction::ImportRobloxPlace));
     let q = queue.clone();
     ui.on_publish_universe(move || q.push(SlintAction::PublishUniverse));
     let q = queue.clone();
@@ -3775,25 +3785,49 @@ fn drain_slint_actions(
             SlintAction::SaveScene => { events.file_events.write(FileEvent::SaveScene); }
             SlintAction::SaveSceneAs => { events.file_events.write(FileEvent::SaveSceneAs); }
             SlintAction::ImportAsset => {
-                // Open the OS file picker for image / video formats.
-                // Picker call is synchronous — fine here because this
-                // arm fires from the user's deliberate ribbon click,
+                // Open the OS file picker for image / video / Roblox
+                // formats. Picker call is synchronous — fine here because
+                // this arm fires from the user's deliberate ribbon click,
                 // not from a hot path. If the user cancels, log and
                 // move on without writing a FileEvent.
                 let picked = rfd::FileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "tga"])
                     .add_filter("Videos", &["mp4", "webm", "mov", "mkv"])
-                    .add_filter("Images & Videos", &[
+                    .add_filter("Roblox Place / Model", super::file_dialogs::ROBLOX_IMPORT_EXTENSIONS)
+                    .add_filter("All Importable", &[
                         "png", "jpg", "jpeg", "webp", "bmp", "gif", "tga",
                         "mp4", "webm", "mov", "mkv",
+                        "rbxl", "rbxlx", "rbxm", "rbxmx",
                     ])
-                    .set_title("Import Image or Video")
+                    .set_title("Import Image / Video / Roblox Place")
                     .pick_file();
                 match picked {
                     Some(path) => {
-                        events.file_events.write(FileEvent::ImportAsset(path));
+                        // Extension whitelist routes Roblox files to the
+                        // dedicated importer; everything else to the
+                        // image/video asset path.
+                        if super::file_dialogs::is_roblox_place_file(&path) {
+                            events.file_events.write(FileEvent::ImportRobloxPlace(path));
+                        } else {
+                            events.file_events.write(FileEvent::ImportAsset(path));
+                        }
                     }
                     None => info!("📥 Import asset cancelled by user"),
+                }
+            }
+            SlintAction::ImportRobloxPlace => {
+                // Dedicated Roblox place / model picker. Same synchronous
+                // pattern as ImportAsset — fires from a deliberate menu
+                // click, not a hot path.
+                let picked = rfd::FileDialog::new()
+                    .add_filter("Roblox Place / Model", super::file_dialogs::ROBLOX_IMPORT_EXTENSIONS)
+                    .set_title("Import Roblox Place")
+                    .pick_file();
+                match picked {
+                    Some(path) => {
+                        events.file_events.write(FileEvent::ImportRobloxPlace(path));
+                    }
+                    None => info!("📥 Import Roblox place cancelled by user"),
                 }
             }
             SlintAction::PublishUniverse => {

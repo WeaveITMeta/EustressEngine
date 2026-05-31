@@ -164,6 +164,19 @@ impl ClassMapping {
             "SpecialMesh" => Some("SpecialMesh"),
             "Decal" => Some("Decal"),
 
+            // ValueObjects (Wave 6.A) — 1:1 name parity with Roblox
+            "StringValue" => Some("StringValue"),
+            "IntValue" => Some("IntValue"),
+            "NumberValue" => Some("NumberValue"),
+            "BoolValue" => Some("BoolValue"),
+            "ObjectValue" => Some("ObjectValue"),
+            "Color3Value" => Some("Color3Value"),
+            "Vector3Value" => Some("Vector3Value"),
+            "CFrameValue" => Some("CFrameValue"),
+            "BrickColorValue" => Some("BrickColorValue"),
+            "RayValue" => Some("RayValue"),
+            "BinaryStringValue" => Some("BinaryStringValue"),
+
             _ => None,
         }
     }

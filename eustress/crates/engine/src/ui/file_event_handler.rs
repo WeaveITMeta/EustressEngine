@@ -78,6 +78,10 @@ pub enum FileAction {
     /// user-picked absolute path. Handler dispatches by extension to
     /// `do_import_image` / `do_import_video` / etc.
     ImportAsset(PathBuf),
+    /// Import a Roblox place / model file (`.rbxl` / `.rbxlx` /
+    /// `.rbxm` / `.rbxmx`). Source is the user-picked / dropped absolute
+    /// path. Handler parses + materialises into the active Space root.
+    ImportRobloxPlace(PathBuf),
 }
 
 // ============================================================================
@@ -102,6 +106,7 @@ pub fn drain_file_events(
             FileEvent::OpenRecent(p)   => FileAction::OpenSpacePath(p.clone()),
             FileEvent::Publish(request) => FileAction::Publish(request.clone()),
             FileEvent::ImportAsset(path) => FileAction::ImportAsset(path.clone()),
+            FileEvent::ImportRobloxPlace(path) => FileAction::ImportRobloxPlace(path.clone()),
         };
         pending.actions.push(action);
     }
@@ -136,6 +141,7 @@ pub fn execute_file_actions(world: &mut World) {
             FileAction::SaveSpaceAs      => do_save_space_as(world),
             FileAction::Publish(request) => do_publish(world, &request),
             FileAction::ImportAsset(path) => do_import_asset(world, path),
+            FileAction::ImportRobloxPlace(path) => do_import_roblox_place(world, path),
         }
     }
 }
@@ -1120,6 +1126,133 @@ fn do_import_asset(world: &mut World, source: PathBuf) {
         "📥 Imported {:?} as {} class entity '{}' (asset: {})",
         source, kind.label(), created.folder_name, universe_rel_asset,
     );
+}
+
+// ============================================================================
+// 9b. Import Roblox place — .rbxl/.rbxlx/.rbxm/.rbxmx → instance.toml tree
+// ============================================================================
+
+/// Parse a user-picked Roblox place / model file and materialise every
+/// instance into the active Space root via the `eustress-roblox-import`
+/// crate. Mirrors [`do_import_asset`]: it resolves the active
+/// `SpaceRoot`, reports failures through [`notify_err`], and surfaces the
+/// outcome via the `NotificationManager` toast stack. The importer writes
+/// one `_instance.toml` per Roblox instance, so the file watcher spawns
+/// the entities — no manual respawn here (same contract as the
+/// `create_instance` path in `do_import_asset`).
+///
+/// The full [`ImportReport`](eustress_roblox_import::ImportReport) is
+/// logged at `info!`; the toast carries the headline counts (entities
+/// imported + total soft warnings). The richer pre-import options modal
+/// and post-import report modal sketched in
+/// `docs/architecture/ROBLOX_IMPORT_SPEC.md` §14 are a follow-up — this
+/// uses `ImportOptions::default()` and a single summary toast.
+fn do_import_roblox_place(world: &mut World, source: PathBuf) {
+    // 1. Resolve the active Space root — the import destination. Same
+    //    resolution as `do_import_asset`.
+    let space_root = match world.get_resource::<crate::space::SpaceRoot>() {
+        Some(sr) => sr.0.clone(),
+        None => {
+            notify_err(world, "Cannot import Roblox place: no Space loaded".to_string());
+            return;
+        }
+    };
+
+    let file_name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("place")
+        .to_string();
+
+    // 2. Parse the file (auto-detects binary vs XML by magic bytes).
+    let dom = match eustress_roblox_import::parse(&source) {
+        Ok(d) => d,
+        Err(e) => {
+            notify_err(
+                world,
+                format!("Roblox import failed to parse '{}': {}", file_name, e),
+            );
+            return;
+        }
+    };
+
+    // 3. Materialise the DOM into the Space root. Defaults route every
+    //    standard service, derive a per-Space deterministic UUID salt,
+    //    and stamp `metadata.unit = "m"` (Roblox studs map 1:1 to
+    //    Eustress meters).
+    let report = match eustress_roblox_import::import_into_space(
+        &dom,
+        &space_root,
+        eustress_roblox_import::ImportOptions::default(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            notify_err(
+                world,
+                format!("Roblox import failed for '{}': {}", file_name, e),
+            );
+            return;
+        }
+    };
+
+    // 4. Tally the soft diagnostics for the headline toast. Hard errors
+    //    short-circuit above; these are the per-node warnings the user
+    //    may want to review in the on-disk report.
+    let warnings = report.unmapped_classes.len()
+        + report.unmapped_properties.len()
+        + report.asset_warnings.len()
+        + report.script_warnings.len()
+        + report.approximations.len()
+        + report.skipped_services.len()
+        + report.unresolved_refs.len()
+        + report.name_collisions.len();
+
+    // 5. Log the full report (every field) for triage.
+    info!(
+        "📥 Roblox import of '{}' complete: {} of {} nodes imported in {:.2?}",
+        file_name, report.total_nodes_imported, report.total_nodes_seen, report.elapsed,
+    );
+    info!("    class counts: {:?}", report.class_counts);
+    if !report.unmapped_classes.is_empty() {
+        info!("    unmapped classes: {:?}", report.unmapped_classes);
+    }
+    if !report.unmapped_properties.is_empty() {
+        info!("    unmapped properties ({}): {:?}", report.unmapped_properties.len(), report.unmapped_properties);
+    }
+    if !report.asset_warnings.is_empty() {
+        info!("    asset warnings: {:?}", report.asset_warnings);
+    }
+    if !report.script_warnings.is_empty() {
+        info!("    script warnings: {:?}", report.script_warnings);
+    }
+    if !report.approximations.is_empty() {
+        info!("    approximations: {:?}", report.approximations);
+    }
+    if !report.skipped_services.is_empty() {
+        info!("    skipped services: {:?}", report.skipped_services);
+    }
+    if !report.unresolved_refs.is_empty() {
+        info!("    unresolved refs ({}): {:?}", report.unresolved_refs.len(), report.unresolved_refs);
+    }
+    if !report.name_collisions.is_empty() {
+        info!("    name collisions: {:?}", report.name_collisions);
+    }
+
+    // 6. Surface the headline outcome as a toast.
+    if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+        let msg = if warnings > 0 {
+            format!(
+                "Imported {} entities from {} — {} warnings (see log)",
+                report.total_nodes_imported, file_name, warnings,
+            )
+        } else {
+            format!(
+                "Imported {} entities from {}",
+                report.total_nodes_imported, file_name,
+            )
+        };
+        n.success(msg);
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

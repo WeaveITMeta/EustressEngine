@@ -379,6 +379,7 @@ export component Ribbon inherits Rectangle {
     callback on-save-scene();
     callback on-save-scene-as();
     callback on-import-asset();
+    callback on-import-roblox-place();
     callback on-publish-universe();
     callback on-publish-space();
     callback on-exit();
@@ -517,6 +518,7 @@ export component Ribbon inherits Rectangle {
                                 DropdownItem { label: "New Universe..."; shortcut: "Ctrl+Shift+N"; clicked => { root.on-new-universe(); } }
                                 DropdownItem { label: "New Space"; shortcut: "Ctrl+N"; clicked => { root.on-new-scene(); } }
                                 DropdownItem { label: "Open File..."; shortcut: "Ctrl+O"; clicked => { root.on-open-scene(); } }
+                                DropdownItem { label: "Import Roblox Place..."; clicked => { root.on-import-roblox-place(); } }
                                 DropdownItem { label: "Save Space"; shortcut: "Ctrl+S"; clicked => { root.on-save-scene(); } }
                                 DropdownItem { label: "Save Space As..."; shortcut: "Ctrl+Shift+S"; clicked => { root.on-save-scene-as(); } }
                                 DropdownSeparator {}
@@ -1879,6 +1881,7 @@ export component Ribbon inherits Rectangle {
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Open"; shortcut: root.shortcut-open; tooltip: "Open File"; tint: #64b5f6; clicked => { root.on-open-scene(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/save.svg"); label: "Save"; shortcut: root.shortcut-save; tooltip: "Save Space"; tint: #64b5f6; clicked => { root.on-save-scene(); } }
                     IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import"; tooltip: "Import image or video into Universe assets"; tint: #81c784; clicked => { root.on-import-asset(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/import.svg"); label: "Import Place"; tooltip: "Import a Roblox place / model (.rbxl/.rbxlx/.rbxm/.rbxmx)"; tint: #81c784; clicked => { root.on-import-roblox-place(); } }
                 }
                 GroupDivider {}
 

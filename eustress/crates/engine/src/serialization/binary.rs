@@ -543,9 +543,23 @@ impl ClassId {
             ClassName::Image => ClassId::Instance,
             ClassName::Video => ClassId::Instance,
             ClassName::WorkshopConversation => ClassId::Instance,
+            // ValueObjects (Wave 6.A) — non-visual, not binary-serialized;
+            // they round-trip via TOML, so map to the Instance fallback id
+            // (same treatment as adornments / asset classes above).
+            ClassName::StringValue
+            | ClassName::IntValue
+            | ClassName::NumberValue
+            | ClassName::BoolValue
+            | ClassName::ObjectValue
+            | ClassName::Color3Value
+            | ClassName::Vector3Value
+            | ClassName::CFrameValue
+            | ClassName::BrickColorValue
+            | ClassName::RayValue
+            | ClassName::BinaryStringValue => ClassId::Instance,
         }
     }
-    
+
     pub fn to_class_name(self) -> ClassName {
         match self {
             // Core Classes

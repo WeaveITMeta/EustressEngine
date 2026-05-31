@@ -142,6 +142,32 @@ pub enum FileEvent {
     /// watcher spawns the entity. Source path is the user-picked
     /// absolute path on the host filesystem.
     ImportAsset(PathBuf),
+    /// User picked (or dropped) a Roblox place / model file
+    /// (`.rbxl` / `.rbxlx` / `.rbxm` / `.rbxmx`) to import. Handler
+    /// parses the file via `eustress_roblox_import::parse`, then
+    /// materialises every instance into the active Space root via
+    /// `import_into_space`, surfacing the `ImportReport` as a toast.
+    /// Source path is the user-picked absolute path on the host
+    /// filesystem. See `docs/architecture/ROBLOX_IMPORT_SPEC.md` §11.
+    ImportRobloxPlace(PathBuf),
+}
+
+/// Roblox place / model file extensions accepted by the importer. Shared
+/// by the file-picker filter and the picker-result router so the
+/// whitelist stays in one place.
+pub const ROBLOX_IMPORT_EXTENSIONS: &[&str] = &["rbxl", "rbxlx", "rbxm", "rbxmx"];
+
+/// True when `path`'s extension is one of [`ROBLOX_IMPORT_EXTENSIONS`]
+/// (case-insensitive). Used to route a picked / dropped file to
+/// `FileEvent::ImportRobloxPlace` instead of `FileEvent::ImportAsset`.
+pub fn is_roblox_place_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            ROBLOX_IMPORT_EXTENSIONS.contains(&e.as_str())
+        })
+        .unwrap_or(false)
 }
 
 /// Show file picker for opening scenes

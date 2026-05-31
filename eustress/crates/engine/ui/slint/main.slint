@@ -752,6 +752,10 @@ export component StudioWindow inherits Window {
     // picker via Rust; the picked path flows back through
     // `SlintAction::ImportAsset` → `FileEvent::ImportAsset`.
     callback import-asset();
+    // File → Import Roblox Place. Opens a .rbxl/.rbxlx/.rbxm/.rbxmx
+    // picker via Rust; the picked path flows back through
+    // `SlintAction::ImportRobloxPlace` → `FileEvent::ImportRobloxPlace`.
+    callback import-roblox-place();
     callback publish-universe();
     callback publish-space();
     callback publish(string, string, string, bool, bool, bool, bool);
@@ -1057,6 +1061,7 @@ export component StudioWindow inherits Window {
             on-save-scene => { root.save-scene(); }
             on-save-scene-as => { root.save-scene-as(); }
             on-import-asset => { root.import-asset(); }
+            on-import-roblox-place => { root.import-roblox-place(); }
             on-publish-universe => { root.publish-universe(); }
             on-publish-space => { root.publish-space(); }
             on-exit => { root.exit-app(); }
