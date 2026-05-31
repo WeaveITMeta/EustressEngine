@@ -557,6 +557,51 @@ impl ClassId {
             | ClassName::BrickColorValue
             | ClassName::RayValue
             | ClassName::BinaryStringValue => ClassId::Instance,
+            // Modern constraints & movers (Wave 6.B) — no dedicated ClassId
+            // yet; route to Instance (same precedent as the adornments and
+            // value-objects above). The reverse map never produces these,
+            // so no ClassId round-trip ambiguity is introduced.
+            ClassName::RodConstraint => ClassId::Instance,
+            ClassName::CylindricalConstraint => ClassId::Instance,
+            ClassName::TorsionSpringConstraint => ClassId::Instance,
+            ClassName::UniversalConstraint => ClassId::Instance,
+            ClassName::AlignPosition => ClassId::Instance,
+            ClassName::AlignOrientation => ClassId::Instance,
+            ClassName::LinearVelocity => ClassId::Instance,
+            ClassName::AngularVelocity => ClassId::Instance,
+            ClassName::VectorForce => ClassId::Instance,
+            ClassName::Torque => ClassId::Instance,
+            ClassName::PlaneConstraint => ClassId::Instance,
+            ClassName::BodyPosition => ClassId::Instance,
+            ClassName::BodyVelocity => ClassId::Instance,
+            ClassName::BodyGyro => ClassId::Instance,
+            ClassName::BodyAngularVelocity => ClassId::Instance,
+            ClassName::BodyForce => ClassId::Instance,
+            ClassName::BodyThrust => ClassId::Instance,
+            // Post-processing & VFX (Wave 6.C)
+            ClassName::BloomEffect => ClassId::Instance,
+            ClassName::BlurEffect => ClassId::Instance,
+            ClassName::DepthOfFieldEffect => ClassId::Instance,
+            ClassName::ColorCorrectionEffect => ClassId::Instance,
+            ClassName::SunRaysEffect => ClassId::Instance,
+            ClassName::Fire => ClassId::Instance,
+            ClassName::Smoke => ClassId::Instance,
+            ClassName::Sparkles => ClassId::Instance,
+            ClassName::Explosion => ClassId::Instance,
+            ClassName::Trail => ClassId::Instance,
+            ClassName::ForceField => ClassId::Instance,
+            // Interaction & character (Wave 6.D)
+            ClassName::Tool => ClassId::Instance,
+            ClassName::Accessory => ClassId::Instance,
+            ClassName::ClickDetector => ClassId::Instance,
+            ClassName::ProximityPrompt => ClassId::Instance,
+            ClassName::Dialog => ClassId::Instance,
+            ClassName::DialogChoice => ClassId::Instance,
+            ClassName::BodyColors => ClassId::Instance,
+            ClassName::CharacterMesh => ClassId::Instance,
+            ClassName::Shirt => ClassId::Instance,
+            ClassName::Pants => ClassId::Instance,
+            ClassName::ShirtGraphic => ClassId::Instance,
         }
     }
 

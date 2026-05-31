@@ -231,6 +231,49 @@ pub enum ClassName {
     BallSocketConstraint,   // Spherical joint — rotation around all axes
     SpringConstraint,       // Spring — distance joint with compliance (stiffness/damping)
     RopeConstraint,         // Rope — distance joint with max length only (no min)
+    // ── Modern constraints & movers (Wave 6.B) ──
+    RodConstraint,          // Rigid rod — fixed distance with optional bend limits
+    CylindricalConstraint,  // Combined slider + revolute (linear + angular actuators)
+    TorsionSpringConstraint,// Angular spring between two attachments
+    UniversalConstraint,    // Two-axis rotation joint (U-joint)
+    AlignPosition,          // Force-driven mover that aligns a part to a target position
+    AlignOrientation,       // Torque-driven mover that aligns a part to a target orientation
+    LinearVelocity,         // Maintains a target linear velocity at an attachment
+    AngularVelocity,        // Maintains a target angular velocity at an attachment
+    VectorForce,            // Applies a constant force vector at an attachment
+    Torque,                 // Applies a constant torque at an attachment
+    PlaneConstraint,        // Constrains a part to a plane (Roblox: Plane)
+    // Legacy body movers (round-trip + functional)
+    BodyPosition,           // Legacy position mover (PD controller toward a target position)
+    BodyVelocity,           // Legacy linear-velocity mover (struct lives in services::physics)
+    BodyGyro,               // Legacy orientation mover (PD controller toward a target CFrame)
+    BodyAngularVelocity,    // Legacy angular-velocity mover
+    BodyForce,              // Legacy constant-force mover (struct lives in services::physics)
+    BodyThrust,             // Legacy force-at-location mover
+    // ── Post-processing & VFX (Wave 6.C) ──
+    BloomEffect,            // Post-FX: bloom / glow around bright pixels
+    BlurEffect,             // Post-FX: full-screen Gaussian blur
+    DepthOfFieldEffect,     // Post-FX: depth-of-field focus blur
+    ColorCorrectionEffect,  // Post-FX: brightness/contrast/saturation/tint grade
+    SunRaysEffect,          // Post-FX: god-ray / sun-shaft scattering
+    Fire,                   // Particle effect: animated fire
+    Smoke,                  // Particle effect: rising smoke
+    Sparkles,               // Particle effect: glittering sparkles
+    Explosion,              // Instantaneous radial blast (force + visual)
+    Trail,                  // Ribbon trail between two attachments
+    ForceField,             // Visual shield overlay on a part/model
+    // ── Interaction & character (Wave 6.D) ──
+    Tool,                   // Equippable tool (Backpack item with a Handle)
+    Accessory,              // Legacy hat/accessory (child Handle + Attachment)
+    ClickDetector,          // Detects mouse clicks on a part
+    ProximityPrompt,        // Contextual hold-to-interact prompt
+    Dialog,                 // NPC dialog tree root
+    DialogChoice,           // A single branch within a Dialog tree
+    BodyColors,             // Per-limb BrickColor palette for a character
+    CharacterMesh,          // Replacement mesh+texture for a character body part
+    Shirt,                  // Character shirt (clothing template)
+    Pants,                  // Character pants (clothing template)
+    ShirtGraphic,           // Front-torso decal graphic (T-shirt)
     SpecialMesh,
     Decal,
     Folder,
@@ -359,6 +402,48 @@ impl ClassName {
             ClassName::BallSocketConstraint => "BallSocketConstraint",
             ClassName::SpringConstraint => "SpringConstraint",
             ClassName::RopeConstraint => "RopeConstraint",
+            // Modern constraints & movers (Wave 6.B)
+            ClassName::RodConstraint => "RodConstraint",
+            ClassName::CylindricalConstraint => "CylindricalConstraint",
+            ClassName::TorsionSpringConstraint => "TorsionSpringConstraint",
+            ClassName::UniversalConstraint => "UniversalConstraint",
+            ClassName::AlignPosition => "AlignPosition",
+            ClassName::AlignOrientation => "AlignOrientation",
+            ClassName::LinearVelocity => "LinearVelocity",
+            ClassName::AngularVelocity => "AngularVelocity",
+            ClassName::VectorForce => "VectorForce",
+            ClassName::Torque => "Torque",
+            ClassName::PlaneConstraint => "PlaneConstraint",
+            ClassName::BodyPosition => "BodyPosition",
+            ClassName::BodyVelocity => "BodyVelocity",
+            ClassName::BodyGyro => "BodyGyro",
+            ClassName::BodyAngularVelocity => "BodyAngularVelocity",
+            ClassName::BodyForce => "BodyForce",
+            ClassName::BodyThrust => "BodyThrust",
+            // Post-processing & VFX (Wave 6.C)
+            ClassName::BloomEffect => "BloomEffect",
+            ClassName::BlurEffect => "BlurEffect",
+            ClassName::DepthOfFieldEffect => "DepthOfFieldEffect",
+            ClassName::ColorCorrectionEffect => "ColorCorrectionEffect",
+            ClassName::SunRaysEffect => "SunRaysEffect",
+            ClassName::Fire => "Fire",
+            ClassName::Smoke => "Smoke",
+            ClassName::Sparkles => "Sparkles",
+            ClassName::Explosion => "Explosion",
+            ClassName::Trail => "Trail",
+            ClassName::ForceField => "ForceField",
+            // Interaction & character (Wave 6.D)
+            ClassName::Tool => "Tool",
+            ClassName::Accessory => "Accessory",
+            ClassName::ClickDetector => "ClickDetector",
+            ClassName::ProximityPrompt => "ProximityPrompt",
+            ClassName::Dialog => "Dialog",
+            ClassName::DialogChoice => "DialogChoice",
+            ClassName::BodyColors => "BodyColors",
+            ClassName::CharacterMesh => "CharacterMesh",
+            ClassName::Shirt => "Shirt",
+            ClassName::Pants => "Pants",
+            ClassName::ShirtGraphic => "ShirtGraphic",
             ClassName::SpecialMesh => "SpecialMesh",
             ClassName::Decal => "Decal",
             ClassName::Folder => "Folder",
@@ -472,6 +557,49 @@ impl ClassName {
             "BallSocketConstraint" => Ok(ClassName::BallSocketConstraint),
             "SpringConstraint" => Ok(ClassName::SpringConstraint),
             "RopeConstraint" => Ok(ClassName::RopeConstraint),
+            // Modern constraints & movers (Wave 6.B)
+            "RodConstraint" => Ok(ClassName::RodConstraint),
+            "CylindricalConstraint" => Ok(ClassName::CylindricalConstraint),
+            "TorsionSpringConstraint" => Ok(ClassName::TorsionSpringConstraint),
+            "UniversalConstraint" => Ok(ClassName::UniversalConstraint),
+            "AlignPosition" => Ok(ClassName::AlignPosition),
+            "AlignOrientation" => Ok(ClassName::AlignOrientation),
+            "LinearVelocity" => Ok(ClassName::LinearVelocity),
+            "AngularVelocity" => Ok(ClassName::AngularVelocity),
+            "VectorForce" => Ok(ClassName::VectorForce),
+            "Torque" => Ok(ClassName::Torque),
+            // Roblox names the class "Plane"; Eustress variant is PlaneConstraint
+            "PlaneConstraint" | "Plane" => Ok(ClassName::PlaneConstraint),
+            "BodyPosition" => Ok(ClassName::BodyPosition),
+            "BodyVelocity" => Ok(ClassName::BodyVelocity),
+            "BodyGyro" => Ok(ClassName::BodyGyro),
+            "BodyAngularVelocity" => Ok(ClassName::BodyAngularVelocity),
+            "BodyForce" => Ok(ClassName::BodyForce),
+            "BodyThrust" => Ok(ClassName::BodyThrust),
+            // Post-processing & VFX (Wave 6.C)
+            "BloomEffect" => Ok(ClassName::BloomEffect),
+            "BlurEffect" => Ok(ClassName::BlurEffect),
+            "DepthOfFieldEffect" => Ok(ClassName::DepthOfFieldEffect),
+            "ColorCorrectionEffect" => Ok(ClassName::ColorCorrectionEffect),
+            "SunRaysEffect" => Ok(ClassName::SunRaysEffect),
+            "Fire" => Ok(ClassName::Fire),
+            "Smoke" => Ok(ClassName::Smoke),
+            "Sparkles" => Ok(ClassName::Sparkles),
+            "Explosion" => Ok(ClassName::Explosion),
+            "Trail" => Ok(ClassName::Trail),
+            "ForceField" => Ok(ClassName::ForceField),
+            // Interaction & character (Wave 6.D)
+            "Tool" => Ok(ClassName::Tool),
+            "Accessory" | "Hat" => Ok(ClassName::Accessory),
+            "ClickDetector" => Ok(ClassName::ClickDetector),
+            "ProximityPrompt" => Ok(ClassName::ProximityPrompt),
+            "Dialog" => Ok(ClassName::Dialog),
+            "DialogChoice" => Ok(ClassName::DialogChoice),
+            "BodyColors" => Ok(ClassName::BodyColors),
+            "CharacterMesh" => Ok(ClassName::CharacterMesh),
+            "Shirt" => Ok(ClassName::Shirt),
+            "Pants" => Ok(ClassName::Pants),
+            "ShirtGraphic" => Ok(ClassName::ShirtGraphic),
             "SpecialMesh" => Ok(ClassName::SpecialMesh),
             "Decal" => Ok(ClassName::Decal),
             "Folder" => Ok(ClassName::Folder),
@@ -2159,6 +2287,1034 @@ impl Default for RopeConstraint {
             c1: Transform::IDENTITY,
             length: 10.0,
             enabled: true,
+        }
+    }
+}
+
+// ============================================================================
+// 13g–13t. Modern constraints & movers (Wave 6.B)
+// ============================================================================
+// Data-layer property structs only (no spawner / system logic). Entity
+// references are `Option<u32>` (attachment IDs), spatial vectors are `Vec3`
+// / `Vec2`, and cframes are Bevy `Transform` — matching the existing
+// constraint structs above. The Wave 6.B infra workers build spawners
+// against these.
+
+/// Rigid rod between two attachments — fixed distance with optional bend limits.
+/// Roblox: `RodConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RodConstraint {
+    /// First attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Fixed rod length
+    pub length: f32,
+    /// Visual rod thickness
+    pub thickness: f32,
+    /// Bend limit at attachment0 (degrees)
+    pub limit_angle0: f32,
+    /// Bend limit at attachment1 (degrees)
+    pub limit_angle1: f32,
+}
+
+impl Default for RodConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            length: 2.0,
+            thickness: 0.15,
+            limit_angle0: 0.0,
+            limit_angle1: 0.0,
+        }
+    }
+}
+
+/// Combined slider + revolute joint with linear and angular actuators.
+/// Roblox: `CylindricalConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CylindricalConstraint {
+    /// First attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Lower linear limit
+    pub lower_limit: f32,
+    /// Upper linear limit
+    pub upper_limit: f32,
+    /// Motor / servo maximum force
+    pub motor_max_force: f32,
+    /// Servo target position (linear)
+    pub servo_target: f32,
+    /// Angular motor maximum torque
+    pub angular_max_torque: f32,
+    /// Angular servo target (degrees)
+    pub angular_servo_target: f32,
+    /// Actuator mode for the linear axis ("Motor" | "Servo" | "None")
+    pub actuator_type: String,
+    /// Actuator mode for the angular axis ("Motor" | "Servo" | "None")
+    pub angular_actuator_type: String,
+}
+
+impl Default for CylindricalConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            lower_limit: -5.0,
+            upper_limit: 5.0,
+            motor_max_force: 0.0,
+            servo_target: 0.0,
+            angular_max_torque: 0.0,
+            angular_servo_target: 0.0,
+            actuator_type: "None".to_string(),
+            angular_actuator_type: "None".to_string(),
+        }
+    }
+}
+
+/// Angular spring between two attachments.
+/// Roblox: `TorsionSpringConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TorsionSpringConstraint {
+    /// First attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Angular stiffness
+    pub stiffness: f32,
+    /// Angular damping
+    pub damping: f32,
+    /// Maximum restoring torque
+    pub max_torque: f32,
+    /// Bounciness (0..1)
+    pub restitution: f32,
+}
+
+impl Default for TorsionSpringConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            stiffness: 100.0,
+            damping: 10.0,
+            max_torque: 1000.0,
+            restitution: 0.0,
+        }
+    }
+}
+
+/// Two-axis rotation joint (universal / U-joint).
+/// Roblox: `UniversalConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UniversalConstraint {
+    /// First attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Maximum bend angle between the two axes (degrees)
+    pub max_angle: f32,
+    /// Bounciness (0..1)
+    pub restitution: f32,
+}
+
+impl Default for UniversalConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            max_angle: 45.0,
+            restitution: 0.0,
+        }
+    }
+}
+
+/// Force-driven mover that aligns a part to a target position.
+/// Roblox: `AlignPosition`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AlignPosition {
+    /// First attachment entity ID (the part being moved)
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID (the target; None = world-space `position`)
+    pub attachment1: Option<u32>,
+    /// World-space target position (used when not attachment-mode)
+    pub position: Vec3,
+    /// Maximum force the mover may apply
+    pub max_force: f32,
+    /// Maximum velocity the mover may reach
+    pub max_velocity: f32,
+    /// How aggressively the mover corrects error
+    pub responsiveness: f32,
+    /// When true, snaps rigidly instead of force-following
+    pub rigidity_enabled: bool,
+    /// Apply the force at the assembly center of mass
+    pub apply_at_center_of_mass: bool,
+    /// Mode ("OneAttachment" | "TwoAttachment")
+    pub mode: String,
+}
+
+impl Default for AlignPosition {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            position: Vec3::ZERO,
+            max_force: 100000.0,
+            max_velocity: 1000.0,
+            responsiveness: 35.0,
+            rigidity_enabled: false,
+            apply_at_center_of_mass: false,
+            mode: "OneAttachment".to_string(),
+        }
+    }
+}
+
+/// Torque-driven mover that aligns a part to a target orientation.
+/// Roblox: `AlignOrientation`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AlignOrientation {
+    /// First attachment entity ID (the part being rotated)
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID (the target; None = world `cframe`)
+    pub attachment1: Option<u32>,
+    /// Target orientation (used when not attachment-mode)
+    pub cframe: Transform,
+    /// Maximum torque the mover may apply
+    pub max_torque: f32,
+    /// Maximum angular velocity the mover may reach
+    pub max_angular_velocity: f32,
+    /// How aggressively the mover corrects error
+    pub responsiveness: f32,
+    /// When true, snaps rigidly instead of torque-following
+    pub rigidity_enabled: bool,
+    /// Mode ("OneAttachment" | "TwoAttachment")
+    pub mode: String,
+    /// Only align the primary axis (leave roll free)
+    pub primary_axis_only: bool,
+}
+
+impl Default for AlignOrientation {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            cframe: Transform::IDENTITY,
+            max_torque: 100000.0,
+            max_angular_velocity: 1000.0,
+            responsiveness: 35.0,
+            rigidity_enabled: false,
+            mode: "OneAttachment".to_string(),
+            primary_axis_only: false,
+        }
+    }
+}
+
+/// Maintains a target linear velocity at an attachment.
+/// Roblox: `LinearVelocity`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct LinearVelocity {
+    /// Attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Direction for line-velocity mode (normalized)
+    pub line_direction: Vec3,
+    /// Target speed along `line_direction`
+    pub line_velocity: f32,
+    /// Target velocity in the plane mode
+    pub plane_velocity: Vec2,
+    /// Target velocity vector (vector mode)
+    pub vector_velocity: Vec3,
+    /// Maximum force the mover may apply
+    pub max_force: f32,
+    /// Constraint mode ("Line" | "Plane" | "Vector")
+    pub velocity_constraint_mode: String,
+    /// Reference frame ("World" | "Attachment0")
+    pub relative_to: String,
+}
+
+impl Default for LinearVelocity {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            line_direction: Vec3::X,
+            line_velocity: 0.0,
+            plane_velocity: Vec2::ZERO,
+            vector_velocity: Vec3::ZERO,
+            max_force: f32::MAX,
+            velocity_constraint_mode: "Vector".to_string(),
+            relative_to: "World".to_string(),
+        }
+    }
+}
+
+/// Maintains a target angular velocity at an attachment.
+/// Roblox: `AngularVelocity`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AngularVelocity {
+    /// Attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Target angular velocity (radians/s per axis)
+    pub angular_velocity: Vec3,
+    /// Maximum torque the mover may apply
+    pub max_torque: f32,
+    /// Reference frame ("World" | "Attachment0")
+    pub relative_to: String,
+    /// Apply an equal-and-opposite reaction torque
+    pub reaction_torque_enabled: bool,
+}
+
+impl Default for AngularVelocity {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            angular_velocity: Vec3::ZERO,
+            max_torque: f32::MAX,
+            relative_to: "World".to_string(),
+            reaction_torque_enabled: false,
+        }
+    }
+}
+
+/// Applies a constant force vector at an attachment.
+/// Roblox: `VectorForce`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct VectorForce {
+    /// Attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Force vector
+    pub force: Vec3,
+    /// Apply at the assembly center of mass instead of the attachment
+    pub apply_at_center_of_mass: bool,
+    /// Reference frame ("World" | "Attachment0")
+    pub relative_to: String,
+}
+
+impl Default for VectorForce {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            force: Vec3::ZERO,
+            apply_at_center_of_mass: false,
+            relative_to: "Attachment0".to_string(),
+        }
+    }
+}
+
+/// Applies a constant torque at an attachment.
+/// Roblox: `Torque`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Torque {
+    /// Attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Torque vector
+    pub torque: Vec3,
+    /// Reference frame ("World" | "Attachment0")
+    pub relative_to: String,
+}
+
+impl Default for Torque {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            torque: Vec3::ZERO,
+            relative_to: "Attachment0".to_string(),
+        }
+    }
+}
+
+/// Constrains a part's motion to a plane defined by two attachments.
+/// Roblox: `Plane` (Eustress variant name: `PlaneConstraint`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct PlaneConstraint {
+    /// First attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Toggle constraint
+    pub enabled: bool,
+}
+
+impl Default for PlaneConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            enabled: true,
+        }
+    }
+}
+
+// ── Legacy body movers (round-trip + functional) ──
+// `BodyVelocity` and `BodyForce` already exist as Component structs in
+// `eustress_common::services::physics`; the Wave 6.B enum variants reuse
+// those structs (no duplicate is defined here). The remaining four legacy
+// movers get their property structs below.
+
+/// Legacy position mover — PD controller that pushes a part toward a target
+/// position. Roblox: `BodyPosition` (deprecated in favour of `AlignPosition`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyPosition {
+    /// Target world-space position
+    pub position: Vec3,
+    /// Maximum force per axis
+    pub max_force: Vec3,
+    /// Proportional gain
+    pub p: f32,
+    /// Derivative gain
+    pub d: f32,
+}
+
+impl Default for BodyPosition {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            max_force: Vec3::splat(4000.0),
+            p: 10000.0,
+            d: 1000.0,
+        }
+    }
+}
+
+/// Legacy orientation mover — PD controller that rotates a part toward a
+/// target CFrame. Roblox: `BodyGyro` (deprecated in favour of `AlignOrientation`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyGyro {
+    /// Target orientation
+    pub cframe: Transform,
+    /// Maximum torque per axis
+    pub max_torque: Vec3,
+    /// Proportional gain
+    pub p: f32,
+    /// Derivative gain
+    pub d: f32,
+}
+
+impl Default for BodyGyro {
+    fn default() -> Self {
+        Self {
+            cframe: Transform::IDENTITY,
+            max_torque: Vec3::splat(400.0),
+            p: 3000.0,
+            d: 500.0,
+        }
+    }
+}
+
+/// Legacy angular-velocity mover. Roblox: `BodyAngularVelocity`
+/// (deprecated in favour of `AngularVelocity`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyAngularVelocity {
+    /// Target angular velocity (radians/s per axis)
+    pub angular_velocity: Vec3,
+    /// Maximum torque per axis
+    pub max_torque: Vec3,
+    /// Proportional gain
+    pub p: f32,
+}
+
+impl Default for BodyAngularVelocity {
+    fn default() -> Self {
+        Self {
+            angular_velocity: Vec3::ZERO,
+            max_torque: Vec3::splat(400.0),
+            p: 3000.0,
+        }
+    }
+}
+
+/// Legacy force-at-location mover. Roblox: `BodyThrust`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyThrust {
+    /// Force vector (local to the part)
+    pub force: Vec3,
+    /// Local point of application
+    pub location: Vec3,
+}
+
+impl Default for BodyThrust {
+    fn default() -> Self {
+        Self {
+            force: Vec3::ZERO,
+            location: Vec3::ZERO,
+        }
+    }
+}
+
+// ============================================================================
+// 13u–13ad. Post-processing & VFX (Wave 6.C)
+// ============================================================================
+// Colors are `[f32; 3]` (matching the GUI Color3 convention used elsewhere
+// in this file). Data-layer only.
+
+/// Post-FX: bloom / glow around bright pixels. Roblox: `BloomEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BloomEffect {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Bloom intensity
+    pub intensity: f32,
+    /// Bloom spread/size
+    pub size: f32,
+    /// Brightness threshold above which pixels bloom
+    pub threshold: f32,
+}
+
+impl Default for BloomEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intensity: 0.4,
+            size: 24.0,
+            threshold: 0.95,
+        }
+    }
+}
+
+/// Post-FX: full-screen Gaussian blur. Roblox: `BlurEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BlurEffect {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Blur kernel size
+    pub size: f32,
+}
+
+impl Default for BlurEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size: 24.0,
+        }
+    }
+}
+
+/// Post-FX: depth-of-field focus blur. Roblox: `DepthOfFieldEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DepthOfFieldEffect {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Blur intensity for far field
+    pub far_intensity: f32,
+    /// Distance to the focal plane
+    pub focus_distance: f32,
+    /// Radius around focus that stays sharp
+    pub in_focus_radius: f32,
+    /// Blur intensity for near field
+    pub near_intensity: f32,
+}
+
+impl Default for DepthOfFieldEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            far_intensity: 0.75,
+            focus_distance: 0.05,
+            in_focus_radius: 10.0,
+            near_intensity: 0.75,
+        }
+    }
+}
+
+/// Post-FX: brightness/contrast/saturation/tint colour grade.
+/// Roblox: `ColorCorrectionEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ColorCorrectionEffect {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Brightness offset
+    pub brightness: f32,
+    /// Contrast multiplier
+    pub contrast: f32,
+    /// Saturation multiplier
+    pub saturation: f32,
+    /// Tint colour (RGB 0..1)
+    pub tint_color: [f32; 3],
+}
+
+impl Default for ColorCorrectionEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            brightness: 0.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            tint_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Post-FX: god-ray / sun-shaft scattering. Roblox: `SunRaysEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct SunRaysEffect {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Ray intensity
+    pub intensity: f32,
+    /// Ray spread
+    pub spread: f32,
+}
+
+impl Default for SunRaysEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intensity: 0.25,
+            spread: 1.0,
+        }
+    }
+}
+
+/// Particle effect: animated fire on a part. Roblox: `Fire`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Fire {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Heat (affects rise speed / flicker)
+    pub heat: f32,
+    /// Flame size
+    pub size: f32,
+    /// Primary flame colour (RGB 0..1)
+    pub color: [f32; 3],
+    /// Secondary flame colour (RGB 0..1)
+    pub secondary_color: [f32; 3],
+}
+
+impl Default for Fire {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            heat: 9.0,
+            size: 5.0,
+            color: [0.847, 0.45, 0.16],
+            secondary_color: [0.847, 0.847, 0.847],
+        }
+    }
+}
+
+/// Particle effect: rising smoke on a part. Roblox: `Smoke`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Smoke {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Smoke colour (RGB 0..1)
+    pub color: [f32; 3],
+    /// Opacity (0..1)
+    pub opacity: f32,
+    /// Rise velocity
+    pub rise_velocity: f32,
+    /// Smoke size
+    pub size: f32,
+}
+
+impl Default for Smoke {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            color: [0.6, 0.6, 0.6],
+            opacity: 0.5,
+            rise_velocity: 1.0,
+            size: 1.0,
+        }
+    }
+}
+
+/// Particle effect: glittering sparkles on a part. Roblox: `Sparkles`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Sparkles {
+    /// Toggle effect
+    pub enabled: bool,
+    /// Sparkle colour (RGB 0..1)
+    pub sparkle_color: [f32; 3],
+}
+
+impl Default for Sparkles {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sparkle_color: [1.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// Instantaneous radial blast — applies force and (optionally) breaks joints.
+/// Roblox: `Explosion`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Explosion {
+    /// Peak pressure at the center
+    pub blast_pressure: f32,
+    /// Radius of effect
+    pub blast_radius: f32,
+    /// World-space detonation position
+    pub position: Vec3,
+    /// Percent of `blast_radius` within which joints break (0..1)
+    pub destroy_joint_radius_percent: f32,
+    /// Behaviour ("NoCraters" | "Craters")
+    pub explosion_type: String,
+}
+
+impl Default for Explosion {
+    fn default() -> Self {
+        Self {
+            blast_pressure: 500000.0,
+            blast_radius: 4.0,
+            position: Vec3::ZERO,
+            destroy_joint_radius_percent: 1.0,
+            explosion_type: "Craters".to_string(),
+        }
+    }
+}
+
+/// Ribbon trail rendered between two attachments as they move. Roblox: `Trail`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Trail {
+    /// Toggle effect
+    pub enabled: bool,
+    /// First (leading) attachment entity ID
+    pub attachment0: Option<u32>,
+    /// Second (trailing) attachment entity ID
+    pub attachment1: Option<u32>,
+    /// Trail colour (RGB 0..1)
+    pub color: [f32; 3],
+    /// How long each trail segment persists (seconds)
+    pub lifetime: f32,
+    /// Minimum movement before a new segment is emitted
+    pub min_length: f32,
+    /// Width multiplier
+    pub width_scale: f32,
+    /// Texture asset ID
+    pub texture: String,
+    /// Billboard the trail toward the camera
+    pub face_camera: bool,
+}
+
+impl Default for Trail {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            attachment0: None,
+            attachment1: None,
+            color: [1.0, 1.0, 1.0],
+            lifetime: 2.0,
+            min_length: 0.1,
+            width_scale: 1.0,
+            texture: String::new(),
+            face_camera: false,
+        }
+    }
+}
+
+/// Visual shield overlay on a part / model. Roblox: `ForceField`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ForceField {
+    /// Render the force-field shader (false = invisible but still present)
+    pub visible: bool,
+}
+
+impl Default for ForceField {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+// ============================================================================
+// 13ae–13ao. Interaction & character (Wave 6.D)
+// ============================================================================
+// Data-layer only. `Humanoid` already exists and is NOT redefined here.
+
+/// Equippable tool (a Backpack item with a `Handle` child). Roblox: `Tool`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Tool {
+    /// Grip position offset on the Handle
+    pub grip_pos: Vec3,
+    /// Grip forward axis
+    pub grip_forward: Vec3,
+    /// Grip right axis
+    pub grip_right: Vec3,
+    /// Grip up axis
+    pub grip_up: Vec3,
+    /// Tool can be dropped by the holder
+    pub can_be_dropped: bool,
+    /// Only activate via script (no click-to-activate)
+    pub manual_activation_only: bool,
+    /// Requires a child part named `Handle`
+    pub requires_handle: bool,
+    /// Tooltip shown in the toolbar
+    pub tool_tip: String,
+    /// Tool is enabled / usable
+    pub enabled: bool,
+}
+
+impl Default for Tool {
+    fn default() -> Self {
+        Self {
+            grip_pos: Vec3::ZERO,
+            grip_forward: Vec3::new(0.0, 0.0, -1.0),
+            grip_right: Vec3::X,
+            grip_up: Vec3::Y,
+            can_be_dropped: true,
+            manual_activation_only: false,
+            requires_handle: true,
+            tool_tip: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// Legacy hat / accessory — a child `Handle` part positioned by an
+/// `Attachment`. Roblox: `Accessory` (and legacy `Hat`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Accessory {
+    /// Named attachment point on the character (e.g. "HatAttachment")
+    pub attachment_point: String,
+}
+
+impl Default for Accessory {
+    fn default() -> Self {
+        Self {
+            attachment_point: String::new(),
+        }
+    }
+}
+
+/// Detects mouse clicks on a part. Roblox: `ClickDetector`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ClickDetector {
+    /// Maximum distance from which the click registers
+    pub max_activation_distance: f32,
+    /// Cursor image asset shown on hover
+    pub cursor_icon: String,
+}
+
+impl Default for ClickDetector {
+    fn default() -> Self {
+        Self {
+            max_activation_distance: 32.0,
+            cursor_icon: String::new(),
+        }
+    }
+}
+
+/// Contextual hold-to-interact prompt. Roblox: `ProximityPrompt`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ProximityPrompt {
+    /// Verb shown ("Open", "Use", …)
+    pub action_text: String,
+    /// Object name shown under the action
+    pub object_text: String,
+    /// Seconds the key must be held (0 = instant)
+    pub hold_duration: f32,
+    /// Maximum distance from which the prompt shows
+    pub max_activation_distance: f32,
+    /// Require unobstructed line of sight to trigger
+    pub requires_line_of_sight: bool,
+    /// Exclusivity ("OnePerButton" | "OneGlobally" | "AlwaysShow")
+    pub exclusivity: String,
+    /// Keyboard key code that triggers the prompt
+    pub keyboard_key_code: String,
+    /// Gamepad key code that triggers the prompt
+    pub gamepad_key_code: String,
+    /// Screen-space offset of the prompt UI
+    pub ui_offset: Vec2,
+}
+
+impl Default for ProximityPrompt {
+    fn default() -> Self {
+        Self {
+            action_text: "Interact".to_string(),
+            object_text: String::new(),
+            hold_duration: 0.0,
+            max_activation_distance: 10.0,
+            requires_line_of_sight: true,
+            exclusivity: "OnePerButton".to_string(),
+            keyboard_key_code: "E".to_string(),
+            gamepad_key_code: "ButtonX".to_string(),
+            ui_offset: Vec2::ZERO,
+        }
+    }
+}
+
+/// NPC dialog tree root. Roblox: `Dialog`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Dialog {
+    /// Greeting line shown when the dialog opens
+    pub initial_prompt: String,
+    /// Purpose ("Quest" | "Help" | "Shop" | …)
+    pub purpose: String,
+    /// Tone ("Neutral" | "Friendly" | "Enemy")
+    pub tone: String,
+    /// Maximum distance from which the dialog can start
+    pub conversation_distance: f32,
+    /// Line shown when the conversation ends
+    pub goodbye_dialog: String,
+    /// Whether the dialog is currently in use (runtime flag)
+    pub in_use: bool,
+}
+
+impl Default for Dialog {
+    fn default() -> Self {
+        Self {
+            initial_prompt: String::new(),
+            purpose: "Help".to_string(),
+            tone: "Neutral".to_string(),
+            conversation_distance: 5.0,
+            goodbye_dialog: "Goodbye!".to_string(),
+            in_use: false,
+        }
+    }
+}
+
+/// A single branch within a `Dialog` tree. Roblox: `DialogChoice`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DialogChoice {
+    /// The line the player picks
+    pub user_dialog: String,
+    /// The NPC's reply to that choice
+    pub response_dialog: String,
+}
+
+impl Default for DialogChoice {
+    fn default() -> Self {
+        Self {
+            user_dialog: String::new(),
+            response_dialog: String::new(),
+        }
+    }
+}
+
+/// Per-limb BrickColor palette for a character. Roblox: `BodyColors`.
+/// Each field is a Roblox BrickColor palette integer.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyColors {
+    /// Head BrickColor
+    pub head_color: i32,
+    /// Torso BrickColor
+    pub torso_color: i32,
+    /// Left-arm BrickColor
+    pub left_arm_color: i32,
+    /// Right-arm BrickColor
+    pub right_arm_color: i32,
+    /// Left-leg BrickColor
+    pub left_leg_color: i32,
+    /// Right-leg BrickColor
+    pub right_leg_color: i32,
+}
+
+impl Default for BodyColors {
+    fn default() -> Self {
+        // 194 = "Medium stone grey" — Roblox default limb colour.
+        Self {
+            head_color: 194,
+            torso_color: 194,
+            left_arm_color: 194,
+            right_arm_color: 194,
+            left_leg_color: 194,
+            right_leg_color: 194,
+        }
+    }
+}
+
+/// Replacement mesh + textures for a character body part. Roblox: `CharacterMesh`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CharacterMesh {
+    /// Replacement mesh asset ID
+    pub mesh_id: String,
+    /// Base texture asset ID
+    pub base_texture_id: String,
+    /// Overlay texture asset ID
+    pub overlay_texture_id: String,
+    /// Which body part this replaces ("Head" | "Torso" | "LeftArm" | …)
+    pub body_part: String,
+}
+
+impl Default for CharacterMesh {
+    fn default() -> Self {
+        Self {
+            mesh_id: String::new(),
+            base_texture_id: String::new(),
+            overlay_texture_id: String::new(),
+            body_part: "Torso".to_string(),
+        }
+    }
+}
+
+/// Character shirt (clothing template). Roblox: `Shirt`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Shirt {
+    /// Shirt clothing-template asset ID
+    pub shirt_template: String,
+}
+
+impl Default for Shirt {
+    fn default() -> Self {
+        Self {
+            shirt_template: String::new(),
+        }
+    }
+}
+
+/// Character pants (clothing template). Roblox: `Pants`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Pants {
+    /// Pants clothing-template asset ID
+    pub pants_template: String,
+}
+
+impl Default for Pants {
+    fn default() -> Self {
+        Self {
+            pants_template: String::new(),
+        }
+    }
+}
+
+/// Front-torso decal graphic (T-shirt). Roblox: `ShirtGraphic`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ShirtGraphic {
+    /// Graphic asset ID
+    pub graphic: String,
+}
+
+impl Default for ShirtGraphic {
+    fn default() -> Self {
+        Self {
+            graphic: String::new(),
         }
     }
 }

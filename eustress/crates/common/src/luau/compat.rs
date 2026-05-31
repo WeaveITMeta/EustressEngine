@@ -103,6 +103,9 @@ impl ClassMapping {
             "WedgePart" => Some("Part"),
             "CornerWedgePart" => Some("Part"),
             "TrussPart" => Some("Part"),
+            // EditableMesh is a runtime AssetService construct; we map it to
+            // Part (per the Wave 6 decision — no dedicated EditableMesh class).
+            "EditableMesh" => Some("Part"),
             "SpawnLocation" => Some("SpawnLocation"),
             "Seat" => Some("Seat"),
             "VehicleSeat" => Some("VehicleSeat"),
@@ -119,6 +122,26 @@ impl ClassMapping {
             "Motor6D" => Some("Motor6D"),
             "Attachment" => Some("Attachment"),
             "HingeConstraint" => Some("HingeConstraint"),
+            // Modern constraints & movers (Wave 6.B)
+            "RodConstraint" => Some("RodConstraint"),
+            "CylindricalConstraint" => Some("CylindricalConstraint"),
+            "TorsionSpringConstraint" => Some("TorsionSpringConstraint"),
+            "UniversalConstraint" => Some("UniversalConstraint"),
+            "AlignPosition" => Some("AlignPosition"),
+            "AlignOrientation" => Some("AlignOrientation"),
+            "LinearVelocity" => Some("LinearVelocity"),
+            "AngularVelocity" => Some("AngularVelocity"),
+            "VectorForce" => Some("VectorForce"),
+            "Torque" => Some("Torque"),
+            // Roblox class is "Plane"; Eustress variant is PlaneConstraint
+            "Plane" => Some("PlaneConstraint"),
+            // Legacy body movers (deprecated in Roblox, still round-tripped)
+            "BodyPosition" => Some("BodyPosition"),
+            "BodyVelocity" => Some("BodyVelocity"),
+            "BodyGyro" => Some("BodyGyro"),
+            "BodyAngularVelocity" => Some("BodyAngularVelocity"),
+            "BodyForce" => Some("BodyForce"),
+            "BodyThrust" => Some("BodyThrust"),
 
             // GUI
             "ScreenGui" => Some("ScreenGui"),
@@ -137,6 +160,18 @@ impl ClassMapping {
             "ParticleEmitter" => Some("ParticleEmitter"),
             "Beam" => Some("Beam"),
             "Sound" => Some("Sound"),
+            // Post-processing & VFX (Wave 6.C)
+            "BloomEffect" => Some("BloomEffect"),
+            "BlurEffect" => Some("BlurEffect"),
+            "DepthOfFieldEffect" => Some("DepthOfFieldEffect"),
+            "ColorCorrectionEffect" => Some("ColorCorrectionEffect"),
+            "SunRaysEffect" => Some("SunRaysEffect"),
+            "Fire" => Some("Fire"),
+            "Smoke" => Some("Smoke"),
+            "Sparkles" => Some("Sparkles"),
+            "Explosion" => Some("Explosion"),
+            "Trail" => Some("Trail"),
+            "ForceField" => Some("ForceField"),
 
             // Scripting
             "Script" => Some("LuauScript"),
@@ -156,6 +191,21 @@ impl ClassMapping {
             // Humanoid
             "Humanoid" => Some("Humanoid"),
             "Animator" => Some("Animator"),
+
+            // Interaction & character (Wave 6.D)
+            "Tool" => Some("Tool"),
+            "Accessory" => Some("Accessory"),
+            // Legacy Hat is an Accessory in modern Roblox
+            "Hat" => Some("Accessory"),
+            "ClickDetector" => Some("ClickDetector"),
+            "ProximityPrompt" => Some("ProximityPrompt"),
+            "Dialog" => Some("Dialog"),
+            "DialogChoice" => Some("DialogChoice"),
+            "BodyColors" => Some("BodyColors"),
+            "CharacterMesh" => Some("CharacterMesh"),
+            "Shirt" => Some("Shirt"),
+            "Pants" => Some("Pants"),
+            "ShirtGraphic" => Some("ShirtGraphic"),
 
             // Camera
             "Camera" => Some("Camera"),
