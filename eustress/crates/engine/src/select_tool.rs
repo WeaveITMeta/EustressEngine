@@ -1178,24 +1178,32 @@ fn handle_box_selection(
                 );
             }
 
-            // Update selection using part_ids
+            // Update selection using part_ids.
+            //
+            // CRITICAL: use `add_to_selection`, NOT `select`. `select()` is
+            // single-select — it CLEARS the set and pushes one id on every
+            // call (correct for a single click). Looping `select()` here left
+            // only the LAST part selected, so the marquee appeared to grab one
+            // part instead of every part inside the box. `add_to_selection`
+            // appends (and de-dupes) without clearing, so the whole box-set
+            // accumulates. We clear ONCE up-front, then accumulate.
             let sm = selection_manager.0.write();
-            
+
             if box_state.additive {
                 // Keep previous selection and add new ones. Same id contract:
                 // entity index/generation (what selection_sync matches on).
                 sm.clear();
                 for entity in &box_state.previous_selection {
-                    sm.select(format!("{}v{}", entity.index(), entity.generation()));
+                    sm.add_to_selection(format!("{}v{}", entity.index(), entity.generation()));
                 }
                 for part_id in &part_ids_in_box {
-                    sm.select(part_id.clone());
+                    sm.add_to_selection(part_id.clone());
                 }
             } else {
-                // Replace selection with box contents
+                // Replace selection with box contents.
                 sm.clear();
                 for part_id in &part_ids_in_box {
-                    sm.select(part_id.clone());
+                    sm.add_to_selection(part_id.clone());
                 }
             }
         }
