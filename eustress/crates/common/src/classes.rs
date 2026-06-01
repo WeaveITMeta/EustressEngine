@@ -377,6 +377,41 @@ pub enum ClassName {
     BrickColorValue,         // i32 — BrickColor palette index
     RayValue,                // [f32; 6] — origin xyz + direction xyz
     BinaryStringValue,       // String — base64/opaque payload
+    // ── Wave 7: legacy joints/movers (7.A) ──
+    Weld,                    // Legacy rigid weld (Part0/Part1 + C0/C1 offsets)
+    Motor,                   // Legacy motorized joint (1-DOF angular drive)
+    VelocityMotor,           // Legacy velocity-driven motor (Part0 + hole attachment)
+    NoCollisionConstraint,   // Disables collisions between two specific parts
+    RigidConstraint,         // Welds two attachments rigidly together
+    LineForce,               // Applies a force along the line between two attachments
+    AnimationConstraint,     // Drives an attachment toward a target pose
+    // ── Wave 7: UI layout modifiers (7.B) ──
+    UICorner,                // Rounds the corners of a GuiObject
+    UIGradient,              // Color/transparency gradient overlay
+    UIStroke,                // Outline stroke around a GuiObject
+    UIListLayout,            // Auto-arranges siblings in a list
+    UIGridLayout,            // Auto-arranges siblings in a grid
+    UIPadding,               // Inner padding for a container
+    UIAspectRatioConstraint, // Locks a GuiObject's aspect ratio
+    UIScale,                 // Uniform scale multiplier for a subtree
+    UISizeConstraint,        // Clamps a GuiObject's absolute size
+    UITextSizeConstraint,    // Clamps auto-scaled text size
+    UITableLayout,           // Auto-arranges children as a table
+    UIPageLayout,            // Paginated scrolling layout
+    UIFlexItem,              // Per-child flexbox sizing within a UIListLayout
+    CanvasGroup,             // GuiObject container with grouped color/transparency
+    UIDragDetector,          // Makes a GuiObject draggable
+    // ── Wave 7: meshes / surfaces / visual adornments (7.C) ──
+    BlockMesh,               // Legacy block mesh shape modifier
+    FileMesh,                // Legacy file-backed mesh shape modifier
+    Texture,                 // Tiling texture decal on a face
+    SurfaceAppearance,       // PBR texture-map override for a MeshPart
+    MaterialVariant,         // Custom material definition (PBR maps + base material)
+    Highlight,               // Fill/outline highlight overlay on a part/model
+    Bone,                    // Skeletal bone for skinned meshes
+    WrapDeformer,            // Cage-mesh deformer for layered clothing
+    WrapLayer,               // Layered-clothing wrap layer
+    WrapTarget,              // Layered-clothing wrap target body
 }
 
 impl ClassName {
@@ -530,6 +565,39 @@ impl ClassName {
             ClassName::BrickColorValue => "BrickColorValue",
             ClassName::RayValue => "RayValue",
             ClassName::BinaryStringValue => "BinaryStringValue",
+            // ── Wave 7 (7.A/7.B/7.C) ──
+            ClassName::Weld => "Weld",
+            ClassName::Motor => "Motor",
+            ClassName::VelocityMotor => "VelocityMotor",
+            ClassName::NoCollisionConstraint => "NoCollisionConstraint",
+            ClassName::RigidConstraint => "RigidConstraint",
+            ClassName::LineForce => "LineForce",
+            ClassName::AnimationConstraint => "AnimationConstraint",
+            ClassName::UICorner => "UICorner",
+            ClassName::UIGradient => "UIGradient",
+            ClassName::UIStroke => "UIStroke",
+            ClassName::UIListLayout => "UIListLayout",
+            ClassName::UIGridLayout => "UIGridLayout",
+            ClassName::UIPadding => "UIPadding",
+            ClassName::UIAspectRatioConstraint => "UIAspectRatioConstraint",
+            ClassName::UIScale => "UIScale",
+            ClassName::UISizeConstraint => "UISizeConstraint",
+            ClassName::UITextSizeConstraint => "UITextSizeConstraint",
+            ClassName::UITableLayout => "UITableLayout",
+            ClassName::UIPageLayout => "UIPageLayout",
+            ClassName::UIFlexItem => "UIFlexItem",
+            ClassName::CanvasGroup => "CanvasGroup",
+            ClassName::UIDragDetector => "UIDragDetector",
+            ClassName::BlockMesh => "BlockMesh",
+            ClassName::FileMesh => "FileMesh",
+            ClassName::Texture => "Texture",
+            ClassName::SurfaceAppearance => "SurfaceAppearance",
+            ClassName::MaterialVariant => "MaterialVariant",
+            ClassName::Highlight => "Highlight",
+            ClassName::Bone => "Bone",
+            ClassName::WrapDeformer => "WrapDeformer",
+            ClassName::WrapLayer => "WrapLayer",
+            ClassName::WrapTarget => "WrapTarget",
         }
     }
 
@@ -696,6 +764,39 @@ impl ClassName {
             "BrickColorValue" => Ok(ClassName::BrickColorValue),
             "RayValue" => Ok(ClassName::RayValue),
             "BinaryStringValue" => Ok(ClassName::BinaryStringValue),
+            // ── Wave 7 (7.A/7.B/7.C) ──
+            "Weld" => Ok(ClassName::Weld),
+            "Motor" => Ok(ClassName::Motor),
+            "VelocityMotor" => Ok(ClassName::VelocityMotor),
+            "NoCollisionConstraint" => Ok(ClassName::NoCollisionConstraint),
+            "RigidConstraint" => Ok(ClassName::RigidConstraint),
+            "LineForce" => Ok(ClassName::LineForce),
+            "AnimationConstraint" => Ok(ClassName::AnimationConstraint),
+            "UICorner" => Ok(ClassName::UICorner),
+            "UIGradient" => Ok(ClassName::UIGradient),
+            "UIStroke" => Ok(ClassName::UIStroke),
+            "UIListLayout" => Ok(ClassName::UIListLayout),
+            "UIGridLayout" => Ok(ClassName::UIGridLayout),
+            "UIPadding" => Ok(ClassName::UIPadding),
+            "UIAspectRatioConstraint" => Ok(ClassName::UIAspectRatioConstraint),
+            "UIScale" => Ok(ClassName::UIScale),
+            "UISizeConstraint" => Ok(ClassName::UISizeConstraint),
+            "UITextSizeConstraint" => Ok(ClassName::UITextSizeConstraint),
+            "UITableLayout" => Ok(ClassName::UITableLayout),
+            "UIPageLayout" => Ok(ClassName::UIPageLayout),
+            "UIFlexItem" => Ok(ClassName::UIFlexItem),
+            "CanvasGroup" => Ok(ClassName::CanvasGroup),
+            "UIDragDetector" => Ok(ClassName::UIDragDetector),
+            "BlockMesh" => Ok(ClassName::BlockMesh),
+            "FileMesh" => Ok(ClassName::FileMesh),
+            "Texture" => Ok(ClassName::Texture),
+            "SurfaceAppearance" => Ok(ClassName::SurfaceAppearance),
+            "MaterialVariant" => Ok(ClassName::MaterialVariant),
+            "Highlight" => Ok(ClassName::Highlight),
+            "Bone" => Ok(ClassName::Bone),
+            "WrapDeformer" => Ok(ClassName::WrapDeformer),
+            "WrapLayer" => Ok(ClassName::WrapLayer),
+            "WrapTarget" => Ok(ClassName::WrapTarget),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -8811,4 +8912,861 @@ pub struct RayValue {
 pub struct BinaryStringValue {
     /// The stored opaque payload, base64/opaque (Roblox `BinaryStringValue.Value`).
     pub value: String,
+}
+
+// ============================================================================
+// Wave 7 — Roblox-import data-layer property structs
+//
+// Pure DATA LAYER: each class carries its Roblox-parity property fields so a
+// place import round-trips losslessly through `_instance.toml`. No spawners,
+// systems, or registration yet — those land in later Wave 7 phases. Derive
+// set and field conventions mirror the existing constraint / GUI / mesh
+// structs above (entity refs = `Option<u32>`, poses = `Transform`, colors =
+// `[f32; 3]`, sizes = small fixed arrays, enum-ish props = `String`).
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// 7.A Legacy joints / movers
+// ----------------------------------------------------------------------------
+
+/// Legacy rigid weld — locks Part1 to Part0 at fixed local offsets.
+/// Roblox `Weld` (predecessor of `WeldConstraint`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Weld {
+    /// Parent part entity ID (Roblox "Part0")
+    pub part0: Option<u32>,
+    /// Child part entity ID (Roblox "Part1")
+    pub part1: Option<u32>,
+    /// Local anchor on Part0 (Roblox "C0")
+    pub c0: Transform,
+    /// Local anchor on Part1 (Roblox "C1")
+    pub c1: Transform,
+}
+
+impl Default for Weld {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+        }
+    }
+}
+
+/// Legacy motorized joint — drives a single rotational DOF toward a target
+/// angle. Roblox `Motor` (predecessor of `Motor6D`).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Motor {
+    /// Parent part entity ID (Roblox "Part0")
+    pub part0: Option<u32>,
+    /// Child part entity ID (Roblox "Part1")
+    pub part1: Option<u32>,
+    /// Target rotation in radians (Roblox "DesiredAngle")
+    pub desired_angle: f32,
+    /// Max angular speed in rad/s (Roblox "MaxVelocity")
+    pub max_velocity: f32,
+    /// Local anchor on Part0 (Roblox "C0")
+    pub c0: Transform,
+    /// Local anchor on Part1 (Roblox "C1")
+    pub c1: Transform,
+}
+
+impl Default for Motor {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            desired_angle: 0.0,
+            max_velocity: 0.1,
+            c0: Transform::IDENTITY,
+            c1: Transform::IDENTITY,
+        }
+    }
+}
+
+/// Legacy velocity-driven motor attached to a part + a hole attachment.
+/// Roblox `VelocityMotor`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct VelocityMotor {
+    /// Driven part entity ID (Roblox "Part0")
+    pub part0: Option<u32>,
+    /// Hole attachment entity ID (Roblox "Hole")
+    pub hole: Option<u32>,
+    /// Target rotation in radians (Roblox "DesiredAngle")
+    pub desired_angle: f32,
+    /// Max angular speed in rad/s (Roblox "MaxVelocity")
+    pub max_velocity: f32,
+}
+
+impl Default for VelocityMotor {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            hole: None,
+            desired_angle: 0.0,
+            max_velocity: 0.1,
+        }
+    }
+}
+
+/// Disables collisions between exactly two parts. Roblox `NoCollisionConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct NoCollisionConstraint {
+    /// First part entity ID (Roblox "Part0")
+    pub part0: Option<u32>,
+    /// Second part entity ID (Roblox "Part1")
+    pub part1: Option<u32>,
+    /// Toggle constraint
+    pub enabled: bool,
+}
+
+impl Default for NoCollisionConstraint {
+    fn default() -> Self {
+        Self {
+            part0: None,
+            part1: None,
+            enabled: true,
+        }
+    }
+}
+
+/// Rigidly welds two attachments together. Roblox `RigidConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RigidConstraint {
+    /// First attachment entity ID (Roblox "Attachment0")
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID (Roblox "Attachment1")
+    pub attachment1: Option<u32>,
+    /// Toggle constraint
+    pub enabled: bool,
+}
+
+impl Default for RigidConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            enabled: true,
+        }
+    }
+}
+
+/// Applies a force along the line connecting two attachments. Roblox `LineForce`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct LineForce {
+    /// First attachment entity ID (Roblox "Attachment0")
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID (Roblox "Attachment1")
+    pub attachment1: Option<u32>,
+    /// Force magnitude (Roblox "Magnitude")
+    pub magnitude: f32,
+    /// Clamp on applied force (Roblox "MaxForce")
+    pub max_force: f32,
+    /// Apply at the assembly center of mass (Roblox "ApplyAtCenterOfMass")
+    pub apply_at_center_of_mass: bool,
+    /// Scale force by 1/distance² (Roblox "InverseSquareLaw")
+    pub inverse_square_law: bool,
+    /// Apply the equal-and-opposite force to Attachment1 (Roblox "ReactionForceEnabled")
+    pub reaction_force_enabled: bool,
+}
+
+impl Default for LineForce {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            magnitude: 0.0,
+            max_force: f32::MAX,
+            apply_at_center_of_mass: false,
+            inverse_square_law: false,
+            reaction_force_enabled: false,
+        }
+    }
+}
+
+/// Drives an attachment toward a target pose with limited force/torque.
+/// Roblox `AnimationConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AnimationConstraint {
+    /// First attachment entity ID (Roblox "Attachment0")
+    pub attachment0: Option<u32>,
+    /// Second attachment entity ID (Roblox "Attachment1")
+    pub attachment1: Option<u32>,
+    /// Clamp on applied force (Roblox "MaxForce")
+    pub max_force: f32,
+    /// Clamp on applied torque (Roblox "MaxTorque")
+    pub max_torque: f32,
+    /// Rigidly enforce the target rather than spring toward it (Roblox "RigidityEnabled")
+    pub rigidity_enabled: bool,
+}
+
+impl Default for AnimationConstraint {
+    fn default() -> Self {
+        Self {
+            attachment0: None,
+            attachment1: None,
+            max_force: f32::MAX,
+            max_torque: f32::MAX,
+            rigidity_enabled: false,
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 7.B UI layout modifiers (children of GuiObjects)
+// ----------------------------------------------------------------------------
+
+/// Rounds the corners of a GuiObject. Roblox `UICorner`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UICorner {
+    /// Corner radius as a UDim (scale fraction + pixel offset). Roblox "CornerRadius"
+    pub corner_radius: crate::ui_types::UDim,
+}
+
+impl Default for UICorner {
+    fn default() -> Self {
+        Self {
+            corner_radius: crate::ui_types::UDim::from_offset(0.0),
+        }
+    }
+}
+
+/// Color/transparency gradient overlay on a GuiObject. Roblox `UIGradient`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIGradient {
+    /// Color keypoints as RGB triplets (Roblox "Color" ColorSequence)
+    pub color: Vec<[f32; 3]>,
+    /// Gradient offset on each axis (Roblox "Offset")
+    pub offset: [f32; 2],
+    /// Rotation in degrees (Roblox "Rotation")
+    pub rotation: f32,
+    /// Transparency keypoints 0-1 (Roblox "Transparency" NumberSequence)
+    pub transparency: Vec<f32>,
+    /// Toggle effect
+    pub enabled: bool,
+}
+
+impl Default for UIGradient {
+    fn default() -> Self {
+        Self {
+            color: vec![[1.0, 1.0, 1.0]],
+            offset: [0.0, 0.0],
+            rotation: 0.0,
+            transparency: vec![0.0],
+            enabled: true,
+        }
+    }
+}
+
+/// Outline stroke drawn around a GuiObject. Roblox `UIStroke`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIStroke {
+    /// Stroke color RGB (Roblox "Color")
+    pub color: [f32; 3],
+    /// Stroke thickness in pixels (Roblox "Thickness")
+    pub thickness: f32,
+    /// Stroke transparency 0-1 (Roblox "Transparency")
+    pub transparency: f32,
+    /// How the stroke aligns to the border: "Contextual"/"Border" (Roblox "ApplyStrokeMode")
+    pub apply_stroke_mode: String,
+    /// Corner join style: "Round"/"Bevel"/"Miter" (Roblox "LineJoinMode")
+    pub line_join_mode: String,
+    /// Toggle effect
+    pub enabled: bool,
+}
+
+impl Default for UIStroke {
+    fn default() -> Self {
+        Self {
+            color: [0.0, 0.0, 0.0],
+            thickness: 1.0,
+            transparency: 0.0,
+            apply_stroke_mode: "Contextual".to_string(),
+            line_join_mode: "Round".to_string(),
+            enabled: true,
+        }
+    }
+}
+
+/// Auto-arranges sibling GuiObjects in a single row/column. Roblox `UIListLayout`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIListLayout {
+    /// Gap between items in pixels (Roblox "Padding")
+    pub padding: f32,
+    /// "Horizontal"/"Vertical" (Roblox "FillDirection")
+    pub fill_direction: String,
+    /// "Left"/"Center"/"Right" (Roblox "HorizontalAlignment")
+    pub horizontal_alignment: String,
+    /// "Top"/"Center"/"Bottom" (Roblox "VerticalAlignment")
+    pub vertical_alignment: String,
+    /// "LayoutOrder"/"Name" (Roblox "SortOrder")
+    pub sort_order: String,
+    /// Wrap items onto new lines when they overflow (Roblox "Wraps")
+    pub wraps: bool,
+}
+
+impl Default for UIListLayout {
+    fn default() -> Self {
+        Self {
+            padding: 0.0,
+            fill_direction: "Vertical".to_string(),
+            horizontal_alignment: "Left".to_string(),
+            vertical_alignment: "Top".to_string(),
+            sort_order: "LayoutOrder".to_string(),
+            wraps: false,
+        }
+    }
+}
+
+/// Auto-arranges sibling GuiObjects in a grid. Roblox `UIGridLayout`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIGridLayout {
+    /// Cell size as a UDim2 4-tuple [x_scale, x_offset, y_scale, y_offset] (Roblox "CellSize")
+    pub cell_size: [f32; 4],
+    /// Cell padding as a UDim2 4-tuple (Roblox "CellPadding")
+    pub cell_padding: [f32; 4],
+    /// "Horizontal"/"Vertical" (Roblox "FillDirection")
+    pub fill_direction: String,
+    /// "LayoutOrder"/"Name" (Roblox "SortOrder")
+    pub sort_order: String,
+    /// "TopLeft"/"TopRight"/"BottomLeft"/"BottomRight" (Roblox "StartCorner")
+    pub start_corner: String,
+    /// "Left"/"Center"/"Right" (Roblox "HorizontalAlignment")
+    pub horizontal_alignment: String,
+    /// "Top"/"Center"/"Bottom" (Roblox "VerticalAlignment")
+    pub vertical_alignment: String,
+}
+
+impl Default for UIGridLayout {
+    fn default() -> Self {
+        Self {
+            cell_size: [0.0, 100.0, 0.0, 100.0],
+            cell_padding: [0.0, 5.0, 0.0, 5.0],
+            fill_direction: "Horizontal".to_string(),
+            sort_order: "LayoutOrder".to_string(),
+            start_corner: "TopLeft".to_string(),
+            horizontal_alignment: "Left".to_string(),
+            vertical_alignment: "Top".to_string(),
+        }
+    }
+}
+
+/// Inner padding for a container GuiObject. Roblox `UIPadding`.
+/// Each edge is stored as a pixel offset (UDim scale dropped for simplicity).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIPadding {
+    /// Top padding in pixels (Roblox "PaddingTop")
+    pub padding_top: f32,
+    /// Bottom padding in pixels (Roblox "PaddingBottom")
+    pub padding_bottom: f32,
+    /// Left padding in pixels (Roblox "PaddingLeft")
+    pub padding_left: f32,
+    /// Right padding in pixels (Roblox "PaddingRight")
+    pub padding_right: f32,
+}
+
+impl Default for UIPadding {
+    fn default() -> Self {
+        Self {
+            padding_top: 0.0,
+            padding_bottom: 0.0,
+            padding_left: 0.0,
+            padding_right: 0.0,
+        }
+    }
+}
+
+/// Locks a GuiObject's aspect ratio. Roblox `UIAspectRatioConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIAspectRatioConstraint {
+    /// Width / height ratio (Roblox "AspectRatio")
+    pub aspect_ratio: f32,
+    /// "FitWithinMaxSize"/"ScaleWithParentSize" (Roblox "AspectType")
+    pub aspect_type: String,
+    /// "Width"/"Height" (Roblox "DominantAxis")
+    pub dominant_axis: String,
+}
+
+impl Default for UIAspectRatioConstraint {
+    fn default() -> Self {
+        Self {
+            aspect_ratio: 1.0,
+            aspect_type: "FitWithinMaxSize".to_string(),
+            dominant_axis: "Width".to_string(),
+        }
+    }
+}
+
+/// Uniform scale multiplier applied to a GuiObject subtree. Roblox `UIScale`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIScale {
+    /// Scale factor (Roblox "Scale")
+    pub scale: f32,
+}
+
+impl Default for UIScale {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+
+/// Clamps a GuiObject's absolute pixel size. Roblox `UISizeConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UISizeConstraint {
+    /// Minimum [width, height] in pixels (Roblox "MinSize")
+    pub min_size: [f32; 2],
+    /// Maximum [width, height] in pixels (Roblox "MaxSize")
+    pub max_size: [f32; 2],
+}
+
+impl Default for UISizeConstraint {
+    fn default() -> Self {
+        Self {
+            min_size: [0.0, 0.0],
+            max_size: [f32::MAX, f32::MAX],
+        }
+    }
+}
+
+/// Clamps auto-scaled text size. Roblox `UITextSizeConstraint`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UITextSizeConstraint {
+    /// Minimum text size in pixels (Roblox "MinTextSize")
+    pub min_text_size: f32,
+    /// Maximum text size in pixels (Roblox "MaxTextSize")
+    pub max_text_size: f32,
+}
+
+impl Default for UITextSizeConstraint {
+    fn default() -> Self {
+        Self {
+            min_text_size: 1.0,
+            max_text_size: 100.0,
+        }
+    }
+}
+
+/// Auto-arranges children as a table. Roblox `UITableLayout`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UITableLayout {
+    /// Cell padding as a UDim2 4-tuple [x_scale, x_offset, y_scale, y_offset] (Roblox "Padding")
+    pub padding: [f32; 4],
+    /// "Horizontal"/"Vertical" (Roblox "FillDirection")
+    pub fill_direction: String,
+    /// Stretch columns to fill empty space (Roblox "FillEmptySpaceColumns")
+    pub fill_empty_space_columns: bool,
+    /// Stretch rows to fill empty space (Roblox "FillEmptySpaceRows")
+    pub fill_empty_space_rows: bool,
+    /// "RowMajor"/"ColumnMajor" (Roblox "MajorAxis")
+    pub major_axis: String,
+    /// "LayoutOrder"/"Name" (Roblox "SortOrder")
+    pub sort_order: String,
+}
+
+impl Default for UITableLayout {
+    fn default() -> Self {
+        Self {
+            padding: [0.0, 0.0, 0.0, 0.0],
+            fill_direction: "Horizontal".to_string(),
+            fill_empty_space_columns: false,
+            fill_empty_space_rows: false,
+            major_axis: "RowMajor".to_string(),
+            sort_order: "LayoutOrder".to_string(),
+        }
+    }
+}
+
+/// Paginated scrolling layout. Roblox `UIPageLayout`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIPageLayout {
+    /// Gap between pages in pixels (Roblox "Padding")
+    pub padding: f32,
+    /// Animate page transitions (Roblox "Animated")
+    pub animated: bool,
+    /// Wrap from last page back to first (Roblox "Circular")
+    pub circular: bool,
+    /// "In"/"Out"/"InOut" (Roblox "EasingDirection")
+    pub easing_direction: String,
+    /// Tween easing style, e.g. "Quad"/"Sine" (Roblox "EasingStyle")
+    pub easing_style: String,
+    /// "Horizontal"/"Vertical" (Roblox "FillDirection")
+    pub fill_direction: String,
+    /// Allow gamepad to change pages (Roblox "GamepadInputEnabled")
+    pub gamepad_input_enabled: bool,
+    /// Allow scroll wheel to change pages (Roblox "ScrollWheelInputEnabled")
+    pub scroll_wheel_input_enabled: bool,
+    /// Allow touch swipe to change pages (Roblox "TouchInputEnabled")
+    pub touch_input_enabled: bool,
+    /// Page transition duration in seconds (Roblox "TweenTime")
+    pub tween_time: f32,
+}
+
+impl Default for UIPageLayout {
+    fn default() -> Self {
+        Self {
+            padding: 0.0,
+            animated: true,
+            circular: false,
+            easing_direction: "Out".to_string(),
+            easing_style: "Back".to_string(),
+            fill_direction: "Horizontal".to_string(),
+            gamepad_input_enabled: true,
+            scroll_wheel_input_enabled: true,
+            touch_input_enabled: true,
+            tween_time: 1.0,
+        }
+    }
+}
+
+/// Per-child flexbox sizing within a UIListLayout. Roblox `UIFlexItem`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIFlexItem {
+    /// "None"/"Grow"/"Shrink"/"Fill"/"Custom" (Roblox "FlexMode")
+    pub flex_mode: String,
+    /// Relative grow weight (Roblox "GrowRatio")
+    pub grow_ratio: f32,
+    /// Relative shrink weight (Roblox "ShrinkRatio")
+    pub shrink_ratio: f32,
+    /// Cross-axis alignment override: "Automatic"/"Start"/"Center"/"End"/"Stretch" (Roblox "ItemLineAlignment")
+    pub item_line_alignment: String,
+}
+
+impl Default for UIFlexItem {
+    fn default() -> Self {
+        Self {
+            flex_mode: "None".to_string(),
+            grow_ratio: 0.0,
+            shrink_ratio: 1.0,
+            item_line_alignment: "Automatic".to_string(),
+        }
+    }
+}
+
+/// GuiObject container that groups its children's color/transparency so they
+/// composite as one layer. Roblox `CanvasGroup`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CanvasGroup {
+    /// Group tint RGB applied to the composited subtree (Roblox "GroupColor3")
+    pub group_color3: [f32; 3],
+    /// Group transparency 0-1 applied to the composited subtree (Roblox "GroupTransparency")
+    pub group_transparency: f32,
+}
+
+impl Default for CanvasGroup {
+    fn default() -> Self {
+        Self {
+            group_color3: [1.0, 1.0, 1.0],
+            group_transparency: 0.0,
+        }
+    }
+}
+
+/// Makes a GuiObject draggable by the user. Roblox `UIDragDetector`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UIDragDetector {
+    /// "Scriptable"/"TranslatePlane"/"TranslateLine"/etc. (Roblox "DragStyle")
+    pub drag_style: String,
+    /// Constraint axis direction (Roblox "DragAxis")
+    pub drag_axis: [f32; 2],
+    /// Toggle dragging
+    pub enabled: bool,
+    /// Drag responsiveness factor (Roblox "Responsiveness")
+    pub responsiveness: f32,
+}
+
+impl Default for UIDragDetector {
+    fn default() -> Self {
+        Self {
+            drag_style: "TranslatePlane".to_string(),
+            drag_axis: [1.0, 0.0],
+            enabled: true,
+            responsiveness: 20.0,
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// 7.C Meshes / surfaces / visual adornments
+// ----------------------------------------------------------------------------
+
+/// Legacy block mesh shape modifier. Roblox `BlockMesh`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BlockMesh {
+    /// Position offset (Roblox "Offset")
+    pub offset: Vec3,
+    /// Non-uniform scale (Roblox "Scale")
+    pub scale: Vec3,
+    /// Per-vertex tint RGB (Roblox "VertexColor")
+    pub vertex_color: [f32; 3],
+}
+
+impl Default for BlockMesh {
+    fn default() -> Self {
+        Self {
+            offset: Vec3::ZERO,
+            scale: Vec3::ONE,
+            vertex_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Legacy file-backed mesh shape modifier with a texture. Roblox `FileMesh`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct FileMesh {
+    /// Mesh asset reference (Roblox "MeshId")
+    pub mesh_id: String,
+    /// Texture asset reference (Roblox "TextureId")
+    pub texture_id: String,
+    /// Position offset (Roblox "Offset")
+    pub offset: Vec3,
+    /// Non-uniform scale (Roblox "Scale")
+    pub scale: Vec3,
+    /// Per-vertex tint RGB (Roblox "VertexColor")
+    pub vertex_color: [f32; 3],
+}
+
+impl Default for FileMesh {
+    fn default() -> Self {
+        Self {
+            mesh_id: String::new(),
+            texture_id: String::new(),
+            offset: Vec3::ZERO,
+            scale: Vec3::ONE,
+            vertex_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Tiling texture decal applied to a face of a part. Roblox `Texture`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Texture {
+    /// Texture asset reference (Roblox "Texture")
+    pub texture: String,
+    /// Face it applies to: "Top"/"Bottom"/"Front"/"Back"/"Left"/"Right" (Roblox "Face")
+    pub face: String,
+    /// Tile size along U in studs (Roblox "StudsPerTileU")
+    pub studs_per_tile_u: f32,
+    /// Tile size along V in studs (Roblox "StudsPerTileV")
+    pub studs_per_tile_v: f32,
+    /// U offset in studs (Roblox "OffsetStudsU")
+    pub offset_studs_u: f32,
+    /// V offset in studs (Roblox "OffsetStudsV")
+    pub offset_studs_v: f32,
+    /// Tint RGB (Roblox "Color3")
+    pub color3: [f32; 3],
+    /// Transparency 0-1 (Roblox "Transparency")
+    pub transparency: f32,
+}
+
+impl Default for Texture {
+    fn default() -> Self {
+        Self {
+            texture: String::new(),
+            face: "Front".to_string(),
+            studs_per_tile_u: 2.0,
+            studs_per_tile_v: 2.0,
+            offset_studs_u: 0.0,
+            offset_studs_v: 0.0,
+            color3: [1.0, 1.0, 1.0],
+            transparency: 0.0,
+        }
+    }
+}
+
+/// PBR texture-map override for a MeshPart's surface. Roblox `SurfaceAppearance`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct SurfaceAppearance {
+    /// Albedo/color map asset (Roblox "ColorMap")
+    pub color_map: String,
+    /// Metalness map asset (Roblox "MetalnessMap")
+    pub metalness_map: String,
+    /// Normal map asset (Roblox "NormalMap")
+    pub normal_map: String,
+    /// Roughness map asset (Roblox "RoughnessMap")
+    pub roughness_map: String,
+    /// "Overlay"/"Transparency" (Roblox "AlphaMode")
+    pub alpha_mode: String,
+}
+
+impl Default for SurfaceAppearance {
+    fn default() -> Self {
+        Self {
+            color_map: String::new(),
+            metalness_map: String::new(),
+            normal_map: String::new(),
+            roughness_map: String::new(),
+            alpha_mode: "Overlay".to_string(),
+        }
+    }
+}
+
+/// Custom material definition (PBR maps over a base material). Roblox `MaterialVariant`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct MaterialVariant {
+    /// Underlying Roblox Material this varies, e.g. "Plastic"/"Metal" (Roblox "BaseMaterial")
+    pub base_material: String,
+    /// Albedo/color map asset (Roblox "ColorMap")
+    pub color_map: String,
+    /// Metalness map asset (Roblox "MetalnessMap")
+    pub metalness_map: String,
+    /// Normal map asset (Roblox "NormalMap")
+    pub normal_map: String,
+    /// Roughness map asset (Roblox "RoughnessMap")
+    pub roughness_map: String,
+    /// "Regular"/"Organic" tiling pattern (Roblox "MaterialPattern")
+    pub material_pattern: String,
+    /// Tile size in studs (Roblox "StudsPerTile")
+    pub studs_per_tile: f32,
+}
+
+impl Default for MaterialVariant {
+    fn default() -> Self {
+        Self {
+            base_material: "Plastic".to_string(),
+            color_map: String::new(),
+            metalness_map: String::new(),
+            normal_map: String::new(),
+            roughness_map: String::new(),
+            material_pattern: "Regular".to_string(),
+            studs_per_tile: 2.0,
+        }
+    }
+}
+
+/// Fill/outline highlight overlay on a part or model. Roblox `Highlight`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Highlight {
+    /// Fill tint RGB (Roblox "FillColor")
+    pub fill_color: [f32; 3],
+    /// Fill transparency 0-1 (Roblox "FillTransparency")
+    pub fill_transparency: f32,
+    /// Outline tint RGB (Roblox "OutlineColor")
+    pub outline_color: [f32; 3],
+    /// Outline transparency 0-1 (Roblox "OutlineTransparency")
+    pub outline_transparency: f32,
+    /// "AlwaysOnTop"/"Occluded" (Roblox "DepthMode")
+    pub depth_mode: String,
+    /// Toggle effect
+    pub enabled: bool,
+}
+
+impl Default for Highlight {
+    fn default() -> Self {
+        Self {
+            fill_color: [1.0, 1.0, 1.0],
+            fill_transparency: 0.5,
+            outline_color: [1.0, 1.0, 1.0],
+            outline_transparency: 0.0,
+            depth_mode: "AlwaysOnTop".to_string(),
+            enabled: true,
+        }
+    }
+}
+
+/// Skeletal bone for skinned-mesh deformation. Roblox `Bone`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Bone {
+    /// Local bind/animated pose (Roblox "Transform"/"CFrame")
+    pub transform: Transform,
+}
+
+impl Default for Bone {
+    fn default() -> Self {
+        Self {
+            transform: Transform::IDENTITY,
+        }
+    }
+}
+
+/// Cage-mesh deformer for layered clothing. Roblox `WrapDeformer`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct WrapDeformer {
+    /// Toggle deformer
+    pub enabled: bool,
+    /// Cage mesh asset reference (Roblox "CageMeshId")
+    pub cage_mesh_id: String,
+}
+
+impl Default for WrapDeformer {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cage_mesh_id: String::new(),
+        }
+    }
+}
+
+/// Layered-clothing wrap layer. Roblox `WrapLayer`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct WrapLayer {
+    /// Toggle layer
+    pub enabled: bool,
+    /// Cage mesh asset reference (Roblox "CageMeshId")
+    pub cage_mesh_id: String,
+    /// Reference mesh asset reference (Roblox "ReferenceMeshId")
+    pub reference_mesh_id: String,
+    /// Layering order (Roblox "Order")
+    pub order: i32,
+}
+
+impl Default for WrapLayer {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cage_mesh_id: String::new(),
+            reference_mesh_id: String::new(),
+            order: 0,
+        }
+    }
+}
+
+/// Layered-clothing wrap target body. Roblox `WrapTarget`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct WrapTarget {
+    /// Cage mesh asset reference (Roblox "CageMeshId")
+    pub cage_mesh_id: String,
+    /// Cage stiffness 0-1 (Roblox "Stiffness")
+    pub stiffness: f32,
+}
+
+impl Default for WrapTarget {
+    fn default() -> Self {
+        Self {
+            cage_mesh_id: String::new(),
+            stiffness: 0.0,
+        }
+    }
 }
