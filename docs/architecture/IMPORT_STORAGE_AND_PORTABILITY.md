@@ -100,3 +100,26 @@ bin gives a NO-ENGINE way to open/verify/export — that's the portability story
 3. TOML projection: serve arch_to_instance(core) -> TOML, edit text, apply
    back via instance_to_arch. TOML ergonomics on a binary core.
 Editing is the most-solved part; the gaps are 8.A (direct import) + 8.B (tool).
+
+## BINARY-PERSISTENCE GAP (verified 2026-06-01) — folds into 8.A
+
+CONFIRMED: Wave 6/7 spawners all have `serialize() -> Vec::new()` (stub). The
+binary core baker `world_db_binary::core_from_components` builds its
+InstanceDefinition from ONLY {Instance, Transform, BasePart, Tags, mesh} and
+sets `extra: HashMap::new()`. It has NO knowledge of the 106 typed config
+components (UICorner, AudioReverb, VectorForce, Tool, StringValue, …). So:
+- TOML save: ✅ lossless (spawner export_to_toml → [properties] table).
+- Binary/Fjall save: ❌ class-specific fields DROPPED (mirror writes empty extra).
+ALSO: the mirror system's `Changed<>` filter is {Transform,BasePart,Tags,
+Instance} — it doesn't even fire when a typed config component changes, so an
+edit to e.g. UICorner.corner_radius never persists to the core at all.
+
+FIX (one path, all classes — NOT 106 serialize impls):
+- core_from_components gains &World + &ClassRegistry access; for the entity's
+  ClassName, call the registered spawner's export_to_toml(world, entity), parse
+  its [properties]/extras table into def.extra. instance_to_arch ALREADY bakes
+  def.extra (EXTRA_KEY) into the core, and arch_to_instance restores it — so the
+  round-trip closes with one change at the baker, reusing the working TOML export.
+- Add the typed config components to the mirror's Changed<> filter (or a
+  generation/dirty bump on spawner apply_edit) so edits actually trigger a save.
+This is Wave 8.A scope (same place the importer's BinarySink lands).

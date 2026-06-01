@@ -239,6 +239,118 @@ pub fn world_to_cell(coord: f32, chunk_size: f32) -> u32 {
     cell.clamp(0, 0x1f_ffff) as u32
 }
 
+// ── Voxel-chunk keys — Wave 9.A (terrain in Fjall) ───────────────────
+//
+// Terrain lives in the same one-handle streaming DB as entities via a
+// dedicated `voxels` partition. A voxel chunk is identified by signed
+// integer chunk coordinates `(cx, cy, cz)` (NOT a world position — the
+// caller has already divided by the chunk edge). The key is the Morton
+// interleave of those coords so spatially-near chunks land in adjacent
+// LSM keys, exactly the locality the entity `INSTANCE_CORE` rows get
+// from [`MortonKeyEncoder`]. A region scan then becomes a Morton range
+// walk over the chunk-coord box.
+
+/// Bias added to each signed chunk-coordinate axis so negatives map into
+/// the unsigned 21-bit range Morton requires. Mirrors the `(1 << 20)`
+/// origin-centring used by [`world_to_cell`]. Representable chunk-coord
+/// span: `[-(1<<20), (1<<20)-1]` per axis (±1,048,576 chunks ≈ ±134
+/// million studs at a 128-stud chunk edge — far beyond any real world).
+pub const VOXEL_CHUNK_BIAS: i64 = 1 << 20;
+
+/// Tag byte stamped on every voxel-chunk key so a stray entity/tree key
+/// can never be mis-decoded as a chunk coord (matches the
+/// `FlatKeyEncoder::TAG` / `MortonKeyEncoder::TAG` discipline).
+const VOXEL_KEY_TAG: u8 = b'V';
+/// Schema version of the voxel-chunk key wire form.
+const VOXEL_KEY_VERSION: u8 = 1;
+
+/// Map one signed chunk-coordinate axis into its biased unsigned 21-bit
+/// cell, clamped to the Morton-representable range.
+fn chunk_axis_to_cell(c: i32) -> u32 {
+    let v = c as i64 + VOXEL_CHUNK_BIAS;
+    v.clamp(0, 0x1f_ffff) as u32
+}
+
+/// Inverse of [`chunk_axis_to_cell`] — biased cell back to signed coord.
+fn cell_to_chunk_axis(cell: u32) -> i32 {
+    (cell as i64 - VOXEL_CHUNK_BIAS) as i32
+}
+
+/// Encode signed voxel-chunk coords `(cx, cy, cz)` into the storage key.
+///
+/// Layout: `V | version(u8) | morton63(biased cx,cy,cz) be8` — 10 bytes.
+/// The Morton interleave makes spatially-adjacent chunks numerically
+/// adjacent, so a range scan over `[encode(lo)..encode(hi)]` returns a
+/// spatial neighbourhood of chunks (the property [`morton3_encode`]
+/// gives entity keys). Round-trips exactly via [`decode_voxel_chunk_key`]
+/// for coords within `±(1<<20)`, including negatives.
+pub fn encode_voxel_chunk_key(cx: i32, cy: i32, cz: i32) -> [u8; 10] {
+    let morton = morton3_encode(
+        chunk_axis_to_cell(cx),
+        chunk_axis_to_cell(cy),
+        chunk_axis_to_cell(cz),
+    );
+    let mut out = [0u8; 10];
+    out[0] = VOXEL_KEY_TAG;
+    out[1] = VOXEL_KEY_VERSION;
+    out[2..10].copy_from_slice(&morton.to_be_bytes());
+    out
+}
+
+/// The just-tag-and-version prefix every voxel-chunk key starts with —
+/// the bound for a full `voxels`-partition scan (`iter_all`).
+pub fn voxel_key_prefix() -> [u8; 2] {
+    [VOXEL_KEY_TAG, VOXEL_KEY_VERSION]
+}
+
+/// Inverse of [`encode_voxel_chunk_key`] → signed `(cx, cy, cz)`.
+/// Returns `Err` on a wrong-length, wrong-tag, or wrong-version key.
+pub fn decode_voxel_chunk_key(bytes: &[u8]) -> Result<(i32, i32, i32)> {
+    if bytes.len() != 10 {
+        return Err(Error::KeyDecode(format!(
+            "voxel-chunk key wrong length: {} (expected 10)",
+            bytes.len()
+        )));
+    }
+    if bytes[0] != VOXEL_KEY_TAG || bytes[1] != VOXEL_KEY_VERSION {
+        return Err(Error::KeyDecode(format!(
+            "voxel-chunk key wrong tag/version: 0x{:02x} v{} (expected 0x{:02x} v{})",
+            bytes[0], bytes[1], VOXEL_KEY_TAG, VOXEL_KEY_VERSION
+        )));
+    }
+    let mut m = [0u8; 8];
+    m.copy_from_slice(&bytes[2..10]);
+    let (cx, cy, cz) = morton3_decode(u64::from_be_bytes(m));
+    Ok((
+        cell_to_chunk_axis(cx),
+        cell_to_chunk_axis(cy),
+        cell_to_chunk_axis(cz),
+    ))
+}
+
+/// Default voxel chunk edge in world studs.
+///
+/// ASSUMPTION (Wave 9.A): the Roblox terrain importer writes chunks at
+/// `CHUNK_EDGE = 32` cells × `ROBLOX_CELL_STUDS = 4` studs/cell =
+/// **128 studs** per chunk along each axis (per
+/// `docs/architecture/TERRAIN_FJALL_MIGRATION.md §9.A`). The terrain
+/// importer (`roblox-import/src/terrain.rs`) does NOT exist in this
+/// crate's branch yet (it lands in a later wave), so this constant is
+/// the single source of truth the storage layer uses to translate a
+/// world-space region box into a chunk-coord box. When the importer
+/// lands it MUST agree with this value (or both move together). The
+/// `*_in_region` API also exposes a `chunk_edge`-parameterised variant
+/// so callers with a different edge are never silently wrong.
+pub const VOXEL_CHUNK_EDGE_STUDS: f32 = 128.0;
+
+/// World coordinate → the chunk index that contains it, at `chunk_edge`
+/// studs per chunk. Floor division so the boundary stud belongs to the
+/// higher chunk consistently and negative coords map correctly
+/// (e.g. `-1.0 / 128.0` → chunk `-1`, not `0`).
+pub fn world_to_chunk_coord(coord: f32, chunk_edge: f32) -> i32 {
+    (coord / chunk_edge).floor() as i32
+}
+
 /// Spatial Morton key encoder — Phase 2, real. The key layout is
 ///
 /// ```text
@@ -384,5 +496,69 @@ mod morton_tests {
         let (e, c) = enc.decode_component(&k).unwrap();
         assert_eq!(e, EntityId(42));
         assert_eq!(c, ComponentTypeId::TRANSFORM);
+    }
+
+    #[test]
+    fn voxel_chunk_key_roundtrip_incl_negatives() {
+        // decode(encode(c)) == c for the full range we promise, including
+        // negatives, zero, and the addressable extremes.
+        for &(cx, cy, cz) in &[
+            (0, 0, 0),
+            (1, 2, 3),
+            (-1, -1, -1),
+            (-7, 12, -300),
+            (123_456, -654_321, 7),
+            (-(1 << 20), 0, (1 << 20) - 1),
+            ((1 << 20) - 1, -(1 << 20), -(1 << 20)),
+        ] {
+            let k = encode_voxel_chunk_key(cx, cy, cz);
+            assert_eq!(
+                decode_voxel_chunk_key(&k).unwrap(),
+                (cx, cy, cz),
+                "voxel chunk roundtrip {cx},{cy},{cz}"
+            );
+        }
+    }
+
+    #[test]
+    fn voxel_chunk_key_is_tagged_and_bounded() {
+        let k = encode_voxel_chunk_key(-5, 9, -2);
+        assert_eq!(k.len(), 10);
+        assert_eq!(&k[..2], &voxel_key_prefix()[..]);
+        // The prefix every key shares is the scan bound.
+        assert!(k.starts_with(&voxel_key_prefix()));
+    }
+
+    #[test]
+    fn voxel_chunk_key_rejects_foreign_bytes() {
+        // Wrong length.
+        assert!(decode_voxel_chunk_key(&[b'V', 1, 0, 0]).is_err());
+        // Wrong tag (an entity Morton key, say).
+        let mut bad = encode_voxel_chunk_key(1, 1, 1);
+        bad[0] = b'M';
+        assert!(decode_voxel_chunk_key(&bad).is_err());
+    }
+
+    #[test]
+    fn voxel_chunk_key_preserves_locality() {
+        // Neighbouring chunks → numerically closer keys than far chunks.
+        let here = u64::from_be_bytes(encode_voxel_chunk_key(50, 50, 50)[2..10].try_into().unwrap());
+        let near = u64::from_be_bytes(encode_voxel_chunk_key(51, 50, 50)[2..10].try_into().unwrap());
+        let far = u64::from_be_bytes(encode_voxel_chunk_key(5000, 50, 50)[2..10].try_into().unwrap());
+        assert!(
+            (here as i128 - near as i128).abs() < (here as i128 - far as i128).abs(),
+            "near chunk key must be closer than far chunk key"
+        );
+    }
+
+    #[test]
+    fn world_to_chunk_coord_floors_and_handles_negatives() {
+        let edge = VOXEL_CHUNK_EDGE_STUDS;
+        assert_eq!(world_to_chunk_coord(0.0, edge), 0);
+        assert_eq!(world_to_chunk_coord(127.9, edge), 0);
+        assert_eq!(world_to_chunk_coord(128.0, edge), 1);
+        assert_eq!(world_to_chunk_coord(-0.1, edge), -1);
+        assert_eq!(world_to_chunk_coord(-128.0, edge), -1);
+        assert_eq!(world_to_chunk_coord(-128.1, edge), -2);
     }
 }
