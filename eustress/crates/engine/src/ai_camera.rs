@@ -36,7 +36,6 @@
 use bevy::prelude::*;
 use bevy::camera::RenderTarget;
 use bevy::asset::RenderAssetUsages;
-use bevy::core_pipeline::Skybox;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use std::path::PathBuf;
 
@@ -67,58 +66,21 @@ impl Plugin for AiCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AiCameraState>()
             .add_systems(Startup, spawn_ai_camera)
-            .add_systems(Update, (process_ai_capture, attach_skybox_to_ai_camera));
+            // R1: the manual `attach_skybox_to_ai_camera` system was removed — the
+            // AI camera now flows through SharedLightingPlugin's shared
+            // attach_skybox_to_cameras (Skybox + EnvironmentMapLight) +
+            // apply_atmosphere_to_cameras, identical to the editor camera.
+            .add_systems(Update, process_ai_capture);
     }
 }
 
-/// Give the AI camera the SKY it was missing.
-///
-/// The AI camera carries `NoAtmosphere`, so `SharedLightingPlugin`'s
-/// `attach_skybox_to_cameras` skips it — which is why its background was a
-/// black void. That shared system attaches `Skybox` AND `EnvironmentMapLight`
-/// together, and it's the env-map (image-based-lighting) bindings that triggered
-/// the "bind group 20 != layout 23" wgpu race on a second camera. So here we
-/// attach ONLY the `Skybox` (the cubemap drawn behind geometry — a separate
-/// render pass, no mesh-view env-map binding) and leave the env-map/atmosphere
-/// off. Result: the AI sees the same sky gradient the user does (and the moon
-/// disc + star field, which are world meshes any camera renders), without the
-/// crash. The sun DISC is atmosphere-rendered and still absent — a deliberate,
-/// separate follow-up. Fill light still comes from the per-camera `AmbientLight`
-/// added in `spawn_ai_camera`.
-///
-/// Runs every frame so it (a) attaches once the skybox handle exists (it's
-/// created in `setup_lighting`, after our Startup spawn) and (b) tracks the
-/// handle when the skybox is regenerated on time-of-day change.
-fn attach_skybox_to_ai_camera(
-    mut commands: Commands,
-    skybox_handle: Res<eustress_common::plugins::lighting_plugin::SkyboxHandle>,
-    mut cams: Query<(Entity, Option<&mut Skybox>), With<AiCamera>>,
-) {
-    let Some(img) = skybox_handle.handle.as_ref() else {
-        return;
-    };
-    for (entity, existing) in cams.iter_mut() {
-        match existing {
-            Some(mut sky) => {
-                if sky.image.id() != img.id() {
-                    sky.image = img.clone();
-                }
-            }
-            None => {
-                commands.entity(entity).insert(Skybox {
-                    image: img.clone(),
-                    brightness: 1000.0,
-                    rotation: Quat::IDENTITY,
-                });
-                info!("🌅 AI Camera: attached skybox (sky now visible to the AI)");
-            }
-        }
-    }
-}
-
-/// Create the off-screen image and spawn the AI camera — modeled on the editor
-/// camera (a plain active `Camera3d`), differing only in its render target
-/// (an Image instead of the window) and `Msaa::Off` (the image is single-sample).
+/// Create the off-screen image and spawn the AI camera. Built from the SAME
+/// `studio_camera_bundle` as the editor camera (identical projection, tonemap,
+/// `Msaa::Off`, and the full R1 photoreal post-stack) and now routed through the
+/// SAME shared lighting attach systems — so it renders identically. It differs
+/// ONLY in: render target (an off-screen Image, not the window), the `AiCamera`
+/// marker, and `Camera { order: -1 }` (so editor tools' `order == 0` lookups
+/// never grab it).
 fn spawn_ai_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -163,35 +125,27 @@ fn spawn_ai_camera(
         Camera { order: -1, ..default() },
         AiCamera,
         // Off-screen: render to our image, never the window — so it can't
-        // displace the editor camera. (Bevy resolves MSAA into the image, so we
-        // keep the editor camera's default MSAA rather than forcing it off.)
+        // displace the editor camera. R1: MSAA is now Off (inherited from
+        // `studio_camera_bundle`, required by TAA); the image is single-sampled
+        // and TAA does the anti-aliasing.
         RenderTarget::Image(handle.into()),
-        // Exclude from SharedLightingPlugin's skybox/atmosphere/env-map auto-attach
-        // — the engine's OWN marker for special/overlay cameras. A second camera
-        // that picks up Atmosphere+EnvironmentMap hits a GPU timing race: the
-        // layout expects those bindings (23) before their textures are prepared,
-        // so its bind group is transiently smaller (20) → wgpu validation panic.
-        // Keeping the AI camera a PLAIN view (self-consistent bindings) avoids it.
-        // It still renders the scene lit by the Sun; sky/ambient can be added
-        // later once the prepare-order is controlled.
-        eustress_common::plugins::lighting_plugin::NoAtmosphere,
-        // ── My eyes' fill light ──────────────────────────────────────────
-        // The engine sets `GlobalAmbientLight::NONE` (all fill comes from the
-        // Atmosphere's image-based lighting), but this camera opts OUT of
-        // Atmosphere — so without this, every surface not facing the Sun
-        // renders pure black and the AI can't judge color or material.
+        // ── R1: AI-camera lighting parity (renders IDENTICALLY to the editor) ──
+        // Deliberately NO `NoAtmosphere` and NO flat `AmbientLight` here. With
+        // those gone, the AI camera flows through SharedLightingPlugin's
+        // `attach_skybox_to_cameras` + `apply_atmosphere_to_cameras` exactly like
+        // the editor camera, so it receives the SAME `Skybox` +
+        // `EnvironmentMapLight` (image-based ambient + reflections) + Bevy
+        // `Atmosphere` (sky). Combined with the shared photoreal post-stack baked
+        // into `studio_camera_bundle`, its captures look the same as the editor
+        // viewport — the point of the AI's "eyes" (it can judge color/material
+        // against real lighting, not a flat fill).
         //
-        // `AmbientLight` is a PER-CAMERA component in Bevy 0.18 (distinct from
-        // the `GlobalAmbientLight` Resource): it brightens ONLY this view, never
-        // the user's editor camera. It adds no texture bindings, so it does NOT
-        // re-trigger the Atmosphere/env-map bind-group race that `NoAtmosphere`
-        // sidesteps. Sky-tinted + bright so shadows read as deep color, not
-        // void — giving the AI usable "eyes" for critiquing its own builds.
-        AmbientLight {
-            color: Color::srgb(0.78, 0.85, 1.0),
-            brightness: 1400.0,
-            affects_lightmapped_meshes: true,
-        },
+        // The old `NoAtmosphere` marker sidestepped a Bevy-0.17-era multi-camera
+        // atmosphere prepare-race ("layout expects 23 bindings, transient 20 →
+        // wgpu panic"). On Bevy 0.18 this is expected to be resolved; if it
+        // resurfaces it shows as a boot-time "N != M bindings" panic. Fallback
+        // (race-free, near-identical look): give the AI camera `Skybox` +
+        // static `EnvironmentMapLight` but keep it off `Atmosphere`.
     ));
     info!(
         "📷 AI Camera spawned (off-screen {AI_CAM_WIDTH}x{AI_CAM_HEIGHT}, via studio_camera_bundle) — \

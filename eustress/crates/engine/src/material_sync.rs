@@ -134,11 +134,19 @@ fn reapply_materials_on_registry_change(
 fn sync_basepart_to_material(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    material_registry: Option<Res<crate::space::material_loader::MaterialRegistry>>,
+    // R2.1: ResMut (was Res) — `sync` now resolves SHARED, deduplicated material
+    // handles via the registry's dedup cache instead of cloning a unique
+    // material per entity. A unique handle per entity defeats Bevy's batching
+    // (batch key = material bind group + mesh) → one draw call per entity, the
+    // ~60K-entity scale wall. Sharing collapses identical-appearance parts into
+    // a handful of batched/indirect draws.
+    mut material_registry: Option<ResMut<crate::space::material_loader::MaterialRegistry>>,
     query: Query<(
         Entity,
         &BasePart,
         &Transform,
+        // Required so we only sync entities that already have a material (a
+        // guard, not used directly now that we insert a fresh shared handle).
         &MeshMaterial3d<StandardMaterial>,
         Option<&NotShadowCaster>,
         Option<&TransmittedShadowReceiver>,
@@ -149,107 +157,44 @@ fn sync_basepart_to_material(
     // UV transform is derived from BasePart.size, not Transform.scale,
     // so Changed<BasePart> is sufficient.
 ) {
-    for (entity, basepart, transform, material_handle, has_no_shadow, has_transmission) in query.iter() {
-        // Look up material by custom name first, then fall back to enum preset name.
-        // Custom materials (e.g. "BrushedMetal" from .mat.toml) use material_name.
-        // Built-in presets (Plastic, Metal, etc.) use the enum debug format.
-        let mat_name = if basepart.material_name.is_empty() {
-            format!("{:?}", basepart.material)
-        } else {
-            basepart.material_name.clone()
-        };
-        if let Some(ref registry) = material_registry {
-            if let Some(registry_handle) = registry.get(&mat_name) {
-                // Clone the registry material so we can tint it with the part's properties
-                if let Some(base_mat) = materials.get(&registry_handle) {
-                    let mut cloned = base_mat.clone();
-                    let alpha = 1.0 - basepart.transparency.clamp(0.0, 1.0);
-                    cloned.base_color = basepart.color.with_alpha(alpha);
-                    if basepart.transparency > 0.0 {
-                        cloned.alpha_mode = AlphaMode::Blend;
-                    }
-                    // Apply reflectance — increases metallic sheen and reduces roughness
-                    let reflectance = basepart.reflectance.clamp(0.0, 1.0);
-                    cloned.reflectance = reflectance;
-                    cloned.metallic = (cloned.metallic + reflectance).min(1.0);
-                    cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
-                    // Emissive for Neon
-                    if matches!(basepart.material, EustressMaterial::Neon) {
-                        cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
-                    }
-                    cloned.uv_transform = compute_uv_transform(basepart, Some(transform.scale));
-                    let new_handle = materials.add(cloned);
-                    commands.entity(entity).insert(MeshMaterial3d(new_handle));
-                    continue;
-                }
-            }
-        }
-
-        // Fallback path: the entity's current material handle was created
-        // without textures (e.g. by resolve_material before the registry
-        // loaded). Clone the registry's textured material if one exists now,
-        // otherwise mutate in-place with PBR scalars only.
+    for (entity, basepart, transform, _material_handle, has_no_shadow, has_transmission) in query.iter() {
         let is_glass = matches!(basepart.material, EustressMaterial::Glass);
-        let alpha = 1.0 - basepart.transparency.clamp(0.0, 1.0);
-        let reflectance = basepart.reflectance.clamp(0.0, 1.0);
-        let (preset_roughness, _preset_metallic, preset_reflectance) = basepart.material.pbr_params();
 
-        // Try to upgrade to a textured material from the registry using
-        // the preset enum name (e.g. "Brick", "Metal"). This catches
-        // entities whose material was resolved before the MaterialService
-        // .mat.toml files finished loading.
-        let upgraded_from_registry = if let Some(ref registry) = material_registry {
-            let preset_name = basepart.material.as_str();
-            if let Some(registry_handle) = registry.get(preset_name) {
-                if let Some(base_mat) = materials.get(&registry_handle) {
-                    let mut cloned = base_mat.clone();
-                    cloned.base_color = basepart.color.with_alpha(alpha);
-                    if basepart.transparency > 0.0 {
-                        cloned.alpha_mode = AlphaMode::Blend;
-                    }
-                    cloned.reflectance = reflectance;
-                    cloned.metallic = (cloned.metallic + reflectance).min(1.0);
-                    cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
-                    if matches!(basepart.material, EustressMaterial::Neon) {
-                        cloned.emissive = LinearRgba::from(basepart.color) * 2.0;
-                    }
-                    cloned.uv_transform = compute_uv_transform(basepart, Some(transform.scale));
-                    let new_handle = materials.add(cloned);
-                    commands.entity(entity).insert(MeshMaterial3d(new_handle));
-                    true
-                } else { false }
-            } else { false }
-        } else { false };
-
-        if !upgraded_from_registry {
-            if let Some(material) = materials.get_mut(&material_handle.0) {
-                material.base_color = basepart.color.with_alpha(alpha);
-                material.metallic = reflectance;
-                material.perceptual_roughness = preset_roughness * (1.0 - reflectance * 0.5);
-                material.reflectance = preset_reflectance.max(reflectance);
-                if basepart.transparency > 0.0 {
-                    material.alpha_mode = AlphaMode::Blend;
-                } else {
-                    material.alpha_mode = AlphaMode::Opaque;
-                }
-                material.uv_transform = compute_uv_transform(basepart, Some(transform.scale));
-                if is_glass {
-                    material.specular_transmission = 0.9;
-                    material.diffuse_transmission = 0.3;
-                    material.thickness = 0.5;
-                    material.ior = 1.5;
-                } else {
-                    material.specular_transmission = 0.0;
-                    material.diffuse_transmission = 0.0;
-                    material.thickness = 0.0;
-                }
-                if matches!(basepart.material, EustressMaterial::Neon) {
-                    material.emissive = LinearRgba::from(basepart.color) * 2.0;
-                } else {
-                    material.emissive = LinearRgba::NONE;
-                }
-            }
+        // ── R2.1: resolve a SHARED material handle (copy-on-write) ──
+        // Replaces the former three branches (registry-clone ×2 + in-place
+        // `get_mut`). `resolve_part_material` reproduces that exact tint math
+        // (so visuals are unchanged — C2) but returns a deduplicated handle:
+        // identical-appearance parts share ONE handle → Bevy batches them.
+        // Editing one part re-resolves it to the handle matching its NEW look,
+        // never mutating others (the deleted in-place `get_mut` was the classic
+        // "edit one, change all" bug once handles are shared).
+        if let Some(ref mut registry) = material_registry {
+            // Custom `.mat.toml` name first, then the preset enum name — the
+            // (possibly textured) base material to clone+tint, if registered.
+            let mat_name = if basepart.material_name.is_empty() {
+                format!("{:?}", basepart.material)
+            } else {
+                basepart.material_name.clone()
+            };
+            let base_template = registry
+                .get(&mat_name)
+                .or_else(|| registry.get(basepart.material.as_str()));
+            let uv = compute_uv_transform(basepart, Some(transform.scale));
+            let handle = registry.resolve_part_material(
+                &mut materials,
+                &mat_name,
+                basepart.material,
+                base_template,
+                basepart.color,
+                basepart.transparency,
+                basepart.reflectance,
+                uv,
+            );
+            commands.entity(entity).insert(MeshMaterial3d(handle));
         }
+        // No registry resource yet (very early frames): leave the existing
+        // handle; `reapply_materials_on_registry_change` re-runs sync once the
+        // registry loads.
 
         // Shadow casting: respect the explicit `cast_shadow` property AND
         // the >= 50% transparency threshold. Either condition opts the

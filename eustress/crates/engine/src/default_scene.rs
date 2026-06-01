@@ -1,5 +1,9 @@
 use bevy::prelude::*;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+// R2.2: DepthPrepass enables early-Z (cuts overdraw on dense grids) and is the
+// prerequisite for GPU occlusion culling. In `bevy_core_pipeline` (already a
+// dep) — needs none of R1's held bevy_anti_alias/bevy_post_process crates.
+use bevy::core_pipeline::prepass::DepthPrepass;
 use eustress_common::plugins::lighting_plugin::SkyboxHandle;
 use eustress_common::classes::{Instance, ClassName};
 use crate::startup::StartupArgs;
@@ -30,7 +34,9 @@ impl Plugin for DefaultScenePlugin {
 pub fn studio_camera_bundle(name: &str, transform: Transform) -> impl Bundle {
     (
         Camera3d::default(),
-        Tonemapping::Reinhard,
+        // R1: filmic tonemap (was Reinhard) — neutral-hue ACES-ish curve, the
+        // Bevy default; needs the `tonemapping_luts` feature (already enabled).
+        Tonemapping::TonyMcMapface,
         transform,
         Projection::Perspective(PerspectiveProjection {
             fov: 70.0_f32.to_radians(),
@@ -46,6 +52,19 @@ pub fn studio_camera_bundle(name: &str, transform: Transform) -> impl Bundle {
             ..Default::default()
         },
         Name::new(name.to_string()),
+        // R2.2: depth prepass — early-Z overdraw rejection on the dense binary-ECS
+        // grid + prerequisite for GPU occlusion culling. Added to the SHARED bundle
+        // so editor + AI camera stay in lockstep against SharedLightingPlugin's
+        // view bind-group layout (both get the depth binding identically).
+        DepthPrepass,
+        // NOTE (R1): the full photoreal post-stack (GTAO + TAA + Bloom +
+        // AutoExposure) would be added HERE, in the shared bundle, so the editor
+        // and off-screen AI camera stay in lockstep. It's on hold: TAA/Bloom/
+        // AutoExposure live in bevy's `bevy_anti_alias` / `bevy_post_process`
+        // crates, which bevy 0.18.1 only published as `0.18.0-rc.1` (no stable
+        // 0.18.x) — enabling those features breaks crates.io resolution. R1
+        // ships filmic tonemapping (above) now; the stack lands once those
+        // crates publish stable or via a bevy git `[patch]` (pending decision).
     )
 }
 

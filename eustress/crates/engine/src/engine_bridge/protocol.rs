@@ -1342,6 +1342,20 @@ pub mod handlers {
                     .and_then(|d| d.smoothed())
             });
 
+        // R2 draw-collapse signal: number of distinct StandardMaterial assets.
+        // The old per-entity material clone made this ≈ entity_count (one bind
+        // group → one draw call each — the ~60K-entity scale wall). R2.1's
+        // handle-sharing collapses it to ≈ distinct appearances (≤4096 in dense
+        // mode), which is what lets Bevy batch entities into a handful of
+        // GPU-driven indirect draws. `material_dedup` is the registry's dedup
+        // cache size; a large gap between the two would flag a sharing leak.
+        let material_count = world
+            .get_resource::<bevy::asset::Assets<bevy::pbr::StandardMaterial>>()
+            .map(|a| a.len());
+        let material_dedup = world
+            .get_resource::<crate::space::material_loader::MaterialRegistry>()
+            .map(|r| r.dedup_cache_len());
+
         let entities_value = match serde_json::to_value(&window) {
             Ok(v) => v,
             Err(e) => {
@@ -1362,6 +1376,8 @@ pub mod handlers {
                 "has_more":     offset + returned < total,
                 "fps":          fps,
                 "entity_count": total,
+                "material_count": material_count,
+                "material_dedup": material_dedup,
             }),
         )
     }

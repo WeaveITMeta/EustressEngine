@@ -33,6 +33,7 @@ mod camera;
 mod commands;
 mod scenes;
 mod default_scene;
+mod photoreal;      // R1 — photoreal post-stack registration (AutoExposurePlugin + settings)
 mod serialization;  // Scene save/load
 mod spawn;          // Entity spawn helpers
 mod camera_controller;
@@ -319,6 +320,10 @@ fn main() {
         })
         // Material sync
         .add_plugins(MaterialSyncPlugin)
+        // R1 photoreal: registers AutoExposurePlugin (DefaultPlugins omits it)
+        // + PhotorealSettings. The post-effect COMPONENTS live in
+        // studio_camera_bundle so editor + AI camera stay in lockstep.
+        .add_plugins(photoreal::PhotorealPlugin)
         .add_plugins(lock_tool::LockToolPlugin)
         .add_plugins(video::VideoPlugin)
         // Lighting — SharedLightingPlugin (sun/ambient/skybox) + engine-side

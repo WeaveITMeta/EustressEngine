@@ -169,16 +169,35 @@ pub fn dense_material_mode() -> bool {
 struct MaterialCacheKey {
     /// RGBA color quantized to 8-bit per channel (4 bytes packed into u32)
     color_bits: u32,
-    /// Material preset name (e.g. "Plastic", "Glass", "Neon")
+    /// Material preset name (e.g. "Plastic", "Glass", "Neon") OR the custom
+    /// `.mat.toml` registry name — the BASE-material identity. Two parts only
+    /// share a handle when they tint the SAME base, so this distinguishes
+    /// e.g. "Plastic" from "BrushedMetal".
     preset: String,
     /// Transparency quantized to 0-1000 (0.1% precision)
     transparency_millipct: u32,
     /// Reflectance quantized to 0-1000 (0.1% precision)
     reflectance_millipct: u32,
+    /// UV tiling, quantized — `Some((u_milli, v_milli))` ONLY for TEXTURED
+    /// base materials (where `uv_transform` is visible), `None` for untextured
+    /// solid-color parts (the bulk + 100% of the benchmark). Gating on texture
+    /// is what lets thousands of differently-SIZED untextured parts still share
+    /// one material: their uv_transform varies but is invisible, so it must NOT
+    /// fragment the key. A textured part of a different size correctly does not
+    /// share (its tiling differs visibly).
+    uv_bits: Option<(u32, u32)>,
 }
 
 impl MaterialCacheKey {
-    fn new(color: Color, preset_name: &str, transparency: f32, reflectance: f32) -> Self {
+    /// `uv` is `Some(uv_transform)` only when the base material is TEXTURED
+    /// (so tiling is visible); pass `None` for untextured parts.
+    fn new(
+        color: Color,
+        preset_name: &str,
+        transparency: f32,
+        reflectance: f32,
+        uv: Option<bevy::math::Affine2>,
+    ) -> Self {
         let lin = LinearRgba::from(color);
         let r = (lin.red.clamp(0.0, 1.0) * 255.0) as u32;
         let g = (lin.green.clamp(0.0, 1.0) * 255.0) as u32;
@@ -192,11 +211,19 @@ impl MaterialCacheKey {
         let shift = MATERIAL_QUANT_SHIFT.load(std::sync::atomic::Ordering::Relaxed);
         let q = |c: u32| (c >> shift) << shift;
         let (r, g, b) = (q(r), q(g), q(b));
+        // Quantize the uv scale (the diagonal of the Affine2's linear part) to
+        // 0.1% so near-identical tilings share. Only kept for textured bases.
+        let uv_bits = uv.map(|t| {
+            let sx = (t.matrix2.x_axis.x.abs() * 1000.0) as u32;
+            let sy = (t.matrix2.y_axis.y.abs() * 1000.0) as u32;
+            (sx, sy)
+        });
         Self {
             color_bits: (r << 24) | (g << 16) | (b << 8) | a,
             preset: preset_name.to_string(),
             transparency_millipct: (transparency.clamp(0.0, 1.0) * 1000.0) as u32,
             reflectance_millipct: (reflectance.clamp(0.0, 1.0) * 1000.0) as u32,
+            uv_bits,
         }
     }
 }
@@ -256,6 +283,130 @@ impl MaterialRegistry {
         handle: Handle<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         self.dedup_cache.entry(key).or_insert(handle).clone()
+    }
+
+    /// R2.1 — resolve a Part's tinted material to a SHARED, deduplicated
+    /// `Handle<StandardMaterial>` with copy-on-write semantics. This is the
+    /// scale lever: `material_sync` calls this instead of `materials.add(clone)`
+    /// per entity, so identical-appearance parts share ONE handle → Bevy batches
+    /// them into instanced/indirect draws (a unique handle per entity is what
+    /// forces one draw call per entity — bevy_pbr batch key = material bind
+    /// group + mesh).
+    ///
+    /// Two build paths, preserving `material_sync`'s exact prior math (C2 — no
+    /// visible change, only handle sharing):
+    /// - `base_template = Some(h)`: clone the registry's (possibly textured)
+    ///   base material `h` and tint it — the old "registry-clone" branches.
+    /// - `base_template = None`: build from the `preset` PBR params — the old
+    ///   "preset-scratch" branch (formerly an in-place `get_mut`, which is the
+    ///   "edit one, change all" trap once handles are shared — now a fresh
+    ///   build + dedup instead).
+    ///
+    /// Copy-on-write: the returned handle is keyed on the FULL appearance, so
+    /// editing one part's `BasePart` re-resolves it to the handle matching its
+    /// NEW appearance (shared with others of that look, or freshly inserted)
+    /// WITHOUT mutating any other part's material.
+    ///
+    /// `uv_transform` is applied + keyed ONLY when the base is textured;
+    /// untextured parts get `Affine2::IDENTITY` (invisible) so differently-sized
+    /// solid-color parts still share.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_part_material(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        mat_name: &str,
+        preset: PresetMaterial,
+        base_template: Option<Handle<StandardMaterial>>,
+        color: Color,
+        transparency: f32,
+        reflectance: f32,
+        uv_transform: bevy::math::Affine2,
+    ) -> Handle<StandardMaterial> {
+        let alpha = 1.0 - transparency.clamp(0.0, 1.0);
+        let reflectance = reflectance.clamp(0.0, 1.0);
+        let is_glass = matches!(preset, PresetMaterial::Glass);
+        let is_neon = matches!(preset, PresetMaterial::Neon);
+
+        // Is the base material textured? Only then does uv_transform matter
+        // (and only then do we key on it, so untextured parts of varying size
+        // still share). Resolved from the base template's base_color_texture.
+        let textured = base_template
+            .as_ref()
+            .and_then(|h| materials.get(h))
+            .map(|m| m.base_color_texture.is_some())
+            .unwrap_or(false);
+        let effective_uv = if textured {
+            uv_transform
+        } else {
+            bevy::math::Affine2::IDENTITY
+        };
+
+        let cache_key = MaterialCacheKey::new(
+            color,
+            mat_name,
+            transparency,
+            reflectance,
+            if textured { Some(uv_transform) } else { None },
+        );
+        if let Some(handle) = self.dedup_cache.get(&cache_key) {
+            return handle.clone();
+        }
+
+        // Build once on miss. Snapshot the base material into an OWNED value
+        // first so the immutable borrow of `materials` is released before the
+        // `materials.add(mat)` below (no borrow held across the mutate). Cheap:
+        // only reached on a cache miss, not on the common hit above.
+        let base_clone: Option<StandardMaterial> =
+            base_template.as_ref().and_then(|h| materials.get(h)).cloned();
+        let mat = match base_clone {
+            // Registry-clone branch (old branches 1+2 math): clone the base
+            // (keeps its textures + baked roughness) then tint.
+            Some(mut cloned) => {
+                cloned.base_color = color.with_alpha(alpha);
+                if transparency > 0.0 {
+                    cloned.alpha_mode = AlphaMode::Blend;
+                }
+                cloned.reflectance = reflectance;
+                cloned.metallic = (cloned.metallic + reflectance).min(1.0);
+                cloned.perceptual_roughness *= 1.0 - reflectance * 0.5;
+                if is_neon {
+                    cloned.emissive = LinearRgba::from(color) * 2.0;
+                }
+                cloned.uv_transform = effective_uv;
+                cloned
+            }
+            // Preset-scratch branch (old in-place `get_mut` math, now built
+            // fresh so the handle can be SHARED instead of mutated in place).
+            None => {
+                let (preset_roughness, _preset_metallic, preset_reflectance) = preset.pbr_params();
+                let mut mat = StandardMaterial {
+                    base_color: color.with_alpha(alpha),
+                    alpha_mode: if transparency > 0.0 {
+                        AlphaMode::Blend
+                    } else {
+                        AlphaMode::Opaque
+                    },
+                    metallic: reflectance,
+                    perceptual_roughness: preset_roughness * (1.0 - reflectance * 0.5),
+                    reflectance: preset_reflectance.max(reflectance),
+                    uv_transform: effective_uv,
+                    ..default()
+                };
+                if is_glass {
+                    mat.specular_transmission = 0.9;
+                    mat.diffuse_transmission = 0.3;
+                    mat.thickness = 0.5;
+                    mat.ior = 1.5;
+                }
+                if is_neon {
+                    mat.emissive = LinearRgba::from(color) * 2.0;
+                }
+                mat
+            }
+        };
+
+        let handle = materials.add(mat);
+        self.dedup_get_or_insert(cache_key, handle)
     }
 }
 
@@ -442,8 +593,9 @@ pub fn resolve_material(
         return handle;
     }
 
-    // 2. Dedup cache lookup — share handles for identical (preset, color, transparency)
-    let cache_key = MaterialCacheKey::new(base_color, material_name, transparency, reflectance);
+    // 2. Dedup cache lookup — share handles for identical (preset, color, transparency).
+    // Spawn-time resolve is untextured (no BasePart size here) → uv = None.
+    let cache_key = MaterialCacheKey::new(base_color, material_name, transparency, reflectance, None);
     if let Some(handle) = registry.dedup_cache.get(&cache_key) {
         return handle.clone();
     }
@@ -523,4 +675,84 @@ pub fn spawn_material_entity(
             source_path: path,
         },
     )).id()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // R2.1 — the dedup key is the scale lever: two parts share ONE
+    // Handle<StandardMaterial> (→ Bevy batches them) iff their keys are equal.
+    // These pure tests prove the sharing AND copy-on-write logic without a GPU
+    // (the engine crate's full build/run is gated by unrelated co-agent errors).
+
+    #[test]
+    fn untextured_parts_share_regardless_of_size() {
+        // The core ~60K-scale win: untextured solid-color parts of DIFFERENT
+        // sizes (→ different uv_transform) must still share. uv is gated on
+        // texture, so untextured parts carry no uv in the key → equal.
+        let c = Color::srgb(0.2, 0.6, 0.9);
+        assert_eq!(
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+        );
+    }
+
+    #[test]
+    fn distinct_colors_do_not_share() {
+        // Copy-on-write: editing a part's color re-resolves it to a DIFFERENT
+        // key → different handle; other parts (old color) keep theirs untouched.
+        assert_ne!(
+            MaterialCacheKey::new(Color::srgb(0.2, 0.6, 0.9), "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(Color::srgb(0.9, 0.1, 0.1), "Plastic", 0.0, 0.0, None),
+        );
+    }
+
+    #[test]
+    fn distinct_presets_do_not_share() {
+        let c = Color::srgb(0.5, 0.5, 0.5);
+        assert_ne!(
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(c, "Glass", 0.0, 0.0, None),
+        );
+    }
+
+    #[test]
+    fn textured_parts_fragment_by_uv() {
+        // Textured parts: different tiling is VISIBLE → must NOT share.
+        let c = Color::srgb(0.5, 0.5, 0.5);
+        let uv_a = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(1.0, 1.0));
+        let uv_b = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(5.0, 5.0));
+        assert_ne!(
+            MaterialCacheKey::new(c, "Brick", 0.0, 0.0, Some(uv_a)),
+            MaterialCacheKey::new(c, "Brick", 0.0, 0.0, Some(uv_b)),
+        );
+        assert_eq!(
+            MaterialCacheKey::new(c, "Brick", 0.0, 0.0, Some(uv_a)),
+            MaterialCacheKey::new(c, "Brick", 0.0, 0.0, Some(uv_a)),
+        );
+    }
+
+    #[test]
+    fn untextured_and_textured_differ() {
+        let c = Color::srgb(0.5, 0.5, 0.5);
+        let uv = bevy::math::Affine2::from_scale(bevy::math::Vec2::new(2.0, 2.0));
+        assert_ne!(
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, Some(uv)),
+        );
+    }
+
+    #[test]
+    fn transparency_and_reflectance_fragment() {
+        let c = Color::srgb(0.5, 0.5, 0.5);
+        assert_ne!(
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(c, "Plastic", 0.5, 0.0, None),
+        );
+        assert_ne!(
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.0, None),
+            MaterialCacheKey::new(c, "Plastic", 0.0, 0.5, None),
+        );
+    }
 }
