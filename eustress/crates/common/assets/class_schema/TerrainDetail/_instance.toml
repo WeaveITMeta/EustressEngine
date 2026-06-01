@@ -1,0 +1,11 @@
+# TerrainDetail — per-material terrain detail config (child of Terrain).
+
+[terrain_detail]
+material = ""
+color_map = ""
+normal_map = ""
+studs_per_tile = 16.0
+
+[metadata]
+class_name = "TerrainDetail"
+archivable = true

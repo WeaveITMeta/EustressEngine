@@ -1,0 +1,9 @@
+# Actor — Model subclass that is the parallel-Luau execution boundary.
+# Scripts parented here may run on worker threads (task.desynchronize).
+
+[actor]
+parallel_enabled = true
+
+[metadata]
+class_name = "Actor"
+archivable = true

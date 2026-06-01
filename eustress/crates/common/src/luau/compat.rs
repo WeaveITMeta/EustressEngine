@@ -352,16 +352,19 @@ impl ClassMapping {
             "TextChatMessageProperties" => Some("TextChatMessageProperties"),
             "HapticEffect" => Some("HapticEffect"),
 
-            // ── Wave 7 final-9: alias the last real misses to existing targets ──
-            // Container-natured classes collapse to Model (a Folder/Model holds
-            // their children; behavior is script-driven).
-            "Actor" => Some("Model"),            // parallel-Luau container
-            "WorldModel" => Some("Model"),        // viewport model container
-            // Post-FX: ColorGradingEffect is the modern name for the same grade.
-            "ColorGradingEffect" => Some("ColorCorrectionEffect"),
-            // Terrain detail/region metadata fold into the Terrain instance.
-            "TerrainDetail" => Some("Terrain"),
-            "TerrainRegion" => Some("Terrain"),
+            // ── Wave 7 final-9: each maps to its OWN class (no lossy collapse) ──
+            // Actor is a Model subclass but its identity is the parallel-Luau
+            // execution boundary (task.desynchronize) — NOT a plain Model.
+            "Actor" => Some("Actor"),
+            // WorldModel is a distinct physics-isolated model container.
+            "WorldModel" => Some("WorldModel"),
+            // ColorGradingEffect is its own post-FX (adds a tonemapper) —
+            // distinct property set from ColorCorrectionEffect.
+            "ColorGradingEffect" => Some("ColorGradingEffect"),
+            // TerrainDetail / TerrainRegion are child/data objects of Terrain,
+            // not Terrain itself — own classes so they don't spawn bogus terrain.
+            "TerrainDetail" => Some("TerrainDetail"),
+            "TerrainRegion" => Some("TerrainRegion"),
             // Team already has a ClassName variant; wire its compat arm.
             "Team" => Some("Team"),
 

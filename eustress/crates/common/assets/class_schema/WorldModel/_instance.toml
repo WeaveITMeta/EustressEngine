@@ -1,0 +1,8 @@
+# WorldModel — physics-isolated model container (ViewportFrame / replication).
+
+[world_model]
+isolated_physics = true
+
+[metadata]
+class_name = "WorldModel"
+archivable = true

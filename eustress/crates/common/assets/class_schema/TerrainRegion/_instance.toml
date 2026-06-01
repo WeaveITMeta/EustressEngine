@@ -1,0 +1,8 @@
+# TerrainRegion — saved voxel region serialized out of Terrain.
+
+[terrain_region]
+region_ref = ""
+
+[metadata]
+class_name = "TerrainRegion"
+archivable = true

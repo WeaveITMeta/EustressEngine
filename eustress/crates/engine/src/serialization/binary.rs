@@ -715,6 +715,12 @@ impl ClassId {
             ClassName::TextChatCommand => ClassId::Instance,
             ClassName::TextChatMessageProperties => ClassId::Instance,
             ClassName::HapticEffect => ClassId::Instance,
+            // ── Wave 7 final-5 ──
+            ClassName::Actor => ClassId::Instance,
+            ClassName::WorldModel => ClassId::Instance,
+            ClassName::ColorGradingEffect => ClassId::Instance,
+            ClassName::TerrainDetail => ClassId::Instance,
+            ClassName::TerrainRegion => ClassId::Instance,
         }
     }
 

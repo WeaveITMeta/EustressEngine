@@ -1,0 +1,14 @@
+# ColorGradingEffect — post-FX color grade + tonemapper.
+# Distinct from ColorCorrectionEffect (which has no tonemapper).
+
+[color_grading_effect]
+enabled = true
+tonemapper = "AgX"
+brightness = 0.0
+contrast = 1.0
+saturation = 1.0
+tint_color = [1.0, 1.0, 1.0]
+
+[metadata]
+class_name = "ColorGradingEffect"
+archivable = true

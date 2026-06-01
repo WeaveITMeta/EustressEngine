@@ -490,6 +490,12 @@ pub enum ClassName {
     TextChatCommand,         // Slash-command for text chat
     TextChatMessageProperties, // Per-message text chat styling
     HapticEffect,            // Controller haptic feedback effect
+    // ── Wave 7 final-5: own classes (faithful round-trip, not lossy aliases) ──
+    Actor,                   // Parallel-Luau execution boundary (Model subclass)
+    WorldModel,              // Physics-isolated model container (viewports/replication)
+    ColorGradingEffect,      // Post-FX color grade + tonemapper (distinct from ColorCorrectionEffect)
+    TerrainDetail,           // Per-material terrain detail config (child of Terrain)
+    TerrainRegion,           // Saved voxel region serialized out of Terrain
 }
 
 impl ClassName {
@@ -754,6 +760,12 @@ impl ClassName {
             ClassName::TextChatCommand => "TextChatCommand",
             ClassName::TextChatMessageProperties => "TextChatMessageProperties",
             ClassName::HapticEffect => "HapticEffect",
+            // ── Wave 7 final-5 ──
+            ClassName::Actor => "Actor",
+            ClassName::WorldModel => "WorldModel",
+            ClassName::ColorGradingEffect => "ColorGradingEffect",
+            ClassName::TerrainDetail => "TerrainDetail",
+            ClassName::TerrainRegion => "TerrainRegion",
         }
     }
 
@@ -1032,6 +1044,12 @@ impl ClassName {
             "TextChatCommand" => Ok(ClassName::TextChatCommand),
             "TextChatMessageProperties" => Ok(ClassName::TextChatMessageProperties),
             "HapticEffect" => Ok(ClassName::HapticEffect),
+            // ── Wave 7 final-5 ──
+            "Actor" => Ok(ClassName::Actor),
+            "WorldModel" => Ok(ClassName::WorldModel),
+            "ColorGradingEffect" => Ok(ClassName::ColorGradingEffect),
+            "TerrainDetail" => Ok(ClassName::TerrainDetail),
+            "TerrainRegion" => Ok(ClassName::TerrainRegion),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -11311,5 +11329,113 @@ impl Default for HapticEffect {
             type_: "Vibration".to_string(),
             magnitude: 1.0,
         }
+    }
+}
+
+// ============================================================================
+// Wave 7 final-5 — own classes for the last importable misses (no lossy alias)
+// ============================================================================
+
+/// `Actor` — a `Model` subclass that is the parallel-Luau execution boundary.
+/// Scripts parented under an Actor may run on worker threads via
+/// `task.desynchronize()`. We keep it a distinct class (not a plain Model) so
+/// a round-trip preserves that boundary; behavior is script-driven.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Actor {
+    /// Whether this Actor's scripts are eligible for parallel execution.
+    pub parallel_enabled: bool,
+}
+impl Default for Actor {
+    fn default() -> Self {
+        Self { parallel_enabled: true }
+    }
+}
+
+/// `WorldModel` — a physics-isolated model container (used inside
+/// `ViewportFrame`s and for replication-isolated worlds). Distinct from
+/// `Model`: it owns an independent physics world.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct WorldModel {
+    /// Whether this WorldModel runs its own isolated physics simulation.
+    pub isolated_physics: bool,
+}
+impl Default for WorldModel {
+    fn default() -> Self {
+        Self { isolated_physics: true }
+    }
+}
+
+/// `ColorGradingEffect` — post-FX color grade with a tonemapper selection.
+/// Distinct from `ColorCorrectionEffect` (which has no tonemapper): keeping
+/// both preserves each one's property set on round-trip.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ColorGradingEffect {
+    /// Effect enabled.
+    pub enabled: bool,
+    /// Tonemapper operator name (e.g. "AgX", "ACES", "Reinhard", "None").
+    pub tonemapper: String,
+    /// Brightness offset.
+    pub brightness: f32,
+    /// Contrast multiplier.
+    pub contrast: f32,
+    /// Saturation multiplier.
+    pub saturation: f32,
+    /// Tint color (RGB).
+    pub tint_color: [f32; 3],
+}
+impl Default for ColorGradingEffect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tonemapper: "AgX".to_string(),
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            tint_color: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// `TerrainDetail` — per-material terrain detail config (a child of `Terrain`,
+/// NOT Terrain itself). Carries the detail/normal/roughness map references for
+/// one terrain material so the importer doesn't spawn bogus extra Terrain.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TerrainDetail {
+    /// Terrain material this detail applies to (e.g. "Grass", "Rock").
+    pub material: String,
+    /// Color/albedo detail map asset reference.
+    pub color_map: String,
+    /// Normal map asset reference.
+    pub normal_map: String,
+    /// Studs per tile (detail tiling scale).
+    pub studs_per_tile: f32,
+}
+impl Default for TerrainDetail {
+    fn default() -> Self {
+        Self {
+            material: String::new(),
+            color_map: String::new(),
+            normal_map: String::new(),
+            studs_per_tile: 16.0,
+        }
+    }
+}
+
+/// `TerrainRegion` — a saved voxel region serialized out of `Terrain`
+/// (Roblox `Terrain:CopyRegion` payload). Stored as an opaque reference so a
+/// place round-trips its terrain-region assets without losing them.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TerrainRegion {
+    /// Opaque region payload reference (asset id or relative path).
+    pub region_ref: String,
+}
+impl Default for TerrainRegion {
+    fn default() -> Self {
+        Self { region_ref: String::new() }
     }
 }
