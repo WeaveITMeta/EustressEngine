@@ -865,6 +865,7 @@ impl ClassName {
             "Moon" => Ok(ClassName::Moon),
             "Seat" => Ok(ClassName::Seat),
             "VehicleSeat" => Ok(ClassName::VehicleSeat),
+            "Team" => Ok(ClassName::Team),
             // Legacy: VCell maps to Part. V-Cell components are just
             // Parts that happen to carry [material] / [thermodynamic] /
             // [electrochemical] sections — the realism data is dynamic
