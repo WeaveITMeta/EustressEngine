@@ -2891,6 +2891,8 @@ pub struct LinearVelocity {
     pub velocity_constraint_mode: String,
     /// Reference frame ("World" | "Attachment0")
     pub relative_to: String,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for LinearVelocity {
@@ -2904,6 +2906,7 @@ impl Default for LinearVelocity {
             max_force: f32::MAX,
             velocity_constraint_mode: "Vector".to_string(),
             relative_to: "World".to_string(),
+            enabled: true,
         }
     }
 }
@@ -2923,6 +2926,8 @@ pub struct AngularVelocity {
     pub relative_to: String,
     /// Apply an equal-and-opposite reaction torque
     pub reaction_torque_enabled: bool,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for AngularVelocity {
@@ -2933,6 +2938,7 @@ impl Default for AngularVelocity {
             max_torque: f32::MAX,
             relative_to: "World".to_string(),
             reaction_torque_enabled: false,
+            enabled: true,
         }
     }
 }
@@ -2950,6 +2956,8 @@ pub struct VectorForce {
     pub apply_at_center_of_mass: bool,
     /// Reference frame ("World" | "Attachment0")
     pub relative_to: String,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for VectorForce {
@@ -2959,6 +2967,7 @@ impl Default for VectorForce {
             force: Vec3::ZERO,
             apply_at_center_of_mass: false,
             relative_to: "Attachment0".to_string(),
+            enabled: true,
         }
     }
 }
@@ -2974,6 +2983,8 @@ pub struct Torque {
     pub torque: Vec3,
     /// Reference frame ("World" | "Attachment0")
     pub relative_to: String,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for Torque {
@@ -2982,6 +2993,7 @@ impl Default for Torque {
             attachment0: None,
             torque: Vec3::ZERO,
             relative_to: "Attachment0".to_string(),
+            enabled: true,
         }
     }
 }
@@ -3028,6 +3040,8 @@ pub struct BodyPosition {
     pub p: f32,
     /// Derivative gain
     pub d: f32,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for BodyPosition {
@@ -3037,6 +3051,7 @@ impl Default for BodyPosition {
             max_force: Vec3::splat(4000.0),
             p: 10000.0,
             d: 1000.0,
+            enabled: true,
         }
     }
 }
@@ -3054,6 +3069,8 @@ pub struct BodyGyro {
     pub p: f32,
     /// Derivative gain
     pub d: f32,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for BodyGyro {
@@ -3063,6 +3080,7 @@ impl Default for BodyGyro {
             max_torque: Vec3::splat(400.0),
             p: 3000.0,
             d: 500.0,
+            enabled: true,
         }
     }
 }
@@ -3078,6 +3096,8 @@ pub struct BodyAngularVelocity {
     pub max_torque: Vec3,
     /// Proportional gain
     pub p: f32,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for BodyAngularVelocity {
@@ -3086,6 +3106,7 @@ impl Default for BodyAngularVelocity {
             angular_velocity: Vec3::ZERO,
             max_torque: Vec3::splat(400.0),
             p: 3000.0,
+            enabled: true,
         }
     }
 }
@@ -3098,6 +3119,8 @@ pub struct BodyThrust {
     pub force: Vec3,
     /// Local point of application
     pub location: Vec3,
+    /// Toggle the mover (Roblox `Constraint.Enabled`)
+    pub enabled: bool,
 }
 
 impl Default for BodyThrust {
@@ -3105,6 +3128,7 @@ impl Default for BodyThrust {
         Self {
             force: Vec3::ZERO,
             location: Vec3::ZERO,
+            enabled: true,
         }
     }
 }

@@ -136,11 +136,11 @@ impl ClassSpawner for CylindricalConstraintSpawner {
         if let Some(v) = rbx.property("ServoTarget").and_then(|v| v.as_f32()) {
             bag.set("servo_target", PropertyValue::Float(v));
         }
-        if let Some(v) = rbx.property("AngularActuatorType").and_then(|v| v.as_str()) {
-            bag.set("angular_actuator_type", PropertyValue::String(v.to_string()));
+        if let Some(v) = rbx.property("AngularActuatorType").and_then(|v| v.as_str().map(str::to_string)) {
+            bag.set("angular_actuator_type", PropertyValue::String(v));
         }
-        if let Some(v) = rbx.property("ActuatorType").and_then(|v| v.as_str()) {
-            bag.set("actuator_type", PropertyValue::String(v.to_string()));
+        if let Some(v) = rbx.property("ActuatorType").and_then(|v| v.as_str().map(str::to_string)) {
+            bag.set("actuator_type", PropertyValue::String(v));
         }
         bag
     }

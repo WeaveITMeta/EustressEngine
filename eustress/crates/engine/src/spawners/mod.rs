@@ -42,3 +42,10 @@ pub mod networking;      // Wave 5.B — RemoteEvent/Function, BindableEvent/Fun
 pub mod scripting;       // Wave 5.C — SoulScript, Luau*, WorkshopConversation
 pub mod value_objects;   // Wave 6.A — 11 ValueObject classes (String/Int/Number/Bool/Object/Color3/Vector3/CFrame/BrickColor/Ray/BinaryString)
 pub mod interaction;     // Wave 6.D — Tool/Accessory/ClickDetector/ProximityPrompt/Dialog/DialogChoice/BodyColors/CharacterMesh/Shirt/Pants/ShirtGraphic
+pub mod ui_layout;       // Wave 7.B — UICorner/UIGradient/UIStroke/UI*Layout/UI*Constraint/CanvasGroup/UIDragDetector
+pub mod meshes;          // Wave 7.C — BlockMesh/FileMesh/Texture/SurfaceAppearance/MaterialVariant/Highlight/Bone/Wrap*
+pub mod legacy_joints;   // Wave 7.A — Weld/Motor/VelocityMotor/NoCollisionConstraint/RigidConstraint/LineForce/AnimationConstraint
+pub mod audio_dsp;       // Wave 7.E — Audio* DSP effects + legacy *SoundEffect
+pub mod character7;      // Wave 7.D — Animation/*Controller/HumanoidDescription/Backpack/Accessory*/IKControl/Pose/...
+pub mod data7;           // Wave 7.F — DataStore*Options/*Curve/Path2D/LocalizationTable/Configuration/Noise/Wire/...
+pub mod editable7;       // Wave 7.G — EditableImage/RobloxEditableImage/BuoyancySensor/DragDetector/TextCh*/HapticEffect

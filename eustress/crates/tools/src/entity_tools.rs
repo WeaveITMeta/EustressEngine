@@ -167,6 +167,7 @@ impl ToolHandler for CreateEntityTool {
             asset_path: None,
             rotation: None,
             unit_symbol,
+            uuid: None,
         };
         // Silence unused-binding warning when units_v1 is off and the
         // load-time conversion is identity.

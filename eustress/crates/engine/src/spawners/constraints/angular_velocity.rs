@@ -40,10 +40,16 @@ impl ClassSpawner for AngularVelocitySpawner {
         let angular_velocity = props.get_vec3("angular_velocity").unwrap_or(Vec3::ZERO);
         let max_torque = props.get_f32("max_torque").unwrap_or(0.0);
         let enabled = props.get_bool("enabled").unwrap_or(true);
+        let attachment0 = super::weld::read_optional_part_ref(props, "attachment0");
+        let relative_to = props.get_string("relative_to").unwrap_or("World").to_string();
+        let reaction_torque_enabled = props.get_bool("reaction_torque_enabled").unwrap_or(false);
 
         let mover = AngularVelocity {
+            attachment0,
             angular_velocity,
             max_torque,
+            relative_to,
+            reaction_torque_enabled,
             enabled,
         };
 

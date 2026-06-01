@@ -35,10 +35,12 @@ impl ClassSpawner for BodyAngularVelocitySpawner {
             .get_vec3("max_torque")
             .unwrap_or(Vec3::splat(f32::MAX));
         let enabled = props.get_bool("enabled").unwrap_or(true);
+        let p = props.get_f32("p").unwrap_or(3000.0);
 
         let mover = BodyAngularVelocity {
             angular_velocity,
             max_torque,
+            p,
             enabled,
         };
 

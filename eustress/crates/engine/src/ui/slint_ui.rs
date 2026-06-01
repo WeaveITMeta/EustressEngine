@@ -1206,6 +1206,18 @@ impl Plugin for SlintUiPlugin {
             crate::spawners::interaction::InteractionSpawnerPlugin,
         ));
 
+        // Wave 7 data-layer spawner groups (~106 classes) — separate
+        // add_plugins call because Bevy's Plugins tuple maxes at 15 elements.
+        app.add_plugins((
+            crate::spawners::ui_layout::UiLayoutSpawnerPlugin,
+            crate::spawners::meshes::MeshesSpawnerPlugin,
+            crate::spawners::legacy_joints::LegacyJointsSpawnerPlugin,
+            crate::spawners::audio_dsp::AudioDspSpawnerPlugin,
+            crate::spawners::character7::Character7SpawnerPlugin,
+            crate::spawners::data7::Data7SpawnerPlugin,
+            crate::spawners::editable7::Editable7SpawnerPlugin,
+        ));
+
         // Wave 6.B mover runtime (PD controllers + Avian force/velocity
         // actuation; gates to PlayModeState::Playing) and Wave 6.D
         // interaction runtime (Tool equip / ClickDetector / ProximityPrompt

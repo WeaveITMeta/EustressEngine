@@ -18,6 +18,31 @@
 //! | `SpringConstraint`     | [`SpringConstraintSpawner`]   | [`avian3d::prelude::DistanceJoint`] + compliance + [`avian3d::prelude::JointDamping`] |
 //! | `RopeConstraint`       | [`RopeConstraintSpawner`]     | [`avian3d::prelude::DistanceJoint`] with `min=0, max=length` |
 //!
+//! ## Wave 6.B additions
+//!
+//! ### Rigid joints (Avian solver-driven, like the Wave 3.D set)
+//!
+//! | `ClassName`               | Spawner                           | Avian joint mapping                                   |
+//! | ------------------------- | --------------------------------- | ----------------------------------------------------- |
+//! | `RodConstraint`           | [`RodConstraintSpawner`]          | [`avian3d::prelude::DistanceJoint`] `min == max`      |
+//! | `CylindricalConstraint`   | [`CylindricalConstraintSpawner`]  | [`avian3d::prelude::PrismaticJoint`] (slide only — APPROX) |
+//! | `TorsionSpringConstraint` | [`TorsionSpringConstraintSpawner`]| [`avian3d::prelude::RevoluteJoint`] + angular compliance/damping |
+//! | `UniversalConstraint`     | [`UniversalConstraintSpawner`]    | [`avian3d::prelude::SphericalJoint`] + swing limit (APPROX) |
+//! | `PlaneConstraint`         | [`PlaneConstraintSpawner`]        | (none — no Avian plane joint; runtime enforcement is follow-up) |
+//!
+//! ### Movers (config component → runtime system in [`crate::physics::movers`])
+//!
+//! These spawners attach **no Avian joint**: they place the Phase-0
+//! configuration component on a child of the driven part, and the
+//! `MoversPlugin` systems push force / velocity / torque onto the parent
+//! body each physics frame. Mover spawners:
+//! [`AlignPositionSpawner`], [`AlignOrientationSpawner`],
+//! [`LinearVelocitySpawner`], [`AngularVelocitySpawner`],
+//! [`VectorForceSpawner`], [`TorqueSpawner`], plus the legacy
+//! [`BodyPositionSpawner`], [`BodyVelocitySpawner`], [`BodyGyroSpawner`],
+//! [`BodyAngularVelocitySpawner`], [`BodyForceSpawner`],
+//! [`BodyThrustSpawner`].
+//!
 //! ## Design decisions
 //!
 //! ### Entity ref resolution
@@ -67,12 +92,17 @@
 //!
 //! ## Plugin
 //!
-//! [`ConstraintsSpawnerPlugin`] registers all 9 spawners with the
-//! [`ClassRegistry`] via the [`RegisterClassExt`] extension trait. The
-//! plugin is self-contained — it does not mount into `SlintUiPlugin`
-//! itself; Wave 5 wires the plugin into the running app once all 3.x
-//! groups have shipped (per the dispatch protocol the parent
-//! `spawners/mod.rs` is owned by 3.A, which integrates every group).
+//! [`ConstraintsSpawnerPlugin`] registers all 26 spawners (9 Wave 3.D +
+//! 17 Wave 6.B) with the [`ClassRegistry`] via the [`RegisterClassExt`]
+//! extension trait. The plugin is self-contained — it does not mount into
+//! `SlintUiPlugin` itself; the integration wave wires the plugin into the
+//! running app (per the dispatch protocol the parent `spawners/mod.rs` is
+//! owned by the integrating task).
+//!
+//! The Wave 6.B *movers* additionally require the
+//! [`MoversPlugin`](crate::physics::movers::MoversPlugin) to be mounted
+//! for their runtime force/velocity actuation — registering the spawner
+//! only handles entity creation, not the per-frame physics.
 //!
 //! Until Wave 3.A integrates this module under `engine/src/lib.rs`'s
 //! `pub mod spawners;` declaration, the files here compile in isolation
@@ -98,6 +128,28 @@ pub mod rope;
 pub mod spring;
 pub mod weld;
 
+// ── Wave 6.B: rigid joints + movers ───────────────────────────────────
+//
+// Rigid joints (Avian joint behind each):
+pub mod cylindrical;
+pub mod plane;
+pub mod rod;
+pub mod torsion_spring;
+pub mod universal;
+// Movers (config component → runtime system in `crate::physics::movers`):
+pub mod align_orientation;
+pub mod align_position;
+pub mod angular_velocity;
+pub mod body_angular_velocity;
+pub mod body_force;
+pub mod body_gyro;
+pub mod body_position;
+pub mod body_thrust;
+pub mod body_velocity;
+pub mod linear_velocity;
+pub mod torque;
+pub mod vector_force;
+
 pub use attachment::AttachmentSpawner;
 pub use ball_socket::BallSocketConstraintSpawner;
 pub use distance::DistanceConstraintSpawner;
@@ -108,10 +160,30 @@ pub use rope::RopeConstraintSpawner;
 pub use spring::SpringConstraintSpawner;
 pub use weld::WeldConstraintSpawner;
 
+// Wave 6.B rigid joints.
+pub use cylindrical::CylindricalConstraintSpawner;
+pub use plane::PlaneConstraintSpawner;
+pub use rod::RodConstraintSpawner;
+pub use torsion_spring::TorsionSpringConstraintSpawner;
+pub use universal::UniversalConstraintSpawner;
+// Wave 6.B movers.
+pub use align_orientation::AlignOrientationSpawner;
+pub use align_position::AlignPositionSpawner;
+pub use angular_velocity::AngularVelocitySpawner;
+pub use body_angular_velocity::BodyAngularVelocitySpawner;
+pub use body_force::BodyForceSpawner;
+pub use body_gyro::BodyGyroSpawner;
+pub use body_position::BodyPositionSpawner;
+pub use body_thrust::BodyThrustSpawner;
+pub use body_velocity::BodyVelocitySpawner;
+pub use linear_velocity::LinearVelocitySpawner;
+pub use torque::TorqueSpawner;
+pub use vector_force::VectorForceSpawner;
+
 // ── Bevy plugin that registers all 9 spawners ────────────────────────
 
-/// Bevy plugin registering every constraint/attachment spawner shipped
-/// by Wave 3.D with the [`ClassRegistry`].
+/// Bevy plugin registering every constraint/attachment/mover spawner
+/// (Wave 3.D + Wave 6.B) with the [`ClassRegistry`].
 ///
 /// Mounts via `app.add_plugins(ConstraintsSpawnerPlugin)`. The Wave 2.3
 /// [`ClassRegistryPlugin`] must run before this — `ConstraintsSpawnerPlugin`
@@ -136,7 +208,26 @@ impl Plugin for ConstraintsSpawnerPlugin {
             .register_class::<PrismaticConstraintSpawner>()
             .register_class::<BallSocketConstraintSpawner>()
             .register_class::<SpringConstraintSpawner>()
-            .register_class::<RopeConstraintSpawner>();
+            .register_class::<RopeConstraintSpawner>()
+            // ── Wave 6.B rigid joints ──────────────────────────────────
+            .register_class::<RodConstraintSpawner>()
+            .register_class::<CylindricalConstraintSpawner>()
+            .register_class::<TorsionSpringConstraintSpawner>()
+            .register_class::<UniversalConstraintSpawner>()
+            .register_class::<PlaneConstraintSpawner>()
+            // ── Wave 6.B movers ────────────────────────────────────────
+            .register_class::<AlignPositionSpawner>()
+            .register_class::<AlignOrientationSpawner>()
+            .register_class::<LinearVelocitySpawner>()
+            .register_class::<AngularVelocitySpawner>()
+            .register_class::<VectorForceSpawner>()
+            .register_class::<TorqueSpawner>()
+            .register_class::<BodyPositionSpawner>()
+            .register_class::<BodyVelocitySpawner>()
+            .register_class::<BodyGyroSpawner>()
+            .register_class::<BodyAngularVelocitySpawner>()
+            .register_class::<BodyForceSpawner>()
+            .register_class::<BodyThrustSpawner>();
     }
 }
 
@@ -167,17 +258,52 @@ pub(crate) fn instance_from_bag(
     instance
 }
 
+// ── Mover helpers: `ForceRelativeTo` ⇄ on-disk string ─────────────────
+
+/// Parse the on-disk / property-bag `relative_to` string into the
+/// [`ForceRelativeTo`] enum. Accepts the Roblox spelling (`"World"` /
+/// `"Attachment0"`/`"Attachment1"` → part-local) case-insensitively, plus
+/// the short `"Part"` form. Anything unrecognised falls back to `World`
+/// (the safest default — no surprise local-frame rotation).
+///
+/// [`ForceRelativeTo`]: eustress_common::services::physics::ForceRelativeTo
+pub(crate) fn read_force_relative_to(
+    s: &str,
+) -> eustress_common::services::physics::ForceRelativeTo {
+    use eustress_common::services::physics::ForceRelativeTo;
+    match s.to_ascii_lowercase().as_str() {
+        "part" | "attachment0" | "attachment1" | "local" => ForceRelativeTo::Part,
+        _ => ForceRelativeTo::World,
+    }
+}
+
+/// Emit a [`ForceRelativeTo`] as its canonical on-disk string.
+///
+/// [`ForceRelativeTo`]: eustress_common::services::physics::ForceRelativeTo
+pub(crate) fn write_force_relative_to(
+    rel: eustress_common::services::physics::ForceRelativeTo,
+) -> &'static str {
+    use eustress_common::services::physics::ForceRelativeTo;
+    match rel {
+        ForceRelativeTo::World => "World",
+        ForceRelativeTo::Part => "Part",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The plugin registers all 9 spawners without duplicates. The
+    /// The plugin registers all 26 spawners without duplicates. The
     /// registry's own `register` panics on duplicate keys, so a
     /// successful `build` is itself the proof — but we also assert the
     /// final count to surface a missed spawner if anyone removes one
     /// from the `build` chain.
+    ///
+    /// 26 = the original Wave 3.D set (Attachment + 8 joints) plus the
+    /// Wave 6.B set (5 rigid joints + 12 movers).
     #[test]
-    fn plugin_registers_all_nine_spawners() {
+    fn plugin_registers_all_spawners() {
         use crate::class_registry::{ClassRegistry, ClassRegistryPlugin};
 
         let mut app = App::new();
@@ -189,13 +315,15 @@ mod tests {
             .resource::<ClassRegistry>();
         assert_eq!(
             registry.len(),
-            9,
-            "ConstraintsSpawnerPlugin must register exactly 9 spawners — \
-             Attachment + 8 joint constraints"
+            26,
+            "ConstraintsSpawnerPlugin must register exactly 26 spawners — \
+             Attachment + 8 Wave 3.D joints + 5 Wave 6.B rigid joints + \
+             12 Wave 6.B movers"
         );
 
         use eustress_common::classes::ClassName;
         for class in [
+            // Wave 3.D
             ClassName::Attachment,
             ClassName::WeldConstraint,
             ClassName::Motor6D,
@@ -205,6 +333,25 @@ mod tests {
             ClassName::BallSocketConstraint,
             ClassName::SpringConstraint,
             ClassName::RopeConstraint,
+            // Wave 6.B rigid joints
+            ClassName::RodConstraint,
+            ClassName::CylindricalConstraint,
+            ClassName::TorsionSpringConstraint,
+            ClassName::UniversalConstraint,
+            ClassName::PlaneConstraint,
+            // Wave 6.B movers
+            ClassName::AlignPosition,
+            ClassName::AlignOrientation,
+            ClassName::LinearVelocity,
+            ClassName::AngularVelocity,
+            ClassName::VectorForce,
+            ClassName::Torque,
+            ClassName::BodyPosition,
+            ClassName::BodyVelocity,
+            ClassName::BodyGyro,
+            ClassName::BodyAngularVelocity,
+            ClassName::BodyForce,
+            ClassName::BodyThrust,
         ] {
             assert!(
                 registry.contains(class),

@@ -43,12 +43,26 @@ impl ClassSpawner for LinearVelocitySpawner {
         let vector_velocity = props.get_vec3("vector_velocity").unwrap_or(Vec3::ZERO);
         let max_force = props.get_f32("max_force").unwrap_or(0.0);
         let enabled = props.get_bool("enabled").unwrap_or(true);
+        let attachment0 = super::weld::read_optional_part_ref(props, "attachment0");
+        let plane_velocity = props
+            .get_vec2("plane_velocity")
+            .map(Vec2::from)
+            .unwrap_or(Vec2::ZERO);
+        let velocity_constraint_mode = props
+            .get_string("velocity_constraint_mode")
+            .unwrap_or("Vector")
+            .to_string();
+        let relative_to = props.get_string("relative_to").unwrap_or("World").to_string();
 
         let mover = LinearVelocity {
-            line_velocity,
+            attachment0,
             line_direction,
+            line_velocity,
+            plane_velocity,
             vector_velocity,
             max_force,
+            velocity_constraint_mode,
+            relative_to,
             enabled,
         };
 

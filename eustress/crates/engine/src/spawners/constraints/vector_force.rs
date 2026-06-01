@@ -21,11 +21,9 @@ use eustress_common::class_registry::{
     ClassSpawner, ComponentBundle, LodTier, PropertyBag, RobloxInstance, SpawnCtx,
 };
 use eustress_common::classes::{ClassName, PropertyValue, VectorForce};
-use eustress_common::services::physics::ForceRelativeTo;
 
 use super::attachment::{read_vec3_array, vec3_to_toml};
 use super::instance_from_bag;
-use super::{read_force_relative_to, write_force_relative_to};
 
 /// [`ClassSpawner`] for `ClassName::VectorForce`.
 #[derive(Default)]
@@ -40,12 +38,14 @@ impl ClassSpawner for VectorForceSpawner {
         let force = props.get_vec3("force").unwrap_or(Vec3::ZERO);
         let relative_to = props
             .get_string("relative_to")
-            .map(read_force_relative_to)
-            .unwrap_or(ForceRelativeTo::World);
+            .unwrap_or("Attachment0")
+            .to_string();
         let apply_at_center_of_mass = props.get_bool("apply_at_center_of_mass").unwrap_or(true);
         let enabled = props.get_bool("enabled").unwrap_or(true);
+        let attachment0 = super::weld::read_optional_part_ref(props, "attachment0");
 
         let mover = VectorForce {
+            attachment0,
             force,
             relative_to,
             apply_at_center_of_mass,
@@ -157,7 +157,7 @@ impl ClassSpawner for VectorForceSpawner {
             props.insert("force".into(), vec3_to_toml(m.force));
             props.insert(
                 "relative_to".into(),
-                toml::Value::String(write_force_relative_to(m.relative_to).into()),
+                toml::Value::String(m.relative_to.clone()),
             );
             props.insert(
                 "apply_at_center_of_mass".into(),
