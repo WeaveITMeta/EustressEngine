@@ -853,6 +853,32 @@ pub struct UnifiedExplorerState {
     /// Slint's `changed scroll-pulse` handler fires once per increment
     /// and snaps the ScrollView's viewport to `scroll-target-y`.
     pub scroll_pulse: u32,
+    /// Phase 4 — virtual DB-backed Explorer. Maps a streamed-row Slint node
+    /// id → the DB-only entity it represents (uuid/class/name). Rebuilt each
+    /// sync alongside `entity_id_cache`; a `SelectNode` whose id is in here
+    /// triggers a stream-in instead of a live-entity select. Empty unless
+    /// residency streaming is enabled (large Space).
+    pub streamed_row_cache: std::collections::HashMap<i32, StreamedRef>,
+    /// Phase 4 — names of DB class buckets ("Part", …) currently expanded in
+    /// the virtual "Database (streamed)" section. Collapsed by default so a
+    /// 10M-entity class doesn't enumerate its first page until asked.
+    pub expanded_db_classes: std::collections::HashSet<String>,
+    /// Phase 4 cache — the (expensive) full `class_index` count scan, kept
+    /// across syncs and refreshed only when `db_cache_valid` is cleared (on
+    /// entity add/remove/rename or Space switch). Without this, a 10M-entity
+    /// Space would re-scan every class-index key every 30 frames.
+    pub cached_db_classes: Vec<(String, usize)>,
+    /// Phase 4 cache — per-expanded-class page of `(uuid_hex, name)` rows
+    /// (≤500). Filled on first expand of a class, dropped when
+    /// `db_cache_valid` clears. Avoids re-reading 500 cores every sync.
+    pub cached_db_pages: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Phase 4 — false forces a rebuild of `cached_db_classes`/`cached_db_pages`
+    /// on the next sync. Cleared by the panel-dirty path (entity mutation).
+    pub db_cache_valid: bool,
+    /// Phase 4 — maps a DB-class-header Slint node id → its class name, rebuilt
+    /// each sync (ids are reassigned per sync). Lets Expand/Collapse on a
+    /// "db_class" row resolve which class to toggle in `expanded_db_classes`.
+    pub db_class_id_cache: std::collections::HashMap<i32, String>,
 }
 
 fn default_space_root() -> std::path::PathBuf {
@@ -884,6 +910,12 @@ impl Default for UnifiedExplorerState {
             last_click_at: None,
             pending_scroll_target_entity: None,
             scroll_pulse: 0,
+            streamed_row_cache: std::collections::HashMap::new(),
+            expanded_db_classes: std::collections::HashSet::new(),
+            cached_db_classes: Vec::new(),
+            cached_db_pages: std::collections::HashMap::new(),
+            db_cache_valid: false,
+            db_class_id_cache: std::collections::HashMap::new(),
         }
     }
 }
@@ -899,7 +931,27 @@ pub enum SelectedItem {
     File(std::path::PathBuf),
     /// Service header node (Workspace, Lighting, etc.) — selected by name
     Service(String),
+    /// A row in the virtual DB-backed Explorer section (Phase 4) that is
+    /// NOT yet live in the ECS. Holds the entity's 32-char hex uuid. This
+    /// is a transient state: selecting such a row fires a stream-in, and
+    /// `sys_stream_in_on_select` flips selection to `Entity(_)` within ~1
+    /// frame once the core is spawned. Properties shows "Streaming in…"
+    /// for that single frame (see `sync_properties_to_slint`).
+    DbStreamed(String),
     None,
+}
+
+/// A DB-only entity row surfaced in the virtual "Database (streamed)"
+/// Explorer section (Phase 4). Recorded in `streamed_row_cache` keyed by
+/// the row's Slint node id so a click can resolve back to the uuid/class.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamedRef {
+    /// 32-char lowercase hex uuid (the persistent identity key).
+    pub uuid: String,
+    /// Class name (e.g. "Part") — the bucket this row lives under.
+    pub class: String,
+    /// Display name (from the core's `metadata.name`, falling back to class).
+    pub name: String,
 }
 
 /// Cached directory tree for efficient Slint sync
@@ -5220,6 +5272,23 @@ fn drain_slint_actions(
                                     es.selected = SelectedItem::None;
                                 }
                             }
+                        } else if node_type == "db_entity" {
+                            // Phase 4: a DB-only row. Set the transient
+                            // DbStreamed selection — `sys_stream_in_on_select`
+                            // (feature-gated) spawns the core next frame and
+                            // flips selection to the real Entity.
+                            if let Some(sref) = es.streamed_row_cache.get(&id).cloned() {
+                                es.selected = SelectedItem::DbStreamed(sref.uuid);
+                            } else {
+                                es.selected = SelectedItem::None;
+                            }
+                            if let Some(ref sel_mgr) = res.selection_manager {
+                                sel_mgr.0.write().clear();
+                            }
+                        } else if node_type == "db_class" || node_type == "db_root" {
+                            // DB header rows carry no entity; a plain click just
+                            // clears selection (expand/collapse handles toggling).
+                            es.selected = SelectedItem::None;
                         } else {
                             if let Some(path) = es.file_path_cache.get(&id).cloned() {
                                 es.selected = SelectedItem::File(path);
@@ -5249,6 +5318,11 @@ fn drain_slint_actions(
                                 es.expanded_entities.insert(entity);
                             }
                         }
+                    } else if node_type == "db_class" {
+                        // Phase 4 — expand a DB class bucket (lists its first page).
+                        if let Some(class) = es.db_class_id_cache.get(&id).cloned() {
+                            es.expanded_db_classes.insert(class);
+                        }
                     } else {
                         // File node — expand directory by hash ID lookup
                         if let Some(path) = es.file_path_cache.get(&id).cloned() {
@@ -5275,6 +5349,11 @@ fn drain_slint_actions(
                             if let Some(entity) = es.entity_id_cache.get(&id).copied() {
                                 es.expanded_entities.remove(&entity);
                             }
+                        }
+                    } else if node_type == "db_class" {
+                        // Phase 4 — collapse a DB class bucket.
+                        if let Some(class) = es.db_class_id_cache.get(&id).cloned() {
+                            es.expanded_db_classes.remove(&class);
                         }
                     } else {
                         // File node — collapse directory by hash ID lookup
@@ -8995,6 +9074,11 @@ fn drain_slint_actions(
                                         .unwrap_or_default();
                                     Some(format!("@service:{}/{}", space, name))
                                 }
+                                // A DB-only row (not yet streamed in): copy a
+                                // uuid mention so the AI/bridge can address it.
+                                SelectedItem::DbStreamed(uuid) => {
+                                    Some(format!("@uuid:{}", uuid))
+                                }
                                 SelectedItem::None => None,
                             }
                         } else {
@@ -11981,6 +12065,9 @@ fn sync_unified_explorer_to_slint(
         if d.explorer {
             d.explorer = false;
             explorer_state.needs_immediate_sync = true;
+            // An entity was added/removed/renamed/reparented — the DB class
+            // counts + cached pages may be stale (Phase 4). Force a rebuild.
+            explorer_state.db_cache_valid = false;
         }
     }
 
@@ -12723,6 +12810,149 @@ fn sync_unified_explorer_to_slint(
     explorer_state.next_entity_node_id = next_id;
 
     // ================================================================
+    // Part 1.5: Virtual "Database (streamed)" section (Phase 4).
+    // ================================================================
+    // Only when camera-locality streaming is active (a large binary Space
+    // whose cores are streamed by camera position, not all boot-loaded).
+    // Lists class buckets + counts; an expanded bucket lists a capped page
+    // of DB-only entities — those NOT currently resident in the live ECS.
+    // Selecting such a row streams it in (`sys_stream_in_on_select`). All DB
+    // access goes through the non-gated `active_db` shim because this system
+    // compiles even without the `world-db` feature.
+    //
+    // `streamed_row_cache` is rebuilt every sync (node ids are reassigned per
+    // sync), so a `SelectNode` can map a row id → uuid to stream in.
+    explorer_state.streamed_row_cache.clear();
+    explorer_state.db_class_id_cache.clear();
+    if crate::space::active_db::streaming_active() {
+        // The full class-index count scan is expensive (scales with entity
+        // count); refresh it only when invalidated (entity add/remove/rename
+        // clears `db_cache_valid`). Cached pages drop with it.
+        if !explorer_state.db_cache_valid {
+            explorer_state.cached_db_classes = crate::space::active_db::iter_all_classes();
+            explorer_state.cached_db_pages.clear();
+            explorer_state.db_cache_valid = true;
+        }
+        // Fill a capped page for each newly-expanded class (≤500 cores read
+        // once, then cached until invalidation).
+        const DB_PAGE_CAP: usize = 500;
+        let expanded_classes = explorer_state.expanded_db_classes.clone();
+        for class in &expanded_classes {
+            if !explorer_state.cached_db_pages.contains_key(class) {
+                let page = crate::space::active_db::list_class_page(class, DB_PAGE_CAP);
+                explorer_state.cached_db_pages.insert(class.clone(), page);
+            }
+        }
+        // Dedup vs resident entities: a streamed-in part already shows under
+        // its real service node, so hide its DB row to avoid a double-listing.
+        let live_uuids: std::collections::HashSet<String> =
+            instances.iter().map(|(_, i)| i.uuid.clone()).collect();
+
+        let classes = explorer_state.cached_db_classes.clone();
+        if !classes.is_empty() {
+            // Closure captures nothing → no borrow of explorer_state.
+            let db_node = |id: i32,
+                           name: String,
+                           node_type: &str,
+                           class_name: &str,
+                           depth: i32,
+                           expandable: bool,
+                           expanded: bool,
+                           selected: bool|
+             -> TreeNode {
+                TreeNode {
+                    id,
+                    name: name.into(),
+                    icon: slint::Image::default(),
+                    depth,
+                    expandable,
+                    expanded,
+                    selected,
+                    visible: true,
+                    node_type: node_type.into(),
+                    class_name: class_name.into(),
+                    path: slint::SharedString::default(),
+                    is_directory: false,
+                    extension: slint::SharedString::default(),
+                    size: slint::SharedString::default(),
+                    modified: false,
+                }
+            };
+
+            let mut next_db_id = explorer_state.next_entity_node_id;
+            // Virtual root — always expanded in the MVP (collapsing the whole
+            // section is a follow-up).
+            let root_id = next_db_id;
+            next_db_id += 1;
+            tree_nodes.push(db_node(
+                root_id,
+                "Database (streamed)".to_string(),
+                "db_root",
+                "",
+                0,
+                true,
+                true,
+                false,
+            ));
+            for (class, count) in &classes {
+                let class_expanded = expanded_classes.contains(class);
+                let class_id = next_db_id;
+                next_db_id += 1;
+                explorer_state
+                    .db_class_id_cache
+                    .insert(class_id, class.clone());
+                tree_nodes.push(db_node(
+                    class_id,
+                    format!("{} ({})", class, count),
+                    "db_class",
+                    class,
+                    1,
+                    *count > 0,
+                    class_expanded,
+                    false,
+                ));
+                if class_expanded {
+                    // Clone the page out so the streamed_row_cache insert below
+                    // doesn't conflict with borrowing cached_db_pages.
+                    if let Some(page) = explorer_state.cached_db_pages.get(class).cloned() {
+                        for (uuid_hex, name) in &page {
+                            // Hide rows already resident (shown under their real node).
+                            if live_uuids.contains(uuid_hex) {
+                                continue;
+                            }
+                            let row_id = next_db_id;
+                            next_db_id += 1;
+                            let is_sel = matches!(
+                                &selected_item,
+                                SelectedItem::DbStreamed(u) if u == uuid_hex
+                            );
+                            explorer_state.streamed_row_cache.insert(
+                                row_id,
+                                StreamedRef {
+                                    uuid: uuid_hex.clone(),
+                                    class: class.clone(),
+                                    name: name.clone(),
+                                },
+                            );
+                            tree_nodes.push(db_node(
+                                row_id,
+                                name.clone(),
+                                "db_entity",
+                                class,
+                                2,
+                                false,
+                                false,
+                                is_sel,
+                            ));
+                        }
+                    }
+                }
+            }
+            explorer_state.next_entity_node_id = next_db_id;
+        }
+    }
+
+    // ================================================================
     // Part 2: Filesystem nodes DISABLED — Explorer shows entity items only.
     // File browsing will be handled by a separate Asset Manager panel.
     // ================================================================
@@ -13238,6 +13468,10 @@ fn open_label_editor_on_enter(
             info!("⏎ [label-edit] skip: selection is Service '{}', not Entity", name);
             return;
         }
+        SelectedItem::DbStreamed(_) => {
+            info!("⏎ [label-edit] skip: selection is a DB-streamed row (not yet live)");
+            return;
+        }
         SelectedItem::None => {
             info!("⏎ [label-edit] skip: no selection");
             return;
@@ -13538,6 +13772,12 @@ fn sync_properties_to_slint(
             path.hash(&mut h);
             0x4000_0000_0000_0000 | h.finish()
         }
+        SelectedItem::DbStreamed(uuid) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            uuid.hash(&mut h);
+            0x2000_0000_0000_0000 | h.finish()
+        }
         SelectedItem::None => 0,
     };
 
@@ -13575,6 +13815,14 @@ fn sync_properties_to_slint(
         SelectedItem::Service(service_name) => {
             // Service header selected — show its properties from ServiceComponent
             build_service_properties(ui, service_name, &service_components);
+            return;
+        }
+        SelectedItem::DbStreamed(uuid) => {
+            // Phase 4: a DB-only row was just selected. `sys_stream_in_on_select`
+            // spawns its core and flips selection to `Entity(_)` within ~1 frame,
+            // so this branch renders only the transient placeholder — no blank
+            // panel flash while the core loads from Fjall.
+            build_streaming_in_properties(ui, uuid);
             return;
         }
         SelectedItem::None => {
@@ -15224,6 +15472,48 @@ fn load_service_properties_from_toml(service_name: &str) -> Option<toml::Value> 
 }
 
 /// Builds service properties for a selected service header and pushes them to the Properties panel.
+/// Phase 4 transient panel: a DB-only Explorer row was selected and is being
+/// streamed into the live ECS. Shown for the ≤1 frame before
+/// `sys_stream_in_on_select` flips selection to the real `Entity`. Renders a
+/// single read-only "Status: Streaming in…" row so the panel never flashes
+/// blank.
+fn build_streaming_in_properties(ui: &StudioWindow, uuid: &str) {
+    ui.set_selected_count(1);
+    ui.set_selected_class("Loading…".into());
+    ui.set_selected_icon(slint::Image::default());
+
+    let mut props: Vec<PropertyData> = Vec::new();
+    let mk = |name: &str, value: &str| PropertyData {
+        name: name.into(),
+        value: value.into(),
+        property_type: "string".into(),
+        editable: false,
+        category: "Database".into(),
+        options: slint::ModelRc::default(),
+        is_header: false,
+        section_collapsed: false,
+        x_value: slint::SharedString::default(),
+        y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(),
+        x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(),
+        y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(),
+        color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+        description: slint::SharedString::default(),
+        learn_url: slint::SharedString::default(),
+        is_attribute: false,
+        attribute_type: slint::SharedString::default(),
+    };
+    props.push(mk("Status", "Streaming in…"));
+    // Short uuid prefix so the user can confirm which row is loading.
+    let short = uuid.get(0..8).unwrap_or(uuid);
+    props.push(mk("UUID", short));
+
+    let model_rc = std::rc::Rc::new(slint::VecModel::from(props));
+    ui.set_entity_properties(slint::ModelRc::from(model_rc));
+}
+
 /// Reads properties from TOML definition files (Roblox-style) with fallback to ServiceComponent.
 fn build_service_properties(
     ui: &StudioWindow,

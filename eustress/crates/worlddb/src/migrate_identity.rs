@@ -559,6 +559,14 @@ mod tests {
                 .map(|((_, u), _)| *u)
                 .collect())
         }
+        fn iter_all_classes(&self) -> Result<Vec<(String, usize)>> {
+            use std::collections::BTreeMap;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for ((c, _), _) in self.class_index.read().iter() {
+                *counts.entry(c.clone()).or_insert(0) += 1;
+            }
+            Ok(counts.into_iter().collect())
+        }
         fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
             Ok(self.meta.read().get(key).cloned())
         }
@@ -832,5 +840,33 @@ mod tests {
             s.push(hex_char(b & 0x0f));
         }
         assert_eq!(s, u);
+    }
+
+    #[test]
+    fn iter_all_classes_buckets_and_counts() {
+        // Phase 4: the virtual DB-backed Explorer lists class buckets +
+        // counts. Seed cores across two classes and assert the rollup.
+        let db = MemDb::new();
+        let u = |n: u8| {
+            let mut b = [0u8; 16];
+            b[0] = n;
+            b
+        };
+        // 3× Part, 1× Model.
+        db.put_class_index("Part", &u(1)).unwrap();
+        db.put_class_index("Part", &u(2)).unwrap();
+        db.put_class_index("Part", &u(3)).unwrap();
+        db.put_class_index("Model", &u(4)).unwrap();
+
+        let classes = db.iter_all_classes().unwrap();
+        // Sorted by class name: Model before Part.
+        assert_eq!(
+            classes,
+            vec![("Model".to_string(), 1), ("Part".to_string(), 3)]
+        );
+
+        // Empty DB → empty rollup.
+        let empty = MemDb::new();
+        assert!(empty.iter_all_classes().unwrap().is_empty());
     }
 }

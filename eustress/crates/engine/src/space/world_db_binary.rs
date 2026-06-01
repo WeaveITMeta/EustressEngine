@@ -430,6 +430,138 @@ pub(crate) fn spawn_binary_core(
     Some(entity)
 }
 
+/// Phase 4 — stream a DB-only entity into the live ECS when the user selects
+/// its row in the virtual "Database (streamed)" Explorer section.
+///
+/// The Explorer's `SelectNode` handler set
+/// `UnifiedExplorerState.selected = DbStreamed(uuid)` (it cannot spawn — it
+/// has no Bevy command buffer). This system is the only place that can:
+/// it resolves the uuid to its core, spawns it via the SAME path as
+/// boot-load / create (`spawn_binary_core`), registers it in the selection
+/// manager (which inserts `Selected`, so residency eviction skips it —
+/// residency.rs), and flips selection to the now-live `Entity`. The mirror
+/// then persists any edit; the entity evicts normally once deselected (no
+/// leak — the pin is released by the selection manager, not held forever).
+///
+/// Idempotent: if the entity is already resident (residency streamed it in
+/// between the click and now), it just selects the live one.
+#[allow(clippy::too_many_arguments)]
+pub fn sys_stream_in_on_select(
+    mut commands: Commands,
+    explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material_registry: ResMut<MaterialRegistry>,
+    mut mesh_cache: ResMut<PrimitiveMeshCache>,
+    space_root: Res<SpaceRoot>,
+    handle: Res<super::world_db_plugin::WorldDbHandle>,
+    selection_manager: Option<Res<crate::selection_sync::SelectionSyncManager>>,
+    services: Query<(Entity, &ServiceComponent)>,
+    existing: Query<(Entity, &Instance), With<BinaryEcsInstance>>,
+) {
+    use crate::ui::slint_ui::SelectedItem;
+    let Some(mut es) = explorer_state else {
+        return;
+    };
+    // Cheap early-out: act only on the transient DbStreamed state.
+    let SelectedItem::DbStreamed(uuid_hex) = es.selected.clone() else {
+        return;
+    };
+
+    // Helper to register selection in the manager (authoritative — it drives
+    // the `Selected` component via sync_selection_components, and removes it
+    // on deselect so the entity un-pins and can evict).
+    let select_in_manager = |entity: Entity| {
+        if let Some(ref mgr) = selection_manager {
+            let id_str = format!("{}v{}", entity.index(), entity.generation());
+            mgr.0.write().select(id_str);
+        }
+    };
+
+    // Already resident? (residency may have streamed it in.) Just select it.
+    if let Some((entity, _)) = existing.iter().find(|(_, i)| i.uuid == uuid_hex) {
+        commands.entity(entity).insert(crate::selection_box::Selected);
+        select_in_manager(entity);
+        es.selected = SelectedItem::Entity(entity);
+        es.needs_immediate_sync = true;
+        return;
+    }
+
+    // Resolve DB + raw core bytes + Workspace.
+    let Some(db) = handle.0.as_ref() else {
+        es.selected = SelectedItem::None;
+        return;
+    };
+    let Some(uuid_bytes) =
+        eustress_common::instance_create::uuid_hex_to_bytes(&uuid_hex)
+    else {
+        es.selected = SelectedItem::None;
+        return;
+    };
+    let bytes = match db.get_entity_core_by_uuid(&uuid_bytes) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            warn!(
+                target: "eustress_engine::world_db", uuid = %uuid_hex,
+                "stream-in: no core for uuid (stale Explorer row?)"
+            );
+            es.selected = SelectedItem::None;
+            return;
+        }
+        Err(e) => {
+            warn!(
+                target: "eustress_engine::world_db", error = %e, uuid = %uuid_hex,
+                "stream-in: core read failed"
+            );
+            es.selected = SelectedItem::None;
+            return;
+        }
+    };
+    let Some(workspace) = services
+        .iter()
+        .find(|(_, s)| s.class_name == "Workspace")
+        .map(|(e, _)| e)
+    else {
+        // Services not ready yet — keep DbStreamed, retry next frame.
+        return;
+    };
+    let stored_id = u64::from_be_bytes(
+        uuid_bytes[0..8]
+            .try_into()
+            .expect("uuid_bytes is 16 long; [0..8] is 8"),
+    );
+
+    match spawn_binary_core(
+        &mut commands,
+        &asset_server,
+        &mut materials,
+        &mut material_registry,
+        &mut mesh_cache,
+        &space_root.0,
+        workspace,
+        stored_id,
+        &bytes,
+    ) {
+        Some(entity) => {
+            // Immediate pin (covers a same-frame evict) + authoritative
+            // manager selection (keeps it pinned until deselect).
+            commands
+                .entity(entity)
+                .insert(crate::selection_box::Selected);
+            select_in_manager(entity);
+            es.selected = SelectedItem::Entity(entity);
+            es.needs_immediate_sync = true;
+            info!(
+                target: "eustress_engine::world_db", uuid = %uuid_hex, ?entity,
+                "stream-in: DB-only entity streamed into the live ECS"
+            );
+        }
+        None => {
+            es.selected = SelectedItem::None;
+        }
+    }
+}
+
 /// Boot-load every binary-ECS core in the active Space into the ECS, once
 /// per Space, after the file loader has spawned the services.
 #[allow(clippy::too_many_arguments)]
@@ -489,6 +621,9 @@ fn load_binary_ecs_instances(
     if active_db::count_instance_cores_capped(cap) > residency_cfg.big_space_threshold {
         residency.enabled = true;
         residency.last_camera_cell = None; // first residency tick loads the camera box
+        // Mirror into the non-gated flag the Explorer reads to show the
+        // virtual "Database (streamed)" section (Phase 4).
+        active_db::set_streaming_active(true);
         info!(
             target: "eustress_engine::world_db",
             threshold = residency_cfg.big_space_threshold,
@@ -499,6 +634,7 @@ fn load_binary_ecs_instances(
         return;
     }
     residency.enabled = false; // small Space: boot-load all; residency idle
+    active_db::set_streaming_active(false); // no DB section for small Spaces
 
     let cores = active_db::iter_instance_cores();
     if cores.is_empty() {
@@ -686,7 +822,15 @@ pub fn register(app: &mut App) {
             )
                 .chain(),
         )
-        .add_systems(Update, drain_pending_binary_recreate);
+        .add_systems(Update, drain_pending_binary_recreate)
+        // Phase 4 — select-to-stream-in for the virtual DB Explorer. Runs
+        // before eviction so a just-streamed entity is registered/pinned in
+        // the same frame's selection pass (the spawn itself is deferred, so
+        // it can't be evicted this frame regardless).
+        .add_systems(
+            Update,
+            sys_stream_in_on_select.before(super::residency::sys_residency_evict),
+        );
 }
 
 // ─────────────────────────────────────────────────────────────────────

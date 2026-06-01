@@ -448,6 +448,65 @@ mod imp {
         a.db.count_instance_cores_capped(cap).unwrap_or(0)
     }
 
+    /// Every distinct class in `class_index` with its entity count, sorted
+    /// by class name. Powers the virtual DB-backed Explorer (Phase 4): list
+    /// `Part (2000000)` etc. without materializing any cores. Empty when no
+    /// DB is active (small/legacy disk Space — Explorer stays live-ECS-only).
+    pub fn iter_all_classes() -> Vec<(String, usize)> {
+        let Ok(g) = ACTIVE.read() else {
+            return Vec::new();
+        };
+        let Some(a) = g.as_ref() else {
+            return Vec::new();
+        };
+        a.db.iter_all_classes().unwrap_or_default()
+    }
+
+    /// Lowercase-hex (32-char) encode a 16-byte uuid — the canonical wire
+    /// form `find_entity_by_uuid` validates and the bridge addresses by.
+    fn uuid_bytes_to_hex(b: &[u8; 16]) -> String {
+        let mut s = String::with_capacity(32);
+        for byte in b {
+            s.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
+            s.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+        s
+    }
+
+    /// A bounded page of DB-only entities in a class for the virtual
+    /// Explorer (Phase 4): `(uuid_hex_32, display_name)` pairs, at most
+    /// `cap`. Reads only `cap` cores — `iter_class_capped` early-exits, so a
+    /// 10M-entity `Part` bucket never materializes 10M uuids just to show
+    /// the first page. The name comes from the core's `metadata.name`
+    /// (falling back to the class name). Empty when no DB is active.
+    pub fn list_class_page(class_name: &str, cap: usize) -> Vec<(String, String)> {
+        let Ok(g) = ACTIVE.read() else {
+            return Vec::new();
+        };
+        let Some(a) = g.as_ref() else {
+            return Vec::new();
+        };
+        let uuids = a.db.iter_class_capped(class_name, cap).unwrap_or_default();
+        let mut out = Vec::with_capacity(uuids.len());
+        for u in uuids {
+            let hex = uuid_bytes_to_hex(&u);
+            let name = a
+                .db
+                .get_entity_core_by_uuid(&u)
+                .ok()
+                .flatten()
+                .and_then(|buf| eustress_worlddb::decode_instance_core(&buf).ok())
+                .and_then(|core| {
+                    crate::space::arch_instance::arch_to_instance(&core)
+                        .metadata
+                        .name
+                })
+                .unwrap_or_else(|| class_name.to_string());
+            out.push((hex, name));
+        }
+        out
+    }
+
     /// Create a binary-ECS entity in ALL FIVE stores in one call — the
     /// chokepoint for the "Insert defaults to scalable" create-flip
     /// (SCALING_ARCHITECTURE.md §0.5 C1). A binary entity must be findable
@@ -688,6 +747,12 @@ mod imp {
     pub fn count_instance_cores_capped(_cap: usize) -> usize {
         0
     }
+    pub fn iter_all_classes() -> Vec<(String, usize)> {
+        Vec::new()
+    }
+    pub fn list_class_page(_class_name: &str, _cap: usize) -> Vec<(String, String)> {
+        Vec::new()
+    }
     pub fn mirror_binary_core(
         _stored_id: u64,
         _uuid: Option<&[u8; 16]>,
@@ -728,3 +793,29 @@ mod imp {
 }
 
 pub use imp::*;
+
+// ── Non-gated streaming signal (Phase 4) ────────────────────────────────
+//
+// The Explorer (`slint_ui::sync_unified_explorer_to_slint`) compiles in
+// BOTH feature modes and cannot reference the feature-gated `ResidencyState`.
+// So the residency boot-load decision mirrors its enabled/disabled state
+// into this process-global flag, which the Explorer reads to decide whether
+// to render the virtual "Database (streamed)" section. False for small
+// Spaces (everything boot-loaded → no DB-only rows), legacy disk Spaces, and
+// whenever the `world-db` feature is off.
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static STREAMING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Is camera-locality streaming active for the current Space? (Large binary
+/// Space whose cores are streamed by camera locality rather than all
+/// boot-loaded.) Read by the Explorer to gate the virtual DB section.
+pub fn streaming_active() -> bool {
+    STREAMING_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Set by the residency boot-load decision (feature-gated) and the Space
+/// teardown (reset to false). Non-gated so both callers compile.
+pub fn set_streaming_active(v: bool) {
+    STREAMING_ACTIVE.store(v, Ordering::Relaxed);
+}

@@ -464,6 +464,31 @@ pub trait WorldDb: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Like [`iter_class`] but stops after collecting `cap` uuids. The
+    /// virtual DB Explorer (Phase 4) lists only a bounded page of a class,
+    /// so a 10M-entity `Part` bucket must NOT materialize 10M uuids (160 MB)
+    /// just to show the first 500 rows. Prefix-scans `class_index/<class>\x1f`
+    /// and early-exits at `cap`.
+    fn iter_class_capped(&self, class_name: &str, cap: usize) -> Result<Vec<[u8; 16]>> {
+        // Default: fall back to the full scan, then truncate. Backends that
+        // can early-exit (FjallWorldDb) override this for real boundedness.
+        let mut v = self.iter_class(class_name)?;
+        v.truncate(cap);
+        Ok(v)
+    }
+
+    /// Enumerate every distinct class present in `class_index` together
+    /// with how many entities each holds, as `(class_name, count)`. Powers
+    /// the virtual DB-backed Explorer (Phase 4): it lists class buckets +
+    /// counts without materializing any cores, so a 10M-entity Space shows
+    /// `Part (10000000)` instantly. One full prefix-scan of the (small,
+    /// empty-valued) `class_index` partition — cost scales with entity
+    /// count, but each entry is a bare key, so it is far cheaper than
+    /// reading cores. Returns sorted by class name for stable UI ordering.
+    fn iter_all_classes(&self) -> Result<Vec<(String, usize)>> {
+        Ok(Vec::new())
+    }
+
     /// Read or write a meta-partition key — used by the migration to
     /// stamp `migration_checkpoint` every 1000 entities for resume-from-
     /// checkpoint (IDENTITY.md §6.3).

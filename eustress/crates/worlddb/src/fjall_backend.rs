@@ -733,6 +733,49 @@ impl WorldDb for FjallWorldDb {
         Ok(out)
     }
 
+    fn iter_class_capped(&self, class_name: &str, cap: usize) -> Result<Vec<[u8; 16]>> {
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+        let mut prefix = Vec::with_capacity(class_name.len() + 1);
+        prefix.extend_from_slice(class_name.as_bytes());
+        prefix.push(0x1f);
+        let mut out = Vec::with_capacity(cap.min(512));
+        for kv in self.class_index.prefix(prefix.as_slice()) {
+            let (k, _v) = kv?;
+            if k.len() < prefix.len() + 16 {
+                continue;
+            }
+            let mut uuid = [0u8; 16];
+            uuid.copy_from_slice(&k[k.len() - 16..]);
+            out.push(uuid);
+            if out.len() >= cap {
+                break; // early exit — never materializes the whole class
+            }
+        }
+        Ok(out)
+    }
+
+    fn iter_all_classes(&self) -> Result<Vec<(String, usize)>> {
+        // One full scan of `class_index`. Each key is `<class>\x1f<uuid_16>`
+        // with an empty value, so we only read keys. Accumulate per-class
+        // counts in a BTreeMap (sorted output for stable UI ordering).
+        use std::collections::BTreeMap;
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for kv in self.class_index.iter() {
+            let (k, _v) = kv?;
+            // Split on the first 0x1f unit separator; the prefix is the class.
+            let Some(sep) = k.iter().position(|&b| b == 0x1f) else {
+                continue;
+            };
+            let Ok(class) = std::str::from_utf8(&k[..sep]) else {
+                continue;
+            };
+            *counts.entry(class.to_string()).or_insert(0) += 1;
+        }
+        Ok(counts.into_iter().collect())
+    }
+
     fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         Ok(self.meta.get(key)?.map(|s| s.to_vec()))
     }

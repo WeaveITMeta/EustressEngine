@@ -791,6 +791,21 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     {
         *residency = crate::space::residency::ResidencyState::default();
     }
+    // Phase 4: clear the non-gated streaming flag + the Explorer's DB-section
+    // cache so the virtual "Database (streamed)" section never shows the
+    // outgoing Space's classes/rows before the new boot-load re-decides. The
+    // boot-load sets the flag true again for a large incoming Space.
+    crate::space::active_db::set_streaming_active(false);
+    if let Some(mut es) =
+        world.get_resource_mut::<crate::ui::slint_ui::UnifiedExplorerState>()
+    {
+        es.cached_db_classes.clear();
+        es.cached_db_pages.clear();
+        es.streamed_row_cache.clear();
+        es.db_class_id_cache.clear();
+        es.expanded_db_classes.clear();
+        es.db_cache_valid = false;
+    }
 
     // Bump the load generation and clear any in-flight deferred queue.
     // Any load_deferred_services frame that already popped an entry will
