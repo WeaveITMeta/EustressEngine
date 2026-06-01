@@ -412,6 +412,84 @@ pub enum ClassName {
     WrapDeformer,            // Cage-mesh deformer for layered clothing
     WrapLayer,               // Layered-clothing wrap layer
     WrapTarget,              // Layered-clothing wrap target body
+    // ── Wave 7: character / players / animation (7.D) ──
+    Animation,               // Animation asset reference (AnimationId)
+    AnimationController,     // Non-Humanoid animation playback controller
+    HumanoidController,      // Base controller for Humanoid locomotion
+    ControllerManager,       // Coordinates a set of physics controllers + sensors
+    AirController,           // In-air locomotion controller
+    ClimbController,         // Ladder/wall climb controller
+    GroundController,        // Grounded walk/run controller
+    SwimController,          // Swimming locomotion controller
+    SkateboardController,    // Skateboard locomotion controller
+    VehicleController,       // Vehicle-seat locomotion controller
+    ControllerPartSensor,    // Senses contact with parts for a ControllerManager
+    HumanoidDescription,     // Avatar body-part + scale specification
+    BodyPartDescription,     // Single body-part asset entry
+    Backpack,                // Player inventory container for Tools
+    StarterGear,             // Tools copied into each player's Backpack
+    Accoutrement,            // Legacy attached cosmetic (base of Accessory/Hat)
+    AccessoryDescription,    // Layered/rigid accessory specification
+    FaceControls,            // FACS blendshape weights for animated faces
+    IKControl,               // Inverse-kinematics chain control
+    KeyframeMarker,          // Named event marker on a keyframe
+    Pose,                    // Per-bone pose within a keyframe
+    NumberPose,              // Scalar pose value within a keyframe
+    CurveAnimation,          // Curve-based animation asset
+    AnimationRigData,        // Skeleton/rig metadata for animations
+    // ── Wave 7: audio DSP effects + routing (7.E) ──
+    AudioReverb,             // Reverb DSP effect
+    AudioEcho,               // Echo/delay DSP effect
+    AudioDistortion,         // Distortion DSP effect
+    AudioEqualizer,          // 3-band equalizer DSP effect
+    AudioCompressor,         // Dynamics compressor DSP effect
+    AudioChorus,             // Chorus DSP effect
+    AudioFlanger,            // Flanger DSP effect
+    AudioFader,              // Volume fader node
+    AudioFilter,             // Frequency filter DSP node
+    AudioPitchShifter,       // Pitch-shift DSP effect
+    AudioEmitter,            // Spatial audio source node
+    AudioListener,           // Spatial audio listener node
+    AudioPlayer,             // Audio asset playback node
+    AudioDeviceInput,        // Microphone/device input node
+    AudioDeviceOutput,       // Speaker/device output node
+    AudioAnalyzer,           // Audio spectrum/level analyzer node
+    AudioSearchParams,       // Tag-based audio routing filter
+    ReverbSoundEffect,       // Legacy reverb SoundEffect
+    EchoSoundEffect,         // Legacy echo SoundEffect
+    DistortionSoundEffect,   // Legacy distortion SoundEffect
+    EqualizerSoundEffect,    // Legacy equalizer SoundEffect
+    CompressorSoundEffect,   // Legacy compressor SoundEffect
+    ChorusSoundEffect,       // Legacy chorus SoundEffect
+    FlangeSoundEffect,       // Legacy flange SoundEffect
+    PitchShiftSoundEffect,   // Legacy pitch-shift SoundEffect
+    TremoloSoundEffect,      // Legacy tremolo SoundEffect
+    // ── Wave 7: data structs / curves / misc (7.F) ──
+    DataStoreGetOptions,     // DataStore get-request options
+    DataStoreSetOptions,     // DataStore set-request options
+    DataStoreIncrementOptions, // DataStore increment-request options
+    DataStoreOptions,        // DataStore configuration options
+    FloatCurve,              // Float keyframe curve container
+    RotationCurve,           // Quaternion rotation keyframe curve
+    EulerRotationCurve,      // Euler-angle rotation keyframe curve
+    Vector3Curve,            // Vector3 keyframe curve container
+    MarkerCurve,             // Event-marker keyframe curve
+    Path2D,                  // 2D path of control points
+    LocalizationTable,       // Translation string table
+    Configuration,           // Folder-like configuration container
+    Noise,                   // Procedural noise generator config
+    UnreliableRemoteEvent,   // Unreliable client/server message channel
+    Wire,                    // Pin-to-pin connection between instances
+    OperationGraph,          // Node graph for procedural operations
+    // ── Wave 7: editable / sensors / chat (7.G) ──
+    EditableImage,           // Runtime-editable image buffer
+    RobloxEditableImage,     // Roblox EditableImage alias surface
+    BuoyancySensor,          // Senses submersion in a fluid volume
+    DragDetector,            // Drag-to-move interaction detector
+    TextChannel,             // Text chat channel
+    TextChatCommand,         // Slash-command for text chat
+    TextChatMessageProperties, // Per-message text chat styling
+    HapticEffect,            // Controller haptic feedback effect
 }
 
 impl ClassName {
@@ -598,6 +676,84 @@ impl ClassName {
             ClassName::WrapDeformer => "WrapDeformer",
             ClassName::WrapLayer => "WrapLayer",
             ClassName::WrapTarget => "WrapTarget",
+            // Wave 7.D character / players / animation
+            ClassName::Animation => "Animation",
+            ClassName::AnimationController => "AnimationController",
+            ClassName::HumanoidController => "HumanoidController",
+            ClassName::ControllerManager => "ControllerManager",
+            ClassName::AirController => "AirController",
+            ClassName::ClimbController => "ClimbController",
+            ClassName::GroundController => "GroundController",
+            ClassName::SwimController => "SwimController",
+            ClassName::SkateboardController => "SkateboardController",
+            ClassName::VehicleController => "VehicleController",
+            ClassName::ControllerPartSensor => "ControllerPartSensor",
+            ClassName::HumanoidDescription => "HumanoidDescription",
+            ClassName::BodyPartDescription => "BodyPartDescription",
+            ClassName::Backpack => "Backpack",
+            ClassName::StarterGear => "StarterGear",
+            ClassName::Accoutrement => "Accoutrement",
+            ClassName::AccessoryDescription => "AccessoryDescription",
+            ClassName::FaceControls => "FaceControls",
+            ClassName::IKControl => "IKControl",
+            ClassName::KeyframeMarker => "KeyframeMarker",
+            ClassName::Pose => "Pose",
+            ClassName::NumberPose => "NumberPose",
+            ClassName::CurveAnimation => "CurveAnimation",
+            ClassName::AnimationRigData => "AnimationRigData",
+            // Wave 7.E audio DSP effects + routing
+            ClassName::AudioReverb => "AudioReverb",
+            ClassName::AudioEcho => "AudioEcho",
+            ClassName::AudioDistortion => "AudioDistortion",
+            ClassName::AudioEqualizer => "AudioEqualizer",
+            ClassName::AudioCompressor => "AudioCompressor",
+            ClassName::AudioChorus => "AudioChorus",
+            ClassName::AudioFlanger => "AudioFlanger",
+            ClassName::AudioFader => "AudioFader",
+            ClassName::AudioFilter => "AudioFilter",
+            ClassName::AudioPitchShifter => "AudioPitchShifter",
+            ClassName::AudioEmitter => "AudioEmitter",
+            ClassName::AudioListener => "AudioListener",
+            ClassName::AudioPlayer => "AudioPlayer",
+            ClassName::AudioDeviceInput => "AudioDeviceInput",
+            ClassName::AudioDeviceOutput => "AudioDeviceOutput",
+            ClassName::AudioAnalyzer => "AudioAnalyzer",
+            ClassName::AudioSearchParams => "AudioSearchParams",
+            ClassName::ReverbSoundEffect => "ReverbSoundEffect",
+            ClassName::EchoSoundEffect => "EchoSoundEffect",
+            ClassName::DistortionSoundEffect => "DistortionSoundEffect",
+            ClassName::EqualizerSoundEffect => "EqualizerSoundEffect",
+            ClassName::CompressorSoundEffect => "CompressorSoundEffect",
+            ClassName::ChorusSoundEffect => "ChorusSoundEffect",
+            ClassName::FlangeSoundEffect => "FlangeSoundEffect",
+            ClassName::PitchShiftSoundEffect => "PitchShiftSoundEffect",
+            ClassName::TremoloSoundEffect => "TremoloSoundEffect",
+            // Wave 7.F data structs / curves / misc
+            ClassName::DataStoreGetOptions => "DataStoreGetOptions",
+            ClassName::DataStoreSetOptions => "DataStoreSetOptions",
+            ClassName::DataStoreIncrementOptions => "DataStoreIncrementOptions",
+            ClassName::DataStoreOptions => "DataStoreOptions",
+            ClassName::FloatCurve => "FloatCurve",
+            ClassName::RotationCurve => "RotationCurve",
+            ClassName::EulerRotationCurve => "EulerRotationCurve",
+            ClassName::Vector3Curve => "Vector3Curve",
+            ClassName::MarkerCurve => "MarkerCurve",
+            ClassName::Path2D => "Path2D",
+            ClassName::LocalizationTable => "LocalizationTable",
+            ClassName::Configuration => "Configuration",
+            ClassName::Noise => "Noise",
+            ClassName::UnreliableRemoteEvent => "UnreliableRemoteEvent",
+            ClassName::Wire => "Wire",
+            ClassName::OperationGraph => "OperationGraph",
+            // Wave 7.G editable / sensors / chat
+            ClassName::EditableImage => "EditableImage",
+            ClassName::RobloxEditableImage => "RobloxEditableImage",
+            ClassName::BuoyancySensor => "BuoyancySensor",
+            ClassName::DragDetector => "DragDetector",
+            ClassName::TextChannel => "TextChannel",
+            ClassName::TextChatCommand => "TextChatCommand",
+            ClassName::TextChatMessageProperties => "TextChatMessageProperties",
+            ClassName::HapticEffect => "HapticEffect",
         }
     }
 
@@ -797,6 +953,84 @@ impl ClassName {
             "WrapDeformer" => Ok(ClassName::WrapDeformer),
             "WrapLayer" => Ok(ClassName::WrapLayer),
             "WrapTarget" => Ok(ClassName::WrapTarget),
+            // Wave 7.D character / players / animation
+            "Animation" => Ok(ClassName::Animation),
+            "AnimationController" => Ok(ClassName::AnimationController),
+            "HumanoidController" => Ok(ClassName::HumanoidController),
+            "ControllerManager" => Ok(ClassName::ControllerManager),
+            "AirController" => Ok(ClassName::AirController),
+            "ClimbController" => Ok(ClassName::ClimbController),
+            "GroundController" => Ok(ClassName::GroundController),
+            "SwimController" => Ok(ClassName::SwimController),
+            "SkateboardController" => Ok(ClassName::SkateboardController),
+            "VehicleController" => Ok(ClassName::VehicleController),
+            "ControllerPartSensor" => Ok(ClassName::ControllerPartSensor),
+            "HumanoidDescription" => Ok(ClassName::HumanoidDescription),
+            "BodyPartDescription" => Ok(ClassName::BodyPartDescription),
+            "Backpack" => Ok(ClassName::Backpack),
+            "StarterGear" => Ok(ClassName::StarterGear),
+            "Accoutrement" => Ok(ClassName::Accoutrement),
+            "AccessoryDescription" => Ok(ClassName::AccessoryDescription),
+            "FaceControls" => Ok(ClassName::FaceControls),
+            "IKControl" => Ok(ClassName::IKControl),
+            "KeyframeMarker" => Ok(ClassName::KeyframeMarker),
+            "Pose" => Ok(ClassName::Pose),
+            "NumberPose" => Ok(ClassName::NumberPose),
+            "CurveAnimation" => Ok(ClassName::CurveAnimation),
+            "AnimationRigData" => Ok(ClassName::AnimationRigData),
+            // Wave 7.E audio DSP effects + routing
+            "AudioReverb" => Ok(ClassName::AudioReverb),
+            "AudioEcho" => Ok(ClassName::AudioEcho),
+            "AudioDistortion" => Ok(ClassName::AudioDistortion),
+            "AudioEqualizer" => Ok(ClassName::AudioEqualizer),
+            "AudioCompressor" => Ok(ClassName::AudioCompressor),
+            "AudioChorus" => Ok(ClassName::AudioChorus),
+            "AudioFlanger" => Ok(ClassName::AudioFlanger),
+            "AudioFader" => Ok(ClassName::AudioFader),
+            "AudioFilter" => Ok(ClassName::AudioFilter),
+            "AudioPitchShifter" => Ok(ClassName::AudioPitchShifter),
+            "AudioEmitter" => Ok(ClassName::AudioEmitter),
+            "AudioListener" => Ok(ClassName::AudioListener),
+            "AudioPlayer" => Ok(ClassName::AudioPlayer),
+            "AudioDeviceInput" => Ok(ClassName::AudioDeviceInput),
+            "AudioDeviceOutput" => Ok(ClassName::AudioDeviceOutput),
+            "AudioAnalyzer" => Ok(ClassName::AudioAnalyzer),
+            "AudioSearchParams" => Ok(ClassName::AudioSearchParams),
+            "ReverbSoundEffect" => Ok(ClassName::ReverbSoundEffect),
+            "EchoSoundEffect" => Ok(ClassName::EchoSoundEffect),
+            "DistortionSoundEffect" => Ok(ClassName::DistortionSoundEffect),
+            "EqualizerSoundEffect" => Ok(ClassName::EqualizerSoundEffect),
+            "CompressorSoundEffect" => Ok(ClassName::CompressorSoundEffect),
+            "ChorusSoundEffect" => Ok(ClassName::ChorusSoundEffect),
+            "FlangeSoundEffect" => Ok(ClassName::FlangeSoundEffect),
+            "PitchShiftSoundEffect" => Ok(ClassName::PitchShiftSoundEffect),
+            "TremoloSoundEffect" => Ok(ClassName::TremoloSoundEffect),
+            // Wave 7.F data structs / curves / misc
+            "DataStoreGetOptions" => Ok(ClassName::DataStoreGetOptions),
+            "DataStoreSetOptions" => Ok(ClassName::DataStoreSetOptions),
+            "DataStoreIncrementOptions" => Ok(ClassName::DataStoreIncrementOptions),
+            "DataStoreOptions" => Ok(ClassName::DataStoreOptions),
+            "FloatCurve" => Ok(ClassName::FloatCurve),
+            "RotationCurve" => Ok(ClassName::RotationCurve),
+            "EulerRotationCurve" => Ok(ClassName::EulerRotationCurve),
+            "Vector3Curve" => Ok(ClassName::Vector3Curve),
+            "MarkerCurve" => Ok(ClassName::MarkerCurve),
+            "Path2D" => Ok(ClassName::Path2D),
+            "LocalizationTable" => Ok(ClassName::LocalizationTable),
+            "Configuration" => Ok(ClassName::Configuration),
+            "Noise" => Ok(ClassName::Noise),
+            "UnreliableRemoteEvent" => Ok(ClassName::UnreliableRemoteEvent),
+            "Wire" => Ok(ClassName::Wire),
+            "OperationGraph" => Ok(ClassName::OperationGraph),
+            // Wave 7.G editable / sensors / chat
+            "EditableImage" => Ok(ClassName::EditableImage),
+            "RobloxEditableImage" => Ok(ClassName::RobloxEditableImage),
+            "BuoyancySensor" => Ok(ClassName::BuoyancySensor),
+            "DragDetector" => Ok(ClassName::DragDetector),
+            "TextChannel" => Ok(ClassName::TextChannel),
+            "TextChatCommand" => Ok(ClassName::TextChatCommand),
+            "TextChatMessageProperties" => Ok(ClassName::TextChatMessageProperties),
+            "HapticEffect" => Ok(ClassName::HapticEffect),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -9767,6 +10001,1314 @@ impl Default for WrapTarget {
         Self {
             cage_mesh_id: String::new(),
             stiffness: 0.0,
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Wave 7.D — character / players / animation
+// ════════════════════════════════════════════════════════════════════════
+
+/// Animation asset reference. Roblox `Animation`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Animation {
+    /// Animation asset id/uri (Roblox "AnimationId")
+    pub animation_id: String,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            animation_id: String::new(),
+        }
+    }
+}
+
+/// Non-Humanoid animation playback controller. Roblox `AnimationController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AnimationController {}
+
+impl Default for AnimationController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Base controller for Humanoid locomotion. Roblox `HumanoidController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct HumanoidController {}
+
+impl Default for HumanoidController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Coordinates a set of physics controllers + sensors. Roblox `ControllerManager`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ControllerManager {}
+
+impl Default for ControllerManager {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// In-air locomotion controller. Roblox `AirController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AirController {}
+
+impl Default for AirController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Ladder/wall climb controller. Roblox `ClimbController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ClimbController {}
+
+impl Default for ClimbController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Grounded walk/run controller. Roblox `GroundController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct GroundController {}
+
+impl Default for GroundController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Swimming locomotion controller. Roblox `SwimController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct SwimController {}
+
+impl Default for SwimController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Skateboard locomotion controller. Roblox `SkateboardController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct SkateboardController {}
+
+impl Default for SkateboardController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Vehicle-seat locomotion controller. Roblox `VehicleController`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct VehicleController {}
+
+impl Default for VehicleController {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Senses contact with parts for a ControllerManager. Roblox `ControllerPartSensor`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ControllerPartSensor {
+    /// Sense mode, e.g. "Floor"/"Ladder"/"Climb" (Roblox "SensorMode")
+    pub sensor_mode: String,
+    /// Max ray search distance (Roblox "SearchDistance")
+    pub search_distance: f32,
+}
+
+impl Default for ControllerPartSensor {
+    fn default() -> Self {
+        Self {
+            sensor_mode: "Floor".to_string(),
+            search_distance: 5.0,
+        }
+    }
+}
+
+/// Avatar body-part + scale specification. Roblox `HumanoidDescription`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct HumanoidDescription {
+    /// Face accessory asset id (Roblox "Face")
+    pub face: String,
+    /// Head mesh asset id (Roblox "Head")
+    pub head: String,
+    /// Torso mesh asset id (Roblox "Torso")
+    pub torso: String,
+    /// Left-arm mesh asset id (Roblox "LeftArm")
+    pub left_arm: String,
+    /// Right-arm mesh asset id (Roblox "RightArm")
+    pub right_arm: String,
+    /// Left-leg mesh asset id (Roblox "LeftLeg")
+    pub left_leg: String,
+    /// Right-leg mesh asset id (Roblox "RightLeg")
+    pub right_leg: String,
+    /// Overall height scale (Roblox "HeightScale")
+    pub height_scale: f32,
+    /// Overall width scale (Roblox "WidthScale")
+    pub width_scale: f32,
+    /// Head scale (Roblox "HeadScale")
+    pub head_scale: f32,
+    /// Body-type blend 0-1 (Roblox "BodyTypeScale")
+    pub body_type_scale: f32,
+    /// Proportion blend 0-1 (Roblox "ProportionScale")
+    pub proportion_scale: f32,
+}
+
+impl Default for HumanoidDescription {
+    fn default() -> Self {
+        Self {
+            face: String::new(),
+            head: String::new(),
+            torso: String::new(),
+            left_arm: String::new(),
+            right_arm: String::new(),
+            left_leg: String::new(),
+            right_leg: String::new(),
+            height_scale: 1.0,
+            width_scale: 1.0,
+            head_scale: 1.0,
+            body_type_scale: 0.0,
+            proportion_scale: 0.0,
+        }
+    }
+}
+
+/// Single body-part asset entry. Roblox `BodyPartDescription`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BodyPartDescription {
+    /// Which body part this entry targets (Roblox "BodyPart")
+    pub body_part: String,
+    /// Asset id for this body part (Roblox "AssetId")
+    pub asset_id: String,
+}
+
+impl Default for BodyPartDescription {
+    fn default() -> Self {
+        Self {
+            body_part: String::new(),
+            asset_id: String::new(),
+        }
+    }
+}
+
+/// Player inventory container for Tools. Roblox `Backpack`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Backpack {}
+
+impl Default for Backpack {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Tools copied into each player's Backpack. Roblox `StarterGear`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct StarterGear {}
+
+impl Default for StarterGear {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Legacy attached cosmetic (base of Accessory/Hat). Roblox `Accoutrement`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Accoutrement {
+    /// Local attachment offset (Roblox "AttachmentPoint" position)
+    pub attachment_point: Vec3,
+}
+
+impl Default for Accoutrement {
+    fn default() -> Self {
+        Self {
+            attachment_point: Vec3::ZERO,
+        }
+    }
+}
+
+/// Layered/rigid accessory specification. Roblox `AccessoryDescription`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AccessoryDescription {
+    /// Accessory category, e.g. "Hat"/"Shirt" (Roblox "AccessoryType")
+    pub accessory_type: String,
+    /// Accessory asset id (Roblox "AssetId")
+    pub asset_id: String,
+    /// Whether this is a layered-clothing accessory (Roblox "IsLayered")
+    pub is_layered: bool,
+}
+
+impl Default for AccessoryDescription {
+    fn default() -> Self {
+        Self {
+            accessory_type: String::new(),
+            asset_id: String::new(),
+            is_layered: false,
+        }
+    }
+}
+
+/// FACS blendshape weights for animated faces. Roblox `FaceControls`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct FaceControls {
+    /// Jaw drop 0-1 (Roblox "JawDrop")
+    pub jaw_drop: f32,
+    /// Left-eye blink 0-1 (Roblox "LeftEyeClosed")
+    pub left_eye_closed: f32,
+    /// Right-eye blink 0-1 (Roblox "RightEyeClosed")
+    pub right_eye_closed: f32,
+    /// Left-brow raise 0-1 (Roblox "LeftBrowUp")
+    pub left_brow_up: f32,
+    /// Right-brow raise 0-1 (Roblox "RightBrowUp")
+    pub right_brow_up: f32,
+    /// Mouth-left pull 0-1 (Roblox "MouthLeft")
+    pub mouth_left: f32,
+    /// Mouth-right pull 0-1 (Roblox "MouthRight")
+    pub mouth_right: f32,
+    /// Funnel/pucker 0-1 (Roblox "FunnelLeft"/"FunnelRight")
+    pub funnel: f32,
+}
+
+impl Default for FaceControls {
+    fn default() -> Self {
+        Self {
+            jaw_drop: 0.0,
+            left_eye_closed: 0.0,
+            right_eye_closed: 0.0,
+            left_brow_up: 0.0,
+            right_brow_up: 0.0,
+            mouth_left: 0.0,
+            mouth_right: 0.0,
+            funnel: 0.0,
+        }
+    }
+}
+
+/// Inverse-kinematics chain control. Roblox `IKControl`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct IKControl {
+    /// Chain root bone/part entity (Roblox "ChainRoot")
+    pub chain_root: Option<u32>,
+    /// End-effector bone/part entity (Roblox "EndEffector")
+    pub end_effector: Option<u32>,
+    /// Target entity to reach toward (Roblox "Target")
+    pub target: Option<u32>,
+    /// Blend weight 0-1 (Roblox "Weight")
+    pub weight: f32,
+    /// Solve type, e.g. "Position"/"Rotation"/"LookAt" (Roblox "Type")
+    pub type_: String,
+}
+
+impl Default for IKControl {
+    fn default() -> Self {
+        Self {
+            chain_root: None,
+            end_effector: None,
+            target: None,
+            weight: 1.0,
+            type_: "Transform".to_string(),
+        }
+    }
+}
+
+/// Named event marker on a keyframe. Roblox `KeyframeMarker`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct KeyframeMarker {
+    /// Marker payload value (Roblox "Value")
+    pub value: String,
+}
+
+impl Default for KeyframeMarker {
+    fn default() -> Self {
+        Self {
+            value: String::new(),
+        }
+    }
+}
+
+/// Per-bone pose within a keyframe. Roblox `Pose`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Pose {
+    /// Pose transform relative to parent (Roblox "CFrame")
+    pub cframe: Transform,
+    /// Blend weight 0-1 (Roblox "Weight")
+    pub weight: f32,
+    /// Easing style, e.g. "Linear"/"Cubic" (Roblox "EasingStyle")
+    pub easing_style: String,
+    /// Easing direction, e.g. "In"/"Out"/"InOut" (Roblox "EasingDirection")
+    pub easing_direction: String,
+}
+
+impl Default for Pose {
+    fn default() -> Self {
+        Self {
+            cframe: Transform::IDENTITY,
+            weight: 1.0,
+            easing_style: "Linear".to_string(),
+            easing_direction: "Out".to_string(),
+        }
+    }
+}
+
+/// Scalar pose value within a keyframe. Roblox `NumberPose`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct NumberPose {
+    /// Pose scalar value (Roblox "Value")
+    pub value: f32,
+}
+
+impl Default for NumberPose {
+    fn default() -> Self {
+        Self { value: 0.0 }
+    }
+}
+
+/// Curve-based animation asset. Roblox `CurveAnimation`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CurveAnimation {}
+
+impl Default for CurveAnimation {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Skeleton/rig metadata for animations. Roblox `AnimationRigData`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AnimationRigData {}
+
+impl Default for AnimationRigData {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Wave 7.E — audio DSP effects + routing
+// ════════════════════════════════════════════════════════════════════════
+
+/// Reverb DSP effect. Roblox `AudioReverb`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioReverb {
+    /// Reverberation decay time, seconds (Roblox "DecayTime")
+    pub decay_time: f32,
+    /// Echo density 0-1 (Roblox "Density")
+    pub density: f32,
+    /// Modal diffusion 0-1 (Roblox "Diffusion")
+    pub diffusion: f32,
+    /// Dry signal level, dB (Roblox "DryLevel")
+    pub dry_level: f32,
+    /// Wet signal level, dB (Roblox "WetLevel")
+    pub wet_level: f32,
+}
+
+impl Default for AudioReverb {
+    fn default() -> Self {
+        Self {
+            decay_time: 1.5,
+            density: 1.0,
+            diffusion: 1.0,
+            dry_level: 0.0,
+            wet_level: 0.0,
+        }
+    }
+}
+
+/// Echo/delay DSP effect. Roblox `AudioEcho`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioEcho {
+    /// Delay between echoes, seconds (Roblox "DelayTime")
+    pub delay: f32,
+    /// Feedback gain 0-1 (Roblox "Feedback")
+    pub feedback: f32,
+    /// Dry signal level, dB (Roblox "DryLevel")
+    pub dry_level: f32,
+    /// Wet signal level, dB (Roblox "WetLevel")
+    pub wet_level: f32,
+}
+
+impl Default for AudioEcho {
+    fn default() -> Self {
+        Self {
+            delay: 0.5,
+            feedback: 0.5,
+            dry_level: 0.0,
+            wet_level: 0.0,
+        }
+    }
+}
+
+/// Distortion DSP effect. Roblox `AudioDistortion`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioDistortion {
+    /// Distortion amount 0-1 (Roblox "Level")
+    pub level: f32,
+}
+
+impl Default for AudioDistortion {
+    fn default() -> Self {
+        Self { level: 0.5 }
+    }
+}
+
+/// 3-band equalizer DSP effect. Roblox `AudioEqualizer`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioEqualizer {
+    /// Low-band gain, dB (Roblox "LowGain")
+    pub low_gain: f32,
+    /// Mid-band gain, dB (Roblox "MidGain")
+    pub mid_gain: f32,
+    /// High-band gain, dB (Roblox "HighGain")
+    pub high_gain: f32,
+}
+
+impl Default for AudioEqualizer {
+    fn default() -> Self {
+        Self {
+            low_gain: 0.0,
+            mid_gain: 0.0,
+            high_gain: 0.0,
+        }
+    }
+}
+
+/// Dynamics compressor DSP effect. Roblox `AudioCompressor`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioCompressor {
+    /// Attack time, seconds (Roblox "Attack")
+    pub attack: f32,
+    /// Release time, seconds (Roblox "Release")
+    pub release: f32,
+    /// Threshold, dB (Roblox "Threshold")
+    pub threshold: f32,
+    /// Compression ratio (Roblox "Ratio")
+    pub ratio: f32,
+    /// Make-up gain, dB (Roblox "GainMakeup")
+    pub makeup_gain: f32,
+}
+
+impl Default for AudioCompressor {
+    fn default() -> Self {
+        Self {
+            attack: 0.1,
+            release: 0.1,
+            threshold: 0.0,
+            ratio: 1.0,
+            makeup_gain: 0.0,
+        }
+    }
+}
+
+/// Chorus DSP effect. Roblox `AudioChorus`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioChorus {
+    /// Modulation rate, Hz (Roblox "Rate")
+    pub rate: f32,
+    /// Modulation depth 0-1 (Roblox "Depth")
+    pub depth: f32,
+    /// Wet/dry mix 0-1 (Roblox "Mix")
+    pub mix: f32,
+}
+
+impl Default for AudioChorus {
+    fn default() -> Self {
+        Self {
+            rate: 1.0,
+            depth: 0.5,
+            mix: 0.5,
+        }
+    }
+}
+
+/// Flanger DSP effect. Roblox `AudioFlanger`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioFlanger {
+    /// Modulation rate, Hz (Roblox "Rate")
+    pub rate: f32,
+    /// Modulation depth 0-1 (Roblox "Depth")
+    pub depth: f32,
+    /// Wet/dry mix 0-1 (Roblox "Mix")
+    pub mix: f32,
+}
+
+impl Default for AudioFlanger {
+    fn default() -> Self {
+        Self {
+            rate: 1.0,
+            depth: 0.5,
+            mix: 0.5,
+        }
+    }
+}
+
+/// Volume fader node. Roblox `AudioFader`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioFader {
+    /// Linear volume multiplier (Roblox "Volume")
+    pub volume: f32,
+    /// Bypass passthrough (Roblox "Bypass")
+    pub bypass: bool,
+}
+
+impl Default for AudioFader {
+    fn default() -> Self {
+        Self {
+            volume: 1.0,
+            bypass: false,
+        }
+    }
+}
+
+/// Frequency filter DSP node. Roblox `AudioFilter`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioFilter {
+    /// Cutoff/center frequency, Hz (Roblox "Frequency")
+    pub frequency: f32,
+    /// Resonance/Q factor (Roblox "Q")
+    pub q: f32,
+    /// Filter gain, dB (Roblox "Gain")
+    pub gain: f32,
+    /// Filter type, e.g. "Lowpass"/"Highpass"/"Bandpass" (Roblox "FilterType")
+    pub filter_type: String,
+}
+
+impl Default for AudioFilter {
+    fn default() -> Self {
+        Self {
+            frequency: 1000.0,
+            q: 1.0,
+            gain: 0.0,
+            filter_type: "Lowpass".to_string(),
+        }
+    }
+}
+
+/// Pitch-shift DSP effect. Roblox `AudioPitchShifter`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioPitchShifter {
+    /// Pitch multiplier (Roblox "Pitch")
+    pub pitch: f32,
+}
+
+impl Default for AudioPitchShifter {
+    fn default() -> Self {
+        Self { pitch: 1.0 }
+    }
+}
+
+/// Spatial audio source node. Roblox `AudioEmitter`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioEmitter {
+    /// Routing interaction group (Roblox "AudioInteractionGroup")
+    pub audio_interaction_group: String,
+}
+
+impl Default for AudioEmitter {
+    fn default() -> Self {
+        Self {
+            audio_interaction_group: String::new(),
+        }
+    }
+}
+
+/// Spatial audio listener node. Roblox `AudioListener`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioListener {
+    /// Routing interaction group (Roblox "AudioInteractionGroup")
+    pub audio_interaction_group: String,
+}
+
+impl Default for AudioListener {
+    fn default() -> Self {
+        Self {
+            audio_interaction_group: String::new(),
+        }
+    }
+}
+
+/// Audio asset playback node. Roblox `AudioPlayer`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioPlayer {
+    /// Audio asset id/uri (Roblox "AssetId")
+    pub asset_id: String,
+    /// Loop playback (Roblox "Looping")
+    pub looping: bool,
+    /// Playback speed multiplier (Roblox "PlaybackSpeed")
+    pub playback_speed: f32,
+    /// Linear volume multiplier (Roblox "Volume")
+    pub volume: f32,
+}
+
+impl Default for AudioPlayer {
+    fn default() -> Self {
+        Self {
+            asset_id: String::new(),
+            looping: false,
+            playback_speed: 1.0,
+            volume: 1.0,
+        }
+    }
+}
+
+/// Microphone/device input node. Roblox `AudioDeviceInput`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioDeviceInput {
+    /// Capture active (Roblox "Active")
+    pub active: bool,
+}
+
+impl Default for AudioDeviceInput {
+    fn default() -> Self {
+        Self { active: false }
+    }
+}
+
+/// Speaker/device output node. Roblox `AudioDeviceOutput`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioDeviceOutput {
+    /// Player whose device receives the output (Roblox "Player")
+    pub player: Option<u32>,
+}
+
+impl Default for AudioDeviceOutput {
+    fn default() -> Self {
+        Self { player: None }
+    }
+}
+
+/// Audio spectrum/level analyzer node. Roblox `AudioAnalyzer`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioAnalyzer {}
+
+impl Default for AudioAnalyzer {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Tag-based audio routing filter. Roblox `AudioSearchParams`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct AudioSearchParams {
+    /// Routing tag to match (Roblox "Tag")
+    pub tag: String,
+}
+
+impl Default for AudioSearchParams {
+    fn default() -> Self {
+        Self { tag: String::new() }
+    }
+}
+
+/// Legacy reverb SoundEffect. Roblox `ReverbSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ReverbSoundEffect {
+    /// Reverberation decay time, seconds (Roblox "DecayTime")
+    pub decay_time: f32,
+    /// Echo density 0-1 (Roblox "Density")
+    pub density: f32,
+    /// Modal diffusion 0-1 (Roblox "Diffusion")
+    pub diffusion: f32,
+    /// Dry signal level, dB (Roblox "DryLevel")
+    pub dry_level: f32,
+    /// Wet signal level, dB (Roblox "WetLevel")
+    pub wet_level: f32,
+}
+
+impl Default for ReverbSoundEffect {
+    fn default() -> Self {
+        Self {
+            decay_time: 1.5,
+            density: 1.0,
+            diffusion: 1.0,
+            dry_level: 0.0,
+            wet_level: 0.0,
+        }
+    }
+}
+
+/// Legacy echo SoundEffect. Roblox `EchoSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct EchoSoundEffect {
+    /// Delay between echoes, seconds (Roblox "Delay")
+    pub delay: f32,
+    /// Feedback gain 0-1 (Roblox "Feedback")
+    pub feedback: f32,
+    /// Dry signal level, dB (Roblox "DryLevel")
+    pub dry_level: f32,
+    /// Wet signal level, dB (Roblox "WetLevel")
+    pub wet_level: f32,
+}
+
+impl Default for EchoSoundEffect {
+    fn default() -> Self {
+        Self {
+            delay: 0.5,
+            feedback: 0.5,
+            dry_level: 0.0,
+            wet_level: 0.0,
+        }
+    }
+}
+
+/// Legacy distortion SoundEffect. Roblox `DistortionSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DistortionSoundEffect {
+    /// Distortion amount 0-1 (Roblox "Level")
+    pub level: f32,
+}
+
+impl Default for DistortionSoundEffect {
+    fn default() -> Self {
+        Self { level: 0.5 }
+    }
+}
+
+/// Legacy equalizer SoundEffect. Roblox `EqualizerSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct EqualizerSoundEffect {
+    /// Low-band gain, dB (Roblox "LowGain")
+    pub low_gain: f32,
+    /// Mid-band gain, dB (Roblox "MidGain")
+    pub mid_gain: f32,
+    /// High-band gain, dB (Roblox "HighGain")
+    pub high_gain: f32,
+}
+
+impl Default for EqualizerSoundEffect {
+    fn default() -> Self {
+        Self {
+            low_gain: 0.0,
+            mid_gain: 0.0,
+            high_gain: 0.0,
+        }
+    }
+}
+
+/// Legacy compressor SoundEffect. Roblox `CompressorSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct CompressorSoundEffect {
+    /// Attack time, seconds (Roblox "Attack")
+    pub attack: f32,
+    /// Release time, seconds (Roblox "Release")
+    pub release: f32,
+    /// Threshold, dB (Roblox "Threshold")
+    pub threshold: f32,
+    /// Compression ratio (Roblox "Ratio")
+    pub ratio: f32,
+    /// Make-up gain, dB (Roblox "GainMakeup")
+    pub makeup_gain: f32,
+}
+
+impl Default for CompressorSoundEffect {
+    fn default() -> Self {
+        Self {
+            attack: 0.1,
+            release: 0.1,
+            threshold: 0.0,
+            ratio: 1.0,
+            makeup_gain: 0.0,
+        }
+    }
+}
+
+/// Legacy chorus SoundEffect. Roblox `ChorusSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct ChorusSoundEffect {
+    /// Modulation rate, Hz (Roblox "Rate")
+    pub rate: f32,
+    /// Modulation depth 0-1 (Roblox "Depth")
+    pub depth: f32,
+    /// Wet/dry mix 0-1 (Roblox "Mix")
+    pub mix: f32,
+}
+
+impl Default for ChorusSoundEffect {
+    fn default() -> Self {
+        Self {
+            rate: 1.0,
+            depth: 0.5,
+            mix: 0.5,
+        }
+    }
+}
+
+/// Legacy flange SoundEffect. Roblox `FlangeSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct FlangeSoundEffect {
+    /// Modulation rate, Hz (Roblox "Rate")
+    pub rate: f32,
+    /// Modulation depth 0-1 (Roblox "Depth")
+    pub depth: f32,
+    /// Wet/dry mix 0-1 (Roblox "Mix")
+    pub mix: f32,
+}
+
+impl Default for FlangeSoundEffect {
+    fn default() -> Self {
+        Self {
+            rate: 1.0,
+            depth: 0.5,
+            mix: 0.5,
+        }
+    }
+}
+
+/// Legacy pitch-shift SoundEffect. Roblox `PitchShiftSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct PitchShiftSoundEffect {
+    /// Pitch multiplier (Roblox "Octave")
+    pub pitch: f32,
+}
+
+impl Default for PitchShiftSoundEffect {
+    fn default() -> Self {
+        Self { pitch: 1.0 }
+    }
+}
+
+/// Legacy tremolo SoundEffect. Roblox `TremoloSoundEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TremoloSoundEffect {
+    /// Wave duty cycle 0-1 (Roblox "Duty")
+    pub duty: f32,
+    /// Modulation frequency, Hz (Roblox "Frequency")
+    pub frequency: f32,
+    /// Modulation depth 0-1 (Roblox "Depth")
+    pub depth: f32,
+}
+
+impl Default for TremoloSoundEffect {
+    fn default() -> Self {
+        Self {
+            duty: 0.5,
+            frequency: 5.0,
+            depth: 0.5,
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Wave 7.F — data structs / curves / misc
+// ════════════════════════════════════════════════════════════════════════
+
+/// DataStore get-request options. Roblox `DataStoreGetOptions`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DataStoreGetOptions {
+    /// Use cached value if available (Roblox "UseCache")
+    pub use_cache: bool,
+}
+
+impl Default for DataStoreGetOptions {
+    fn default() -> Self {
+        Self { use_cache: true }
+    }
+}
+
+/// DataStore set-request options. Roblox `DataStoreSetOptions`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DataStoreSetOptions {}
+
+impl Default for DataStoreSetOptions {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// DataStore increment-request options. Roblox `DataStoreIncrementOptions`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DataStoreIncrementOptions {}
+
+impl Default for DataStoreIncrementOptions {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// DataStore configuration options. Roblox `DataStoreOptions`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DataStoreOptions {
+    /// Whether keys span all scopes (Roblox "AllScopes")
+    pub all_scopes: bool,
+}
+
+impl Default for DataStoreOptions {
+    fn default() -> Self {
+        Self { all_scopes: false }
+    }
+}
+
+/// Float keyframe curve container. Roblox `FloatCurve`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct FloatCurve {}
+
+impl Default for FloatCurve {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Quaternion rotation keyframe curve. Roblox `RotationCurve`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RotationCurve {}
+
+impl Default for RotationCurve {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Euler-angle rotation keyframe curve. Roblox `EulerRotationCurve`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct EulerRotationCurve {}
+
+impl Default for EulerRotationCurve {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Vector3 keyframe curve container. Roblox `Vector3Curve`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Vector3Curve {}
+
+impl Default for Vector3Curve {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Event-marker keyframe curve. Roblox `MarkerCurve`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct MarkerCurve {}
+
+impl Default for MarkerCurve {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// 2D path of control points. Roblox `Path2D`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Path2D {
+    /// Whether the path forms a closed loop (Roblox "Closed")
+    pub closed: bool,
+}
+
+impl Default for Path2D {
+    fn default() -> Self {
+        Self { closed: false }
+    }
+}
+
+/// Translation string table. Roblox `LocalizationTable`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct LocalizationTable {
+    /// Source locale id, e.g. "en-us" (Roblox "SourceLocaleId")
+    pub source_locale: String,
+}
+
+impl Default for LocalizationTable {
+    fn default() -> Self {
+        Self {
+            source_locale: "en-us".to_string(),
+        }
+    }
+}
+
+/// Folder-like configuration container. Roblox `Configuration`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Configuration {}
+
+impl Default for Configuration {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Procedural noise generator config. Roblox `Noise` (Smooth/PerlinNoise modules).
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Noise {
+    /// Noise seed (Roblox "Seed")
+    pub seed: i32,
+    /// Base frequency (Roblox "Frequency")
+    pub frequency: f32,
+}
+
+impl Default for Noise {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            frequency: 1.0,
+        }
+    }
+}
+
+/// Unreliable client/server message channel. Roblox `UnreliableRemoteEvent`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct UnreliableRemoteEvent {}
+
+impl Default for UnreliableRemoteEvent {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Pin-to-pin connection between instances. Roblox `Wire`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct Wire {
+    /// Source instance entity (Roblox "SourceInstance")
+    pub source_instance: Option<u32>,
+    /// Source pin name (Roblox "SourceName")
+    pub source_name: String,
+    /// Target instance entity (Roblox "TargetInstance")
+    pub target_instance: Option<u32>,
+    /// Target pin name (Roblox "TargetName")
+    pub target_name: String,
+}
+
+impl Default for Wire {
+    fn default() -> Self {
+        Self {
+            source_instance: None,
+            source_name: String::new(),
+            target_instance: None,
+            target_name: String::new(),
+        }
+    }
+}
+
+/// Node graph for procedural operations. Roblox `OperationGraph`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct OperationGraph {}
+
+impl Default for OperationGraph {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Wave 7.G — editable / sensors / chat
+// ════════════════════════════════════════════════════════════════════════
+
+/// Runtime-editable image buffer. Roblox `EditableImage`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct EditableImage {
+    /// Image width in pixels (Roblox "Size".X)
+    pub width: i32,
+    /// Image height in pixels (Roblox "Size".Y)
+    pub height: i32,
+}
+
+impl Default for EditableImage {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
+/// Roblox EditableImage alias surface. Roblox `RobloxEditableImage`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct RobloxEditableImage {
+    /// Image width in pixels (Roblox "Size".X)
+    pub width: i32,
+    /// Image height in pixels (Roblox "Size".Y)
+    pub height: i32,
+}
+
+impl Default for RobloxEditableImage {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
+/// Senses submersion in a fluid volume. Roblox `BuoyancySensor`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct BuoyancySensor {
+    /// Fully submerged in fluid (Roblox "FullySubmerged")
+    pub fully_submerged: bool,
+    /// Touching a fluid surface (Roblox "TouchingSurface")
+    pub touching_surface: bool,
+}
+
+impl Default for BuoyancySensor {
+    fn default() -> Self {
+        Self {
+            fully_submerged: false,
+            touching_surface: false,
+        }
+    }
+}
+
+/// Drag-to-move interaction detector. Roblox `DragDetector`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct DragDetector {
+    /// Drag constraint style, e.g. "TranslatePlane"/"Rotate" (Roblox "DragStyle")
+    pub drag_style: String,
+    /// Drag responsiveness (Roblox "Responsiveness")
+    pub responsiveness: f32,
+    /// Toggle interaction (Roblox "Enabled")
+    pub enabled: bool,
+}
+
+impl Default for DragDetector {
+    fn default() -> Self {
+        Self {
+            drag_style: "TranslateLine".to_string(),
+            responsiveness: 20.0,
+            enabled: true,
+        }
+    }
+}
+
+/// Text chat channel. Roblox `TextChannel`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TextChannel {}
+
+impl Default for TextChannel {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+/// Slash-command for text chat. Roblox `TextChatCommand`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TextChatCommand {
+    /// Primary command alias (Roblox "PrimaryAlias")
+    pub primary_alias: String,
+    /// Secondary command alias (Roblox "SecondaryAlias")
+    pub secondary_alias: String,
+    /// Toggle command (Roblox "Enabled")
+    pub enabled: bool,
+}
+
+impl Default for TextChatCommand {
+    fn default() -> Self {
+        Self {
+            primary_alias: String::new(),
+            secondary_alias: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+/// Per-message text chat styling. Roblox `TextChatMessageProperties`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct TextChatMessageProperties {
+    /// Prefix text shown before the message (Roblox "PrefixText")
+    pub prefix_text: String,
+    /// Message body text (Roblox "Text")
+    pub text: String,
+}
+
+impl Default for TextChatMessageProperties {
+    fn default() -> Self {
+        Self {
+            prefix_text: String::new(),
+            text: String::new(),
+        }
+    }
+}
+
+/// Controller haptic feedback effect. Roblox `HapticEffect`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
+#[reflect(Component)]
+pub struct HapticEffect {
+    /// Haptic effect type, e.g. "Vibration" (Roblox "Type")
+    pub type_: String,
+    /// Effect magnitude 0-1 (Roblox "Magnitude")
+    pub magnitude: f32,
+}
+
+impl Default for HapticEffect {
+    fn default() -> Self {
+        Self {
+            type_: "Vibration".to_string(),
+            magnitude: 1.0,
         }
     }
 }
