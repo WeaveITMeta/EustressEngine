@@ -34,6 +34,9 @@ pub struct InstanceOverrides {
     pub asset_mesh: Option<String>,
     pub asset_path: Option<String>,
     pub unit_symbol: Option<String>,
+    /// Phase 3.5 PROMOTE: explicit uuid to preserve when materializing a
+    /// binary entity to disk. See the common-crate field docs.
+    pub uuid: Option<String>,
 }
 
 impl From<InstanceOverrides> for eustress_common::instance_create::InstanceOverrides {
@@ -50,6 +53,7 @@ impl From<InstanceOverrides> for eustress_common::instance_create::InstanceOverr
             asset_mesh: value.asset_mesh,
             asset_path: value.asset_path,
             unit_symbol: value.unit_symbol,
+            uuid: value.uuid,
         }
     }
 }

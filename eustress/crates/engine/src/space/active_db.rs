@@ -618,6 +618,76 @@ mod imp {
         core_removed
     }
 
+    /// Phase 3.5 PROMOTE — write the REAL-path FileSystem identity for an
+    /// entity being materialized from a binary core to an on-disk TOML folder.
+    /// The one-shot `migrate_identity` pass (which populates these for TOML
+    /// entities) is latched-done and never re-runs, so a runtime promote must
+    /// write them itself. Pairs with `delete_binary_instance(synthetic_rel)`
+    /// (call that FIRST to drop the binary Morton core + synthetic-path stores
+    /// so the core does not resurrect on boot-load), then this to register the
+    /// real path. `real_rel` is the Space-relative `Workspace/<Name>/_instance.toml`
+    /// (forward-slashed). `core` = the same tagged rkyv bytes; `toml` = the
+    /// folder's `_instance.toml` bytes (so a converted Space's `get_instance`
+    /// serves it). Best-effort; warns on partial failure.
+    pub fn write_filesystem_identity(
+        uuid: &[u8; 16],
+        class_name: &str,
+        real_rel: &str,
+        core: &[u8],
+        toml: &[u8],
+    ) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let mut failures: Vec<&str> = Vec::new();
+        if a.db.put_path_to_uuid(real_rel, uuid).is_err() {
+            failures.push("path_to_uuid");
+        }
+        if a.db.put_uuid_to_path(uuid, real_rel).is_err() {
+            failures.push("uuid_to_path");
+        }
+        if a.db.put_class_index(class_name, uuid).is_err() {
+            failures.push("class_index");
+        }
+        if a.db.put_entity_core_by_uuid(uuid, core).is_err() {
+            failures.push("entities_uuid");
+        }
+        if a.db.put_file(real_rel, toml).is_err() {
+            failures.push("tree_toml");
+        }
+        if !failures.is_empty() {
+            tracing::warn!(
+                target: "eustress_engine::active_db",
+                class_name, real_rel, failed = ?failures,
+                "write_filesystem_identity: partial write (rebuild_indexes recovers)"
+            );
+        }
+        failures.is_empty()
+    }
+
+    /// Phase 3.5 DEMOTE — drop the REAL-path FileSystem identity when folding
+    /// a TOML folder back into a binary core. Pairs with
+    /// `create_binary_instance(synthetic_rel)` (call that to re-create the
+    /// binary stores; it rewrites `uuid_to_path`/`class_index`/`entities_uuid`
+    /// to the synthetic path). This removes the real-path `path_to_uuid` + the
+    /// tree TOML (+ any lazily-written `#bin` twin) so the disk path no longer
+    /// resolves. Best-effort.
+    pub fn remove_filesystem_identity(real_rel: &str) -> bool {
+        let Ok(g) = ACTIVE.read() else {
+            return false;
+        };
+        let Some(a) = g.as_ref() else {
+            return false;
+        };
+        let _ = a.db.delete_path_to_uuid(real_rel);
+        let _ = a.db.delete_file(real_rel);
+        let _ = a.db.delete_file(&format!("{real_rel}{BIN_SUFFIX}"));
+        true
+    }
+
     /// GUI definition twin of [`get_instance`].
     pub fn get_gui(abs: &Path) -> Option<GuiTomlFile> {
         let g = ACTIVE.read().ok()?;
@@ -779,6 +849,18 @@ mod imp {
         _pos: [f32; 3],
         _synthetic_rel: &str,
     ) -> bool {
+        false
+    }
+    pub fn write_filesystem_identity(
+        _uuid: &[u8; 16],
+        _class_name: &str,
+        _real_rel: &str,
+        _core: &[u8],
+        _toml: &[u8],
+    ) -> bool {
+        false
+    }
+    pub fn remove_filesystem_identity(_real_rel: &str) -> bool {
         false
     }
     pub fn get_gui(_abs: &Path) -> Option<GuiTomlFile> {

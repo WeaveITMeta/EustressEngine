@@ -625,3 +625,101 @@ impl ToolHandler for FindEntityBridgeTool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// promote_entity / demote_entity  ->  entity.promote / entity.demote (Phase 3.5)
+// ---------------------------------------------------------------------------
+//
+// Bridge-ONLY (no disk fallback): "change representation" is an in-process
+// operation on the live World + single-writer DB, so when the engine is down
+// these fail with a clear message rather than falling back (unlike the CRUD
+// tools). They write a folder + rewrite identity stores → `requires_approval`.
+
+/// Materialize a binary-ECS entity into an on-disk TOML folder ("Export to disk").
+pub struct PromoteEntityTool;
+
+impl ToolHandler for PromoteEntityTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "promote_entity",
+            description: "Materialize a binary-ECS entity (a bare Part stored in the world DB, not on disk) into an on-disk Workspace/<Name>/_instance.toml FOLDER — making it path-addressable, hand-editable, and file-attachable while preserving its uuid and appearance. The explicit 'Export to disk' action. Identify the entity by `uuid` (preferred) or `name` (must be resident). Requires the engine to be running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "uuid": { "type": "string", "description": "32-char hex uuid of the entity (preferred)." },
+                    "name": { "type": "string", "description": "Entity name (resident match) if the uuid is unknown." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["uuid", "name"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "entity.promote", Value::Object(params)) {
+            Ok(result) => {
+                let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("(folder)");
+                ok("promote_entity", format!("Promoted to disk: {path}"), result)
+            }
+            Err(e) if e.contains("is not running") => fail(
+                "promote_entity",
+                "The engine must be running to promote an entity (binary→disk happens in-process).".to_string(),
+            ),
+            Err(e) => fail("promote_entity", e),
+        }
+    }
+}
+
+/// Fold a bare, artifact-free FileSystem entity back into a binary-ECS core.
+pub struct DemoteEntityTool;
+
+impl ToolHandler for DemoteEntityTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "demote_entity",
+            description: "Fold a bare, artifact-free FileSystem entity (a Workspace/<Name>/ TOML folder) back into a binary-ECS core and DELETE its disk folder — the reverse of promote_entity. Identify by `uuid` (preferred) or `name`. Fails if the folder still has attached files or the class/mesh isn't binary-eligible. Requires the engine to be running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "uuid": { "type": "string", "description": "32-char hex uuid (preferred)." },
+                    "name": { "type": "string", "description": "Entity name (resident match)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: true,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        for key in ["uuid", "name"] {
+            if let Some(v) = input.get(key) {
+                if !v.is_null() {
+                    params.insert(key.to_string(), v.clone());
+                }
+            }
+        }
+        match call_engine(&ctx.universe_root, "entity.demote", Value::Object(params)) {
+            Ok(result) => ok(
+                "demote_entity",
+                "Demoted to binary-ECS (disk folder removed).".to_string(),
+                result,
+            ),
+            Err(e) if e.contains("is not running") => fail(
+                "demote_entity",
+                "The engine must be running to demote an entity.".to_string(),
+            ),
+            Err(e) => fail("demote_entity", e),
+        }
+    }
+}

@@ -247,6 +247,8 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::EntityFind => protocol::handlers::entity_find(world, &pending.request),
             MethodName::EntityAddTag => protocol::handlers::entity_add_tag(world, &pending.request),
             MethodName::EntityRemoveTag => protocol::handlers::entity_remove_tag(world, &pending.request),
+            MethodName::EntityPromote => protocol::handlers::entity_promote(world, &pending.request),
+            MethodName::EntityDemote => protocol::handlers::entity_demote(world, &pending.request),
             MethodName::Unknown(ref name) => {
                 // Unknown method — return a JSON-RPC "method not found"
                 // error rather than crashing the handler.

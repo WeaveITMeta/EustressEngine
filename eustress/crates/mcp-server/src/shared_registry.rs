@@ -59,6 +59,11 @@ fn registry() -> &'static ToolRegistry {
         // find_entity remaps `query` → `name_contains` (dedicated wrapper).
         r.register(BridgeEntityTool::new("ecs.inspect", eustress_tools::entity_tools::QueryEntitiesTool));
         r.register(crate::bridge_tools::FindEntityBridgeTool::default());
+        // Phase 3.5 — explicit promote (binary→disk TOML folder) / demote
+        // (disk→binary). Bridge-only (no disk fallback): changing representation
+        // is an in-process op on the live World + single-writer DB.
+        r.register(crate::bridge_tools::PromoteEntityTool);
+        r.register(crate::bridge_tools::DemoteEntityTool);
         r
     })
 }

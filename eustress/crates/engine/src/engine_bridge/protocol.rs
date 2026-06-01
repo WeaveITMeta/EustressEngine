@@ -168,6 +168,11 @@ pub enum MethodName {
     EntityAddTag,
     /// Remove a CollectionService tag.
     EntityRemoveTag,
+    /// Phase 3.5 — materialize a binary-ECS entity to an on-disk TOML folder
+    /// (explicit "Export to disk"; preserves uuid + visuals).
+    EntityPromote,
+    /// Phase 3.5 — fold a bare, artifact-free FileSystem entity back to binary.
+    EntityDemote,
     Unknown(String),
 }
 
@@ -199,6 +204,8 @@ where
         "entity.find" => MethodName::EntityFind,
         "entity.add_tag" => MethodName::EntityAddTag,
         "entity.remove_tag" => MethodName::EntityRemoveTag,
+        "entity.promote" => MethodName::EntityPromote,
+        "entity.demote" => MethodName::EntityDemote,
         _ => MethodName::Unknown(s),
     })
 }
@@ -1190,6 +1197,91 @@ pub mod handlers {
                 "encoding": encoding,
             }),
         )
+    }
+
+    /// Parse `uuid` (preferred) | `name` from a promote/demote request into a
+    /// `promote::EntityRef`. uuid → addressed directly (resident-resolved in the
+    /// helper); name → resolved to a resident `Entity` here.
+    #[cfg(feature = "world-db")]
+    fn resolve_promote_target(
+        world: &mut World,
+        req: &BridgeRequest,
+    ) -> Result<crate::space::promote::EntityRef, String> {
+        use crate::space::promote::EntityRef;
+        use eustress_common::classes::Instance;
+        if let Some(u) = req.params.get("uuid").and_then(|v| v.as_str()) {
+            return Ok(EntityRef::Uuid(u.to_string()));
+        }
+        if let Some(n) = req.params.get("name").and_then(|v| v.as_str()) {
+            let n = n.to_string();
+            let mut q = world.query::<(Entity, &Instance)>();
+            return q
+                .iter(world)
+                .find(|(_, i)| i.name == n)
+                .map(|(e, _)| EntityRef::Entity(e))
+                .ok_or_else(|| format!("no resident entity named {n:?} (stream it in first)"));
+        }
+        Err("provide `uuid` or `name`".to_string())
+    }
+
+    /// `entity.promote` — Phase 3.5. Materialize a binary-ECS entity into an
+    /// on-disk `Workspace/<Name>/_instance.toml` folder (explicit "Export to
+    /// disk"). Preserves the uuid + visuals; the entity stays live. Params:
+    /// `uuid` (preferred) | `name`. Errors if the target isn't resident /
+    /// isn't binary-backed.
+    pub fn entity_promote(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.promote: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            let target = match resolve_promote_target(world, req) {
+                Ok(t) => t,
+                Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+            };
+            match crate::space::promote::promote_to_filesystem(world, target) {
+                Ok(folder) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "promoted": true,
+                        "path": folder.to_string_lossy(),
+                    }),
+                ),
+                Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+            }
+        }
+    }
+
+    /// `entity.demote` — Phase 3.5. Fold a bare, artifact-free FileSystem entity
+    /// back into a binary core (deletes its disk folder). Params: `uuid` | `name`.
+    pub fn entity_demote(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        #[cfg(not(feature = "world-db"))]
+        {
+            let _ = world;
+            return BridgeResponse::error(
+                req.id.clone(),
+                BridgeError::internal("entity.demote: world-db disabled"),
+            );
+        }
+        #[cfg(feature = "world-db")]
+        {
+            let target = match resolve_promote_target(world, req) {
+                Ok(t) => t,
+                Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+            };
+            match crate::space::promote::demote_to_binary(world, target) {
+                Ok(()) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "demoted": true }),
+                ),
+                Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+            }
+        }
     }
 
     /// `ecs.inspect` — a DETAILED live scene snapshot for AI debugging.

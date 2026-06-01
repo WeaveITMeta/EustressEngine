@@ -180,6 +180,13 @@ pub struct InstanceOverrides {
     /// the Space-default unit here so the file records its provenance
     /// instead of relying on the implicit default.
     pub unit_symbol: Option<String>,
+    /// Optional explicit uuid to stamp into `metadata.uuid` instead of
+    /// minting a fresh one. Used by Phase-3.5 PROMOTE (binary-ECS core →
+    /// on-disk TOML folder): the materialized folder MUST keep the entity's
+    /// existing uuid so identity (find-by-uuid, references) survives the
+    /// representation change. Ignored unless it is a valid 32-char
+    /// lowercase-hex uuid; `None` keeps the normal fresh-mint behavior.
+    pub uuid: Option<String>,
 }
 
 /// Outcome of a successful [`create_instance`] call.
@@ -346,7 +353,15 @@ fn apply_overrides(
                 .map(is_valid_uuid)
                 .unwrap_or(false);
             if !has_valid {
-                let uuid = fresh_uuid_for_create();
+                // Phase 3.5 PROMOTE: honor an explicit valid uuid override
+                // (preserve the binary entity's identity when materializing
+                // it to disk) before falling back to a fresh mint.
+                let uuid = overrides
+                    .uuid
+                    .as_deref()
+                    .filter(|u| is_valid_uuid(u))
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(fresh_uuid_for_create);
                 meta_table.insert(
                     "uuid".to_string(),
                     toml::Value::String(uuid),
@@ -734,6 +749,52 @@ mod apply_overrides_tests {
             .and_then(|v| v.as_str())
             .unwrap();
         assert!(is_valid_uuid(uuid_str), "bogus uuid replaced with valid one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Phase 3.5 PROMOTE: an explicit valid `uuid` override is stamped instead
+    /// of a fresh mint, so materializing a binary entity to disk PRESERVES its
+    /// identity. An invalid override falls back to a fresh mint.
+    #[test]
+    fn apply_overrides_honors_uuid_override() {
+        let dir = make_tempdir();
+        let toml_path = dir.join("_instance.toml");
+        let mut f = fs::File::create(&toml_path).unwrap();
+        writeln!(f, "[metadata]").unwrap();
+        writeln!(f, "class_name = \"Part\"").unwrap();
+        drop(f);
+        let preserved = "abcdef0123456789abcdef0123456789";
+        let overrides = InstanceOverrides {
+            uuid: Some(preserved.to_string()),
+            ..Default::default()
+        };
+        apply_overrides(&toml_path, "Part", "Part", &overrides).expect("apply_overrides");
+        let doc: toml::Value = fs::read_to_string(&toml_path).unwrap().parse().unwrap();
+        let uuid_str = doc
+            .get("metadata")
+            .and_then(|m| m.get("uuid"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(uuid_str, preserved, "explicit uuid override must be preserved");
+
+        // Invalid override → fresh valid mint (not the bogus value).
+        let toml2 = dir.join("_instance2.toml");
+        let mut f2 = fs::File::create(&toml2).unwrap();
+        writeln!(f2, "[metadata]").unwrap();
+        writeln!(f2, "class_name = \"Part\"").unwrap();
+        drop(f2);
+        let bad = InstanceOverrides {
+            uuid: Some("NOT-VALID".to_string()),
+            ..Default::default()
+        };
+        apply_overrides(&toml2, "Part", "Part", &bad).expect("apply_overrides");
+        let doc2: toml::Value = fs::read_to_string(&toml2).unwrap().parse().unwrap();
+        let u2 = doc2
+            .get("metadata")
+            .and_then(|m| m.get("uuid"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(is_valid_uuid(u2) && u2 != "NOT-VALID", "invalid override → fresh mint");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
