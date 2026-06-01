@@ -1202,6 +1202,17 @@ impl Plugin for SlintUiPlugin {
             crate::spawners::animation::AnimationSpawnerPlugin,
             // Wave 6.A (11 ValueObject spawners)
             crate::spawners::value_objects::ValueObjectsSpawnerPlugin,
+            // Wave 6.D (11 interaction + character-appearance spawners)
+            crate::spawners::interaction::InteractionSpawnerPlugin,
+        ));
+
+        // Wave 6.B mover runtime (PD controllers + Avian force/velocity
+        // actuation; gates to PlayModeState::Playing) and Wave 6.D
+        // interaction runtime (Tool equip / ClickDetector / ProximityPrompt
+        // / Dialog UI / appearance).
+        app.add_plugins((
+            crate::physics::MoversPlugin,
+            crate::interaction::InteractionPlugin,
         ));
 
         app

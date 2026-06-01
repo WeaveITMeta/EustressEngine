@@ -144,6 +144,8 @@ pub mod class_registry;
 /// spawners with the ClassRegistry resource at plugin-build time.
 /// See `spawners/mod.rs` for the per-group layout.
 pub mod spawners;
+pub mod physics;         // Wave 6.B — mover runtime systems (MoversPlugin)
+pub mod interaction;     // Wave 6.D — interaction runtime systems (InteractionPlugin)
 pub mod txt_to_toml_watcher;
 pub mod stream_node_plugin;
 pub mod updater;
